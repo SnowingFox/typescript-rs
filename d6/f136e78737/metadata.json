@@ -1,0 +1,23 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "d6f136e78737",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "docs/rust-rewrite/PORTING.md",
+    "docs/rust-rewrite/README.md",
+    "docs/rust-rewrite/phase-1-foundation/core/impl.md",
+    "docs/rust-rewrite/references/TEMPLATE-impl.md",
+    "docs/rust-rewrite/references/TEMPLATE-tests.md",
+    "docs/rust-rewrite/references/crate-map.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d6/f136e78737/0/metadata.json",
+      "transcript": "/d6/f136e78737/0/full.jsonl",
+      "content_hash": "/d6/f136e78737/0/content_hash.txt",
+      "prompt": "/d6/f136e78737/0/prompt.txt"
+    }
+  ]
+}

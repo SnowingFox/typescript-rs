@@ -1,0 +1,286 @@
+<manually_attached_skills>
+The user has manually attached the following skills to their message.
+These skills contain specific instructions or workflows that the user wants you to follow for this request.
+Only read the files if needed, the full skill content is inlined here.
+
+Skill Name: using-story
+Path: /Users/bytedance/.claude/plugins/cache/story-skills/story/687ccad09672/skills/using-story/SKILL.md
+SKILL.md content:
+# Using Story
+
+Your default when exploring or understanding code should be: **read the
+recorded intent, don't guess.**
+
+Story checkpoints capture the prompts, transcripts, and decisions behind every
+agent-driven change. When you need to understand why code exists or how a module
+evolved, look up the checkpoint history first. Only fall back to inference from
+code structure when no history is available — and label that explicitly.
+
+## When This Skill Activates
+
+Use this skill whenever the task involves:
+
+- Exploring or understanding an unfamiliar module or file
+- Preparing to refactor, extend, or debug code you didn't write
+- Answering "why is this like this?" or "what was the intent?"
+- Doing pre-work research before making changes
+- Any codebase exploration where historical context would help
+
+Do **not** use this skill for simple, well-understood edits where you already
+have full context (e.g. "add a comment to line 5").
+
+## First Step: Discover Capabilities
+
+Before diving into specific lookups, orient yourself with what Story can tell
+you:
+
+```bash
+story help
+```
+
+This lists available subcommands including `search`, `explain`, `sessions`,
+`status`, `doctor`, and more. Use this to understand what queries are possible
+in the current repository.
+
+Also check repository health:
+
+```bash
+story status
+```
+
+This tells you whether Story is enabled, which git hooks are installed, whether
+the metadata branch is initialized, and any active sessions on the current
+branch.
+
+## Scenario Routing
+
+When this skill activates, determine which sub-skill best fits the user's need:
+
+| Scenario | Delegate to | What it does |
+|----------|-------------|--------------|
+| "Why is this code like this?" / provenance of a specific block | `story:what-happened` | `git blame` + transcript lookup for exact lines |
+| "Has anyone done X before?" / find prior work | `story:search` | Keyword search across checkpoint history |
+| "Explain this function/file" / understand original intent | `story:explain` | Trace source code back to its creating session |
+| "Summarize recent work" / generate a report | `story:dispatch` | Read checkpoints and produce a narrative summary |
+| "Review these changes" / audit with intent context | `story:review` | Read transcripts then audit the diff |
+| "Hand off this session" / continue in another agent | `story:session-handoff` | Package current session state for transfer |
+| General exploration / understand a module's architecture | _(self — see below)_ | blame + explain flow for key areas |
+
+If the scenario clearly maps to a sub-skill, delegate entirely to that skill's
+workflow. Do not duplicate their steps here.
+
+## General Exploration Flow
+
+When no specific sub-skill fits — e.g. the user asks to "understand this
+module" or "explore how auth works" — use this flow:
+
+1. **Identify key files** in the target area (entry points, main types, core
+   functions).
+
+2. **Check for checkpoint coverage** on each key file:
+
+```bash
+git log --format='%H %s' -5 -- <file>
+```
+
+Look for `Story-Checkpoint:` trailers in the commit bodies:
+
+```bash
+git log --format='%H %b' -5 -- <file> | grep -B1 'Story-Checkpoint:'
+```
+
+3. **Read intent for covered commits** using `story explain --commit <sha>` for
+   commits that have checkpoint trailers.
+
+4. **Synthesize**: combine the recorded intent (from checkpoints) with the
+   current code structure to build a comprehensive understanding.
+
+5. **Report** your findings, clearly distinguishing:
+   - Facts backed by checkpoint transcripts (label as "recorded intent")
+   - Observations inferred from code alone (label as "inferred from code")
+
+## When No Checkpoints Exist
+
+If the target code predates Story or has no checkpoint coverage:
+
+1. Say explicitly: "No Story checkpoint history is available for this code."
+2. Proceed with standard code understanding (read source, check git log, trace
+   call sites).
+3. Label all explanations as "inferred from code — not backed by recorded
+   intent."
+4. If the user wants deeper history, suggest `story:search` with related
+   keywords — there may be checkpoints on related work even if the specific
+   file isn't directly covered.
+
+## Transparency Principle
+
+Always make it clear whether your answer comes from:
+
+- **Checkpoint-backed history** — you read the actual session transcript and
+  know the developer's stated intent
+- **Code inference** — you analyzed the code structure and are reasoning about
+  probable intent
+
+Never present inferred intent as if it were recorded fact. The core value of
+this workflow is that distinction.
+
+---
+
+Skill Name: grill-me
+Path: /Users/bytedance/.cursor/skills/grill-me/SKILL.md
+SKILL.md content:
+Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
+
+Ask the questions one at a time.
+
+If a question can be answered by exploring the codebase, explore the codebase instead.
+
+---
+
+Skill Name: tdd
+Path: /Users/bytedance/.cursor/skills/tdd/SKILL.md
+SKILL.md content:
+# Test-Driven Development
+
+## Philosophy
+
+**Core principle**: Tests should verify behavior through public interfaces, not implementation details. Code can change entirely; tests shouldn't.
+
+**Good tests** are integration-style: they exercise real code paths through public APIs. They describe _what_ the system does, not _how_ it does it. A good test reads like a specification - "user can checkout with valid cart" tells you exactly what capability exists. These tests survive refactors because they don't care about internal structure.
+
+**Bad tests** are coupled to implementation. They mock internal collaborators, test private methods, or verify through external means (like querying a database directly instead of using the interface). The warning sign: your test breaks when you refactor, but behavior hasn't changed. If you rename an internal function and tests fail, those tests were testing implementation, not behavior.
+
+See [tests.md](tests.md) for examples and [mocking.md](mocking.md) for mocking guidelines.
+
+## Anti-Pattern: Horizontal Slices
+
+**DO NOT write all tests first, then all implementation.** This is "horizontal slicing" - treating RED as "write all tests" and GREEN as "write all code."
+
+This produces **crap tests**:
+
+- Tests written in bulk test _imagined_ behavior, not _actual_ behavior
+- You end up testing the _shape_ of things (data structures, function signatures) rather than user-facing behavior
+- Tests become insensitive to real changes - they pass when behavior breaks, fail when behavior is fine
+- You outrun your headlights, committing to test structure before understanding the implementation
+
+**Correct approach**: Vertical slices via tracer bullets. One test → one implementation → repeat. Each test responds to what you learned from the previous cycle. Because you just wrote the code, you know exactly what behavior matters and how to verify it.
+
+```
+WRONG (horizontal):
+  RED:   test1, test2, test3, test4, test5
+  GREEN: impl1, impl2, impl3, impl4, impl5
+
+RIGHT (vertical):
+  RED→GREEN: test1→impl1
+  RED→GREEN: test2→impl2
+  RED→GREEN: test3→impl3
+  ...
+```
+
+## Workflow
+
+### 1. Planning
+
+When exploring the codebase, use the project's domain glossary so that test names and interface vocabulary match the project's language, and respect ADRs in the area you're touching.
+
+Before writing any code:
+
+- [ ] Confirm with user what interface changes are needed
+- [ ] Confirm with user which behaviors to test (prioritize)
+- [ ] Identify opportunities for [deep modules](deep-modules.md) (small interface, deep implementation)
+- [ ] Design interfaces for [testability](interface-design.md)
+- [ ] List the behaviors to test (not implementation steps)
+- [ ] Get user approval on the plan
+
+Ask: "What should the public interface look like? Which behaviors are most important to test?"
+
+**You can't test everything.** Confirm with the user exactly which behaviors matter most. Focus testing effort on critical paths and complex logic, not every possible edge case.
+
+### 2. Tracer Bullet
+
+Write ONE test that confirms ONE thing about the system:
+
+```
+RED:   Write test for first behavior → test fails
+GREEN: Write minimal code to pass → test passes
+```
+
+This is your tracer bullet - proves the path works end-to-end.
+
+### 3. Incremental Loop
+
+For each remaining behavior:
+
+```
+RED:   Write next test → fails
+GREEN: Minimal code to pass → passes
+```
+
+Rules:
+
+- One test at a time
+- Only enough code to pass current test
+- Don't anticipate future tests
+- Keep tests focused on observable behavior
+
+### 4. Refactor
+
+After all tests pass, look for [refactor candidates](refactoring.md):
+
+- [ ] Extract duplication
+- [ ] Deepen modules (move complexity behind simple interfaces)
+- [ ] Apply SOLID principles where natural
+- [ ] Consider what new code reveals about existing code
+- [ ] Run tests after each refactor step
+
+**Never refactor while RED.** Get to GREEN first.
+
+## Checklist Per Cycle
+
+```
+[ ] Test describes behavior, not implementation
+[ ] Test uses public interface only
+[ ] Test would survive internal refactor
+[ ] Code is minimal for this test
+[ ] No speculative features added
+```
+</manually_attached_skills>
+<timestamp>Friday, May 29, 2026, 1:34 PM (UTC+8)</timestamp>
+
+/using-story  你可以看看 ~/dev/story 下面的 session，我好像搞错地方了
+
+/grill-me /tdd 应该在这重写
+
+---
+
+[Image]
+<image_files>
+The following images were provdied by the user and saved to the workspace for future use:
+1. /Users/bytedance/.cursor/projects/Users-bytedance-dev-typescript-go/assets/image-46cd0d69-a341-426f-8f25-e443b0069708.png
+
+These images can be copied for use in other locations.
+</image_files>
+<timestamp>Friday, May 29, 2026, 1:37 PM (UTC+8)</timestamp>
+
+指的这个 session 啊你没找到吗
+
+---
+
+<timestamp>Friday, May 29, 2026, 1:38 PM (UTC+8)</timestamp>
+
+就第一个 Cursor (claude-opus-4-8-thinking-xhigh) · d735da02-fa18-4f0e-94a1-0c9ba2ffde6d
+> "resume"
+started 9m ago · active 5m ago · files 0
+tokens 0  (in 0 · out 0 · cache/r 0 · cache/w 0)
+
+---
+
+整个 phase10 的文档都要写好，然后需要深入读 go 源码，然后单测一定要对齐，以及遵循 /tdd ，phase 10 个文档可以开 subagent 写，subagent 也要让他们多读读 go 源码，单测和 impl.md 要对齐哈，来吧，可以多参考 ~/dev/story 里面的
+
+---
+
+resume
+
+---
+
+也加入一下文档质量检测吧，还有代码检测什么的，加个 gate
