@@ -1,0 +1,45 @@
+后面这些可以 subagent 全部并发做吗？还是得一个一个来
+
+---
+
+收尾一下 p1 看看有没有问题，然后做 phase2 吧，尽量能开 subagent 就开 subagent，那就一个一个 phase 来吧
+
+---
+
+收尾一下 p1 看看有没有问题，然后做 phase2 吧，尽量能开 subagent 就开 subagent，那就一个一个 phase 来吧，遵循 docs/rust-rewrite/README.md 和 /tdd
+
+---
+
+Implement the plan as specified, it is attached for your reference. Do NOT edit the plan file itself.
+
+To-do's from the plan have already been created. Do not create them again. Mark them as in_progress as you work, starting with the first one. Don't stop until you have completed all the to-dos.
+
+---
+
+enable by plan mode：收尾 p2，然后 check 一遍有没有问题，然后开始 phase3，遵循 /tdd 能 subagent 就 subagent，做完后 check 一下
+
+---
+
+enable by plan mode：收尾 p2，然后 check 一遍有没有问题，然后开始 phase3，遵循 /tdd 能 subagent 就 subagent，做完后 check 一下
+```/tmp/gen_diagnostics.py:57:59
+        text_lit, end = parse_go_string(line, m.end())
+        rest = line[end:]
+        ru = "reportsUnnecessary: true" in rest
+```
+
+---
+
+enable by plan mode：收尾 p2，然后 check 一遍有没有问题，然后开始 phase3，遵循 /tdd 能 subagent 就 subagent，做完后 check 一下
+```/tmp/gen_diagnostics.py:57:59
+        text_lit, end = parse_go_string(line, m.end())
+        rest = line[end:]
+        ru = "reportsUnnecessary: true" in rest
+```
+
+---
+
+收尾 p2，
+
+---
+
+后续大概哪些 phase 可以直接开 subagent？就是可以多个 phase 并行的哪种，是什么 roadmap
