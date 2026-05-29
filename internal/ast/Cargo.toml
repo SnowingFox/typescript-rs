@@ -1,0 +1,17 @@
+[package]
+name = "tsgo_ast"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+bitflags = "2.11.1"
+rustc-hash = "2.1.2"
+tsgo_collections = { path = "../collections" }
+tsgo_core = { path = "../core" }
+tsgo_debug = { path = "../debug" }
+tsgo_diagnostics = { path = "../diagnostics" }
+tsgo_locale = { path = "../locale" }
+tsgo_tspath = { path = "../tspath" }

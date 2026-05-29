@@ -16,4 +16,6 @@ members = [
     "internal/jsonrpc",
     "internal/vfs",
     "internal/bundled",
+    "internal/diagnostics",
+    "internal/ast",
 ]

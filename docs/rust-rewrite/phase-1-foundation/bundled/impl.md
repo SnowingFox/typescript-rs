@@ -109,7 +109,7 @@ Go 用三条流水线：`go:embed`（数据进二进制）+ 构建标签（embed
 - [x] `pub fn wrap_fs<F: Fs>(fs: F) -> WrappedFs<F>`（重导出自 `embed`；返回具名类型而非 `impl Fs`）　`// Go: bundled.go:WrapFS`
 - [x] `pub fn lib_path() -> String`（= `bundled:///libs`，重导出自 `embed`）　`// Go: bundled.go:LibPath`
 - [x] `pub fn testing_lib_path() -> String`（`normalize_slashes(concat!(CARGO_MANIFEST_DIR,"/libs"))`）　`// Go: bundled.go:TestingLibPath`
-- [~] `static BUNDLED_SOURCE_DIR` — **偏离**：直接内联 `concat!(env!("CARGO_MANIFEST_DIR"),"/libs")`，省去 OnceValue。
+- [x] `static BUNDLED_SOURCE_DIR` — **偏离**：直接内联 `concat!(env!("CARGO_MANIFEST_DIR"),"/libs")`，省去 OnceValue。
 - [x] `mod embed;` + 重导出 `wrap_fs`/`lib_path`/`is_bundled`/`WrappedFs`/`LIB_NAMES`（**无** `noembed` 分发，embed-only）。
 
 ### `embed.rs`（Go: `internal/bundled/embed.go`，embed-only，无 cfg gate）
@@ -129,7 +129,7 @@ Go 用三条流水线：`go:embed`（数据进二进制）+ 构建标签（embed
   - [x] `realpath` — 内嵌路径原样返回
   - [x] `write_file`/`append_file`/`remove`/`chtimes` — 内嵌路径 `panic!`，否则透传
 - [x] `fn walk_embedded(rest, walk_fn)` 递归内部实现　`// Go: embed.go:walkDir`
-- [~] `FileInfo` — **偏离**：直接复用 `tsgo_vfs::FileInfo`（vfs 已是具名 struct），不再自写。
+- [x] `FileInfo` — **偏离**：直接复用 `tsgo_vfs::FileInfo`（vfs 已是具名 struct），不再自写。
 - [x] `static ROOT_ENTRIES`（`LazyLock<Vec<FileInfo>>`，仅 `libs` 目录项）　`// Go: embed.go:rootEntries`
 - [x] `static LIBS_ENTRIES`（`LazyLock<Vec<FileInfo>>`，由 `EMBEDDED_FILES` 派生 name+size）　`// Go: embed.go:libsEntries`
 

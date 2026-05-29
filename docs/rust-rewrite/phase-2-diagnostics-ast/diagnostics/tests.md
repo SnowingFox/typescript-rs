@@ -18,19 +18,19 @@
 
 | Rust 测试 | 验证内容 | input（message / locale / args） → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `localize_english_default` | 英语直接取 `text` | `IDENTIFIER_EXPECTED` / `English` / — → `"Identifier expected."` | `TestLocalize/english default` | |
-| `localize_undefined_locale_uses_english` | `Und` 回落英语 | `IDENTIFIER_EXPECTED` / `Und` / — → `"Identifier expected."` | `TestLocalize/undefined locale uses english` | |
-| `localize_with_single_argument` | 单参 `{0}` 替换 | `_0_EXPECTED` / `English` / `[")"]` → `"')' expected."` | `TestLocalize/with single argument` | |
-| `localize_with_multiple_arguments` | 多参 `{0}`/`{1}` 替换 | `THE_PARSER_EXPECTED_TO_FIND_A_1_TO_MATCH_THE_0_TOKEN_HERE` / `English` / `["{","}"]` → `"The parser expected to find a '}' to match the '{' token here."` | `TestLocalize/with multiple arguments` | |
-| `localize_fallback_to_english_for_unknown_locale` | 未支持 locale 回落英语 | `IDENTIFIER_EXPECTED` / `af-ZA` / — → `"Identifier expected."` | `TestLocalize/fallback to english for unknown locale` | |
-| `localize_german` | 德语译文命中 | `IDENTIFIER_EXPECTED` / `de-DE` / — → `"Es wurde ein Bezeichner erwartet."` | `TestLocalize/german` | |
-| `localize_french` | 法语译文命中 | `IDENTIFIER_EXPECTED` / `fr-FR` / — → `"Identificateur attendu."` | `TestLocalize/french` | |
-| `localize_spanish` | 西语译文命中 | `IDENTIFIER_EXPECTED` / `es-ES` / — → `"Se esperaba un identificador."` | `TestLocalize/spanish` | |
-| `localize_japanese` | 日语译文命中 | `IDENTIFIER_EXPECTED` / `ja-JP` / — → `"識別子が必要です。"` | `TestLocalize/japanese` | |
-| `localize_chinese_simplified` | 简中译文命中 | `IDENTIFIER_EXPECTED` / `zh-CN` / — → `"应为标识符。"` | `TestLocalize/chinese simplified` | |
-| `localize_korean` | 韩语译文命中 | `IDENTIFIER_EXPECTED` / `ko-KR` / — → `"식별자가 필요합니다."` | `TestLocalize/korean` | |
-| `localize_russian` | 俄语译文命中 | `IDENTIFIER_EXPECTED` / `ru-RU` / — → `"Ожидался идентификатор."` | `TestLocalize/russian` | |
-| `localize_german_with_args` | 德语译文 + 占位符替换 | `_0_EXPECTED` / `de-DE` / `[")"]` → `"\")\" wurde erwartet."` | `TestLocalize/german with args` | |
+| `localize_english_default` | 英语直接取 `text` | `IDENTIFIER_EXPECTED` / `English` / — → `"Identifier expected."` | `TestLocalize/english default` | ✓ |
+| `localize_undefined_locale_uses_english` | `Und` 回落英语 | `IDENTIFIER_EXPECTED` / `Und` / — → `"Identifier expected."` | `TestLocalize/undefined locale uses english` | ✓ |
+| `localize_with_single_argument` | 单参 `{0}` 替换 | `X_0_EXPECTED` / `English` / `[")"]` → `"')' expected."` | `TestLocalize/with single argument` | ✓ |
+| `localize_with_multiple_arguments` | 多参 `{0}`/`{1}` 替换 | `THE_PARSER_EXPECTED_TO_FIND_A_1_TO_MATCH_THE_0_TOKEN_HERE` / `English` / `["{","}"]` → `"The parser expected to find a '}' to match the '{' token here."` | `TestLocalize/with multiple arguments` | ✓ |
+| `localize_fallback_to_english_for_unknown_locale` | 未支持 locale 回落英语 | `IDENTIFIER_EXPECTED` / `af-ZA` / — → `"Identifier expected."` | `TestLocalize/fallback to english for unknown locale` | ✓ |
+| `localize_german` | 德语译文命中 | `IDENTIFIER_EXPECTED` / `de-DE` / — → `"Es wurde ein Bezeichner erwartet."` | `TestLocalize/german` | ✓ |
+| `localize_french` | 法语译文命中 | `IDENTIFIER_EXPECTED` / `fr-FR` / — → `"Identificateur attendu."` | `TestLocalize/french` | ✓ |
+| `localize_spanish` | 西语译文命中 | `IDENTIFIER_EXPECTED` / `es-ES` / — → `"Se esperaba un identificador."` | `TestLocalize/spanish` | ✓ |
+| `localize_japanese` | 日语译文命中 | `IDENTIFIER_EXPECTED` / `ja-JP` / — → `"識別子が必要です。"` | `TestLocalize/japanese` | ✓ |
+| `localize_chinese_simplified` | 简中译文命中 | `IDENTIFIER_EXPECTED` / `zh-CN` / — → `"应为标识符。"` | `TestLocalize/chinese simplified` | ✓ |
+| `localize_korean` | 韩语译文命中 | `IDENTIFIER_EXPECTED` / `ko-KR` / — → `"식별자가 필요합니다."` | `TestLocalize/korean` | ✓ |
+| `localize_russian` | 俄语译文命中 | `IDENTIFIER_EXPECTED` / `ru-RU` / — → `"Ожидался идентификатор."` | `TestLocalize/russian` | ✓ |
+| `localize_german_with_args` | 德语译文 + 占位符替换 | `X_0_EXPECTED` / `de-DE` / `[")"]` → `"\")\" wurde erwartet."` | `TestLocalize/german with args` | ✓ |
 
 > 注：Go 表里共 13 行（上表 13 条）。`german with args` 的 expected 含转义双引号 `"\")\" wurde erwartet."`，即德语模板用 `"{0}"`（双引号）而非英语的 `'{0}'`（单引号），是 locale 模板差异的关键断言，须逐字节核对。
 
@@ -41,8 +41,8 @@
 
 | Rust 测试 | 验证内容 | input（key / locale / args） → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `localize_by_key_without_args` | 仅凭 key 查表取英语 | `"Identifier_expected_1003"` / `English` / — → `"Identifier expected."` | `TestLocalize_ByKey/by key without args` | |
-| `localize_by_key_with_args` | 仅凭 key 查表 + 单参替换 | `"_0_expected_1005"` / `English` / `[")"]` → `"')' expected."` | `TestLocalize_ByKey/by key with args` | |
+| `localize_by_key_without_args` | 仅凭 key 查表取英语 | `"Identifier_expected_1003"` / `English` / — → `"Identifier expected."` | `TestLocalize_ByKey/by key without args` | ✓ |
+| `localize_by_key_with_args` | 仅凭 key 查表 + 单参替换 | `"_0_expected_1005"` / `English` / `[")"]` → `"')' expected."` | `TestLocalize_ByKey/by key with args` | ✓ |
 
 > 注：`key_to_message` 用的 key（`Identifier_expected_1003` / `_0_expected_1005`）是 Go 生成器 `convertPropertyName` 的产物，须与生成的 `Key` 字面量逐字节一致（不随 Rust static 变量名改写）。
 
@@ -52,14 +52,14 @@ Go 单测只覆盖 `Localize` 链路；以下函数无直接单测，按 PORTING
 
 | Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
 |---|---|---|---|---|
-| `format_no_args_short_circuit` | 无参直接返回原串 | `format("a{0}b", &[])` → `"a{0}b"` | diagnostics.go:Format | |
-| `format_invalid_placeholder_panics` | 占位符越界 panic | `format("{1}", &["x"])` → panic `"Invalid formatting placeholder"` | diagnostics.go:Format | |
-| `format_invalid_utf8_args_sanitized` | 参数非法 UTF-8 → U+FFFD | 含非法字节的 arg → 替换为 `\u{FFFD}` | diagnostics.go:Format（`ToValidUTF8`） | |
-| `category_name_mapping` | 4 个分类名 | `Warning→"warning"`,`Error→"error"`,`Suggestion→"suggestion"`,`Message→"message"` | diagnostics.go:Category.Name | |
-| `category_repr_values` | 数值与 Go iota 一致 | `Warning=0,Error=1,Suggestion=2,Message=3` | diagnostics.go:Category | |
-| `stringify_args_mixed` | 字符串原样 / 其他 `Display` | `["x", 42]` → `["x","42"]`；`[]`→`[]` | diagnostics.go:StringifyArgs | |
-| `key_to_message_unknown_returns_none` | 未知 key → None | `key_to_message("nope")` → None | diagnostics_generated.go:keyToMessage | |
-| `localize_unknown_key_panics` | message=None 且 key 未知 → panic | `localize(English, None, "nope", &[])` → panic `"Unknown diagnostic message: nope"` | diagnostics.go:Localize | |
+| `format_no_args_short_circuit` | 无参直接返回原串 | `format("a{0}b", &[])` → `"a{0}b"` | diagnostics.go:Format | ✓ |
+| `format_invalid_placeholder_panics` | 占位符越界 panic | `format("{1}", &["x"])` → panic `"Invalid formatting placeholder"` | diagnostics.go:Format | ✓ |
+| `format_invalid_utf8_args_sanitized` | 参数非法 UTF-8 → U+FFFD | 含非法字节的 arg → 替换为 `\u{FFFD}` | diagnostics.go:Format（`ToValidUTF8`） | ✓ |
+| `category_name_mapping` | 4 个分类名 | `Warning→"warning"`,`Error→"error"`,`Suggestion→"suggestion"`,`Message→"message"` | diagnostics.go:Category.Name | ✓ |
+| `category_repr_values` | 数值与 Go iota 一致 | `Warning=0,Error=1,Suggestion=2,Message=3` | diagnostics.go:Category | ✓ |
+| `stringify_args_mixed` | 字符串原样 / 其他 `Display` | `["x", 42]` → `["x","42"]`；`[]`→`[]` | diagnostics.go:StringifyArgs | ✓ |
+| `key_to_message_unknown_returns_none` | 未知 key → None | `key_to_message("nope")` → None | diagnostics_generated.go:keyToMessage | ✓ |
+| `localize_unknown_key_panics` | message=None 且 key 未知 → panic | `localize(English, None, "nope", &[])` → panic `"Unknown diagnostic message: nope"` | diagnostics.go:Localize | ✓ |
 
 ## 与 impl.md 的对齐核对
 

@@ -43,13 +43,13 @@ flowchart LR
 > 勾选规则：`impl.md` 全部实现类 TODO 为 `[x]` 且 `tests.md` 应收口测试行均 `✓`，方可标 `[x]`。
 > 本轮先产出**文档**（impl.md + tests.md），代码实现随后按文档执行 TDD。
 
-- [x] **P1 地基** — `stringutil` `json` `collections` `tspath` `jsnum` `semver` `glob` `core` `debug` `vfs` `locale` `repo` `pprof` `jsonrpc` `bundled`（15 crate 全绿，663 测试 pass，gate C1–C8 GREEN；`project/logging`·`project/dirty` 为 P1 叶子 crate 但无 P1 内消费者，随 P8 `project` 实现）
-- [ ] **P2 诊断+AST** — `diagnostics` `ast`
+- [x] **P1 地基** — `stringutil` `json` `collections` `tspath` `jsnum` `semver` `glob` `core` `debug` `vfs` `locale` `repo` `pprof` `jsonrpc` `bundled`（15 crate 全绿，663 测试 pass，gate C1–C8 GREEN）
+- [x] **P2 诊断+AST** — `diagnostics` `ast`（17 crate workspace 全绿；diagnostics 30 单测+7 doctest；ast 用 arena+NodeId/enum NodeData/bitflags，52 单测+22 doctest，positionmap 绿，deepclone 全表 DEFER(phase-3) 待 parser）
 - [ ] **P3 词法/语法** — `scanner` `parser` `astnav` `binder`
 - [ ] **P4 类型检查（含 checker 全部构建前置）** — `evaluator` `module` `modulespecifiers` `packagejson` `symlinks` `nodebuilder` `pseudochecker` `outputpaths` `sourcemap` `tracing` `tsoptions` `printer` `checker`
 - [ ] **P5 Emit** — `transformers` `diagnosticwriter`
 - [ ] **P6 编译管线** — `compiler`
-- [ ] **P7 语言服务** — `lsproto` `ls/lsconv` `ls/lsutil` `ls/change` `ls/autoimport` `format` `ls`
+- [ ] **P7 语言服务** — `lsproto` `project/dirty` `project/logging` `ls/lsconv` `ls/lsutil` `ls/change` `ls/autoimport` `format` `ls`
 - [ ] **P8 LSP/工程/API** — `project` `api` `lsp`
 - [ ] **P9 执行/CLI** — `execute` `cmd/tsgo`
 - [ ] **P10 测试设施 + 一致性 parity** — `testutil` `testrunner` `fourslash` + `testdata` 端到端对拍
