@@ -1,0 +1,39 @@
+/tdd 开始实现 phase-1 可以多开几个 subagent，严格遵循 tdd，多读读 go 源码，严格遵循哈，先把 core 弄完再开其他的 subagent（我想这样是不是稳妥一点？）subagent 也要遵循 tdd
+
+---
+
+Implement the plan as specified, it is attached for your reference. Do NOT edit the plan file itself.
+
+To-do's from the plan have already been created. Do not create them again. Mark them as in_progress as you work, starting with the first one. Don't stop until you have completed all the to-dos.
+
+---
+
+记得用英文注释而不是英文，改改文档，然后改改之前的中文注释
+
+---
+
+刚刚不小心被中断了，以及单测的话，我建议单独开个文件而不是塞一起，就像 go 那样
+
+---
+
+后面的 subagent 是不是可以并行？等 core 弄完了？
+
+---
+
+等会记得别用 fast 模型，就慢慢做吧
+
+---
+
+tdd 是遵循 /tdd  这个 SKILL 哈，以及你跟他说的时候用英文说吧，我们沟通用英文，以及你之前写的时候为什么不是遵循 tdd 而是写完方法之后再写单测？很奇怪，加入到文档里面，绝对遵循 /tdd 这个 SKILL，包括 subagent 都要让它读一遍
+
+---
+
+tdd 不用贴原文吧，你就说用 /tdd 这个 SKILL，以及贴上地址就行了
+
+---
+
+resume
+
+---
+
+都做完了吗？
