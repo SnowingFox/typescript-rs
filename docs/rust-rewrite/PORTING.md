@@ -1,0 +1,224 @@
+# PORTING.md — typescript-go → Rust 移植契约
+
+> 本文件是所有 phase / 所有 subagent 写代码、写文档时的**共享契约**。动手前必读。
+> 灵感来自 Bun 的 Zig→Rust `PORTING.md`（结构优先、逐文件 1:1），但我们**不**照搬其
+> "不需要编译 / 禁用 rayon" 的约束。我们要的是：**测试先行的逐文件 1:1 移植 + 真编译 + 真并发**。
+
+## 0. 一句话目标
+
+把 `github.com/microsoft/typescript-go`（Go 1.26，~30.4 万行实现 + 4383 个测试文件）
+逐文件 1:1 移植到 **安全 Rust**（尽量零 `unsafe`），源 `.go` 不删，`.rs` 紧贴同目录同名，
+每个模块**先移植测试（red）→ 再移植实现（green）**，编译通过 + 测试全绿才进入下一个。
+
+## 1. 已敲定的方法论决策（grill 结论，不可推翻）
+
+| # | 决策 | 结论 |
+|---|---|---|
+| 1 | 方法论 | **测试先行的逐文件移植**：每个 Go 文件先把 `*_test.go` 译成 Rust 测试（red）→ 再译实现（green）。模块必须真编译 + 测试全绿才进入下一个。不留"不编译"的草稿。 |
+| 2 | 代码位置 | **同仓库 side-by-side**：`internal/core/core.go` 旁放 `internal/core/core.rs`，不删 Go 源。 |
+| 3 | crate 布局 | 仓库根一个 **Cargo workspace**；每个 `internal/<pkg>` = 一个 crate，名 `tsgo_<pkg>`。 |
+| 4 | 分阶段 | 按真实依赖 DAG 的 **10 个 phase**（见 README）。每个包/子阶段一个目录，含 `impl.md` + `tests.md`。 |
+| 5 | 注释 | 所有公开项必须有 rustdoc `///`，含 `# Examples`（input/output）与 **Side effects** 说明。 |
+| 6 | 测试范围 | 早期按包把 `*_test.go` 单测 1:1 移植作 gate；`fourslash`(4250) + `testdata`(294MB) 推迟到 **P10** 做端到端 parity。 |
+| 7 | AST 所有权 | **arena + 类型化索引（`NodeId`）**；零 `unsafe`；`Parent`/子节点都用索引。 |
+| 8 | 并发 | **真并发**（要性能收益）：数据并行用 `rayon`，生产者/消费者用 `std::thread` scoped + channel；输出保持确定性以便断言。CPU-bound，不引入 tokio。 |
+
+## 2. 仓库与 crate 布局
+
+```
+typescript-go/
+├── Cargo.toml                 # [workspace] members = ["internal/stringutil", ...]（随 phase 增量追加）
+├── rust-toolchain.toml        # 钉工具链版本，edition = 2021
+├── internal/
+│   ├── stringutil/
+│   │   ├── util.go            # 原 Go（不删）
+│   │   ├── util.rs            # 移植产物
+│   │   ├── util_test.go       # 原 Go 测试（不删）
+│   │   ├── Cargo.toml         # name = "tsgo_stringutil"
+│   │   └── lib.rs             # crate 根（见命名规则）
+│   ├── core/ ...
+│   └── ...
+└── docs/rust-rewrite/         # 本套文档
+```
+
+### 文件命名规则（照 Bun）
+
+- `.rs` 与 `.go` **同目录、同 basename**。
+- 若 basename == crate 根目录名 → `lib.rs`（如 `internal/core/core.go` → `internal/core/lib.rs`，且 crate `tsgo_core` 的入口）。
+- 若 basename == 其直接父目录名（嵌套子模块）→ `mod.rs`。
+- 其余 → 同名 `.rs`（`internal/core/compare.go` → `internal/core/compare.rs`，在 `lib.rs` 里 `mod compare;`）。
+- 嵌套子包（如 `internal/ls/lsconv/`、`internal/vfs/iovfs/`）作为父 crate 的子 module 或独立子 crate，由所属 phase 的文档决定，但**默认作父 crate 的子 module**，除非有独立外部依赖。
+
+### crate 命名
+
+- crate 名一律 `tsgo_<pkg>`（snake_case）：`tsgo_core` / `tsgo_ast` / `tsgo_checker` …
+- crate 间依赖在各自 `Cargo.toml` 的 `[dependencies]` 用 `path` 声明，镜像 Go 的 import 边。
+
+## 3. Go → Rust 类型映射（标准表，写进每个 impl.md 的"类型映射"小节）
+
+| Go | Rust | 备注 |
+|---|---|---|
+| `string` | `String` / `&str` | 拥有用 `String`，借用用 `&str`；TS 源码字符串是 UTF-8 |
+| `[]byte` | `Vec<u8>` / `&[u8]` | |
+| `[]T` | `Vec<T>` / `&[T]` | |
+| `map[K]V`（无序） | `FxHashMap<K, V>`（`rustc_hash`） | 默认；需确定性输出时见下 |
+| `map[K]V`（需保插入序 / 决定输出） | `indexmap::IndexMap<K, V>` | **凡影响 emit/诊断顺序的 map 必须用 IndexMap** |
+| Go `set`（`map[T]struct{}`） | `FxHashSet<T>` / `IndexSet<T>` | 同上规则 |
+| `int` / `int32` / `int64` | `i32` / `i64`（按语义） | TS 源里多为 `int`→`i32`；位置/偏移用 `i32`（对齐 Go 的 `int` 截断行为，存疑处加 `// PERF(port)`） |
+| `float64` | `f64` | `jsnum` 包专门处理 JS number 语义 |
+| `bool` | `bool` | |
+| `rune` | `char` | 注意 Go rune 是 i32 code point；UTF-16 处理见 scanner |
+| `*T`（可空指针） | `Option<Box<T>>` / `Option<Idx>` | AST 节点一律用 `NodeId` 索引（见 §5） |
+| `*T`（非空、共享） | `Rc<T>` / arena 索引 | 优先 arena 索引；symbol/type 等长生命周期对象用 arena |
+| `interface{ ... }`（行为） | `trait` + `dyn`/泛型 | |
+| `interface{}` / `any` | `enum` (判别联合) 优先；不得已用 `Box<dyn Any>` | AST `nodeData` → `enum NodeData` |
+| Go `iota` 枚举 | `#[repr(i32)] enum` 或 `bitflags!` | flags 类（`NodeFlags`/`SymbolFlags`/`ModifierFlags`）用 `bitflags` crate |
+| `error` / `(T, error)` | `Result<T, E>` | 见 §4 错误处理 |
+| `nil`（接口/指针） | `None` | |
+| `sync.Mutex` / `sync.RWMutex` | `Mutex` / `RwLock`（parking_lot 可选） | |
+| `sync.Map` | `dashmap::DashMap` 或 `Mutex<HashMap>` | |
+| `atomic.Uint64` | `AtomicU64` | |
+| goroutine + channel | `std::thread::scope` + `crossbeam-channel`；数据并行用 `rayon` | 见 §6 |
+| `context.Context` | 显式传 `&Cancel`/`Arc<AtomicBool>` 取消标志 | 不引入 async |
+
+## 4. Go → Rust 惯用法映射
+
+- **错误处理**：Go `(T, error)` → `Result<T, E>`，`if err != nil { return ... }` → `?`。
+  panic 性质的 `panic()` → Rust `panic!`/`unreachable!`；`debug.Assert` → `debug_assert!`/自定义 `assert`。
+- **多返回值** → 元组 `(A, B)` 或具名 struct。
+- **零值** → `Default::default()`；注意 Go 零值语义（空 slice vs nil）在边界处用注释标注。
+- **`defer`** → RAII（`Drop`）或 scope guard（`scopeguard` crate）。
+- **方法 receiver** → `impl` 块；指针 receiver `(n *Node)` 改 `&mut self`，值 receiver `&self`。
+- **嵌入（embedding）** → 组合 + 委托（无继承）；公共字段用组合 struct，方法手写转发或用 `Deref`（慎用）。
+- **泛型** → Rust 泛型 + trait bound。Go 1.26 泛型基本可直译。
+- **接口断言 `x.(T)`** → `match`/`if let` on enum，或 `Any::downcast`。
+- **`switch x.(type)`** → `match` on enum 判别。
+- **命名**：Go `CamelCase` 导出 → Rust `snake_case` 函数/字段、`CamelCase` 类型；缩写折叠成一个小写词（`toJSON`→`to_json`、`isCSS`→`is_css`、`getURL`→`get_url`）。
+
+### Marker 注释（机检友好）
+
+- `// PERF(port): <Go idiom> — 见 Phase B`：凡用了 Go 的性能特化写法（arena 预分配、`appendAssumeCapacity` 类）而当前用标准 Rust 等价物替代处。
+- `// TODO(port): <原因>`：移植中暂时简化、待回填处。
+- `// DEFER(phase-N): <原因> / blocked-by: <依赖>`：依赖尚未移植、推迟到 phase N 的占位。
+- `// Go: internal/<pkg>/<file>.go:<func>`：每个 Rust 公开函数若有 Go 上游对应物，标注锚点（行号会漂移，用 `<file>:<func>` 锚）。
+
+## 5. AST 所有权模型（命门：决定能否零 unsafe）
+
+Go 的 AST 是 **arena + 裸指针图**：单一 `ast.Node{ Kind, Flags, Loc, Parent *Node, data nodeData }`，
+`data` 是数百个实现的接口（相当于判别联合），节点由 `NodeFactory` 的各类型 arena 分配，
+`NodeList{ Nodes []*Node }`，且有 `Parent` 反向指针 + 绑定期可变。
+
+**Rust 表示（统一约定）：**
+
+- 用一个 **arena**（如 `Vec<NodeData>` 或 `id-arena`/`la-arena` crate）持有所有节点。
+- `NodeId` 是 newtype 索引（`#[derive(Copy)] struct NodeId(u32)`），**所有引用（含 `Parent`、子节点、`NodeList`）都用 `NodeId`**，不用 Rust 引用 `&`。
+- `nodeData` 接口 → `enum NodeData { Identifier(...), CallExpression(...), ... }`，`Kind` 与之对应。
+- 访问器从 `n.Parent` → `arena[id].parent` 或 `id.parent(&arena)`；调用点改成 arena/handle 访问器。
+- 这样环、反向指针、绑定期可变都能用安全 Rust 表达（rust-analyzer / swc 的主流做法）。
+- 同模式适用于 `Symbol` / `Type` 图（checker 的 `TypeId` / `SymbolId` arena）。
+
+> 偏离字面 Go 语法（`node.Parent` → `node.parent(arena)`），但**结构 1:1 保留**。
+> 这是允许的、且必要的偏离，须在该包 impl.md 顶部"所有权模型"小节写明。
+
+## 6. 并发
+
+- typescript-go 用 goroutine/channel 并行（~289 处 goroutine/sync、41 处 chan），主要在 checker / compiler / project。
+- Rust 侧**按站点选最合适原语**：
+  - 数据并行（map 一批文件/节点）→ `rayon` 的 `par_iter`。
+  - 生产者-消费者 / worker 池 → `std::thread::scope` + `crossbeam-channel`。
+- **输出必须确定性**：并行收集后按稳定 key 排序，保证诊断/emit 顺序与 Go 一致（这是 TDD 断言的前提）。
+- 不引入 `tokio` 等 async 运行时（编译器是 CPU-bound）。
+- 第一遍若并行点难直译，可先写顺序版 + `// PERF(port)`，并在该包 impl.md 标注待并行化；但**不强制**先单线程——能直接安全并行就并行。
+
+## 7. rustdoc 注释规范（doc 质量红线）
+
+参照 story 仓库的写法（见 `internal/.../diff-tree.ts` 风格）。**每个公开项**（`pub fn` / `pub struct` / `pub enum` / `pub trait`）必须：
+
+1. 多行 `///` summary：说清**意图**，不复读签名。
+2. `# Examples`：给 input → output 的最小例子（doctest 能跑最好）。
+3. **Side effects** 段：有 I/O（读写文件 / 调子进程 / 改全局）的函数必须列副作用清单 + "没动什么"（防误解，如 `// Worktree / index / HEAD: unchanged`）。纯函数注明"无副作用"。
+4. 不允许 section divider 注释（`// ==== xxx ====`）划分文件区块。
+5. 不允许 `# Arguments` / `# Returns` 复读类型签名。
+
+示例：
+
+```rust
+/// 把字符串按 RFC3986 `encodeURI` 规则百分号编码，保留保留字符（`;/?:@&=+$,#`）。
+///
+/// 镜像 TS `encodeURI` 语义：非 ASCII 按 UTF-8 字节逐个 `%XX`。
+///
+/// # Examples
+/// ```
+/// assert_eq!(encode_uri("a b"), "a%20b");
+/// assert_eq!(encode_uri(";/?:@&=+$,#"), ";/?:@&=+$,#");
+/// ```
+///
+/// Side effects: 无（纯函数）。
+// Go: internal/stringutil/util.go:EncodeURI
+pub fn encode_uri(input: &str) -> String { /* ... */ }
+```
+
+## 8. 测试对齐规范（单测 1:1 的硬要求）
+
+这是本次移植的**核心纪律**——`tests.md` 必须与真实 Go 测试逐条对齐：
+
+1. **逐 `func Test*` 对齐**：每个 Go `func TestXxx` 对应一个或多个 Rust `#[test]`。
+2. **钻进表驱动子用例**：Go 测试多为 `tests := []struct{...}{...}` + `t.Run(tt.name, ...)`。
+   `tests.md` 必须把**每个子用例**（`name` + input + expected）列成一行，不能只列顶层函数。
+   Rust 侧对应用 `#[test]` 逐 case 或 `rstest` 参数化。
+3. **ground truth 用 Go 实测值**：expected 值取自 Go 测试里的字面量，不得用 Rust 侧推断。
+4. **`// Go:` 锚点**：每个 Rust 测试文件 / 用例标 `// Go: internal/<pkg>/<file>_test.go:<TestFunc>/<case-name>`。
+5. **0 直接单测的包**（`scanner`/`evaluator`/`json`/`glob`/`nodebuilder` 等）：
+   `tests.md` 明确写"Go 侧无直接单测；行为由 P10 conformance/fourslash parity 兜底"，
+   并**补充**少量行为级 Rust 测试（基于公开接口、用 Go 实测值或 spec 已知值）覆盖关键路径。
+6. `tests.md` 的"完成"列：`✓`=Rust 已有对应用例且 `cargo test` 通过；留空=未写/未过；`—`=推迟到指定 phase。
+
+## 9. 每个模块的 TDD 循环（执行期，文档先于代码）
+
+文档阶段（本轮）只产出 `impl.md` + `tests.md`，但必须写成"可被直接执行 TDD 的脚本"：
+
+1. `impl.md` 列出该包**全部非测试 `.go` 文件** → 对应 `.rs`，每个文件下列可勾选的函数级 TODO（带 `// Go:` 锚）。
+2. `tests.md` 列出该包**全部 `*_test.go`** → 对应 Rust 测试，逐子用例对齐（见 §8）。
+3. 二者必须**互相对齐**：impl.md 里每个要实现的公开函数，若 Go 有测试，tests.md 必须有对应行；反之 tests.md 每条用例，impl.md 必须有承载它的实现 TODO。
+
+## 10. 依赖白名单（Go 依赖 → Rust crate 映射，写进 references/crate-map.md）
+
+| 用途 | crate |
+|---|---|
+| 有序 map/set | `indexmap` |
+| 快速 hash | `rustc_hash`（FxHashMap） |
+| bitflags 枚举 | `bitflags` |
+| arena | `la-arena` / `id-arena`（择一，全仓统一） |
+| 数据并行 | `rayon` |
+| channel | `crossbeam-channel` |
+| 并发 map | `dashmap` |
+| 序列化（LSP/JSON） | `serde` / `serde_json` |
+| 错误 | `thiserror`（库内）；不引入 `anyhow` 到库公开 API |
+| 临时目录（测试） | `tempfile` |
+| 参数化测试 | `rstest` |
+
+> 新增依赖必须用最新稳定版（执行期用 `cargo add`，不要瞎编版本号），并记到 `references/crate-map.md`。
+
+## 11. 质量 Gate（把本契约变成可运行门禁）
+
+本契约里的红线（rustdoc / 命名 / `// Go:` 锚 / 零 unsafe / checkbox 纪律 / DEFER+blocked-by / 依赖序）
+都由 `docs/rust-rewrite/scripts/` 下的脚本**机检**，完整说明见 **[references/gates.md](./references/gates.md)**：
+
+```bash
+bash docs/rust-rewrite/scripts/gate-docs.sh   # 文档 gate（纯 bash+ripgrep，不依赖 Rust 代码）
+bash docs/rust-rewrite/scripts/gate-code.sh   # 代码 gate（无 Cargo.toml 时优雅 no-op）
+bash docs/rust-rewrite/scripts/gate.sh        # 聚合：--docs-only | --code-only | --strict
+```
+
+| Gate | 对应本文档红线 |
+|---|---|
+| 文档 D2（`// Go:` 锚） | §4 marker、§8 测试对齐 |
+| 文档 D3（checkbox 纪律） | §9 可执行 TDD 脚本 |
+| 文档 D5（crate 名 / 无 divider） | §2 命名、§7.4 禁 divider |
+| 文档 D6（依赖序倒置） | §1 决策 4（按真实依赖 DAG 排 phase） |
+| 代码 C4（unsafe 须 SAFETY） | §0/§5 尽量零 unsafe |
+| 代码 C5（rustdoc missing_docs） | §7 rustdoc 红线 |
+| 代码 C6（test-go-parity） | §8 测试 1:1 对齐 |
+| 代码 C7（stub-readiness） | §4 `DEFER(phase-N)` + `blocked-by:` |
+
+**纪律**：每个包/phase 收口前必须 `gate.sh` 全绿，才能在 README 进度打 `[x]`（镜像 story「README 顶层 `[x]` ≠ 真完成」）。
