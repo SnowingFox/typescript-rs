@@ -2,6 +2,8 @@
 
 > 复制本模板到 `phase-N-*/<pkg>/impl.md`。删除本行与所有 `<...>` 占位说明。
 > 写之前**必须实际读** `internal/<pkg>/*.go`（非测试）逐个文件。所有 TODO 带 `// Go:` 锚点。
+> 语言：本规划文档用中文；但**生成的 `.rs` 代码里所有注释必须英文**（rustdoc `///`/`//!`、行内 `//`、`Side effects`、marker 等），见 [PORTING.md §7](../PORTING.md)。
+> TDD：实现期**绝对遵循 `/tdd` SKILL**（红→绿逐行为，禁止"先翻完实现再补测试"），见 [references/tdd.md](./tdd.md)。
 
 **crate**：`tsgo_<pkg>`　**目标**：<一句话：这个包干什么>
 **依赖（crate）**：`tsgo_xxx` `tsgo_yyy`（镜像 Go import 边，path 依赖）

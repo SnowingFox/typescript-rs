@@ -1,5 +1,7 @@
 # jsonrpc: 实现方案（impl.md）
 
+> **phase 归属（依赖序修正）**：本包**前移到 P1**（原列 P8）。原因：近叶子（仅依赖 `json`），被 `lsproto`(P7)/`lsp`/`api`(P8) 依赖。详见根 README「依赖序口径」与 [references/crate-map.md](../../references/crate-map.md)。
+
 > 写前已实读 `internal/jsonrpc/*.go`（2 个非测试文件，全部读完）。所有 TODO 带 `// Go:` 锚点。
 
 **crate**：`tsgo_jsonrpc`　**目标**：通用 JSON-RPC 2.0 类型 + LSP base 协议（`Content-Length` 帧）编解码，供 `lsproto` / `api` / 其他 JSON-RPC 协议复用。
@@ -75,40 +77,40 @@ pub enum BaseProtoError {
 
 ### `jsonrpc.rs`（lib.rs；Go: `internal/jsonrpc/jsonrpc.go`）
 
-- [ ] `pub struct JsonRpcVersion;` + serde：serialize→`"2.0"`，deserialize 校验，错 → `ErrInvalidJsonRpcVersion`　`// Go: jsonrpc.go:JSONRPCVersion.MarshalJSON/UnmarshalJSON`
-- [ ] `pub enum Id { Str(String), Int(i32) }`　`// Go: jsonrpc.go:ID`
-- [ ] `pub fn Id::new(raw: IntegerOrString) -> Id`　`// Go: jsonrpc.go:NewID`
-- [ ] `pub fn Id::new_string(s: String) -> Id` / `new_int(i: i32) -> Id`　`// Go: jsonrpc.go:NewIDString/NewIDInt`
-- [ ] `impl Display for Id`（str 优先，否则 itoa）　`// Go: jsonrpc.go:ID.String`
-- [ ] `Id` 的 serde Serialize（str→json string，int→json number）/ Deserialize（首字节 `"` → str 否则 int）　`// Go: jsonrpc.go:ID.MarshalJSON/UnmarshalJSON`
-- [ ] `pub fn Id::try_int(&self) -> Option<i32>`（nil/str→None）　`// Go: jsonrpc.go:ID.TryInt`
-- [ ] `pub fn Id::must_int(&self) -> i32`（str→panic）　`// Go: jsonrpc.go:ID.MustInt`
-- [ ] `pub enum IntegerOrString { Integer(i32), String(String) }`　`// Go: jsonrpc.go:IntegerOrString`
-- [ ] `pub struct ResponseError { code: i32, message: String, data: Option<Value> }`　`// Go: jsonrpc.go:ResponseError`
-- [ ] `impl Display/Error for ResponseError`（含 `String()`：nil→空串；data marshal 失败 → `[code]: msg\n<data>`，否则 `[code]: msg`）　`// Go: jsonrpc.go:ResponseError.String/Error`
-- [ ] 错误码常量 `CODE_PARSE_ERROR=-32700 … CODE_INTERNAL_ERROR=-32603`　`// Go: jsonrpc.go:CodeParseError..CodeInternalError`
-- [ ] `pub enum MessageKind { Notification, Request, Response }`（repr i32，对齐 iota）　`// Go: jsonrpc.go:MessageKind`
-- [ ] `pub struct Message { jsonrpc, id, method, params, result, error }`（params/result = `Option<RawValue>`）　`// Go: jsonrpc.go:Message`
-- [ ] `pub fn Message::kind(&self) -> MessageKind`（id!=None&&method==""→Response；id==None→Notification；else Request）　`// Go: jsonrpc.go:Message.Kind`
-- [ ] `pub fn Message::is_request/is_notification/is_response(&self) -> bool`　`// Go: jsonrpc.go:Message.IsRequest/IsNotification/IsResponse`
-- [ ] `pub struct RequestMessage { jsonrpc, id: Option<Id>, method: String, params: Option<Value> }`　`// Go: jsonrpc.go:RequestMessage`
-- [ ] `pub struct ResponseMessage { jsonrpc, id: Option<Id>, result: Option<Value>, error: Option<ResponseError> }`　`// Go: jsonrpc.go:ResponseMessage`
+- [x] `pub struct JsonRpcVersion;` + serde：serialize→`"2.0"`，deserialize 校验，错 → `ErrInvalidJsonRpcVersion`　`// Go: jsonrpc.go:JSONRPCVersion.MarshalJSON/UnmarshalJSON`
+- [x] `pub enum Id { Str(String), Int(i32) }`　`// Go: jsonrpc.go:ID`
+- [x] `pub fn Id::new(raw: IntegerOrString) -> Id`　`// Go: jsonrpc.go:NewID`
+- [x] `pub fn Id::new_string(s: String) -> Id` / `new_int(i: i32) -> Id`　`// Go: jsonrpc.go:NewIDString/NewIDInt`
+- [x] `impl Display for Id`（str 优先，否则 itoa）　`// Go: jsonrpc.go:ID.String`
+- [x] `Id` 的 serde Serialize（str→json string，int→json number）/ Deserialize（首字节 `"` → str 否则 int）　`// Go: jsonrpc.go:ID.MarshalJSON/UnmarshalJSON`
+- [x] `pub fn Id::try_int(&self) -> Option<i32>`（nil/str→None）　`// Go: jsonrpc.go:ID.TryInt`
+- [x] `pub fn Id::must_int(&self) -> i32`（str→panic）　`// Go: jsonrpc.go:ID.MustInt`
+- [x] `pub enum IntegerOrString { Integer(i32), String(String) }`　`// Go: jsonrpc.go:IntegerOrString`
+- [x] `pub struct ResponseError { code: i32, message: String, data: Option<Value> }`　`// Go: jsonrpc.go:ResponseError`
+- [x] `impl Display/Error for ResponseError`（含 `String()`：nil→空串；data marshal 失败 → `[code]: msg\n<data>`，否则 `[code]: msg`）　`// Go: jsonrpc.go:ResponseError.String/Error`
+- [x] 错误码常量 `CODE_PARSE_ERROR=-32700 … CODE_INTERNAL_ERROR=-32603`　`// Go: jsonrpc.go:CodeParseError..CodeInternalError`
+- [x] `pub enum MessageKind { Notification, Request, Response }`（repr i32，对齐 iota）　`// Go: jsonrpc.go:MessageKind`
+- [x] `pub struct Message { jsonrpc, id, method, params, result, error }`（params/result = `Option<RawValue>`）　`// Go: jsonrpc.go:Message`
+- [x] `pub fn Message::kind(&self) -> MessageKind`（id!=None&&method==""→Response；id==None→Notification；else Request）　`// Go: jsonrpc.go:Message.Kind`
+- [x] `pub fn Message::is_request/is_notification/is_response(&self) -> bool`　`// Go: jsonrpc.go:Message.IsRequest/IsNotification/IsResponse`
+- [x] `pub struct RequestMessage { jsonrpc, id: Option<Id>, method: String, params: Option<Value> }`　`// Go: jsonrpc.go:RequestMessage`
+- [x] `pub struct ResponseMessage { jsonrpc, id: Option<Id>, result: Option<Value>, error: Option<ResponseError> }`　`// Go: jsonrpc.go:ResponseMessage`
 
 ### `baseproto.rs`（Go: `internal/jsonrpc/baseproto.go`）
 
-- [ ] `pub struct Reader<R: BufRead> { r: R }`　`// Go: baseproto.go:Reader`
-- [ ] `pub fn Reader::new(r: R) -> Reader`　`// Go: baseproto.go:NewReader`
-- [ ] `pub fn Reader::read(&mut self) -> Result<Option<Vec<u8>>, BaseProtoError>`（`Ok(None)`=EOF）。循环读行：`\r\n` 单独行→header 结束；无 `:` → `InvalidHeader`；`Content-Length` 解析（含负值/空值错误文案）；`content_length<=0`→`NoContentLength`；`read_exact` 读 body，不足→`ReadContent(unexpected EOF)`　`// Go: baseproto.go:Reader.Read`
-- [ ] `pub struct Writer<W: Write> { w: BufWriter<W> }`　`// Go: baseproto.go:Writer`
-- [ ] `pub fn Writer::new(w: W) -> Writer`　`// Go: baseproto.go:NewWriter`
-- [ ] `pub fn Writer::write(&mut self, data: &[u8]) -> io::Result<()>`（写 `Content-Length: N\r\n\r\n`+data+flush）　`// Go: baseproto.go:Writer.Write`
-- [ ] `pub enum BaseProtoError`（thiserror，文案对齐 Go）
+- [x] `pub struct Reader<R: BufRead> { r: R }`　`// Go: baseproto.go:Reader`
+- [x] `pub fn Reader::new(r: R) -> Reader`　`// Go: baseproto.go:NewReader`
+- [x] `pub fn Reader::read(&mut self) -> Result<Option<Vec<u8>>, BaseProtoError>`（`Ok(None)`=EOF）。循环读行：`\r\n` 单独行→header 结束；无 `:` → `InvalidHeader`；`Content-Length` 解析（含负值/空值错误文案）；`content_length<=0`→`NoContentLength`；`read_exact` 读 body，不足→`ReadContent(unexpected EOF)`　`// Go: baseproto.go:Reader.Read`
+- [x] `pub struct Writer<W: Write> { w: BufWriter<W> }`　`// Go: baseproto.go:Writer`
+- [x] `pub fn Writer::new(w: W) -> Writer`　`// Go: baseproto.go:NewWriter`
+- [x] `pub fn Writer::write(&mut self, data: &[u8]) -> io::Result<()>`（写 `Content-Length: N\r\n\r\n`+data+flush）　`// Go: baseproto.go:Writer.Write`
+- [x] `pub enum BaseProtoError`（thiserror，文案对齐 Go）
 
 ### Cargo / crate 接线
 
-- [ ] `internal/jsonrpc/Cargo.toml`（`name = "tsgo_jsonrpc"`，deps: `tsgo_json` path, `serde`, `serde_json`, `thiserror`）
-- [ ] 根 `Cargo.toml` workspace members 追加 `internal/jsonrpc`
-- [ ] `lib.rs`（= `jsonrpc.rs`）声明 `mod baseproto;` + re-export `Reader`/`Writer`
+- [x] `internal/jsonrpc/Cargo.toml`（`name = "tsgo_jsonrpc"`，deps: `tsgo_json` path, `serde`, `serde_json`, `thiserror`）
+- [x] 根 `Cargo.toml` workspace members 追加 `internal/jsonrpc`
+- [x] `lib.rs`（= `jsonrpc.rs`）声明 `mod baseproto;` + re-export `Reader`/`Writer`
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

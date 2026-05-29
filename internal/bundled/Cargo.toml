@@ -1,0 +1,13 @@
+[package]
+name = "tsgo_bundled"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+rustc-hash = "2.1.2"
+tsgo_repo = { path = "../repo" }
+tsgo_tspath = { path = "../tspath" }
+tsgo_vfs = { path = "../vfs" }

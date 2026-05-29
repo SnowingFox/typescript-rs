@@ -1,5 +1,7 @@
 # project: 实现方案（impl.md）
 
+> **子 crate 拆分（依赖序）**：`project/dirty`→`tsgo_project_dirty`、`project/logging`→`tsgo_project_logging` 拆出并**前移到 P1**（叶子），以破 `ls/autoimport→project→…→ls` 环。`project` 主体（含 `ata`/`background`）留 P8。本 impl.md 同时承载 dirty/logging 的移植细节。详见 [references/crate-map.md](../../references/crate-map.md)。
+
 > 写前已实读 `internal/project/` 全部非测试 `.go`（22 个顶层 + 4 子包 `ata`/`background`/`dirty`/`logging` 共 16 个，合计 38 个非测试文件；其中 `session.go`/`projectcollectionbuilder.go`/`configfileregistrybuilder.go`/`snapshotfs.go`/`ata/ata.go`/`ata/typesmap.go` 按公开 API 表面 + 关键路径精读）。所有 TODO 带 `// Go:` 锚点。
 
 **crate**：`tsgo_project`（+ 子 crate `tsgo_project_dirty` `tsgo_project_background` `tsgo_project_logging` `tsgo_project_ata`）

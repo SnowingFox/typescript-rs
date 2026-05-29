@@ -1,5 +1,7 @@
 # tsoptions: 实现方案（impl.md）
 
+> **phase 归属（依赖序修正）**：本包**前移到 P4**（原列 P6）。原因：`checker`/`modulespecifiers`/`printer` 的**非测试**代码依赖 `tsgo_tsoptions`，必须排在 checker 之前。详见根 README「依赖序口径」与 [references/crate-map.md](../../references/crate-map.md)。
+
 **crate**：`tsgo_tsoptions`　**目标**：解析与校验编译器选项——命令行参数（`tsc` / `tsc -b`）、`tsconfig.json`/`jsconfig.json`（含 `extends` 继承、`${configDir}` 替换、`files`/`include`/`exclude` 通配展开、project references），并提供选项声明表（option declarations）与各种名字映射 / 枚举映射。
 **依赖（crate）**：`tsgo_ast` `tsgo_collections` `tsgo_core` `tsgo_diagnostics` `tsgo_glob` `tsgo_jsnum` `tsgo_locale` `tsgo_module` `tsgo_modulespecifiers` `tsgo_outputpaths` `tsgo_parser` `tsgo_scanner` `tsgo_stringutil` `tsgo_tspath` `tsgo_vfs`（含 `vfs/vfsmatch`）`tsgo_debug`。镜像 Go import 边。
 **Go 源**：`internal/tsoptions/`（16 个非测试 `.go` + 子目录 `tsoptionstest/` 2 个 = 18 文件；最大 `tsconfigparsing.go` 1815 行 + `declscompiler.go` 1265 行）

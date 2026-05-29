@@ -9,9 +9,9 @@
 
 ## 测试文件 → Rust 测试模块
 
-| Go 测试文件 | Rust 测试位置 | 顶层测试函数数 |
+| Go 测试文件 | Rust 测试文件（独立，镜像 `_test.go`） | 顶层测试函数数 |
 |---|---|---|
-| `internal/<pkg>/<file>_test.go` | `internal/<pkg>/<file>.rs`（`#[cfg(test)] mod tests`）或 `tests/<file>.rs` | <N> |
+| `internal/<pkg>/<file>_test.go` | `internal/<pkg>/<file>_test.rs`（兄弟文件，`use super::*;`，由 `<file>.rs` 末尾 `#[cfg(test)] #[path="<file>_test.rs"] mod tests;` 挂载） | <N> |
 
 ## `<file>_test.go`
 

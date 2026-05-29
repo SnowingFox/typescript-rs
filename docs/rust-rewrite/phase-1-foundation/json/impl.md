@@ -44,16 +44,16 @@ typescript-go 的所有 JSON 交互（tsconfig 读取、LSP 消息、`--generate
 
 ### `lib.rs`（Go: `internal/json/json.go`）
 
-- [ ] `pub fn marshal<T: Serialize>(in_: &T, opts: JsonOptions) -> Result<Vec<u8>, Error>` — 默认前置 allow-invalid-utf8 语义　`// Go: json.go:Marshal`
-- [ ] `pub fn marshal_write<W: Write, T: Serialize>(w: &mut W, in_: &T, opts) -> Result<(), Error>`　`// Go: json.go:MarshalWrite`
-- [ ] `pub fn marshal_encode<T: Serialize>(enc: &mut Serializer, in_: &T, opts) -> Result<(), Error>`　`// Go: json.go:MarshalEncode`
-- [ ] `pub fn marshal_indent<T: Serialize>(in_: &T, prefix: &str, indent: &str) -> Result<Vec<u8>, Error>` — `prefix==""&&indent==""` 走紧凑 `marshal`，否则带缩进　`// Go: json.go:MarshalIndent`
+- [x] `pub fn marshal<T: Serialize>(in_: &T, opts: JsonOptions) -> Result<Vec<u8>, Error>` — 默认前置 allow-invalid-utf8 语义　`// Go: json.go:Marshal`
+- [x] `pub fn marshal_write<W: Write, T: Serialize>(w: &mut W, in_: &T, opts) -> Result<(), Error>`　`// Go: json.go:MarshalWrite`
+- [ ] `pub fn marshal_encode<T: Serialize>(enc: &mut Serializer, in_: &T, opts) -> Result<(), Error>`　`// Go: json.go:MarshalEncode`（DEFER(phase-8) 流式）
+- [x] `pub fn marshal_indent<T: Serialize>(in_: &T, prefix: &str, indent: &str) -> Result<Vec<u8>, Error>` — `prefix==""&&indent==""` 走紧凑 `marshal`，否则带缩进　`// Go: json.go:MarshalIndent`
 - [ ] `pub fn marshal_indent_write<W: Write, T: Serialize>(w, in_, prefix, indent) -> Result<(),Error>` — 同上分支　`// Go: json.go:MarshalIndentWrite`
-- [ ] `pub fn unmarshal<T: DeserializeOwned>(in_: &[u8], opts) -> Result<T, Error>`　`// Go: json.go:Unmarshal`
-- [ ] `pub fn unmarshal_decode<T: DeserializeOwned>(dec: &mut Deserializer, opts) -> Result<T, Error>`　`// Go: json.go:UnmarshalDecode`
-- [ ] `pub fn unmarshal_read<R: Read, T: DeserializeOwned>(r: R, opts) -> Result<T, Error>`　`// Go: json.go:UnmarshalRead`
-- [ ] `pub fn allow_duplicate_names(allow: bool) -> Opt`（选项构造）　`// Go: json.go:AllowDuplicateNames`
-- [ ] `pub fn deterministic(v: bool) -> Opt`　`// Go: json.go:Deterministic`
+- [x] `pub fn unmarshal<T: DeserializeOwned>(in_: &[u8], opts) -> Result<T, Error>`　`// Go: json.go:Unmarshal`
+- [ ] `pub fn unmarshal_decode<T: DeserializeOwned>(dec: &mut Deserializer, opts) -> Result<T, Error>`　`// Go: json.go:UnmarshalDecode`（DEFER(phase-8) 流式）
+- [x] `pub fn unmarshal_read<R: Read, T: DeserializeOwned>(r: R, opts) -> Result<T, Error>`　`// Go: json.go:UnmarshalRead`
+- [ ] `pub fn allow_duplicate_names(allow: bool) -> Opt`（选项构造）　`// Go: json.go:AllowDuplicateNames`（DEFER(phase-8)）
+- [x] `pub fn deterministic(v: bool) -> Opt`　`// Go: json.go:Deterministic`（实现为 `marshal_deterministic`）
 - [ ] `pub fn with_indent(indent: &str) -> Opt`　`// Go: json.go:WithIndent`
 - [ ] `pub fn new_decoder<R: Read>(r: R) -> Deserializer<...>`　`// Go: json.go:NewDecoder`
 - [ ] re-export 类型别名：`Value` / `Kind` / `Decoder` / `Encoder` / trait `UnmarshalerFrom`(→自定义) / `MarshalerTo`　`// Go: json.go`（type 块）
@@ -61,9 +61,9 @@ typescript-go 的所有 JSON 交互（tsconfig 读取、LSP 消息、`--generate
 
 ### Cargo / crate 接线
 
-- [ ] `internal/json/Cargo.toml`（`name = "tsgo_json"`，deps `serde` `serde_json`）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` re-export
+- [x] `internal/json/Cargo.toml`（`name = "tsgo_json"`，deps `serde` `serde_json`）
+- [x] 根 `Cargo.toml` workspace members 追加
+- [x] `lib.rs` re-export
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

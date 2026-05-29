@@ -1,0 +1,10 @@
+[package]
+name = "tsgo_glob"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+thiserror = "2.0.18"

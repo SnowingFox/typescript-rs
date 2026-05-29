@@ -1,5 +1,7 @@
 # tracing: 实现方案（impl.md）
 
+> **phase 归属（依赖序修正）**：本包**前移到 P4**（原列 P6）。原因：`checker` 非测试依赖 `tsgo_tracing`（`tracer.go`），须早于 checker（仅依赖 ast/json/scanner/tspath/vfs，近叶子）。详见根 README「依赖序口径」。
+
 **crate**：`tsgo_tracing`　**目标**：记录编译器的 Chrome Trace Event（`trace.json`）+ 每个 checker 的类型快照（`types_<N>.json`）+ 索引（`legend.json`），用于 `--generateTrace` 性能/类型分析。
 **依赖（crate）**：`tsgo_ast`（`Symbol`/`Node`/`EscapeAllInternalSymbolNames`）、`tsgo_json`、`tsgo_scanner`（行列换算）、`tsgo_tspath`、`tsgo_vfs`；外部 `xxh3`（线程 ID 稳定哈希，对应 Go `github.com/zeebo/xxh3`）。
 **Go 源**：`internal/tracing/`（1 个非测试文件：`tracing.go` 764 行）

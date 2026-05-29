@@ -1,5 +1,7 @@
 # ls: 实现方案（impl.md）
 
+> **子 crate 拆分（依赖序）**：`ls` 的 4 个子目录各拆独立 crate 并均置 **P7**：`tsgo_ls_lsconv`/`tsgo_ls_lsutil`/`tsgo_ls_change`/`tsgo_ls_autoimport`（早于 `ls` 根）；`lsp/lsproto`→`tsgo_lsproto` 亦置 P7。拆分用于破 `format→ls→format` 与 `ls↔project` 环（`ls/autoimport` 依赖 `project/{dirty,logging}`，后者拆到 P1）。本 impl.md 同时承载这些子 crate 的移植细节。详见 [references/crate-map.md](../../references/crate-map.md)。
+
 > 写之前已实际通读 `internal/ls/` 全部 60 个非测试 `.go`（根 36 + `lsconv` 2 + `lsutil` 8 + `change` 3 + `autoimport` 11）。文件用真实名 + 主函数签名 + `// Go:` 锚。本包体量大，impl.md 按**子系统**分节，但覆盖全部 60 文件。
 
 **crate（族）**：`tsgo_ls`（根）+ 4 个子 crate（见下「crate 拆分」）　**目标**：实现 TypeScript **语言服务核心**——补全 / 悬停 / 跳转定义 / 查找引用 / 重命名 / 签名帮助 / 语义高亮 / inlay hints / 折叠 / 文档符号 / 调用层级 / code action / organize imports / 文档诊断 / 格式化转发等，把内部计算结果转成 **LSP 协议类型**（`lsproto`）。

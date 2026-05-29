@@ -1,5 +1,7 @@
 # printer: 实现方案（impl.md）
 
+> **phase 归属（依赖序修正）**：本包**前移到 P4**（原列 P5）。原因：`checker` 非测试依赖 `tsgo_printer`（如 `nodebuilder.go`），须早于 checker；`transformers`（依赖 printer/checker）相应留在 checker 之后（P5）。详见根 README「依赖序口径」与 [references/crate-map.md](../../references/crate-map.md)。
+
 **crate**：`tsgo_printer`　**目标**：把（经 transformers 降级后的）AST 打印成 TypeScript/JavaScript 源文本——含 emit 上下文（`EmitContext`）、emit 感知的节点工厂（`NodeFactory`）、名字生成器、parenthesizer（按优先级插括号）、注释/源映射发射、各类 `EmitTextWriter`。
 **依赖（crate）**：`tsgo_ast` `tsgo_core` `tsgo_collections` `tsgo_debug` `tsgo_scanner` `tsgo_sourcemap` `tsgo_diagnostics` `tsgo_binder`(测试) `tsgo_stringutil`
 **Go 源**：`internal/printer/`（15 个非测试文件，约 14789 行；`printer.go` 单文件 ~220KB 是 emit 核心）

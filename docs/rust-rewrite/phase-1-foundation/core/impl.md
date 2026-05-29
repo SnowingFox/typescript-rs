@@ -92,69 +92,69 @@ Go 的 `Arena[T]` 返回裸 `*T`，靠"满了分新 backing、旧 backing 不释
 
 > ~70 个泛型函数；下面按族列，逐个带锚点。
 
-- [ ] 切片变换：`filter / filter_seq / filter_index / map / try_map / map_index / map_non_nil / map_filtered / flat_map / same_map / same_map_index`　`// Go: core.go:Filter/.../SameMapIndex`
-- [ ] 谓词/查找：`same / some / every / or / find / find_last / find_index / find_last_index / count_where`　`// Go: core.go:Same/Some/Every/Or/Find/FindLast/FindIndex/FindLastIndex/CountWhere`
-- [ ] 取元素：`first_or_nil / last_or_nil / element_or_nil / first_or_nil_seq / first_non_nil / first_non_zero`　`// Go: core.go:FirstOrNil/.../FirstNonZero`
-- [ ] 拼接/编辑：`concatenate / splice / replace_element / insert_sorted / append_if_unique / deduplicate / deduplicate_sorted / flatten / min_all_func`　`// Go: core.go:Concatenate/Splice/ReplaceElement/InsertSorted/AppendIfUnique/Deduplicate/DeduplicateSorted/Flatten/MinAllFunc`
-- [ ] 映射工具：`diff_maps / diff_maps_func / copy_map_into / unordered_equal`　`// Go: core.go:DiffMaps/DiffMapsFunc/CopyMapInto/UnorderedEqual`
-- [ ] 函数式：`memoize / if_else / or_else / coalesce / identity`　`// Go: core.go:Memoize/IfElse/OrElse/Coalesce/Identity`
-- [ ] 序列：`filter_seq / concatenate_seq / enumerate`　`// Go: core.go:FilterSeq/ConcatenateSeq/Enumerate`
-- [ ] 文本/编码：`compute_ecma_line_starts(_seq) / position_to_line_and_byte_offset / utf16_len(UTF16Offset)`　`// Go: core.go:ComputeECMALineStarts/PositionToLineAndByteOffset/UTF16Len`
-- [ ] 其它：`must / first_result / stringify_json / get_script_kind_from_file_name / check_each_defined / index_after / should_rewrite_module_specifier / single_element_slice / compare_booleans / apply_debug_stack_limit`　`// Go: core.go:Must/FirstResult/StringifyJson/GetScriptKindFromFileName/CheckEachDefined/IndexAfter/ShouldRewriteModuleSpecifier/SingleElementSlice/CompareBooleans/ApplyDebugStackLimit`
-- [ ] 拼写建议：`get_spelling_suggestion / get_spelling_suggestion_for_strings` + `levenshtein_with_max`（带 max 剪枝；buffer 复用）　`// Go: core.go:GetSpellingSuggestion/GetSpellingSuggestionForStrings/levenshteinWithMax`
+- [x] 切片变换：`filter / filter_seq / filter_index / map / try_map / map_index / map_non_nil / map_filtered / flat_map / same_map / same_map_index`　`// Go: core.go:Filter/.../SameMapIndex`
+- [x] 谓词/查找：`same / some / every / or / find / find_last / find_index / find_last_index / count_where`　`// Go: core.go:Same/Some/Every/Or/Find/FindLast/FindIndex/FindLastIndex/CountWhere`
+- [x] 取元素：`first_or_nil / last_or_nil / element_or_nil / first_or_nil_seq / first_non_nil / first_non_zero`　`// Go: core.go:FirstOrNil/.../FirstNonZero`
+- [x] 拼接/编辑：`concatenate / splice / replace_element / insert_sorted / append_if_unique / deduplicate / deduplicate_sorted / flatten / min_all_func`　`// Go: core.go:Concatenate/Splice/ReplaceElement/InsertSorted/AppendIfUnique/Deduplicate/DeduplicateSorted/Flatten/MinAllFunc`
+- [x] 映射工具：`diff_maps / diff_maps_func / copy_map_into / unordered_equal`　`// Go: core.go:DiffMaps/DiffMapsFunc/CopyMapInto/UnorderedEqual`
+- [x] 函数式：`memoize / if_else / or_else / coalesce / identity`　`// Go: core.go:Memoize/IfElse/OrElse/Coalesce/Identity`
+- [x] 序列：`filter_seq / concatenate_seq / enumerate`　`// Go: core.go:FilterSeq/ConcatenateSeq/Enumerate`
+- [x] 文本/编码：`compute_ecma_line_starts(_seq) / position_to_line_and_byte_offset / utf16_len(UTF16Offset)`　`// Go: core.go:ComputeECMALineStarts/PositionToLineAndByteOffset/UTF16Len`
+- [x] 其它：`must / first_result / stringify_json / get_script_kind_from_file_name / check_each_defined / index_after / should_rewrite_module_specifier / single_element_slice / compare_booleans / apply_debug_stack_limit`　`// Go: core.go:Must/FirstResult/StringifyJson/GetScriptKindFromFileName/CheckEachDefined/IndexAfter/ShouldRewriteModuleSpecifier/SingleElementSlice/CompareBooleans/ApplyDebugStackLimit`
+- [x] 拼写建议：`get_spelling_suggestion / get_spelling_suggestion_for_strings` + `levenshtein_with_max`（带 max 剪枝；buffer 复用）　`// Go: core.go:GetSpellingSuggestion/GetSpellingSuggestionForStrings/levenshteinWithMax`
 
 ### `text.rs` / `textchange.rs`
 
-- [ ] `TextPos(i32)`；`TextRange{pos,end}` + `new/undefined/pos/end/len/is_valid/contains/contains_inclusive/contains_exclusive/with_pos/with_end/contained_by/overlaps/intersects` + `compare_text_ranges`　`// Go: text.go:*`
-- [ ] `TextChange{range, new_text}` + `apply_to` / `apply_bulk_edits`　`// Go: textchange.go:TextChange/ApplyTo/ApplyBulkEdits`
+- [x] `TextPos(i32)`；`TextRange{pos,end}` + `new/undefined/pos/end/len/is_valid/contains/contains_inclusive/contains_exclusive/with_pos/with_end/contained_by/overlaps/intersects` + `compare_text_ranges`　`// Go: text.go:*`
+- [x] `TextChange{range, new_text}` + `apply_to` / `apply_bulk_edits`　`// Go: textchange.go:TextChange/ApplyTo/ApplyBulkEdits`
 
 ### `tristate.rs`
 
-- [ ] `enum Tristate{Unknown,False,True}` + `is_true/is_true_or_unknown/is_false/is_false_or_unknown/is_unknown/default_if_unknown` + `bool_to_tristate` + serde（true/false/null）+ `Display`（Stringer：`TSUnknown/TSFalse/TSTrue`）　`// Go: tristate.go:*` + `tristate_stringer_generated.go`
+- [x] `enum Tristate{Unknown,False,True}` + `is_true/is_true_or_unknown/is_false/is_false_or_unknown/is_unknown/default_if_unknown` + `bool_to_tristate` + serde（true/false/null）+ `Display`（Stringer：`TSUnknown/TSFalse/TSTrue`）　`// Go: tristate.go:*` + `tristate_stringer_generated.go`
 
 ### `compileroptions.rs`（含枚举 + Stringer）
 
-- [ ] `struct CompilerOptions{...120 字段...}` + `#[derive(Clone,Default)]` + serde（`omitzero`→`skip_serializing_if`）；`EMPTY_COMPILER_OPTIONS`　`// Go: compileroptions.go:CompilerOptions/EmptyCompilerOptions`
-- [ ] `clone`（derive 替代 reflect）　`// Go: compileroptions.go:(*CompilerOptions).Clone`
-- [ ] getter：`get_emit_script_target / get_emit_module_kind / get_module_resolution_kind / get_emit_module_detection_kind / get_resolve_package_json_exports / ..._imports / get_allow_importing_ts_extensions / allow_importing_ts_extensions_from / get_resolve_json_module / should_preserve_const_enums / get_allow_js / get_jsx_transform_enabled / get_strict_option_value / get_effective_type_roots / uses_wildcard_types / get_isolated_modules / is_incremental / get_emit_standard_class_fields / get_use_define_for_class_fields / get_emit_declarations / get_are_declaration_maps_enabled / has_json_module_emit_enabled / get_paths_base_path`　`// Go: compileroptions.go:(*CompilerOptions).*`
-- [ ] 枚举：`ModuleDetectionKind / ModuleKind(含 IsNonNodeESM/SupportsImportAttributes) / ResolutionMode(别名) / ModuleResolutionKind(自定义 Display，Unknown panic) / NewLineKind(GetNewLineKind/GetNewLineCharacter) / ScriptTarget / JsxEmit(自定义 Display)`，保留显式判别值　`// Go: compileroptions.go:*` + `modulekind_stringer_generated.go` + `scripttarget_stringer_generated.go`
-- [ ] `MODULE_KIND_TO_MODULE_RESOLUTION_KIND` 映射表　`// Go: compileroptions.go:ModuleKindToModuleResolutionKind`
+- [x] `struct CompilerOptions{...120 字段...}` + `#[derive(Clone,Default)]` + serde（`omitzero`→`skip_serializing_if`）；`EMPTY_COMPILER_OPTIONS`　`// Go: compileroptions.go:CompilerOptions/EmptyCompilerOptions`
+- [x] `clone`（derive 替代 reflect）　`// Go: compileroptions.go:(*CompilerOptions).Clone`
+- [x] getter：`get_emit_script_target / get_emit_module_kind / get_module_resolution_kind / get_emit_module_detection_kind / get_resolve_package_json_exports / ..._imports / get_allow_importing_ts_extensions / allow_importing_ts_extensions_from / get_resolve_json_module / should_preserve_const_enums / get_allow_js / get_jsx_transform_enabled / get_strict_option_value / get_effective_type_roots / uses_wildcard_types / get_isolated_modules / is_incremental / get_emit_standard_class_fields / get_use_define_for_class_fields / get_emit_declarations / get_are_declaration_maps_enabled / has_json_module_emit_enabled / get_paths_base_path`　`// Go: compileroptions.go:(*CompilerOptions).*`
+- [x] 枚举：`ModuleDetectionKind / ModuleKind(含 IsNonNodeESM/SupportsImportAttributes) / ResolutionMode(别名) / ModuleResolutionKind(自定义 Display，Unknown panic) / NewLineKind(GetNewLineKind/GetNewLineCharacter) / ScriptTarget / JsxEmit(自定义 Display)`，保留显式判别值　`// Go: compileroptions.go:*` + `modulekind_stringer_generated.go` + `scripttarget_stringer_generated.go`
+- [x] `MODULE_KIND_TO_MODULE_RESOLUTION_KIND` 映射表　`// Go: compileroptions.go:ModuleKindToModuleResolutionKind`
 
 ### 其它选项/枚举
 
-- [ ] `BuildOptions`（buildoptions.rs）　`// Go: buildoptions.go:BuildOptions`
-- [ ] `ParsedOptions`（parsedoptions.rs）　`// Go: parsedoptions.go:ParsedOptions`
-- [ ] `WatchOptions` + `WatchFileKind/WatchDirectoryKind/PollingKind` + `watch_interval`　`// Go: watchoptions.go:*`
-- [ ] `TypeAcquisition` + `equals`　`// Go: typeacquisition.go:TypeAcquisition/Equals`
-- [ ] `ProjectReference` + `resolve_project_reference_path / resolve_config_file_name_of_project_reference`　`// Go: projectreference.go:*`
-- [ ] `ScriptKind` 枚举 + Stringer　`// Go: scriptkind.go` + `scriptkind_stringer_generated.go`
-- [ ] `LanguageVariant` 枚举 + Stringer　`// Go: languagevariant.go` + `languagevariant_stringer_generated.go`
+- [x] `BuildOptions`（buildoptions.rs）　`// Go: buildoptions.go:BuildOptions`
+- [x] `ParsedOptions`（parsedoptions.rs）　`// Go: parsedoptions.go:ParsedOptions`
+- [x] `WatchOptions` + `WatchFileKind/WatchDirectoryKind/PollingKind` + `watch_interval`　`// Go: watchoptions.go:*`
+- [x] `TypeAcquisition` + `equals`　`// Go: typeacquisition.go:TypeAcquisition/Equals`
+- [x] `ProjectReference` + `resolve_project_reference_path / resolve_config_file_name_of_project_reference`　`// Go: projectreference.go:*`
+- [x] `ScriptKind` 枚举 + Stringer　`// Go: scriptkind.go` + `scriptkind_stringer_generated.go`
+- [x] `LanguageVariant` 枚举 + Stringer　`// Go: languagevariant.go` + `languagevariant_stringer_generated.go`
 
 ### 数据结构
 
-- [ ] `Arena<T>`（New/NewSlice/NewSlice1/Clone + `next_arena_size`）→ typed-arena/索引方案　`// Go: arena.go:*`
-- [ ] `LinkStore<K,V>`（get/has/try_get，懒分配）　`// Go: linkstore.go:*`
-- [ ] `Stack<T>`（push/pop/peek/len，空 pop/peek panic）　`// Go: stack.go:*`
-- [ ] `Pattern{text, star_index}` + `try_parse_pattern / is_valid / matches / matched_text / find_best_pattern_match`　`// Go: pattern.go:*`
-- [ ] `binary_search_unique_func`　`// Go: binarysearch.go:BinarySearchUniqueFunc`
+- [x] `Arena<T>`（New/NewSlice/NewSlice1/Clone + `next_arena_size`）→ typed-arena/索引方案　`// Go: arena.go:*`
+- [x] `LinkStore<K,V>`（get/has/try_get，懒分配）　`// Go: linkstore.go:*`
+- [x] `Stack<T>`（push/pop/peek/len，空 pop/peek panic）　`// Go: stack.go:*`
+- [x] `Pattern{text, star_index}` + `try_parse_pattern / is_valid / matches / matched_text / find_best_pattern_match`　`// Go: pattern.go:*`
+- [x] `binary_search_unique_func`　`// Go: binarysearch.go:BinarySearchUniqueFunc`
 
 ### 并发 / BFS
 
-- [ ] `Semaphore` trait + `UnlimitedSemaphore` + `LimitedSemaphore`（acquire 返回 RAII release；try_acquire 带取消）　`// Go: semaphore.go:*`
-- [ ] `WorkGroup` trait + 并行/单线程实现 + `ThrottleGroup`（限流 + 首错收集）　`// Go: workgroup.go:*`
-- [ ] `BreadthFirstSearchResult/Level/Options` + `breadth_first_search_parallel(_ex)` + `update_min`（原子 CAS）　`// Go: bfs.go:*`
-- [ ] request id：`with_request_id / get_request_id` 改显式传参（不用 context）　`// Go: context.go:*`
+- [x] `Semaphore` trait + `UnlimitedSemaphore` + `LimitedSemaphore`（acquire 返回 RAII release；try_acquire 带取消）　`// Go: semaphore.go:*`
+- [x] `WorkGroup` trait + 并行/单线程实现 + `ThrottleGroup`（限流 + 首错收集）　`// Go: workgroup.go:*`
+- [x] `BreadthFirstSearchResult/Level/Options` + `breadth_first_search_parallel(_ex)` + `update_min`（原子 CAS）　`// Go: bfs.go:*`
+- [x] request id：`with_request_id / get_request_id` 改显式传参（不用 context）　`// Go: context.go:*`
 
 ### 杂项
 
-- [ ] `version`/`version_major_minor`（`LazyLock`，可被构建期覆盖）　`// Go: version.go:*`
-- [ ] Node 内置模块：`UNPREFIXED_NODE_CORE_MODULES`/`EXCLUSIVELY_PREFIXED_NODE_CORE_MODULES`/`node_core_modules()`(LazyLock)/`non_relative_module_name_for_typing_cache`　`// Go: nodemodules.go:*`
+- [x] `version`/`version_major_minor`（`LazyLock`，可被构建期覆盖）　`// Go: version.go:*`
+- [x] Node 内置模块：`UNPREFIXED_NODE_CORE_MODULES`/`EXCLUSIVELY_PREFIXED_NODE_CORE_MODULES`/`node_core_modules()`(LazyLock)/`non_relative_module_name_for_typing_cache`　`// Go: nodemodules.go:*`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/core/Cargo.toml`（`name = "tsgo_core"`，path deps：collections/stringutil/tspath/debug/json + rayon/crossbeam-channel/arena/serde/rustc_hash）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` 声明全部子模块 + re-export
+- [x] `internal/core/Cargo.toml`（`name = "tsgo_core"`，path deps：collections/stringutil/tspath/debug/json + rayon/crossbeam-channel/arena/serde/rustc_hash）
+- [x] 根 `Cargo.toml` workspace members 追加
+- [x] `lib.rs` 声明全部子模块 + re-export
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

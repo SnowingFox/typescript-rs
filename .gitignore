@@ -172,6 +172,9 @@ go.work.sum
 /cmd/tsgo/tsgo
 /tsgo
 
+# Rust build output (rust-rewrite)
+/target
+
 # Benchmarking results
 *.txt
 

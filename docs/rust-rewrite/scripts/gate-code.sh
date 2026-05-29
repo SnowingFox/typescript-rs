@@ -12,6 +12,7 @@
 #   C5 rustdoc gate —— RUSTDOCFLAGS="-D missing_docs" cargo doc --no-deps --all
 #   C6 test-go-parity—— 每个含 // Go: 锚的实现 .rs 必须有含 // Go: 锚的对应测试
 #   C7 stub-readiness—— 每个 todo!()/unimplemented!() 须紧邻 // DEFER(phase-N) + // blocked-by:
+#   C8 comments-en  —— .rs 代码注释一律英文（注释中禁出现 CJK 字符）
 #
 # 用法：
 #   bash docs/rust-rewrite/scripts/gate-code.sh            # 跑全部
@@ -119,45 +120,55 @@ else
 fi
 
 # ─── C6 test-go-parity ───────────────────────────────────────────────────────
-echo ""; echo "[C6] 含 // Go: 锚的实现文件须有含 // Go: 锚的对应测试"
+# 测试约定（PORTING §2/§8）：单测独立成兄弟文件 <stem>_test.rs（镜像 Go _test.go）。
+# 故每个含 // Go: 锚的实现文件 <stem>.rs，须有同目录 <stem>_test.rs 且其含 // Go: 锚；
+# 同时兼容旧式内联 #[cfg(test)] 锚 与 crate tests/ 目录测试。
+echo ""; echo "[C6] 含 // Go: 锚的实现文件须有含 // Go: 锚的对应测试（优先独立 <stem>_test.rs）"
 c6_bad=0
 while IFS= read -r f; do
 	[ -z "$f" ] && continue
 	base="$(basename "$f")"
-	# 跳过 tests/ 下的测试文件本身
+	# 跳过测试文件本身（独立 _test.rs 与 tests/ 目录）
+	case "$base" in *_test.rs) continue ;; esac
 	case "$f" in */tests/*) continue ;; esac
 	total_go="$(grep -c "// Go:" "$f" 2>/dev/null || echo 0)"
 	total_go="${total_go//[^0-9]/}"
 	[ "${total_go:-0}" -eq 0 ] && continue
-	# 找同文件内 #[cfg(test)] 起点
+	# 区分实现锚 vs 旧式内联测试锚（以同文件内 #[cfg(test)] 起点为界）
 	cfgline="$(grep -nE '#\[cfg\(test\)\]' "$f" 2>/dev/null | head -1 | cut -d: -f1 || true)"
-	impl_go=0; test_go=0
+	impl_go=0; inline_test_go=0
 	if [ -n "$cfgline" ]; then
 		impl_go="$(awk -v c="$cfgline" 'NR<c && /\/\/ Go:/{n++} END{print n+0}' "$f")"
-		test_go="$(awk -v c="$cfgline" 'NR>=c && /\/\/ Go:/{n++} END{print n+0}' "$f")"
+		inline_test_go="$(awk -v c="$cfgline" 'NR>=c && /\/\/ Go:/{n++} END{print n+0}' "$f")"
 	else
 		impl_go="$total_go"
 	fi
 	[ "$impl_go" -eq 0 ] && continue
-	if [ "$test_go" -gt 0 ]; then
-		continue
-	fi
-	# 同文件无内联测试 → 找 crate tests/ 目录下引用本文件的测试
-	crate_dir="$(dirname "$f")"
-	while [ "$crate_dir" != "$REPO_ROOT" ] && [ "$crate_dir" != "/" ]; do
-		[ -f "$crate_dir/Cargo.toml" ] && break
-		crate_dir="$(dirname "$crate_dir")"
-	done
+	dir="$(dirname "$f")"
 	stem="${base%.rs}"
-	ext_hit=0
-	if [ -d "$crate_dir/tests" ]; then
-		while IFS= read -r tf; do
-			[ -z "$tf" ] && continue
-			if grep -q "// Go:" "$tf" 2>/dev/null; then ext_hit=1; break; fi
-		done < <(find "$crate_dir/tests" -type f -name "*${stem}*.rs" 2>/dev/null || true)
+	covered=0
+	# 1) 首选：同目录兄弟 <stem>_test.rs 且含 // Go:
+	if [ -f "$dir/${stem}_test.rs" ] && grep -q "// Go:" "$dir/${stem}_test.rs" 2>/dev/null; then
+		covered=1
 	fi
-	if [ "$ext_hit" = "0" ]; then
-		echo "  ✗ ${f#"$REPO_ROOT"/}：有 // Go: 锚但无含 // Go: 的对应测试"
+	# 2) 兼容：旧式同文件内联测试锚
+	[ "$covered" = "0" ] && [ "$inline_test_go" -gt 0 ] && covered=1
+	# 3) 兼容：crate tests/ 目录下引用本文件的测试
+	if [ "$covered" = "0" ]; then
+		crate_dir="$dir"
+		while [ "$crate_dir" != "$REPO_ROOT" ] && [ "$crate_dir" != "/" ]; do
+			[ -f "$crate_dir/Cargo.toml" ] && break
+			crate_dir="$(dirname "$crate_dir")"
+		done
+		if [ -d "$crate_dir/tests" ]; then
+			while IFS= read -r tf; do
+				[ -z "$tf" ] && continue
+				if grep -q "// Go:" "$tf" 2>/dev/null; then covered=1; break; fi
+			done < <(find "$crate_dir/tests" -type f -name "*${stem}*.rs" 2>/dev/null || true)
+		fi
+	fi
+	if [ "$covered" = "0" ]; then
+		echo "  ✗ ${f#"$REPO_ROOT"/}：有 // Go: 锚但缺独立 ${stem}_test.rs（或其无 // Go: 锚）"
 		c6_bad=$((c6_bad + 1))
 	fi
 done < <(collect_rs)
@@ -199,6 +210,27 @@ else
 	echo "  C7 OK"
 fi
 
+# ─── C8 comments must be English (no CJK in .rs comments) ────────────────────
+echo ""; echo "[C8] 代码注释一律英文（.rs 注释中禁出现 CJK 字符）"
+c8_bad=0
+# CJK 范围：CJK 统一表意 + 扩展A + 兼容 + 假名 + 全角标点 + 注音/部首
+cjk='[\x{3000}-\x{303F}\x{3040}-\x{30FF}\x{3100}-\x{312F}\x{31A0}-\x{31BF}\x{3400}-\x{4DBF}\x{4E00}-\x{9FFF}\x{F900}-\x{FAFF}\x{FF00}-\x{FFEF}]'
+while IFS= read -r f; do
+	[ -z "$f" ] && continue
+	# 启发式：行注释/块注释起始符之后（同行）出现 CJK 即判违规。
+	# 仅扫注释，故 "café"/中文测试数据等字符串字面量不受影响（除非该行还带注释）。
+	while IFS= read -r m; do
+		[ -z "$m" ] && continue
+		echo "  ✗ ${f#"$REPO_ROOT"/}:${m%%:*} 注释含 CJK（请改英文）"
+		c8_bad=$((c8_bad + 1))
+	done < <(rg -n "(//|/\*).*${cjk}" "$f" 2>/dev/null | head -50 || true)
+done < <(collect_rs)
+if [ "$c8_bad" -gt 0 ]; then
+	note_fail "C8 comments-en：$c8_bad 处代码注释含 CJK（改成英文）"
+else
+	echo "  C8 OK（注释无 CJK）"
+fi
+
 # ─── 小结 + 退出码 ───────────────────────────────────────────────────────────
 echo ""
 echo "----------------------------------------------------------------"
@@ -208,6 +240,6 @@ if [ ${#FAILS[@]} -gt 0 ]; then
 	echo "----------------------------------------------------------------"
 	exit 1
 fi
-echo " 代码 Gate 小结：GREEN（C1-C7 全通过）"
+echo " 代码 Gate 小结：GREEN（C1-C8 全通过）"
 echo "----------------------------------------------------------------"
 exit 0

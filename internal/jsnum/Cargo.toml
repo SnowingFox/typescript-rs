@@ -1,0 +1,14 @@
+[package]
+name = "tsgo_jsnum"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+num-bigint = "0.4.6"
+num-traits = "0.2.19"
+ryu = "1.0.23"
+tsgo_json = { path = "../json" }
+tsgo_stringutil = { path = "../stringutil" }

@@ -3,6 +3,10 @@
 > 本文件是所有 phase / 所有 subagent 写代码、写文档时的**共享契约**。动手前必读。
 > 灵感来自 Bun 的 Zig→Rust `PORTING.md`（结构优先、逐文件 1:1），但我们**不**照搬其
 > "不需要编译 / 禁用 rayon" 的约束。我们要的是：**测试先行的逐文件 1:1 移植 + 真编译 + 真并发**。
+>
+> 🔴 **头号铁律：绝对遵循 `/tdd` SKILL（红→绿垂直切片）。** 先有红的测试，才允许写让它变绿的实现。
+> **移植不豁免 TDD**：即使 Go 的 impl+test 都现成，也禁止"先把实现整文件翻完再补测试"（横切反模式）。
+> 完整规则 + `/tdd` 原文见 **[references/tdd.md](./references/tdd.md)（写任何 `.rs` 前必读）**。
 
 ## 0. 一句话目标
 
@@ -14,7 +18,7 @@
 
 | # | 决策 | 结论 |
 |---|---|---|
-| 1 | 方法论 | **测试先行的逐文件移植**：每个 Go 文件先把 `*_test.go` 译成 Rust 测试（red）→ 再译实现（green）。模块必须真编译 + 测试全绿才进入下一个。不留"不编译"的草稿。 |
+| 1 | 方法论 | **严格 TDD（`/tdd` SKILL，红→绿垂直切片）**：**逐行为**地"移植一个 Go 测试→看到它红→移植该函数实现→变绿"，一次一个，绝不横切（禁止先翻完整文件实现再补测试）。模块必须真编译 + 测试全绿才进入下一个。完整规则见 [references/tdd.md](./references/tdd.md)。 |
 | 2 | 代码位置 | **同仓库 side-by-side**：`internal/core/core.go` 旁放 `internal/core/core.rs`，不删 Go 源。 |
 | 3 | crate 布局 | 仓库根一个 **Cargo workspace**；每个 `internal/<pkg>` = 一个 crate，名 `tsgo_<pkg>`。 |
 | 4 | 分阶段 | 按真实依赖 DAG 的 **10 个 phase**（见 README）。每个包/子阶段一个目录，含 `impl.md` + `tests.md`。 |
@@ -48,6 +52,21 @@ typescript-go/
 - 若 basename == 其直接父目录名（嵌套子模块）→ `mod.rs`。
 - 其余 → 同名 `.rs`（`internal/core/compare.go` → `internal/core/compare.rs`，在 `lib.rs` 里 `mod compare;`）。
 - 嵌套子包（如 `internal/ls/lsconv/`、`internal/vfs/iovfs/`）作为父 crate 的子 module 或独立子 crate，由所属 phase 的文档决定，但**默认作父 crate 的子 module**，除非有独立外部依赖。
+
+### 测试文件命名（**单测独立成文件，镜像 Go `_test.go`**）
+
+- **不要把测试内联进实现文件**（禁止在 `<file>.rs` 里写 `#[cfg(test)] mod tests { ... }` 大块）。
+- 每个有测试的 `<file>.rs` 旁配一个兄弟文件 **`<file>_test.rs`**（对应 Go 的 `<file>_test.go`，如 `util.rs` ↔ `util_test.rs`、`lib.rs` ↔ `lib_test.rs`）。
+- 在 `<file>.rs` **末尾**用一行挂载（保持同模块、可访问私有项）：
+
+```rust
+#[cfg(test)]
+#[path = "util_test.rs"]
+mod tests;
+```
+
+- `<file>_test.rs` 以 `use super::*;` 开头，即可像 Go 同包测试一样访问 `<file>.rs` 的私有项。
+- `#[path]` 相对当前文件目录解析，故测试文件与实现文件**同目录并排**，与 `.go`/`_test.go` 布局一致。
 
 ### crate 命名
 
@@ -132,20 +151,25 @@ Go 的 AST 是 **arena + 裸指针图**：单一 `ast.Node{ Kind, Flags, Loc, Pa
 
 ## 7. rustdoc 注释规范（doc 质量红线）
 
-参照 story 仓库的写法（见 `internal/.../diff-tree.ts` 风格）。**每个公开项**（`pub fn` / `pub struct` / `pub enum` / `pub trait`）必须：
+> **语言铁律：所有代码里的注释一律用英文** —— rustdoc `///`/`//!`、行内 `//`、`# Examples`、`Side effects`、`// Go:`/`// PERF(port)`/`// TODO(port)`/`// DEFER`/`// SAFETY:` 等全部用英文。
+> 规划类 markdown（`impl.md`/`tests.md`/各 `README.md`）仍用中文；**只有 `.rs` 源码内的注释必须英文**。
+> 理由：这是 Microsoft 官方仓库的 Rust 移植，代码注释面向国际维护者，须与 Go 上游一致用英文。该红线由 gate-code 的 C8 机检（`.rs` 注释禁出现 CJK 字符）。
 
-1. 多行 `///` summary：说清**意图**，不复读签名。
+**每个公开项**（`pub fn` / `pub struct` / `pub enum` / `pub trait`）必须：
+
+1. 多行 `///` summary（英文）：说清**意图**，不复读签名。
 2. `# Examples`：给 input → output 的最小例子（doctest 能跑最好）。
-3. **Side effects** 段：有 I/O（读写文件 / 调子进程 / 改全局）的函数必须列副作用清单 + "没动什么"（防误解，如 `// Worktree / index / HEAD: unchanged`）。纯函数注明"无副作用"。
+3. **Side effects** 段：有 I/O（读写文件 / 调子进程 / 改全局）的函数必须列副作用清单 + "没动什么"（防误解，如 `// Worktree / index / HEAD: unchanged`）。纯函数注明 `Side effects: none (pure)`。
 4. 不允许 section divider 注释（`// ==== xxx ====`）划分文件区块。
 5. 不允许 `# Arguments` / `# Returns` 复读类型签名。
 
-示例：
+示例（注意：注释全英文）：
 
 ```rust
-/// 把字符串按 RFC3986 `encodeURI` 规则百分号编码，保留保留字符（`;/?:@&=+$,#`）。
+/// Percent-encodes a string per RFC3986 `encodeURI`, preserving the reserved
+/// set (`;/?:@&=+$,#`).
 ///
-/// 镜像 TS `encodeURI` 语义：非 ASCII 按 UTF-8 字节逐个 `%XX`。
+/// Mirrors TS `encodeURI`: non-ASCII is emitted as `%XX` over its UTF-8 bytes.
 ///
 /// # Examples
 /// ```
@@ -153,7 +177,7 @@ Go 的 AST 是 **arena + 裸指针图**：单一 `ast.Node{ Kind, Flags, Loc, Pa
 /// assert_eq!(encode_uri(";/?:@&=+$,#"), ";/?:@&=+$,#");
 /// ```
 ///
-/// Side effects: 无（纯函数）。
+/// Side effects: none (pure).
 // Go: internal/stringutil/util.go:EncodeURI
 pub fn encode_uri(input: &str) -> String { /* ... */ }
 ```
@@ -162,6 +186,7 @@ pub fn encode_uri(input: &str) -> String { /* ... */ }
 
 这是本次移植的**核心纪律**——`tests.md` 必须与真实 Go 测试逐条对齐：
 
+0. **测试放独立文件**：Rust 测试写在兄弟文件 `<file>_test.rs`（镜像 Go `<file>_test.go`），用 `#[cfg(test)] #[path="<file>_test.rs"] mod tests;` 挂在 `<file>.rs` 末尾，测试文件以 `use super::*;` 开头（见 §2）。**禁止内联大块 `#[cfg(test)] mod tests {}`**。
 1. **逐 `func Test*` 对齐**：每个 Go `func TestXxx` 对应一个或多个 Rust `#[test]`。
 2. **钻进表驱动子用例**：Go 测试多为 `tests := []struct{...}{...}` + `t.Run(tt.name, ...)`。
    `tests.md` 必须把**每个子用例**（`name` + input + expected）列成一行，不能只列顶层函数。

@@ -1,0 +1,15 @@
+[package]
+name = "tsgo_vfs"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tsgo_collections = { path = "../collections" }
+tsgo_core = { path = "../core" }
+tsgo_tspath = { path = "../tspath" }
+
+[dev-dependencies]
+tempfile = "3.27.0"

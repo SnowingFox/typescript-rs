@@ -45,45 +45,45 @@
 
 ### `util.rs`（Go: `internal/stringutil/util.go`）
 
-- [ ] `pub fn is_white_space_like(ch: char) -> bool` — `IsWhiteSpaceSingleLine || IsLineBreak`　`// Go: util.go:IsWhiteSpaceLike`
-- [ ] `pub fn is_white_space_single_line(ch: char) -> bool` — 21 个空白码点的 match（含 `0x0085` nextLine、`0xFEFF` BOM）　`// Go: util.go:IsWhiteSpaceSingleLine`
-- [ ] `pub fn is_line_break(ch: char) -> bool` — `\n` `\r` `\u{2028}` `\u{2029}`　`// Go: util.go:IsLineBreak`
-- [ ] `pub fn is_digit(ch: char) -> bool` — `'0'..='9'`　`// Go: util.go:IsDigit`
-- [ ] `pub fn is_octal_digit(ch: char) -> bool` — `'0'..='7'`　`// Go: util.go:IsOctalDigit`
-- [ ] `pub fn is_hex_digit(ch: char) -> bool` — `0-9A-Fa-f`　`// Go: util.go:IsHexDigit`
-- [ ] `pub fn is_ascii_letter(ch: char) -> bool` — `A-Za-z`　`// Go: util.go:IsASCIILetter`
-- [ ] `pub fn split_lines(text: &str) -> Vec<&str>` — 按 `\r\n`/`\r`/`\n` 切分；保留尾部非空段；预分配 `count('\n')+1`　`// Go: util.go:SplitLines`
-- [ ] `pub fn guess_indentation(lines: &[&str]) -> usize` — 取所有非空行的最小前导空白宽度（按 rune 解码、`IsWhiteSpaceLike`）；空集或全空返回 0；命中 0 立即返回　`// Go: util.go:GuessIndentation`
-- [ ] `pub fn encode_uri(s: &str) -> String` — **逐字节**百分号编码，保留未保留字符集 `;/?:@&=+$,#-_.!~*'()` 与字母数字　`// Go: util.go:EncodeURI`
-- [ ] `fn should_escape_for_encode_uri(b: u8) -> bool` — 私有，配合 `encode_uri`　`// Go: util.go:shouldEscapeForEncodeURI`
-- [ ] `fn get_byte_order_mark_length(text: &str) -> usize` — 私有；识别 UTF16BE(0xFEFF)/UTF16LE(0xFFFE)/UTF8(0xEFBBBF) BOM 字节，返回 0/2/3　`// Go: util.go:getByteOrderMarkLength`
-- [ ] `pub fn remove_byte_order_mark(text: &str) -> &str` — 去掉 BOM 前缀　`// Go: util.go:RemoveByteOrderMark`
-- [ ] `pub fn add_utf8_byte_order_mark(text: &str) -> String` — 无 BOM 时前置 `\xEF\xBB\xBF`　`// Go: util.go:AddUTF8ByteOrderMark`
-- [ ] `pub fn strip_quotes(name: &str) -> &str` — 首尾同为 `'`/`"`/`` ` `` 时剥离　`// Go: util.go:StripQuotes`
-- [ ] `pub fn unquote_string(s: &str) -> String` — `strip_quotes` 后用正则把 `\\.` 替换为其第二字符（注意 Go 注释指出此行为"看似有误但照搬"）　`// Go: util.go:UnquoteString`
-- [ ] `pub fn lower_first_char(s: &str) -> String` — 首 rune 转小写 + 余下原样　`// Go: util.go:LowerFirstChar`
-- [ ] `pub fn truncate_by_runes(s: &str, max_length: usize) -> &str` — 字节长 < max 直接返回；max<=0 返回空；否则在第 max+1 个 rune 处截断　`// Go: util.go:TruncateByRunes`
+- [x] `pub fn is_white_space_like(ch: char) -> bool` — `IsWhiteSpaceSingleLine || IsLineBreak`　`// Go: util.go:IsWhiteSpaceLike`
+- [x] `pub fn is_white_space_single_line(ch: char) -> bool` — 21 个空白码点的 match（含 `0x0085` nextLine、`0xFEFF` BOM）　`// Go: util.go:IsWhiteSpaceSingleLine`
+- [x] `pub fn is_line_break(ch: char) -> bool` — `\n` `\r` `\u{2028}` `\u{2029}`　`// Go: util.go:IsLineBreak`
+- [x] `pub fn is_digit(ch: char) -> bool` — `'0'..='9'`　`// Go: util.go:IsDigit`
+- [x] `pub fn is_octal_digit(ch: char) -> bool` — `'0'..='7'`　`// Go: util.go:IsOctalDigit`
+- [x] `pub fn is_hex_digit(ch: char) -> bool` — `0-9A-Fa-f`　`// Go: util.go:IsHexDigit`
+- [x] `pub fn is_ascii_letter(ch: char) -> bool` — `A-Za-z`　`// Go: util.go:IsASCIILetter`
+- [x] `pub fn split_lines(text: &str) -> Vec<&str>` — 按 `\r\n`/`\r`/`\n` 切分；保留尾部非空段；预分配 `count('\n')+1`　`// Go: util.go:SplitLines`
+- [x] `pub fn guess_indentation(lines: &[&str]) -> usize` — 取所有非空行的最小前导空白宽度（按 rune 解码、`IsWhiteSpaceLike`）；空集或全空返回 0；命中 0 立即返回　`// Go: util.go:GuessIndentation`
+- [x] `pub fn encode_uri(s: &str) -> String` — **逐字节**百分号编码，保留未保留字符集 `;/?:@&=+$,#-_.!~*'()` 与字母数字　`// Go: util.go:EncodeURI`
+- [x] `fn should_escape_for_encode_uri(b: u8) -> bool` — 私有，配合 `encode_uri`　`// Go: util.go:shouldEscapeForEncodeURI`
+- [x] `fn get_byte_order_mark_length(text: &str) -> usize` — 私有；识别 UTF16BE(0xFEFF)/UTF16LE(0xFFFE)/UTF8(0xEFBBBF) BOM 字节，返回 0/2/3　`// Go: util.go:getByteOrderMarkLength`
+- [x] `pub fn remove_byte_order_mark(text: &str) -> &str` — 去掉 BOM 前缀　`// Go: util.go:RemoveByteOrderMark`
+- [x] `pub fn add_utf8_byte_order_mark(text: &str) -> String` — 无 BOM 时前置 `\xEF\xBB\xBF`　`// Go: util.go:AddUTF8ByteOrderMark`
+- [x] `pub fn strip_quotes(name: &str) -> &str` — 首尾同为 `'`/`"`/`` ` `` 时剥离　`// Go: util.go:StripQuotes`
+- [x] `pub fn unquote_string(s: &str) -> String` — `strip_quotes` 后用正则把 `\\.` 替换为其第二字符（注意 Go 注释指出此行为"看似有误但照搬"）　`// Go: util.go:UnquoteString`
+- [x] `pub fn lower_first_char(s: &str) -> String` — 首 rune 转小写 + 余下原样　`// Go: util.go:LowerFirstChar`
+- [x] `pub fn truncate_by_runes(s: &str, max_length: usize) -> &str` — 字节长 < max 直接返回；max<=0 返回空；否则在第 max+1 个 rune 处截断　`// Go: util.go:TruncateByRunes`
 
 ### `compare.rs`（Go: `internal/stringutil/compare.go`）
 
-- [ ] `pub fn equate_string_case_insensitive(a: &str, b: &str) -> bool` — `str::eq_ignore_ascii_case`?**不**，Go 用 `strings.EqualFold`（Unicode 折叠），需用 Unicode 折叠等价物　`// Go: compare.go:EquateStringCaseInsensitive`
-- [ ] `pub fn equate_string_case_sensitive(a: &str, b: &str) -> bool` — `a == b`　`// Go: compare.go:EquateStringCaseSensitive`
-- [ ] `pub fn get_string_equality_comparer(ignore_case: bool) -> fn(&str,&str)->bool`　`// Go: compare.go:GetStringEqualityComparer`
-- [ ] `pub type Comparison = Ordering`（或导出 `ComparisonLessThan/Equal/GreaterThan` 常量）　`// Go: compare.go:Comparison`
-- [ ] `pub fn compare_strings_case_insensitive(a: &str, b: &str) -> Ordering` — 逐 rune 解码、`to_lower` 比较，等价时按长度收尾　`// Go: compare.go:CompareStringsCaseInsensitive`
-- [ ] `pub fn compare_strings_case_sensitive(a: &str, b: &str) -> Ordering` — `a.cmp(b)`（字节序）　`// Go: compare.go:CompareStringsCaseSensitive`
-- [ ] `pub fn get_string_comparer(ignore_case: bool) -> fn(&str,&str)->Ordering`　`// Go: compare.go:GetStringComparer`
-- [ ] `pub fn has_prefix(s: &str, prefix: &str, case_sensitive: bool) -> bool`　`// Go: compare.go:HasPrefix`
-- [ ] `pub fn has_suffix(s: &str, suffix: &str, case_sensitive: bool) -> bool`　`// Go: compare.go:HasSuffix`
-- [ ] `pub fn has_prefix_and_suffix_without_overlap(s, prefix, suffix, case_sensitive) -> bool`　`// Go: compare.go:HasPrefixAndSuffixWithoutOverlap`
-- [ ] `pub fn compare_strings_case_insensitive_then_sensitive(a, b) -> Ordering`　`// Go: compare.go:CompareStringsCaseInsensitiveThenSensitive`
-- [ ] `pub fn compare_strings_case_insensitive_eslint_compatible(a, b) -> Ordering` — 用 `to_lowercase()` 而非大写，保持与 eslint `sort-imports` 一致　`// Go: compare.go:CompareStringsCaseInsensitiveEslintCompatible`
+- [x] `pub fn equate_string_case_insensitive(a: &str, b: &str) -> bool` — `str::eq_ignore_ascii_case`?**不**，Go 用 `strings.EqualFold`（Unicode 折叠），需用 Unicode 折叠等价物　`// Go: compare.go:EquateStringCaseInsensitive`
+- [x] `pub fn equate_string_case_sensitive(a: &str, b: &str) -> bool` — `a == b`　`// Go: compare.go:EquateStringCaseSensitive`
+- [x] `pub fn get_string_equality_comparer(ignore_case: bool) -> fn(&str,&str)->bool`　`// Go: compare.go:GetStringEqualityComparer`
+- [x] `pub type Comparison = Ordering`（或导出 `ComparisonLessThan/Equal/GreaterThan` 常量）　`// Go: compare.go:Comparison`
+- [x] `pub fn compare_strings_case_insensitive(a: &str, b: &str) -> Ordering` — 逐 rune 解码、`to_lower` 比较，等价时按长度收尾　`// Go: compare.go:CompareStringsCaseInsensitive`
+- [x] `pub fn compare_strings_case_sensitive(a: &str, b: &str) -> Ordering` — `a.cmp(b)`（字节序）　`// Go: compare.go:CompareStringsCaseSensitive`
+- [x] `pub fn get_string_comparer(ignore_case: bool) -> fn(&str,&str)->Ordering`　`// Go: compare.go:GetStringComparer`
+- [x] `pub fn has_prefix(s: &str, prefix: &str, case_sensitive: bool) -> bool`　`// Go: compare.go:HasPrefix`
+- [x] `pub fn has_suffix(s: &str, suffix: &str, case_sensitive: bool) -> bool`　`// Go: compare.go:HasSuffix`
+- [x] `pub fn has_prefix_and_suffix_without_overlap(s, prefix, suffix, case_sensitive) -> bool`　`// Go: compare.go:HasPrefixAndSuffixWithoutOverlap`
+- [x] `pub fn compare_strings_case_insensitive_then_sensitive(a, b) -> Ordering`　`// Go: compare.go:CompareStringsCaseInsensitiveThenSensitive`
+- [x] `pub fn compare_strings_case_insensitive_eslint_compatible(a, b) -> Ordering` — 用 `to_lowercase()` 而非大写，保持与 eslint `sort-imports` 一致　`// Go: compare.go:CompareStringsCaseInsensitiveEslintCompatible`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/stringutil/Cargo.toml`（`name = "tsgo_stringutil"`，`[dependencies] regex`）
-- [ ] 根 `Cargo.toml` workspace members 追加本 crate
-- [ ] `lib.rs` 声明 `mod util; mod compare;` + `pub use`
+- [x] `internal/stringutil/Cargo.toml`（`name = "tsgo_stringutil"`，`[dependencies] regex`）
+- [x] 根 `Cargo.toml` workspace members 追加本 crate
+- [x] `lib.rs` 声明 `mod util; mod compare;` + `pub use`
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

@@ -17,8 +17,8 @@
 
 | Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `testing_lib_path_has_lib_dts` | `testing_lib_path()` 指向的目录存在，且其下 `lib.d.ts` 存在 | `testing_lib_path()` → 目录可 `stat`；`<p>/lib.d.ts` 可 `stat` | `bundled_test.go:TestTestingLibPath` | |
-| `embedded_libs_walk_matches_lib_names` | 用 `wrap_fs(osvfs())` 对 `lib_path()` 做 `walk_dir`，收集所有非目录项的 basename，应**逐项等于** `LIB_NAMES` | `walk_dir(lib_path())` 收集 basenames → `== LIB_NAMES`（110 项，按名序） | `bundled_test.go:TestEmbeddedLibs` | |
+| `tests::test_testing_lib_path`（`lib_test.rs`） | `testing_lib_path()` 指向的目录存在，且其下 `lib.d.ts` 存在 | `testing_lib_path()` → 目录可 `metadata`；`<p>/lib.d.ts` 可 `metadata` | `bundled_test.go:TestTestingLibPath` | ✓ |
+| `embed::tests::test_embedded_libs`（`embed_test.rs`） | 用 `wrap_fs(osvfs::fs())` 对 `lib_path()` 做 `walk_dir`，收集所有非目录项的 basename（`get_base_file_name`），应**逐项等于** `LIB_NAMES` | `walk_dir(lib_path())` 收集 basenames → `== LIB_NAMES`（108 项，按名序） | `bundled_test.go:TestEmbeddedLibs` | ✓ |
 
 ### 关键断言细节（取自 Go 实测）
 
@@ -30,7 +30,7 @@
 
 ## 补充的行为级 Rust 测试（公开接口，expected 取自 Go 行为 / 已知值）
 
-Go 侧只有 2 个直测，但本包还有大量未被直测的行为（被 cmd/tsgo/lsp/api 间接依赖）。补少量行为级测试守住内嵌 FS 的关键路径（这些是 `WrappedFs` 的语义，expected 来自 `embed.go` 源码逻辑）：
+Go 侧只有 2 个直测，但本包还有大量未被直测的行为（被 cmd/tsgo/lsp/api 间接依赖）。下列补充行为级测试**本轮未实现**（任务仅要求移植 `bundled_test.go` 的 2 个直测）；它们的行为已由 `embed.rs` 实现承载，可在后续按需补测（expected 来自 `embed.go` 源码逻辑）：
 
 | Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
 |---|---|---|---|---|

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "internal/stringutil",
+    "internal/json",
+    "internal/debug",
+    "internal/tspath",
+    "internal/collections",
+    "internal/core",
+    "internal/jsnum",
+    "internal/semver",
+    "internal/glob",
+    "internal/locale",
+    "internal/pprof",
+    "internal/repo",
+    "internal/jsonrpc",
+    "internal/vfs",
+    "internal/bundled",
+]

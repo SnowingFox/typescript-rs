@@ -1,5 +1,7 @@
 # lsp: 实现方案（impl.md）
 
+> **子 crate 拆分（依赖序）**：`lsp/lsproto` 拆为独立 crate `tsgo_lsproto` 并**前移到 P7**（被 `ls/*`/`project`/`api` 依赖）；`jsonrpc` 前移到 P1。`lsp` 主体留 P8。本 impl.md 中关于 `lsproto` 的协议类型 / serde 细节仍适用（crate 现位 P7）。详见 [references/crate-map.md](../../references/crate-map.md)。
+
 > 写前已实读 `internal/lsp/*.go`（logger.go / progress.go / server.go / stack_sanitizer.go）与 `internal/lsp/lsproto/*.go`（baseproto / jsonrpc / lsp / util + 抽样 `lsp_generated.go` 38691 行的关键结构）。所有 TODO 带 `// Go:` 锚点。
 
 **crate**：`tsgo_lsp`（含子 crate `tsgo_lsproto`）　**目标**：LSP 服务器主循环 + LSP 协议类型/编解码。把 stdin/stdout 上的 LSP 消息分发到 `tsgo_ls` 语言服务，管理 `tsgo_project` 会话、进度上报、客户端能力、API 子会话。

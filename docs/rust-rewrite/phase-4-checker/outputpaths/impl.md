@@ -1,5 +1,7 @@
 # outputpaths: 实现方案（impl.md）
 
+> **phase 归属（依赖序修正）**：本包**前移到 P4**（原列 P5）。原因：`modulespecifiers`/`printer`（现 P4）非测试依赖 `tsgo_outputpaths`（仅依赖 ast/core/tspath，是近叶子）。详见根 README「依赖序口径」。
+
 **crate**：`tsgo_outputpaths`　**目标**：根据 `CompilerOptions` + 源文件名计算每个文件的输出路径（`.js` / `.js.map` / `.d.ts` / `.d.ts.map` / `.tsbuildinfo`），并计算 common source directory。
 **依赖（crate）**：`tsgo_ast` `tsgo_core` `tsgo_tspath`（镜像 Go import 边，path 依赖）
 **Go 源**：`internal/outputpaths/`（2 个非测试文件，约 300 行）

@@ -10,17 +10,17 @@
 
 | Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
 |---|---|---|---|---|
-| `parse_valid_simple` | 简单语言标签 | `parse("en")` → Some | locale.go:Parse | |
-| `parse_valid_region` | 语言-地区 | `parse("zh-CN")` → Some；`parse("ja")` → Some | locale.go:Parse | |
-| `parse_invalid_returns_none` | 非法标签宽松失败 | `parse("not a locale!!")` → None | locale.go:Parse（ok=false） | |
-| `parse_empty_returns_none_or_default` | 空串行为 | `parse("")` → None（与 Go `language.Parse("")` 一致的失败/und 处理） | locale.go:Parse | |
-| `default_is_zero_value` | Default 为零值标签 | `Locale::default()` 等于零值 | locale.go:Default | |
+| `parse_valid_simple` | 简单语言标签 | `parse("en")` → Some | locale.go:Parse | ✓ |
+| `parse_valid_region` | 语言-地区 | `parse("zh-CN")` → Some；`parse("ja")` → Some | locale.go:Parse | ✓ |
+| `parse_invalid_returns_none` | 非法标签宽松失败 | `parse("not a locale!!")` → None | locale.go:Parse（ok=false） | ✓ |
+| `parse_empty_returns_none_or_default` | 空串行为 | `parse("")` → None（与 Go `language.Parse("")` 一致的失败/und 处理） | locale.go:Parse | ✓ |
+| `default_is_zero_value` | Default 为零值标签 | `Locale::default()` 等于零值 | locale.go:Default | ✓ |
 
 > ⚠️ 注：`parse_empty` 的确切返回需在实现期对照 `unic-langid` 与 Go `x/text` 对空串/`"und"` 的处理；当前按"非法→None"标注，存疑见下表。
 
 ## 与 impl.md 的对齐核对
 
-- [ ] 每条行为级用例带 `// Go:` 锚（「依据」列即上游锚，指向实现源 `internal/locale/<file>.go:<Func>`，因 Go 侧无 `*_test.go`）
+- [x] 每条行为级用例带 `// Go:` 锚（「依据」列即上游锚，指向实现源 `internal/locale/<file>.go:<Func>`，因 Go 侧无 `*_test.go`）
 
 - [x] 无 Go `func Test*` 需映射（0 直接单测，已说明）
 - [x] 补充测试覆盖 `parse` 合法/非法/空 + `Default`，均在 impl.md 有 TODO 承载

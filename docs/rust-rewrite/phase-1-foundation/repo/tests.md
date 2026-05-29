@@ -10,16 +10,16 @@
 
 | Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
 |---|---|---|---|---|
-| `root_path_contains_workspace_manifest` | 仓库根目录存在 workspace `Cargo.toml` | `Path::new(root_path()).join("Cargo.toml").exists()` → true | paths.go:RootPath | |
-| `root_path_is_absolute` | 返回绝对路径 | `Path::new(root_path()).is_absolute()` → true | paths.go:rootPath（IsAbs 断言） | |
-| `submodule_path_suffix` | 子模块路径后缀正确 | `typescript_submodule_path()` 以 `_submodules/TypeScript` 结尾 | paths.go:TypeScriptSubmodulePath | |
-| `test_data_path_suffix` | testdata 路径后缀正确 | `test_data_path()` 以 `testdata` 结尾 | paths.go:TestDataPath | |
-| `submodule_exists_matches_disk` | 存在性与磁盘一致 | `typescript_submodule_exists()` == `<submodule>/package.json` 实际存在 | paths.go:TypeScriptSubmoduleExists | |
-| `skip_helper_no_panic` | skip 辅助不 panic | 调用 `skip_if_no_typescript_submodule()` 不 panic（返回布尔/跳过） | paths.go:SkipIfNoTypeScriptSubmodule | |
+| `root_path_contains_workspace_manifest` | 仓库根目录存在 workspace `Cargo.toml` | `Path::new(root_path()).join("Cargo.toml").exists()` → true | paths.go:RootPath | ✓ |
+| `root_path_is_absolute` | 返回绝对路径 | `Path::new(root_path()).is_absolute()` → true | paths.go:rootPath（IsAbs 断言） | ✓ |
+| `submodule_path_suffix` | 子模块路径后缀正确 | `typescript_submodule_path()` 以 `_submodules/TypeScript` 结尾 | paths.go:TypeScriptSubmodulePath | ✓ |
+| `test_data_path_suffix` | testdata 路径后缀正确 | `test_data_path()` 以 `testdata` 结尾 | paths.go:TestDataPath | ✓ |
+| `submodule_exists_matches_disk` | 存在性与磁盘一致 | `typescript_submodule_exists()` == `<submodule>/package.json` 实际存在 | paths.go:TypeScriptSubmoduleExists | ✓ |
+| `skip_helper_no_panic` | skip 辅助不 panic | 调用 `skip_if_no_typescript_submodule()` 不 panic（返回布尔/跳过） | paths.go:SkipIfNoTypeScriptSubmodule | ✓ |
 
 ## 与 impl.md 的对齐核对
 
-- [ ] 每条行为级用例带 `// Go:` 锚（「依据」列即上游锚，指向实现源 `internal/repo/<file>.go:<Func>`，因 Go 侧无 `*_test.go`）
+- [x] 每条行为级用例带 `// Go:` 锚（「依据」列即上游锚，指向实现源 `internal/repo/<file>.go:<Func>`，因 Go 侧无 `*_test.go`）
 
 - [x] 无 Go `func Test*` 需映射（0 直接单测，已说明）
 - [x] 补充测试覆盖 root_path / submodule_path / test_data_path / exists / skip，均在 impl.md 有 TODO 承载

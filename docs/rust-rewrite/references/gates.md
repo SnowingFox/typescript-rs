@@ -50,7 +50,7 @@ bash docs/rust-rewrite/scripts/gate.sh --strict
 | **D3** | `impl.md`「实现 TODO」段只用 `- [ ]`/`- [x]`，无裸 bullet | 只有 checkbox 才能被 `grep -c "^- \[ \]"` 量化进度，进而 gate 顶层 `[x]` | 把裸 `- xxx` 改成 `- [ ] xxx` | FAIL |
 | **D4** | `tests.md` 含 `✓`/`—` 完成列图例 | 完成列语义自解释，避免「留空 vs 推迟」歧义 | 在头部加图例行（见 `TEMPLATE-tests.md`） | FAIL |
 | **D5** | Cargo crate 名须 `tsgo` 前缀；代码围栏内禁止 section divider 注释（`// ====` / `/* ===` / `// ----`） | 命名统一（PORTING §2）；divider 是 story 明令禁止的坏味道（PORTING §7.4） | crate 名改 `tsgo_<pkg>`（`cmd/tsgo` bin 名 `tsgo` 例外）；删掉 divider 注释，用 rustdoc 段落组织 | FAIL |
-| **D6** | **依赖序倒置**：解析 `README` 的 phase→包 映射，对每个 `internal/<pkg>` 用 `rg -o "microsoft/typescript-go/internal/[a-z0-9]+"`（仅非测试 `.go`）求内部依赖；依赖被排在更后 phase 即倒置 | phase 必须按真实依赖 DAG 排（叶子先行），倒置 = 后面的包还没移植，前面的包就编译不过 | **调整 `README` 的 phase→包 映射**，把被依赖包前移（内容性决策，脚本不自动改） | FAIL |
+| **D6** | **依赖序倒置（子包粒度 + 边分类）**：枚举每个 Go 包目录（含子包），抽其内部 import（注释行过滤）；按 `crate_of()` 归并到 crate，crate→phase 取自 `README` 映射。**构建边**（非 `*_test.go`）若指向更后 phase 的 crate 即倒置（同 phase 内互依合法）。**仅测试边** / **测试设施边**列为信息，不约束 | phase 必须按真实**构建**依赖 DAG 排（叶子先行），倒置 = 后面的包还没移植，前面的包就编译不过；测试边是 dev-dep 不影响构建序 | **调整 `README` 的 phase→包 映射** / 必要时**拆出子 crate**（如 `lsproto`/`ls/*`/`project/{dirty,logging}`） | FAIL |
 | **D7** | 若装了 `markdownlint`/`mdl` 则跑，否则优雅跳过 | markdown 规范化（可选） | 装 `markdownlint-cli` 后按其提示修 | WARN |
 
 ### Phase-1 特殊处理
@@ -58,12 +58,23 @@ bash docs/rust-rewrite/scripts/gate.sh --strict
 `phase-1-foundation` 可能仍在被其它 subagent 写入。`gate-docs.sh` 把 **phase-1 的所有问题单列**到
 「Phase-1（可能尚在生成中）」小节，且**不计入失败**（退出码不受其影响）。phase-1 收口时应回头清掉这些。
 
-### D6 的已知约定
+### D6 的边分类与约定（重要）
 
-- 只扫**非测试** `.go`（排除 `*_test.go`），代表实现期的真实依赖边。
-- 依赖按**顶层包**聚合（`internal/lsp/lsproto` → `lsp`），与 phase 映射的粒度一致。
-- 已知非 crate token（如 `testdata` fixture 语料）在 D1b 中跳过。
-- 内部依赖若不在任何 phase 映射，列入「未映射依赖（信息）」，不判失败（提示可能漏规划的辅助包）。
+D6 把内部 import 边分三类，**只有「构建边」约束 phase 拓扑序**：
+
+| 边类型 | 判定 | 处理 |
+|---|---|---|
+| **构建边** | 出现在非 `*_test.go` | 必须合法拓扑：依赖的 crate 不得在更后 phase（同 phase 合法）。倒置 = FAIL |
+| **仅测试边** | 只在 `*_test.go` | → Rust `[dev-dependencies]`，不约束 phase；「看似倒置」者列为信息（如 `checker→compiler`、`ls/autoimport→project`、`printer→transformers`、`tsoptions→diagnosticwriter`） |
+| **测试设施边** | 源或目标是 `testutil`/`testrunner`/`fourslash` 或 `*tests`/`*testutil`/`*mock` 子包 | 源整体豁免；目标按 dev-dep，列为信息 |
+
+其它约定：
+
+- **注释行过滤**：抽 import 时排除以 `//`/`/*`/`*` 开头的行（避免把注释掉的 import 误判为依赖——曾导致 `ls/autoimport→ls` 假环）。
+- **子包粒度**：节点 = 每个 Go 包目录；`crate_of()` 把目录归并到 crate——默认顶层包；7 个**拆分子 crate**（`lsp/lsproto`、`ls/{lsconv,lsutil,change,autoimport}`、`project/{dirty,logging}`）各自独立。其余子目录归并父 crate。
+- **README token 即 crate key**：`lsproto`、`ls/lsconv`、`cmd/tsgo` 等全名 token 直接作 key（不取 basename）。
+- **D1b 例外**：`testdata`（fixture 语料）与 7 个拆分子 crate（文档随父包 impl.md）在 D1b 中跳过「无文档目录」告警。
+- 未映射构建依赖列为信息（提示可能漏规划的辅助包）。
 
 ---
 
@@ -134,29 +145,40 @@ jobs:
         run: bash docs/rust-rewrite/scripts/gate-code.sh
 ```
 
-> 注意：D6 依赖序倒置当前为 RED（见下）——若直接接入 CI，文档 gate 会一直红，直到 phase→包 映射调整完成。
-> 可先用 `--docs-only` 跑非 D6 项，或在 owner 决定 phase 重排后再开 D6 强约束。
+> 提示：D6 现已 GREEN（见 §E）。CI 可直接接入 `gate-docs.sh`（全绿退出 0）。
 
 ---
 
-## E. 已知 RED 项（截至本 gate 落地）
+## E. 依赖序倒置：已通过重排 + 拆分解决（D6 GREEN）
 
-`gate-docs.sh` 当前抓到 **12 处跨 phase 依赖序倒置**（D6），这些是**计划级**问题，需人工决策调整
-`README` 的 phase→包 映射后才能转绿（脚本不自动重排）：
+初版 gate 抓到 **12 处跨 phase 构建倒置**。本轮按"构建边/仅测试边/测试设施边"三类口径重排，已全部解决，`gate-docs.sh` **D6 GREEN（退出 0）**：
 
-| 包(当前 phase) | 依赖 | 被依赖包 phase | 非测试导入示例 |
-|---|---|---|---|
-| `checker`(P4) | `printer` | P5 | `internal/checker/nodebuilder.go` |
-| `checker`(P4) | `tracing` | P6 | `internal/checker/tracer.go` |
-| `checker`(P4) | `tsoptions` | P6 | `internal/checker/checker.go` |
-| `modulespecifiers`(P4) | `outputpaths` | P5 | `internal/modulespecifiers/specifiers.go` |
-| `modulespecifiers`(P4) | `tsoptions` | P6 | `internal/modulespecifiers/specifiers.go` |
-| `printer`(P5) | `tsoptions` | P6 | `internal/printer/emithost.go` |
-| `ls`(P7) | `lsp` | P8 | `internal/ls/*`（`lsp/lsproto` 协议类型） |
-| `ls`(P7) | `project` | P8 | `internal/ls/autoimport/registry.go` |
-| `ls`(P7) | `bundled` | P9 | `internal/ls/*` |
-| `lsp`(P8) | `bundled` | P9 | `internal/lsp/*` |
-| `api`(P8) | `bundled` | P9 | `internal/api/server.go` |
-| `execute`(P9) | `testutil` | P10 | `internal/execute/tsctests/sys.go` |
+**12 处的归宿：**
 
-> 处理方向由 owner 定夺（前移被依赖包 / 拆分包 / 接受倒置并以接口隔离）。在决策落地前，本 gate 对 D6 保持 RED 是**有意为之**——它就是用来逼出这个计划级冲突的。
+| 原倒置 | 归类 / 处理 |
+|---|---|
+| `checker(P4)→printer(P5)` | `printer` 前移 P4 |
+| `checker(P4)→tracing(P6)` | `tracing` 前移 P4 |
+| `checker(P4)→tsoptions(P6)` | `tsoptions` 前移 P4 |
+| `modulespecifiers(P4)→outputpaths(P5)` | `outputpaths` 前移 P4 |
+| `modulespecifiers(P4)→tsoptions(P6)` | `tsoptions` 前移 P4 |
+| `printer(P5)→tsoptions(P6)` | 二者均 P4 |
+| `ls(P7)→lsp(P8)` | 实为 `ls/*→lsp/lsproto`；`lsproto` 拆 crate 前移 P7（`ls→lsp` 主体仅在 `*_test.go`，dev-dep） |
+| `ls(P7)→project(P8)` | 实为 `ls/autoimport→project/{dirty,logging}`；后两者拆 crate 前移 P1（`ls→project` 主体仅测试，dev-dep） |
+| `ls(P7)→bundled(P9)` | `bundled` 前移 P1 |
+| `lsp(P8)→bundled(P9)` | `bundled` 前移 P1 |
+| `api(P8)→bundled(P9)` | `bundled` 前移 P1 |
+| `execute(P9)→testutil(P10)` | 实为 `execute/tsctests→testutil`，`tsctests` 是测试设施子包 → dev-dep 豁免（已核实生产 execute 非测试代码不依赖 testutil） |
+
+**最终合法 phase 次序**（gate D6 据 `README` 映射判定为合法拓扑序）：
+
+- **P1** + `jsonrpc` `bundled` `project/dirty` `project/logging`
+- **P4** + `outputpaths` `sourcemap` `tracing` `tsoptions` `printer`（checker 的构建前置）
+- **P5** = `transformers` `diagnosticwriter`（checker 之后）
+- **P6** = `compiler`
+- **P7** = `lsproto` `ls/lsconv` `ls/lsutil` `ls/change` `ls/autoimport` `format` `ls`
+- **P8** = `project` `api` `lsp`；**P9** = `execute` `cmd/tsgo`
+
+详见根 [README.md](../README.md) 的「依赖序口径」与 [crate-map.md](./crate-map.md) 的拆分/前移/ dev-dep 三表。
+
+> 仍为 dev-dep（仅测试边，gate 列为信息、不阻断）：`checker→compiler`、`ls/autoimport→project`、`printer→transformers`、`tsoptions→diagnosticwriter` 等——落地时声明为 Rust `[dev-dependencies]`。

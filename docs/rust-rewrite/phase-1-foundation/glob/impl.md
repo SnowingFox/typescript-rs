@@ -42,23 +42,23 @@
 
 ### `lib.rs`（Go: `internal/glob/glob.go`）
 
-- [ ] `pub struct Glob { elems: Vec<Element> }`　`// Go: glob.go:Glob`
-- [ ] `enum Element { Slash, Literal(String), Star, AnyChar, StarStar, Group(Vec<Glob>), CharRange{negate,low,high} }`　`// Go: glob.go`（element 类型族）
-- [ ] `pub fn parse(pattern: &str) -> Result<Glob, GlobError>` — 调内部 `parse_inner(pattern,false)`　`// Go: glob.go:Parse`
-- [ ] `fn parse_inner(pattern: &str, nested: bool) -> Result<(Glob, &str), GlobError>` — 主解析循环：`/`→Slash、`**`（仅邻 `/`，否则 `errBadRange`/"** may only be adjacent to '/'"）、`*`→Star、`?`→AnyChar、`{`→递归分组（未闭合报 "unmatched '{'"）、`}`/`,`（nested 时返回）、`[`→范围、default→literal　`// Go: glob.go:parse`
-- [ ] `fn read_range_rune(input: &str) -> Result<(char, usize), GlobError>` — 解码范围端点 rune；空→`errBadRange`，非法→`errInvalidUTF8`　`// Go: glob.go:readRangeRune`
-- [ ] `fn parse_literal(&mut self, pattern, nested) -> remaining` — 截取到下一个特殊字符（nested 时特殊集含 `},`）　`// Go: glob.go:(*Glob).parseLiteral`
-- [ ] `impl Display for Glob` / `Element` — 回显模式串　`// Go: glob.go:(各 String 方法)`
-- [ ] `pub fn match_input(&self, input: &str) -> bool`（对应 `Match`） — 调 `match_elems`　`// Go: glob.go:(*Glob).Match`
-- [ ] `fn match_elems(elems: &[Element], input: &str) -> bool` — 回溯匹配器：Slash（≥1 斜杠）、StarStar（推进段+尾随匹配一切+回溯）、Literal（前缀）、Star（段内回溯）、AnyChar（非 `/` 单字符）、Group（分支拼接递归）、CharRange（范围/取反）　`// Go: glob.go:match`
-- [ ] `fn split(input: &str) -> (&str, &str)` — 首个斜杠（含连续斜杠）前后切分　`// Go: glob.go:split`
-- [ ] `enum GlobError { BadRange, InvalidUtf8, DoubleStarAdjacency, UnmatchedBrace }` + `Display`　`// Go: glob.go:errBadRange/errInvalidUTF8 + inline errors`
+- [x] `pub struct Glob { elems: Vec<Element> }`　`// Go: glob.go:Glob`
+- [x] `enum Element { Slash, Literal(String), Star, AnyChar, StarStar, Group(Vec<Glob>), CharRange{negate,low,high} }`　`// Go: glob.go`（element 类型族）
+- [x] `pub fn parse(pattern: &str) -> Result<Glob, GlobError>` — 调内部 `parse_inner(pattern,false)`　`// Go: glob.go:Parse`
+- [x] `fn parse_inner(pattern: &str, nested: bool) -> Result<(Glob, &str), GlobError>` — 主解析循环：`/`→Slash、`**`（仅邻 `/`，否则 `errBadRange`/"** may only be adjacent to '/'"）、`*`→Star、`?`→AnyChar、`{`→递归分组（未闭合报 "unmatched '{'"）、`}`/`,`（nested 时返回）、`[`→范围、default→literal　`// Go: glob.go:parse`
+- [x] `fn read_range_rune(input: &str) -> Result<(char, usize), GlobError>` — 解码范围端点 rune；空→`errBadRange`，非法→`errInvalidUTF8`　`// Go: glob.go:readRangeRune`
+- [x] `fn parse_literal(&mut self, pattern, nested) -> remaining` — 截取到下一个特殊字符（nested 时特殊集含 `},`）　`// Go: glob.go:(*Glob).parseLiteral`
+- [x] `impl Display for Glob` / `Element` — 回显模式串　`// Go: glob.go:(各 String 方法)`
+- [x] `pub fn match_input(&self, input: &str) -> bool`（对应 `Match`） — 调 `match_elems`　`// Go: glob.go:(*Glob).Match`
+- [x] `fn match_elems(elems: &[Element], input: &str) -> bool` — 回溯匹配器：Slash（≥1 斜杠）、StarStar（推进段+尾随匹配一切+回溯）、Literal（前缀）、Star（段内回溯）、AnyChar（非 `/` 单字符）、Group（分支拼接递归）、CharRange（范围/取反）　`// Go: glob.go:match`
+- [x] `fn split(input: &str) -> (&str, &str)` — 首个斜杠（含连续斜杠）前后切分　`// Go: glob.go:split`
+- [x] `enum GlobError { BadRange, InvalidUtf8, DoubleStarAdjacency, UnmatchedBrace }` + `Display`　`// Go: glob.go:errBadRange/errInvalidUTF8 + inline errors`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/glob/Cargo.toml`（`name = "tsgo_glob"`，dep `thiserror`）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` re-export `Glob` / `GlobError`
+- [x] `internal/glob/Cargo.toml`（`name = "tsgo_glob"`，dep `thiserror`）
+- [x] 根 `Cargo.toml` workspace members 追加
+- [x] `lib.rs` re-export `Glob` / `GlobError`
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

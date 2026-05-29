@@ -1,5 +1,7 @@
 # sourcemap: 实现方案（impl.md）
 
+> **phase 归属（依赖序修正）**：本包**前移到 P4**（原列 P5）。原因：`printer`（现 P4）非测试依赖 `tsgo_sourcemap`。VLQ **自实现**（见 [references/crate-map.md](../../references/crate-map.md)）。
+
 **crate**：`tsgo_sourcemap`　**目标**：生成与解析 Source Map v3——`Generator` 增量累积 mappings 并输出 `RawSourceMap`/JSON/base64 data URL；`MappingsDecoder` 解码 VLQ mappings；`DocumentPositionMapper` 做生成位置↔源位置双向映射。
 **依赖（crate）**：`tsgo_core` `tsgo_json` `tsgo_tspath` `tsgo_scanner` `tsgo_stringutil` `tsgo_debug`
 **Go 源**：`internal/sourcemap/`（6 个非测试文件，约 740 行）

@@ -52,35 +52,35 @@ evaluator / checker 在常量折叠、字面量类型、枚举值计算时必须
 
 ### `lib.rs`（Go: `internal/jsnum/jsnum.go`）
 
-- [ ] `pub struct Number(f64)` + `MAX_SAFE_INTEGER`(2^53-1) / `MIN_SAFE_INTEGER`　`// Go: jsnum.go:Number/MaxSafeInteger/MinSafeInteger`
-- [ ] `nan() / is_nan() / inf(sign) / is_inf()` + `is_non_finite(f64)`（位掩码）　`// Go: jsnum.go:NaN/IsNaN/Inf/IsInf/isNonFinite`
-- [ ] `fn to_uint32(self) -> u32` / `fn to_int32(self) -> i32`（SMI 快路径 + trunc + mod 2^32 + 回绕）/ `fn to_shift_count(self) -> u32`　`// Go: jsnum.go:toUint32/toInt32/toShiftCount`
-- [ ] `signed_right_shift / unsigned_right_shift / left_shift / bitwise_not / bitwise_or / bitwise_and / bitwise_xor`　`// Go: jsnum.go:SignedRightShift/UnsignedRightShift/LeftShift/BitwiseNOT/BitwiseOR/BitwiseAND/BitwiseXOR`
-- [ ] `trunc / floor / abs` + `negative_zero`　`// Go: jsnum.go:trunc/Floor/Abs/negativeZero`
-- [ ] `remainder(d)`（NaN/Inf/0 特例 + `fmod`）　`// Go: jsnum.go:Remainder`
-- [ ] `exponentiate(exponent)`（base==±1 特例 + 大整数精确路径 + `powf` 兜底）　`// Go: jsnum.go:Exponentiate`
+- [x] `pub struct Number(f64)` + `MAX_SAFE_INTEGER`(2^53-1) / `MIN_SAFE_INTEGER`　`// Go: jsnum.go:Number/MaxSafeInteger/MinSafeInteger`
+- [x] `nan() / is_nan() / inf(sign) / is_inf()` + `is_non_finite(f64)`（位掩码）　`// Go: jsnum.go:NaN/IsNaN/Inf/IsInf/isNonFinite`
+- [x] `fn to_uint32(self) -> u32` / `fn to_int32(self) -> i32`（SMI 快路径 + trunc + mod 2^32 + 回绕）/ `fn to_shift_count(self) -> u32`　`// Go: jsnum.go:toUint32/toInt32/toShiftCount`
+- [x] `signed_right_shift / unsigned_right_shift / left_shift / bitwise_not / bitwise_or / bitwise_and / bitwise_xor`　`// Go: jsnum.go:SignedRightShift/UnsignedRightShift/LeftShift/BitwiseNOT/BitwiseOR/BitwiseAND/BitwiseXOR`
+- [x] `trunc / floor / abs` + `negative_zero`　`// Go: jsnum.go:trunc/Floor/Abs/negativeZero`
+- [x] `remainder(d)`（NaN/Inf/0 特例 + `fmod`）　`// Go: jsnum.go:Remainder`
+- [x] `exponentiate(exponent)`（base==±1 特例 + 大整数精确路径 + `powf` 兜底）　`// Go: jsnum.go:Exponentiate`
 
 ### `string.rs`（Go: `internal/jsnum/string.go`）
 
-- [ ] `impl Display for Number`（NaN/±Infinity → 安全整数快路径 → JS 兼容 dtoa）　`// Go: string.go:(Number).String`
-- [ ] `pub fn from_string(s: &str) -> Number`（trim JS 空白 → 空/Infinity 特例 → 字符校验 → tryParseInt → 符号 → parseFloatString）　`// Go: string.go:FromString`
-- [ ] `is_str_white_space(char) -> bool`（JS WhiteSpace+LineTerminator，含 `Zs`，**不同于** stringutil 版）　`// Go: string.go:isStrWhiteSpace`
-- [ ] `try_parse_int(s) -> Option<Number>`（`0b/0B/0o/0O/0x/0X` 进制 + 十进制去前导零 + 大数 big.Int）　`// Go: string.go:tryParseInt`
-- [ ] `parse_float_string(s) -> f64`（拆 `<a>.<b>e<c>` 重组喂给 `parse::<f64>`）　`// Go: string.go:parseFloatString`
-- [ ] 辅助：`cut_any / trim_leading_zeros / trim_trailing_zeros / string_to_float64 / is_all_digits / is_all_binary_digits / is_all_octal_digits / is_all_hex_digits / is_number_rune`　`// Go: string.go:*`
+- [x] `impl Display for Number`（NaN/±Infinity → 安全整数快路径 → JS 兼容 dtoa）　`// Go: string.go:(Number).String`
+- [x] `pub fn from_string(s: &str) -> Number`（trim JS 空白 → 空/Infinity 特例 → 字符校验 → tryParseInt → 符号 → parseFloatString）　`// Go: string.go:FromString`
+- [x] `is_str_white_space(char) -> bool`（JS WhiteSpace+LineTerminator，含 `Zs`，**不同于** stringutil 版）　`// Go: string.go:isStrWhiteSpace`
+- [x] `try_parse_int(s) -> Option<Number>`（`0b/0B/0o/0O/0x/0X` 进制 + 十进制去前导零 + 大数 big.Int）　`// Go: string.go:tryParseInt`
+- [x] `parse_float_string(s) -> f64`（拆 `<a>.<b>e<c>` 重组喂给 `parse::<f64>`）　`// Go: string.go:parseFloatString`
+- [x] 辅助：`cut_any / trim_leading_zeros / trim_trailing_zeros / string_to_float64 / is_all_digits / is_all_binary_digits / is_all_octal_digits / is_all_hex_digits / is_number_rune`　`// Go: string.go:*`
 
 ### `pseudobigint.rs`（Go: `internal/jsnum/pseudobigint.go`）
 
-- [ ] `pub struct PseudoBigInt { negative: bool, base10_value: String }` + `new(value, negative)`（去前导零；负仅当非空）　`// Go: pseudobigint.go:PseudoBigInt/NewPseudoBigInt`
-- [ ] `impl Display`（空→`"0"`，负→`"-"+v`）/ `sign() -> i32`　`// Go: pseudobigint.go:String/Sign`
-- [ ] `parse_valid_big_int(text) -> PseudoBigInt`（剥 `-` → ParsePseudoBigInt）　`// Go: pseudobigint.go:ParseValidBigInt`
-- [ ] `parse_pseudo_big_int(s) -> String`（剥尾 `n`；十进制去前导零；非十进制用 big.Int 转十进制；失败 panic）　`// Go: pseudobigint.go:ParsePseudoBigInt`
+- [x] `pub struct PseudoBigInt { negative: bool, base10_value: String }` + `new(value, negative)`（去前导零；负仅当非空）　`// Go: pseudobigint.go:PseudoBigInt/NewPseudoBigInt`
+- [x] `impl Display`（空→`"0"`，负→`"-"+v`）/ `sign() -> i32`　`// Go: pseudobigint.go:String/Sign`
+- [x] `parse_valid_big_int(text) -> PseudoBigInt`（剥 `-` → ParsePseudoBigInt）　`// Go: pseudobigint.go:ParseValidBigInt`
+- [x] `parse_pseudo_big_int(s) -> String`（剥尾 `n`；十进制去前导零；非十进制用 big.Int 转十进制；失败 panic）　`// Go: pseudobigint.go:ParsePseudoBigInt`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/jsnum/Cargo.toml`（`name = "tsgo_jsnum"`，deps `tsgo_stringutil` `tsgo_json` path + `num-bigint`）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` 声明子模块 + re-export
+- [x] `internal/jsnum/Cargo.toml`（`name = "tsgo_jsnum"`，deps `tsgo_stringutil` `tsgo_json` path + `num-bigint`）
+- [x] 根 `Cargo.toml` workspace members 追加
+- [x] `lib.rs` 声明子模块 + re-export
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

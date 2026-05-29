@@ -43,7 +43,7 @@ flowchart LR
 > 勾选规则：`impl.md` 全部实现类 TODO 为 `[x]` 且 `tests.md` 应收口测试行均 `✓`，方可标 `[x]`。
 > 本轮先产出**文档**（impl.md + tests.md），代码实现随后按文档执行 TDD。
 
-- [ ] **P1 地基** — `stringutil` `json` `collections` `tspath` `jsnum` `semver` `glob` `core` `debug` `vfs` `locale` `repo` `pprof` `jsonrpc` `bundled` `project/logging` `project/dirty`
+- [x] **P1 地基** — `stringutil` `json` `collections` `tspath` `jsnum` `semver` `glob` `core` `debug` `vfs` `locale` `repo` `pprof` `jsonrpc` `bundled`（15 crate 全绿，663 测试 pass，gate C1–C8 GREEN；`project/logging`·`project/dirty` 为 P1 叶子 crate 但无 P1 内消费者，随 P8 `project` 实现）
 - [ ] **P2 诊断+AST** — `diagnostics` `ast`
 - [ ] **P3 词法/语法** — `scanner` `parser` `astnav` `binder`
 - [ ] **P4 类型检查（含 checker 全部构建前置）** — `evaluator` `module` `modulespecifiers` `packagejson` `symlinks` `nodebuilder` `pseudochecker` `outputpaths` `sourcemap` `tracing` `tsoptions` `printer` `checker`
@@ -107,12 +107,13 @@ bash docs/rust-rewrite/scripts/gate.sh        # 聚合：--docs-only | --code-on
 - **文档 gate**：结构完整 / `// Go:` 锚 / checkbox 纪律 / 完成列图例 / 命名红线 / **依赖序倒置检测**。
 - **代码 gate**：`fmt` + `clippy -D warnings` + `test`(含 doctest) + unsafe-须-SAFETY + rustdoc `missing_docs` + test-go-parity + stub-readiness。
 - **收口纪律**：**phase 收口前必须 `gate.sh` 全绿，才能在上面的进度表打 `[x]`**（详见 gates.md §C）。
-- ⚠️ 当前文档 gate 因 **12 处跨 phase 依赖序倒置**（`tsoptions`/`lsp`/`bundled`/`testutil` 等被排在更后 phase）保持 RED，属计划级待决问题，见 [gates.md §E](./references/gates.md)。
+- ✅ 初版抓到的 **12 处跨 phase 依赖序倒置已全部解决**（`tsoptions`/`printer`/`sourcemap`/`outputpaths`/`tracing` 前移 P4；`jsonrpc`/`bundled` 前移 P1；`lsproto`/`ls/*` 拆 crate 入 P7；`project/{dirty,logging}` 拆入 P1），D6 现为 GREEN。详见 [gates.md §E](./references/gates.md)。
 
 ## 文档导航
 
 | 想做什么 | 看哪里 |
 |---|---|
+| 严格 TDD 纪律（`/tdd` 原文 + 移植场景红→绿规则） | [references/tdd.md](./references/tdd.md) |
 | 方法论 / 类型映射 / AST 模型 / 并发 / 注释 / 测试对齐规范 | [PORTING.md](./PORTING.md) |
 | 质量 gate（文档+代码门禁）/ 收口纪律 / CI 示例 | [references/gates.md](./references/gates.md) · `scripts/` |
 | impl.md / tests.md 写法模板 | [references/TEMPLATE-impl.md](./references/TEMPLATE-impl.md) · [references/TEMPLATE-tests.md](./references/TEMPLATE-tests.md) |

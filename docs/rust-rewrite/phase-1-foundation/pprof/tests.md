@@ -10,20 +10,20 @@
 
 | Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
 |---|---|---|---|---|
-| `cpu_profiler_double_start_errors` | 重复启动报错 | 连续两次 `start_cpu_profile` → 第二次 Err("CPU profiling already in progress") | pprof.go:StartCPUProfile | |
-| `cpu_profiler_stop_without_start_errors` | 未启动即停止报错 | `stop_cpu_profile()`（未 start）→ Err("CPU profiling not in progress") | pprof.go:StopCPUProfile | |
-| `cpu_profiler_start_stop_returns_path` | 正常启停返回路径 | start→stop → Ok(path)，path 以 `-cpuprofile.pb.gz` 结尾 | pprof.go:StartCPUProfile/StopCPUProfile | |
-| `cpu_profile_filename_contains_pid` | 文件名含 pid | path 含 `process::id()` | pprof.go:StartCPUProfile（`%d-%d-cpuprofile.pb.gz`） | |
-| `begin_profiling_creates_dir` | mkdir 行为 | 传入不存在目录 → 目录被创建，session 含 cpu/mem 路径 | pprof.go:BeginProfiling | |
-| `save_heap_profile_returns_path` | 堆 profile 落盘（临时目录） | `save_heap_profile(tmp)` → Ok(path) 以 `-heapprofile.pb.gz` 结尾 | pprof.go:SaveHeapProfile | |
-| `save_alloc_profile_returns_path` | 分配 profile 落盘 | `save_alloc_profile(tmp)` → Ok(path) 以 `-allocprofile.pb.gz` 结尾 | pprof.go:SaveAllocProfile | |
-| `run_gc_no_panic` | RunGC 不 panic | `run_gc()` 正常返回 | pprof.go:RunGC | |
+| `cpu_profiler_double_start_errors` | 重复启动报错 | 连续两次 `start_cpu_profile` → 第二次 Err("CPU profiling already in progress") | pprof.go:StartCPUProfile | ✓ |
+| `cpu_profiler_stop_without_start_errors` | 未启动即停止报错 | `stop_cpu_profile()`（未 start）→ Err("CPU profiling not in progress") | pprof.go:StopCPUProfile | ✓ |
+| `cpu_profiler_start_stop_returns_path` | 正常启停返回路径 | start→stop → Ok(path)，path 以 `-cpuprofile.pb.gz` 结尾 | pprof.go:StartCPUProfile/StopCPUProfile | ✓ |
+| `cpu_profile_filename_contains_pid` | 文件名含 pid | path 含 `process::id()` | pprof.go:StartCPUProfile（`%d-%d-cpuprofile.pb.gz`） | ✓ |
+| `begin_profiling_creates_dir` | mkdir 行为 | 传入不存在目录 → 目录被创建，session 含 cpu/mem 路径 | pprof.go:BeginProfiling | ✓ |
+| `save_heap_profile_returns_path` | 堆 profile 落盘（临时目录） | `save_heap_profile(tmp)` → Ok(path) 以 `-heapprofile.pb.gz` 结尾 | pprof.go:SaveHeapProfile | ✓ |
+| `save_alloc_profile_returns_path` | 分配 profile 落盘 | `save_alloc_profile(tmp)` → Ok(path) 以 `-allocprofile.pb.gz` 结尾 | pprof.go:SaveAllocProfile | ✓ |
+| `run_gc_no_panic` | RunGC 不 panic | `run_gc()` 正常返回 | pprof.go:RunGC | ✓ |
 
 > 测试使用 `tempfile::TempDir` 隔离落盘，避免污染；真实剖析后端可能受 CI 环境限制，必要时标 `#[ignore]` 转手动。
 
 ## 与 impl.md 的对齐核对
 
-- [ ] 每条行为级用例带 `// Go:` 锚（「依据」列即上游锚，指向实现源 `internal/pprof/<file>.go:<Func>`，因 Go 侧无 `*_test.go`）
+- [x] 每条行为级用例带 `// Go:` 锚（「依据」列即上游锚，指向实现源 `internal/pprof/<file>.go:<Func>`，因 Go 侧无 `*_test.go`）
 
 - [x] 无 Go `func Test*` 需映射（0 直接单测，已说明）
 - [x] 补充测试覆盖 CpuProfiler 状态机 + 命名 + begin/stop + save_*，均在 impl.md 有 TODO 承载

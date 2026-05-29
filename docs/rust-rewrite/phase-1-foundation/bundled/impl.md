@@ -1,5 +1,7 @@
 # bundled: 实现方案（impl.md）
 
+> **phase 归属（依赖序修正）**：本包**前移到 P1**（原列 P9）。原因：近叶子（`repo`/`tspath`/`vfs`），被 `ls/lsconv`(P7)/`lsp`/`api`(P8)/`cmd/tsgo`(P9) 依赖。详见根 README「依赖序口径」与 [references/crate-map.md](../../references/crate-map.md)。
+
 **crate**：`tsgo_bundled`　**目标**：把 TypeScript 自带的 `lib.*.d.ts` 标准库文件**内嵌进二进制**，并通过一个虚拟文件系统（`bundled:///` 方案）暴露给编译器/语言服务，使发布的单文件可执行程序无需额外携带 stdlib。
 **依赖（crate）**：`tsgo_vfs`（`vfs::FS` trait）、`tsgo_tspath`（路径规范化）。测试还用到 `tsgo_vfs::osvfs`。
 **Go 源**：`internal/bundled/`（6 个非测试文件 + `libs/` 子目录 110 个 `.d.ts` 数据文件）。
@@ -98,62 +100,58 @@ Go 用三条流水线：`go:embed`（数据进二进制）+ 构建标签（embed
 
 ## 实现 TODO（逐文件 / 逐函数，可勾选）
 
+> **实现状态（P1 收口，2026-05）**：已落地 **embed-only 变体**（默认内嵌），`cargo test -p tsgo_bundled`（2 单测 + 7 doctest）全绿、`cargo clippy -p tsgo_bundled --all-targets -- -D warnings` 干净。
+> 按任务范围**未做** `noembed` feature 分支与 `src/bin/generate.rs` xtask（见各小节说明与「与 Go 的已知偏离」）。生成的 `embed_generated.rs`/`libs_generated.rs` 由一次性脚本产出并入库。
+
 ### `lib.rs`（Go: `internal/bundled/bundled.go`）
 
-- [ ] `pub const EMBEDDED: bool` — 是否内嵌（= feature）　`// Go: bundled.go:Embedded`
-- [ ] `pub fn wrap_fs<F: FS>(fs: F) -> impl FS` — 内嵌路径重定向到内嵌 FS，否则原样　`// Go: bundled.go:WrapFS`
-- [ ] `pub fn lib_path() -> String` — 返回 lib 目录路径（`bundled:///libs` 或磁盘目录）　`// Go: bundled.go:LibPath`
-- [ ] `pub fn testing_lib_path() -> String` — 源码 `libs` 目录（仅测试，非测试调用 panic）　`// Go: bundled.go:TestingLibPath`
-- [ ] `static BUNDLED_SOURCE_DIR: LazyLock<String>` — crate 根目录（`env!("CARGO_MANIFEST_DIR")`）　`// Go: bundled.go:bundledSourceDir`
-- [ ] `mod embed; / mod noembed;` 按 feature 分发；重导出 `wrap_fs`/`lib_path`/`is_bundled`。
+- [x] `pub const EMBEDDED: bool`（恒 `true`，embed-only）　`// Go: bundled.go:Embedded`
+- [x] `pub fn wrap_fs<F: Fs>(fs: F) -> WrappedFs<F>`（重导出自 `embed`；返回具名类型而非 `impl Fs`）　`// Go: bundled.go:WrapFS`
+- [x] `pub fn lib_path() -> String`（= `bundled:///libs`，重导出自 `embed`）　`// Go: bundled.go:LibPath`
+- [x] `pub fn testing_lib_path() -> String`（`normalize_slashes(concat!(CARGO_MANIFEST_DIR,"/libs"))`）　`// Go: bundled.go:TestingLibPath`
+- [~] `static BUNDLED_SOURCE_DIR` — **偏离**：直接内联 `concat!(env!("CARGO_MANIFEST_DIR"),"/libs")`，省去 OnceValue。
+- [x] `mod embed;` + 重导出 `wrap_fs`/`lib_path`/`is_bundled`/`WrappedFs`/`LIB_NAMES`（**无** `noembed` 分发，embed-only）。
 
-### `embed.rs`（Go: `internal/bundled/embed.go`，`#[cfg(feature="embed")]`）
+### `embed.rs`（Go: `internal/bundled/embed.go`，embed-only，无 cfg gate）
 
-- [ ] `const SCHEME: &str = "bundled:///"`　`// Go: embed.go:scheme`
-- [ ] `fn split_path(path: &str) -> Option<&str>`　`// Go: embed.go:splitPath`
-- [ ] `pub fn is_bundled(path: &str) -> bool`　`// Go: embed.go:IsBundled`
-- [ ] `fn lib_path() -> String`（= `"bundled:///libs"`）　`// Go: embed.go:libPath`
-- [ ] `struct WrappedFs<F: FS> { inner: F }` + `impl FS for WrappedFs`：
-  - [ ] `use_case_sensitive_file_names` — 透传　`// Go: embed.go:UseCaseSensitiveFileNames`
-  - [ ] `file_exists` — 内嵌路径查 map　`// Go: embed.go:FileExists`
-  - [ ] `read_file` — 内嵌路径返回内嵌内容　`// Go: embed.go:ReadFile`
-  - [ ] `directory_exists` — 内嵌路径仅 `"libs"` 为真　`// Go: embed.go:DirectoryExists`
-  - [ ] `get_accessible_entries` — `""`→dirs=["libs"]，`"libs"`→files=LIB_NAMES　`// Go: embed.go:GetAccessibleEntries`
-  - [ ] `stat` — 内嵌路径返回 `FileInfo`(dir 或 file+size)　`// Go: embed.go:Stat`
-  - [ ] `walk_dir` — 遍历内嵌树，处理 SkipAll/SkipDir　`// Go: embed.go:WalkDir`
-  - [ ] `realpath` — 内嵌路径原样返回　`// Go: embed.go:Realpath`
-  - [ ] `write_file`/`append_file`/`remove`/`chtimes` — 内嵌路径 `panic!`，否则透传　`// Go: embed.go:WriteFile/AppendFile/Remove/Chtimes`
-- [ ] `fn walk_dir(rest, walk_fn)` 递归内部实现　`// Go: embed.go:walkDir`
-- [ ] `struct FileInfo { mode, name, size }` impl `vfs::FileInfo` + `vfs::DirEntry`　`// Go: embed.go:fileInfo`
-- [ ] `static ROOT_ENTRIES: &[FileInfo]`（仅 `libs` 目录项）　`// Go: embed.go:rootEntries`
+- [x] `const SCHEME: &str = "bundled:///"`　`// Go: embed.go:scheme`
+- [x] `fn split_path(path: &str) -> Option<&str>`（`strip_prefix`）　`// Go: embed.go:splitPath`
+- [x] `pub fn is_bundled(path: &str) -> bool`　`// Go: embed.go:IsBundled`
+- [x] `pub fn lib_path() -> String`（= `"bundled:///libs"`）　`// Go: embed.go:libPath`
+- [x] `struct WrappedFs<F: Fs> { inner: F }` + `impl Fs for WrappedFs`：
+  - [x] `use_case_sensitive_file_names` — 透传
+  - [x] `file_exists` — 内嵌路径查 `EMBEDDED_CONTENTS`
+  - [x] `read_file` — 内嵌路径返回内嵌内容（`Option<String>`）
+  - [x] `directory_exists` — 内嵌路径仅 `"libs"` 为真
+  - [x] `get_accessible_entries` — `""`→dirs=["libs"]，`"libs"`→files=LIB_NAMES
+  - [x] `stat` — 内嵌路径返回 `vfs::FileInfo`(dir 或 file+size)
+  - [x] `walk_dir` — 遍历内嵌树，处理 SkipAll/SkipDir（`WalkControl`）
+  - [x] `realpath` — 内嵌路径原样返回
+  - [x] `write_file`/`append_file`/`remove`/`chtimes` — 内嵌路径 `panic!`，否则透传
+- [x] `fn walk_embedded(rest, walk_fn)` 递归内部实现　`// Go: embed.go:walkDir`
+- [~] `FileInfo` — **偏离**：直接复用 `tsgo_vfs::FileInfo`（vfs 已是具名 struct），不再自写。
+- [x] `static ROOT_ENTRIES`（`LazyLock<Vec<FileInfo>>`，仅 `libs` 目录项）　`// Go: embed.go:rootEntries`
+- [x] `static LIBS_ENTRIES`（`LazyLock<Vec<FileInfo>>`，由 `EMBEDDED_FILES` 派生 name+size）　`// Go: embed.go:libsEntries`
 
-### `noembed.rs`（Go: `internal/bundled/noembed.go`，`#[cfg(not(feature="embed"))]`）
+### `noembed.rs`（Go: `internal/bundled/noembed.go`）
 
-- [ ] `pub fn wrap_fs<F: FS>(fs: F) -> F`（透传）　`// Go: noembed.go:wrapFS`
-- [ ] `static EXECUTABLE_DIR: LazyLock<String>`（`current_exe` + realpath + dir）　`// Go: noembed.go:executableDir`
-- [ ] `static LIB_PATH: LazyLock<String>`（测试用 testing_lib_path，否则可执行目录，校验 `lib.d.ts` 存在）　`// Go: noembed.go:libPath`
-- [ ] `pub fn is_bundled(_: &str) -> bool { false }`　`// Go: noembed.go:IsBundled`
+- [—] **未实现（按任务范围跳过）**：本轮只做 embed-only 变体；`noembed` 磁盘回退留待后续需要时再补。
 
 ### `embed_generated.rs` / `libs_generated.rs`（生成、入库）
 
-- [ ] `EMBEDDED_CONTENTS`（`phf_map!` 或 `LazyLock<FxHashMap>`，`include_str!`）　`// Go: embed_generated.go`
-- [ ] `LIBS_ENTRIES`（name+size）　`// Go: embed_generated.go`
-- [ ] `pub static LIB_NAMES: &[&str]`（按 target 名排序）　`// Go: libs_generated.go`
+- [x] `EMBEDDED_CONTENTS`（`LazyLock<FxHashMap<&str,&str>>`，由 `EMBEDDED_FILES` 的 108 `include_str!` 派生；键 `"libs/<name>"`）
+- [x] `EMBEDDED_FILES`（108 `("libs/<name>", include_str!(...))`，按名序）
+- [x] `pub static LIB_NAMES: &[&str]`（108，按名序）　`// Go: libs_generated.go`
 
 ### `src/bin/generate.rs`（xtask，Go: `internal/bundled/generate.go`）
 
-- [ ] `read_libs()` — 读 `libs.json`（strip JSONC）→ `Vec<Lib{target, sources}>`，按 target 排序　`// Go: generate.go:readLibs`
-- [ ] `strip_jsonc(&mut Vec<u8>)` — 去注释/尾逗号（保留字符串内）　`// Go: generate.go:stripJSONC`
-- [ ] `generate_libs(libs)` — 清空 `libs/`，拼版权+源写出　`// Go: generate.go:generateLibs`
-- [ ] `generate_lib_list(libs)` — 写 `libs_generated.rs`　`// Go: generate.go:generateLibList`
-- [ ] `generate_embedded(libs)` — 写 `embed_generated.rs`　`// Go: generate.go:generateEmbedded`
-- [ ] `read_copyright()` / `remove_crlf()` 辅助　`// Go: generate.go:readCopyright/removeCRLF`
+- [—] **未实现（按任务范围跳过）**：`libs/` 与两份生成文件已就绪；本轮用一次性脚本从 `libs_generated.go` 的 `LibNames` 派生入库，未移植 JSONC 再生成器。
 
 ### Cargo / crate 接线
 
-- [ ] `internal/bundled/Cargo.toml`：`name = "tsgo_bundled"`；`[features] default=["embed"]`, `embed=[]`；deps `tsgo_vfs`、`tsgo_tspath`、（embed）`phf`；`[[bin]] name="generate-libs" path="src/bin/generate.rs"`。
-- [ ] 根 `Cargo.toml` workspace members 追加 `internal/bundled`。
-- [ ] `lib.rs` 用 `#[cfg(feature="embed")]`/`#[cfg(not)]` 分发并重导出。
+- [x] `internal/bundled/Cargo.toml`：`name = "tsgo_bundled"`；deps `tsgo_repo`/`tsgo_tspath`/`tsgo_vfs` + `cargo add rustc_hash`（未用 `phf`）。
+- [x] 根 `Cargo.toml` workspace members 已含 `internal/bundled`（无需改动）。
+- [x] `lib.rs` 重导出统一 API（embed-only，无 cfg 分发）。
 
 ## TDD 推进顺序（tracer bullet → 增量）
 
@@ -163,12 +161,15 @@ Go 用三条流水线：`go:embed`（数据进二进制）+ 构建标签（embed
 4. 跑 `generate-libs` xtask 再生成全量 `embed_generated.rs`，确认 `include_str!` 全 110 文件编译通过。
 5. 加 `noembed` feature 分支编译验证（`cargo build --no-default-features`）。
 
-## 与 Go 的已知偏离（divergence）
+## 与 Go 的已知偏离（divergence — 实测落地版）
 
-- **构建标签 → Cargo feature**：`//go:build noembed` 映射为 `#[cfg(not(feature="embed"))]`。语义等价，但激活方式不同（`-tags noembed` → `--no-default-features`）。
-- **`runtime.Caller(0)` → `CARGO_MANIFEST_DIR`**：Rust 编译期常量更可靠，但要求 `libs/` 与 crate 根的相对位置不变（与 Go 假设一致）。
-- **内嵌 map 用 `phf`**：键集合固定、编译期已知，比 Go 运行时建 `map` 更省；若不引 `phf` 则 `LazyLock<FxHashMap>`，行为一致。
-- **`WalkDir` 控制流（SkipAll/SkipDir）** 依赖 P1 `tsgo_vfs` 对 walk 回调返回值的抽象；若 P1 用 `ControlFlow`/枚举，本包按其约定适配。
+- **只做 embed-only 变体**：本轮按任务范围**不**实现 `noembed.go`/`generate.go` 的 Rust 对应物，也**不**引入 Cargo feature。`EMBEDDED` 恒 `true`。后续若需磁盘回退/再生成器再补。
+- **`runtime.Caller(0)` → `CARGO_MANIFEST_DIR`**：`testing_lib_path()` 直接 `normalize_slashes(concat!(env!("CARGO_MANIFEST_DIR"),"/libs"))`，省去 `bundledSourceDir` OnceValue；Go 的"非测试 panic"守卫被丢弃（任务允许）。
+- **内嵌 map 用 `LazyLock<FxHashMap>`（`rustc_hash`）而非 `phf`**：键集合固定、值为 `include_str!` 的 `&'static str`，行为与 Go `embeddedContents` 一致；`include_str!` 等价 `//go:embed`（编译进 `.rodata`、运行时零 I/O）。
+- **`fileInfo` → 复用 `tsgo_vfs::FileInfo`**：vfs 已把 Go 的 `fs.FileInfo`/`fs.DirEntry` 收敛为一个具名 struct，故不再自写；`libsEntries`/`rootEntries` 改为 `LazyLock<Vec<FileInfo>>`。
+- **`WalkDir` 控制流**：`tsgo_vfs` 的回调签名是 `FnMut(&str, &FileInfo) -> FsResult<WalkControl>`（`Continue`/`SkipDir`/`SkipAll` 枚举，而非 `fs.SkipAll`/`fs.SkipDir` 哨兵 error）。`walk_embedded` 用 `Ok(WalkControl::SkipAll)` 向上传播以整体中止，公开 `walk_dir` 把它折叠为 `Ok(())`，与 Go「`WalkDir` 捕获 `SkipAll` 返回 nil」语义一致。
+- **`read_file` 返回 `Option<String>`**（vfs trait 口径），对应 Go 的 `(string, bool)`。
+- **`wrap_fs` 返回具名 `WrappedFs<F>`** 而非 `impl Fs`，便于在 doctest/调用点命名类型。
 
 ## 转交 / 推迟（DEFER）
 

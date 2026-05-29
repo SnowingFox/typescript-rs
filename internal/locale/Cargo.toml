@@ -1,0 +1,10 @@
+[package]
+name = "tsgo_locale"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+unic-langid = "0.9.6"

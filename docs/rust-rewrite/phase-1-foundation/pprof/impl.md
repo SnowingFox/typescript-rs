@@ -41,21 +41,21 @@
 
 ### `lib.rs`（Go: `internal/pprof/pprof.go`）
 
-- [ ] `pub struct ProfileSession { cpu_file_path, mem_file_path, cpu_file, log_writer }`　`// Go: pprof.go:ProfileSession`
-- [ ] `pub fn begin_profiling(profile_dir: &Path, log_writer: Box<dyn Write>) -> ProfileSession` — mkdir、按 pid 命名、启动 CPU 剖析　`// Go: pprof.go:BeginProfiling`
-- [ ] `impl ProfileSession { pub fn stop(self) }` — 停 CPU、写 mem profile（allocs）、打印路径　`// Go: pprof.go:(*ProfileSession).Stop`
-- [ ] `pub struct CpuProfiler { mu: Mutex<Option<ProfileSession>> }`　`// Go: pprof.go:CPUProfiler`
-- [ ] `impl CpuProfiler { pub fn start_cpu_profile(&self, dir: &Path) -> Result<(), Error> }` — 已在进行则报错 "CPU profiling already in progress"；文件名带毫秒时间戳　`// Go: pprof.go:(*CPUProfiler).StartCPUProfile`
-- [ ] `impl CpuProfiler { pub fn stop_cpu_profile(&self) -> Result<String, Error> }` — 未进行则报错 "CPU profiling not in progress"；返回文件路径　`// Go: pprof.go:(*CPUProfiler).StopCPUProfile`
-- [ ] `pub fn save_heap_profile(dir: &Path) -> Result<String, Error>` — 先 GC（Rust 无 GC，按 crate 语义）→ 写 heap profile　`// Go: pprof.go:SaveHeapProfile`
-- [ ] `pub fn save_alloc_profile(dir: &Path) -> Result<String, Error>` — 写 allocs profile　`// Go: pprof.go:SaveAllocProfile`
-- [ ] `pub fn run_gc()` — Rust 无 GC，空操作 / 触发分配器整理（按 crate）　`// Go: pprof.go:RunGC`
+- [x] `pub struct ProfileSession { cpu_file_path, mem_file_path, cpu_file, log_writer }`　`// Go: pprof.go:ProfileSession`
+- [x] `pub fn begin_profiling(profile_dir: &Path, log_writer: Box<dyn Write>) -> ProfileSession` — mkdir、按 pid 命名、启动 CPU 剖析　`// Go: pprof.go:BeginProfiling`
+- [x] `impl ProfileSession { pub fn stop(self) }` — 停 CPU、写 mem profile（allocs）、打印路径　`// Go: pprof.go:(*ProfileSession).Stop`
+- [x] `pub struct CpuProfiler { mu: Mutex<Option<ProfileSession>> }`　`// Go: pprof.go:CPUProfiler`
+- [x] `impl CpuProfiler { pub fn start_cpu_profile(&self, dir: &Path) -> Result<(), Error> }` — 已在进行则报错 "CPU profiling already in progress"；文件名带毫秒时间戳　`// Go: pprof.go:(*CPUProfiler).StartCPUProfile`
+- [x] `impl CpuProfiler { pub fn stop_cpu_profile(&self) -> Result<String, Error> }` — 未进行则报错 "CPU profiling not in progress"；返回文件路径　`// Go: pprof.go:(*CPUProfiler).StopCPUProfile`
+- [x] `pub fn save_heap_profile(dir: &Path) -> Result<String, Error>` — 先 GC（Rust 无 GC，按 crate 语义）→ 写 heap profile　`// Go: pprof.go:SaveHeapProfile`
+- [x] `pub fn save_alloc_profile(dir: &Path) -> Result<String, Error>` — 写 allocs profile　`// Go: pprof.go:SaveAllocProfile`
+- [x] `pub fn run_gc()` — Rust 无 GC，空操作 / 触发分配器整理（按 crate）　`// Go: pprof.go:RunGC`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/pprof/Cargo.toml`（`name = "tsgo_pprof"`，dep `pprof`）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` re-export
+- [x] `internal/pprof/Cargo.toml`（`name = "tsgo_pprof"`；dev-dep `tempfile`。**偏离**：real `pprof` crate 后端推迟到 P10，本轮不引入运行期依赖，profile 文件按 Go 命名落盘但内容为占位）
+- [x] 根 `Cargo.toml` workspace members 追加
+- [x] `lib.rs` re-export
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

@@ -39,15 +39,15 @@
 
 ### `lib.rs`（Go: `internal/locale/locale.go`）
 
-- [ ] `pub struct Locale(LanguageIdentifier)`（或别名） + `Default`　`// Go: locale.go:Locale/Default`
-- [ ] `pub fn parse(locale_str: &str) -> Option<Locale>` — 宽松解析，失败返回 `None`（对齐 Go `(Locale, ok)` 的 `ok=false`）　`// Go: locale.go:Parse`
-- [ ] （偏离说明）原 `WithLocale`/`FromContext` 改为显式传参，不在本 crate 提供 context 注入；如需轻量传递，提供 `Locale` 的 `Clone`/`Copy`　`// Go: locale.go:WithLocale/FromContext`（DEFER 到 diagnostics 接线）
+- [x] `pub struct Locale(LanguageIdentifier)`（或别名） + `Default`　`// Go: locale.go:Locale/Default`
+- [x] `pub fn parse(locale_str: &str) -> Option<Locale>` — 宽松解析，失败返回 `None`（对齐 Go `(Locale, ok)` 的 `ok=false`）　`// Go: locale.go:Parse`
+- [x] （偏离说明）原 `WithLocale`/`FromContext` 改为显式传参，不在本 crate 提供 context 注入；如需轻量传递，提供 `Locale` 的 `Clone`/`Copy`　`// Go: locale.go:WithLocale/FromContext`（DEFER 到 diagnostics 接线）
 
 ### Cargo / crate 接线
 
-- [ ] `internal/locale/Cargo.toml`（`name = "tsgo_locale"`，dep `unic-langid`）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` re-export `Locale` / `parse`
+- [x] `internal/locale/Cargo.toml`（`name = "tsgo_locale"`，dep `unic-langid`）
+- [x] 根 `Cargo.toml` workspace members 追加
+- [x] `lib.rs` re-export `Locale` / `parse`
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

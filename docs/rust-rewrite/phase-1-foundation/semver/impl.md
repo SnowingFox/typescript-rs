@@ -46,35 +46,35 @@ TypeScript 用 semver 处理 `typesVersions`、`engines`、`@types` 包匹配、
 
 ### `version.rs`（Go: `internal/semver/version.go`）
 
-- [ ] 正则常量：`version_regexp` / `prerelease_regexp` / `build_regexp` / `numeric_identifier_regexp`（`prerelease_part`/`build_part` 见上注，待确认）　`// Go: version.go`（var 块）
-- [ ] `pub struct Version{major,minor,patch:u32, prerelease,build:Vec<String>}` + `version_zero`（prerelease=["0"]）　`// Go: version.go:Version/versionZero`
-- [ ] `fn increment_major/minor/patch(&self) -> Version`　`// Go: version.go:incrementMajor/incrementMinor/incrementPatch`
-- [ ] `fn compare(&self, b: &Version) -> Ordering`（major→minor→patch→prerelease）　`// Go: version.go:Compare`
-- [ ] `fn compare_prerelease_identifiers(left, right) -> Ordering`（空集语义：有 prerelease 优先级更低）　`// Go: version.go:comparePreReleaseIdentifiers`
-- [ ] `fn compare_prerelease_identifier(left, right) -> Ordering`（数字<非数字；数字按数值；溢出回退长度/字符串；字母按 ASCII）　`// Go: version.go:comparePreReleaseIdentifier`
-- [ ] `impl Display for Version`（`maj.min.patch[-pre][+build]`）　`// Go: version.go:(Version).String`
-- [ ] `struct SemverParseError{orig_input}` + `Display`（消息 `Could not parse version string from "..."`）　`// Go: version.go:SemverParseError/Error`
-- [ ] `pub fn try_parse_version(text) -> Result<Version, SemverParseError>`（正则提取 + 各段校验）　`// Go: version.go:TryParseVersion`
-- [ ] `pub fn must_parse(text) -> Version`（失败 panic）　`// Go: version.go:MustParse`
-- [ ] `fn get_uint_component(text) -> Result<u32, _>`　`// Go: version.go:getUintComponent`
+- [x] 正则常量：`version_regexp` / `prerelease_regexp` / `build_regexp` / `numeric_identifier_regexp`（`prerelease_part`/`build_part` 见上注，待确认）　`// Go: version.go`（var 块）
+- [x] `pub struct Version{major,minor,patch:u32, prerelease,build:Vec<String>}` + `version_zero`（prerelease=["0"]）　`// Go: version.go:Version/versionZero`
+- [x] `fn increment_major/minor/patch(&self) -> Version`　`// Go: version.go:incrementMajor/incrementMinor/incrementPatch`
+- [x] `fn compare(&self, b: &Version) -> Ordering`（major→minor→patch→prerelease）　`// Go: version.go:Compare`
+- [x] `fn compare_prerelease_identifiers(left, right) -> Ordering`（空集语义：有 prerelease 优先级更低）　`// Go: version.go:comparePreReleaseIdentifiers`
+- [x] `fn compare_prerelease_identifier(left, right) -> Ordering`（数字<非数字；数字按数值；溢出回退长度/字符串；字母按 ASCII）　`// Go: version.go:comparePreReleaseIdentifier`
+- [x] `impl Display for Version`（`maj.min.patch[-pre][+build]`）　`// Go: version.go:(Version).String`
+- [x] `struct SemverParseError{orig_input}` + `Display`（消息 `Could not parse version string from "..."`）　`// Go: version.go:SemverParseError/Error`
+- [x] `pub fn try_parse_version(text) -> Result<Version, SemverParseError>`（正则提取 + 各段校验）　`// Go: version.go:TryParseVersion`
+- [x] `pub fn must_parse(text) -> Version`（失败 panic）　`// Go: version.go:MustParse`
+- [x] `fn get_uint_component(text) -> Result<u32, _>`　`// Go: version.go:getUintComponent`
 
 ### `version_range.rs`（Go: `internal/semver/version_range.go`）
 
-- [ ] 正则常量：`logical_or` / `whitespace` / `partial` / `hyphen` / `range`　`// Go: version_range.go`（var 块）
-- [ ] `pub struct VersionRange{alternatives: Vec<Vec<VersionComparator>>}` + `struct VersionComparator{operator, operand}` + `enum ComparatorOperator{Lt,Le,Eq,Ge,Gt}`　`// Go: version_range.go:VersionRange/versionComparator/comparatorOperator`
-- [ ] `impl Display for VersionRange`（`format_disjunction`：空→`*`、`format_alternative`/`format_comparator`）　`// Go: version_range.go:String/formatDisjunction/formatAlternative/formatComparator`
-- [ ] `fn test(&self, version: &Version) -> bool`（`test_disjunction`：空→true 全匹配 / `test_alternative` / `test_comparator`）　`// Go: version_range.go:Test/testDisjunction/testAlternative/testComparator`
-- [ ] `pub fn try_parse_version_range(text) -> (VersionRange, bool)`（`parse_alternatives`：按 `||` 拆 → hyphen 或空白拆 simple）　`// Go: version_range.go:TryParseVersionRange/parseAlternatives`
-- [ ] `fn parse_hyphen(left, right) -> Option<Vec<VersionComparator>>`（左非通配→`>=`；右按 minor/patch 通配展开 `<`/`<=`）　`// Go: version_range.go:parseHyphen`
-- [ ] `struct PartialVersion{version, major_str, minor_str, patch_str}` + `fn parse_partial(text) -> Option<PartialVersion>`（通配符 `x/X/*` 处理）　`// Go: version_range.go:partialVersion/parsePartial`
-- [ ] `fn parse_comparator(op, text) -> Option<Vec<VersionComparator>>`（`~`/`^`/`< >=`/`<= >`/`= ""` 各分支展开；通配 major 时 `<`/`>` → `<0.0.0-0`）　`// Go: version_range.go:parseComparator`
-- [ ] `fn is_wildcard(text) -> bool`（`* x X`）　`// Go: version_range.go:isWildcard`
+- [x] 正则常量：`logical_or` / `whitespace` / `partial` / `hyphen` / `range`　`// Go: version_range.go`（var 块）
+- [x] `pub struct VersionRange{alternatives: Vec<Vec<VersionComparator>>}` + `struct VersionComparator{operator, operand}` + `enum ComparatorOperator{Lt,Le,Eq,Ge,Gt}`　`// Go: version_range.go:VersionRange/versionComparator/comparatorOperator`
+- [x] `impl Display for VersionRange`（`format_disjunction`：空→`*`、`format_alternative`/`format_comparator`）　`// Go: version_range.go:String/formatDisjunction/formatAlternative/formatComparator`
+- [x] `fn test(&self, version: &Version) -> bool`（`test_disjunction`：空→true 全匹配 / `test_alternative` / `test_comparator`）　`// Go: version_range.go:Test/testDisjunction/testAlternative/testComparator`
+- [x] `pub fn try_parse_version_range(text) -> (VersionRange, bool)`（`parse_alternatives`：按 `||` 拆 → hyphen 或空白拆 simple）　`// Go: version_range.go:TryParseVersionRange/parseAlternatives`
+- [x] `fn parse_hyphen(left, right) -> Option<Vec<VersionComparator>>`（左非通配→`>=`；右按 minor/patch 通配展开 `<`/`<=`）　`// Go: version_range.go:parseHyphen`
+- [x] `struct PartialVersion{version, major_str, minor_str, patch_str}` + `fn parse_partial(text) -> Option<PartialVersion>`（通配符 `x/X/*` 处理）　`// Go: version_range.go:partialVersion/parsePartial`
+- [x] `fn parse_comparator(op, text) -> Option<Vec<VersionComparator>>`（`~`/`^`/`< >=`/`<= >`/`= ""` 各分支展开；通配 major 时 `<`/`>` → `<0.0.0-0`）　`// Go: version_range.go:parseComparator`
+- [x] `fn is_wildcard(text) -> bool`（`* x X`）　`// Go: version_range.go:isWildcard`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/semver/Cargo.toml`（`name = "tsgo_semver"`，deps `regex` `thiserror`）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` 声明子模块 + re-export
+- [x] `internal/semver/Cargo.toml`（`name = "tsgo_semver"`，deps `regex` `thiserror`）
+- [x] 根 `Cargo.toml` workspace members 追加
+- [x] `lib.rs` 声明子模块 + re-export
 
 ## TDD 推进顺序（tracer bullet → 增量）
 
@@ -95,5 +95,5 @@ TypeScript 用 semver 处理 `typesVersions`、`engines`、`@types` 包匹配、
 
 ## 转交 / 推迟（DEFER）
 
-- `prereleasePartRegexp` / `buildPartRegExp` 未引用，待实现期确认是否删除（`// TODO(port)`）。
+- `prereleasePartRegexp` / `buildPartRegExp`：已确认 Go 中声明但从未引用，Rust 端**已省略**（保留会触发 dead_code → `-D warnings` 失败），在 `version.rs` 留英文注释说明。
 - 本包真实用于 `typesVersions`/`@types` 匹配在 module/program（P4/P6）接通；本包 P1 完整实现并测。

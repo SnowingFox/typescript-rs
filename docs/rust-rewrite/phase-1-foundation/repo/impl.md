@@ -43,17 +43,17 @@
 
 ### `paths.rs`（Go: `internal/repo/paths.go`）
 
-- [ ] `pub fn root_path() -> &'static str` — `OnceLock`；用 `CARGO_MANIFEST_DIR` 上溯到 workspace 根（含 `[workspace]` 的 `Cargo.toml`）；找不到 → panic　`// Go: paths.go:RootPath/rootPath`
-- [ ] `pub fn typescript_submodule_path() -> &'static str` — `<root>/_submodules/TypeScript`　`// Go: paths.go:TypeScriptSubmodulePath`
-- [ ] `pub fn test_data_path() -> &'static str` — `<root>/testdata`　`// Go: paths.go:TestDataPath`
-- [ ] `pub fn typescript_submodule_exists() -> bool` — 检查 `<submodule>/package.json` 存在　`// Go: paths.go:TypeScriptSubmoduleExists`
-- [ ] `pub fn skip_if_no_typescript_submodule() -> bool`（或宏 `skip_if_no_ts_submodule!()`） — 子模块缺失时让测试跳过　`// Go: paths.go:SkipIfNoTypeScriptSubmodule`
+- [x] `pub fn root_path() -> &'static str` — `OnceLock`；用 `CARGO_MANIFEST_DIR` 上溯到 workspace 根（含 `[workspace]` 的 `Cargo.toml`）；找不到 → panic　`// Go: paths.go:RootPath/rootPath`
+- [x] `pub fn typescript_submodule_path() -> &'static str` — `<root>/_submodules/TypeScript`　`// Go: paths.go:TypeScriptSubmodulePath`
+- [x] `pub fn test_data_path() -> &'static str` — `<root>/testdata`　`// Go: paths.go:TestDataPath`
+- [x] `pub fn typescript_submodule_exists() -> bool` — 检查 `<submodule>/package.json` 存在　`// Go: paths.go:TypeScriptSubmoduleExists`
+- [x] `pub fn skip_if_no_typescript_submodule() -> bool`（或宏 `skip_if_no_ts_submodule!()`） — 子模块缺失时让测试跳过　`// Go: paths.go:SkipIfNoTypeScriptSubmodule`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/repo/Cargo.toml`（`name = "tsgo_repo"`）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` 声明 `mod paths;` + re-export
+- [x] `internal/repo/Cargo.toml`（`name = "tsgo_repo"`）
+- [x] 根 `Cargo.toml` workspace members 追加
+- [x] `lib.rs` 声明 `mod paths;` + re-export
 
 ## TDD 推进顺序（tracer bullet → 增量）
 
