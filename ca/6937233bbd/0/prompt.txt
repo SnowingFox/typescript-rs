@@ -1,47 +1,116 @@
-phase2 完成了？
+<manually_attached_skills>
+The user has manually attached the following skills to their message.
+These skills contain specific instructions or workflows that the user wants you to follow for this request.
+Only read the files if needed, the full skill content is inlined here.
 
----
+Skill Name: tdd
+Path: /Users/bytedance/.cursor/skills/tdd/SKILL.md
+SKILL.md content:
+# Test-Driven Development
 
-哎？后面 phase3 和 phase4 能一起吗？还是得串行？你把整个 Roadmap 用 ASCII 流程图画出来吧，我看看哪些可以并行哪些需要串行
+## Philosophy
 
----
+**Core principle**: Tests should verify behavior through public interfaces, not implementation details. Code can change entirely; tests shouldn't.
 
-这个画的还是看不懂= =，用框图 + phase 来标记吧，wave 感觉怪怪的= =
+**Good tests** are integration-style: they exercise real code paths through public APIs. They describe _what_ the system does, not _how_ it does it. A good test reads like a specification - "user can checkout with valid cart" tells you exactly what capability exists. These tests survive refactors because they don't care about internal structure.
 
----
+**Bad tests** are coupled to implementation. They mock internal collaborators, test private methods, or verify through external means (like querying a database directly instead of using the interface). The warning sign: your test breaks when you refactor, but behavior hasn't changed. If you rename an internal function and tests fail, those tests were testing implementation, not behavior.
 
-用 ascii 画啊
+See [tests.md](tests.md) for examples and [mocking.md](mocking.md) for mocking guidelines.
 
----
+## Anti-Pattern: Horizontal Slices
 
-/tdd 开始吧，完成 wave2 以及我觉得你可以一直推行下去呢？你用 subagent 去完成任务 + 纠错，你就负责主流程推进 + 标记 wave 完成，来吧，好好规划一下 plan，以及这个图我觉得你可以用 composer-2.5-fast 来画，然后每个 subagent 完成一个模块都要 subagent + tdd 模式开发 + 做完后自检，严格遵循 tdd 以及看看这个框图画的有没有问题，每个 subagent 都要读 go 源码来实现，以及遵循 tdd，遵循标准规范，来吧
+**DO NOT write all tests first, then all implementation.** This is "horizontal slicing" - treating RED as "write all tests" and GREEN as "write all code."
 
----
+This produces **crap tests**:
 
-Implement the plan as specified, it is attached for your reference. Do NOT edit the plan file itself.
+- Tests written in bulk test _imagined_ behavior, not _actual_ behavior
+- You end up testing the _shape_ of things (data structures, function signatures) rather than user-facing behavior
+- Tests become insensitive to real changes - they pass when behavior breaks, fail when behavior is fine
+- You outrun your headlights, committing to test structure before understanding the implementation
 
-To-do's from the plan have already been created. Do not create them again. Mark them as in_progress as you work, starting with the first one. Don't stop until you have completed all the to-dos.
+**Correct approach**: Vertical slices via tracer bullets. One test → one implementation → repeat. Each test responds to what you learned from the previous cycle. Because you just wrote the code, you know exactly what behavior matters and how to verify it.
 
----
+```
+WRONG (horizontal):
+  RED:   test1, test2, test3, test4, test5
+  GREEN: impl1, impl2, impl3, impl4, impl5
 
-这不是还在干活吗，你为什么说死了？然后继续等 worker 吧，
+RIGHT (vertical):
+  RED→GREEN: test1→impl1
+  RED→GREEN: test2→impl2
+  RED→GREEN: test3→impl3
+  ...
+```
 
----
+## Workflow
 
-这不是还在干活吗，你为什么说死了？然后继续等 worker 吧，不对，刚刚做完了，然后你继续下一个吧，你可以检查一下，如果没做完或者只是一些 lint 问题也可以在后面一起修复，继续 resume
+### 1. Planning
 
----
+When exploring the codebase, use the project's domain glossary so that test names and interface vocabulary match the project's language, and respect ADRs in the area you're touching.
 
-subagent 还在跑，我更新一下规则，我发现 go 的单测很少，但是我们至少要确保每个函数都要有单测，反正遵循 /tdd 
+Before writing any code:
 
-以及我发现 internal/checker/checker.go 这玩意超级大，我觉得我们可以拆个新目录 checker/core 放这里面，然后拆多点文件，合理一些，然后呢，单测也加上，可以加点你觉得合适的，以及 go 的单测绝对是不能少的哈
+- [ ] Confirm with user what interface changes are needed
+- [ ] Confirm with user which behaviors to test (prioritize)
+- [ ] Identify opportunities for [deep modules](deep-modules.md) (small interface, deep implementation)
+- [ ] Design interfaces for [testability](interface-design.md)
+- [ ] List the behaviors to test (not implementation steps)
+- [ ] Get user approval on the plan
 
-然后你登 subagent 跑完了你再继续工作吧，你现在可以更新一下规则，以及这种超大文件拆分的规则
+Ask: "What should the public interface look like? Which behaviors are most important to test?"
 
----
+**You can't test everything.** Confirm with the user exactly which behaviors matter most. Focus testing effort on critical paths and complex logic, not every possible edge case.
 
-提交所有改动，然后继续
+### 2. Tracer Bullet
 
----
+Write ONE test that confirms ONE thing about the system:
+
+```
+RED:   Write test for first behavior → test fails
+GREEN: Write minimal code to pass → test passes
+```
+
+This is your tracer bullet - proves the path works end-to-end.
+
+### 3. Incremental Loop
+
+For each remaining behavior:
+
+```
+RED:   Write next test → fails
+GREEN: Minimal code to pass → passes
+```
+
+Rules:
+
+- One test at a time
+- Only enough code to pass current test
+- Don't anticipate future tests
+- Keep tests focused on observable behavior
+
+### 4. Refactor
+
+After all tests pass, look for [refactor candidates](refactoring.md):
+
+- [ ] Extract duplication
+- [ ] Deepen modules (move complexity behind simple interfaces)
+- [ ] Apply SOLID principles where natural
+- [ ] Consider what new code reveals about existing code
+- [ ] Run tests after each refactor step
+
+**Never refactor while RED.** Get to GREEN first.
+
+## Checklist Per Cycle
+
+```
+[ ] Test describes behavior, not implementation
+[ ] Test uses public interface only
+[ ] Test would survive internal refactor
+[ ] Code is minimal for this test
+[ ] No speculative features added
+```
+</manually_attached_skills>
+<timestamp>Saturday, May 30, 2026, 11:23 AM (UTC+8)</timestamp>
 
 提交所有改动，然后继续，继续遵循对应的规则， /tdd 和 docs/rust-rewrite/README.md 直到完成为止
