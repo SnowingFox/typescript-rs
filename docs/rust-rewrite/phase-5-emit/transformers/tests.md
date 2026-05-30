@@ -205,6 +205,19 @@
 | `estransforms::r#async::tests::async_function_lowers_to_awaiter_wrapper` | estransforms | **6d-3** async 函数 → `__awaiter` 包装 + `await`→`yield` | `async function f() { await g(); }` → prologue `var __awaiter = …;` + `function f() { return __awaiter(this, void 0, void 0, function* () { yield g(); }); }` | `visitFunctionDeclaration`/`transformAsyncFunctionBody` | ✓ |
 | `estransforms::r#async::tests::async_function_without_await_still_wraps` | estransforms | **6d-3** 无 await 仍包装 | `async function f() { g(); }` → `… function* () { g(); }` | `visitFunctionDeclaration` | ✓ |
 | `estransforms::r#async::tests::async_generator_is_left_unchanged` | estransforms | **6d-3** async 生成器守卫（保持不变）| `async function* g() { yield 1; }` → 不变 | `FunctionFlagsGenerator` 守卫 | ✓ |
+| `moduletransforms::externalmoduleinfo::tests::named_import_is_an_external_import` | moduletransforms | **6e** 收集 external imports | `import { x } from "m";` → external_imports=1 | `collect` (KindImportDeclaration) | ✓ |
+| `moduletransforms::externalmoduleinfo::tests::export_star_sets_flag_and_is_external_import` | moduletransforms | **6e** `export *` 标志 | `export * from "m";` → has_export_stars + external_imports=1 | `collect` (KindExportDeclaration) | ✓ |
+| `moduletransforms::externalmoduleinfo::tests::local_named_export_records_exported_name` | moduletransforms | **6e** 本地命名导出名 | `export { x };` → exported_names=[x] | `addExportedNamesForExportDeclaration` | ✓ |
+| `moduletransforms::externalmoduleinfo::tests::export_equals_is_recorded` | moduletransforms | **6e** `export =` | `export = x;` → export_equals=Some | `collect` (KindExportAssignment) | ✓ |
+| `moduletransforms::externalmoduleinfo::tests::exported_const_records_exported_name` | moduletransforms | **6e** `export const` 导出名 | `export const y = 1;` → exported_names=[y] | `collectExportedVariableInfo` | ✓ |
+| `jsxtransforms::jsx::tests::intrinsic_self_closing_element_lowers_to_create_element` | jsxtransforms | **6f** intrinsic 标签 → string-literal | `<div/>;` → `React.createElement("div", null);` | `visitJsxOpeningLikeElementCreateElement` | ✓ |
+| `jsxtransforms::jsx::tests::component_self_closing_element_uses_identifier_tag` | jsxtransforms | **6f** 组件标签 → identifier | `<Foo/>;` → `React.createElement(Foo, null);` | `getTagName` | ✓ |
+| `jsxtransforms::jsx::tests::string_attribute_becomes_props_object` | jsxtransforms | **6f** string 属性 → props 对象 | `<div id="x"/>;` → `…("div", { id: "x" });` | `transformJsxAttributeToObjectLiteralElement` | ✓ |
+| `jsxtransforms::jsx::tests::expression_attribute_uses_inner_expression` | jsxtransforms | **6f** `{expr}` 属性 | `<div id={y}/>;` → `…("div", { id: y });` | `transformJsxAttributeInitializer` | ✓ |
+| `jsxtransforms::jsx::tests::expression_child_becomes_trailing_argument` | jsxtransforms | **6f** 表达式子节点 | `<div>{x}</div>;` → `…("div", null, x);` | `transformJsxChildToExpression` | ✓ |
+| `jsxtransforms::jsx::tests::text_child_becomes_string_literal` | jsxtransforms | **6f** 文本子节点 | `<div>hi</div>;` → `…("div", null, "hi");` | `visitJsxText` | ✓ |
+| `jsxtransforms::jsx::tests::nested_element_child_is_lowered` | jsxtransforms | **6f** 嵌套元素子节点 | `<div><span/></div>;` → 递归 createElement | `transformJsxChildToExpression` | ✓ |
+| `jsxtransforms::jsx::tests::fragment_lowers_to_react_fragment_create_element` | jsxtransforms | **6f** fragment | `<>{x}</>;` → `…(React.Fragment, null, x);` | `visitJsxOpeningFragmentCreateElement` | ✓ |
 | `printer::emithelpers::requested_helper_definition_emitted_in_prologue` | printer（additive）| **6d-2** prologue emit helper 定义 | 挂 `__setFunctionName` → 源文件顶部出现其定义 | `emitHelpers` | ✓ |
 | `printer::emithelpers::prologue_emits_helpers_in_priority_order` | printer（additive）| **6d-2** 优先级排序 | `__awaiter`(5) 先于 `__setFunctionName`(None) | `compareEmitHelpers` | ✓ |
 | `printer::emitcontext::requested_helpers_round_trip_and_dedup` | printer（additive）| **6d-2** request/read + 去重 | 双 request 记录一次；read 清空 | `RequestEmitHelper`/`ReadEmitHelpers` | ✓ |
@@ -251,6 +264,25 @@
 | esdecorator | `tests/cases/conformance/esDecorators/**` | 标准（TC39）装饰器降级 + helper emit | DEFER（待 checker 元数据 + helper-emit）/P10 |
 
 > 6c-1 仅落地 `exponentiation`（标识符目标）与 `classfields`（无 heritage/无既有构造器的实例字段）子集；6c-4 收口 `classfields` 可达面（私有实例字段直接 WeakMap 形态 + 计算实例字段名）；其余（named-helper 私有形态、accessor、class-expr、私有 static/方法、参数属性、target 门控）为登记项，详见 `impl.md` 的「classfields 移植状态」。
+
+## moduletransforms conformance 切片（P10 端到端兜底）
+
+| transform | conformance 子集 | 验证内容 | 目标轮 |
+|---|---|---|---|
+| externalmoduleinfo | （无独立 baseline；由 CJS/ESM 输出间接覆盖）| import/export 结构化收集 | 6e ✓（单测覆盖：imports/export*/export names/export=）|
+| commonjsmodule | `tests/cases/compiler/**`、`.../es2015/modules/**`（`--module commonjs`）| `import`→`require`、`export`→`exports.x`、`__importStar`/`__importDefault`/`__exportStar` interop、`__esModule` 标志 | DEFER（需 emit substitution + 真实 ReferenceResolver + compilerOptions 线程化）+ P10 |
+| esmodule | `.../es2015/modules/**`（`--module es2015/esnext`）| import/export elision + interop helper 注入 | DEFER（同上）+ P10 |
+
+> 6e 仅落地 `externalmoduleinfo` 结构化分析子集；CJS/ESM 变换待一轮 substitution + resolver + compilerOptions 前置基建（详见 `impl.md` 的「moduletransforms 解锁前置」）。
+
+## jsxtransforms conformance 切片（P10 端到端兜底）
+
+| transform | conformance 子集 | 验证内容 | 目标轮 |
+|---|---|---|---|
+| jsx（classic）| `tests/cases/conformance/jsx/**`（`--jsx react`）| `<tag attrs>children</tag>` → `React.createElement(tag, props, ...children)`、fragment → `React.Fragment` | 6f ✓（intrinsic/组件标签、string/expr 属性、expr/text/嵌套 子节点、fragment）/ DEFER（spread attr、entity 解码、自定义 factory/namespace、whitespace 精确边界）+ P10 |
+| jsx（automatic）| `tests/cases/conformance/jsx/**`（`--jsx react-jsx`/`react-jsxdev`）| `jsx`/`jsxs`/`jsxDEV` + implicit `react/jsx-runtime` import | DEFER（需 compilerOptions 选择运行时 + emitResolver implicit-import 注入）+ P10 |
+
+> 6f 落地 classic runtime 子集（硬编码 `React.createElement`/`React.Fragment` 工厂）；automatic runtime 与自定义 pragma/factory 待 compilerOptions/resolver 线程化（同 moduletransforms 缺口）。
 
 ## 与 impl.md 的对齐核对
 

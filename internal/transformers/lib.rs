@@ -18,7 +18,9 @@ use tsgo_printer::EmitContext;
 
 pub mod chain;
 pub mod estransforms;
+pub mod jsxtransforms;
 pub mod modifiervisitor;
+pub mod moduletransforms;
 pub mod transformer;
 pub mod tstransforms;
 pub mod utilities;

@@ -26,8 +26,9 @@
 | **6d** ✅ 子集 | `estransforms` part 2：两条**无 helper** 的 es stage：`optionalchain`（`a?.b`→保护性条件表达式）+ `objectrestspread`（对象 spread→`Object.assign`） | `a?.b;` → `a === null \|\| a === void 0 ? void 0 : a.b;`；`const o = { ...x, y };` → `const o = Object.assign(Object.assign({}, x), { y });` | 全走 arena 既有构造器（`new_conditional_expression`/`new_void_expression`/`new_object_literal_expression` 等均已存在），**本轮无需 ast/printer 增长**。DEFER：`namedevaluation`/`using`/`forawait`/`async`（**全部需 helper-library emit 基建**，Rust 侧未移植）+ optionalchain temp-hoist/this-capture + objectrestspread `__rest` 绑定 |
 | **6d-2** ✅ | **printer helper-emit 基建**（`EmitHelper` 模型 + `request_emit_helper`/`read_emit_helpers` + 每节点 `add/get_emit_helper` + `compare_emit_helpers` 优先级排序 + `new_unscoped_helper_name` + 源文件 prologue emit `write_lines`），并以 `namedevaluation` tracer 端到端验证 | `var f = function(){}` → prologue `var __setFunctionName = …;` + `var f = __setFunctionName(function () { }, "f");` | additive 增长 `printer`（新增 `emithelpers.rs` + EmitContext helper 存储 + factory `new_unscoped_helper_name` + printer `emit_helpers`/`write_lines`）。解锁 `async`/`forawait`/`using`（6d-3）|
 | **6d-3** ✅ 子集 | `estransforms` part 3：**`async`** 顶层函数声明 → `__awaiter` 包装 + `await`→`yield`（复用 6d-2 helper 基建）| `async function f() { await g(); }` → prologue `var __awaiter = …;` + `function f() { return __awaiter(this, void 0, void 0, function* () { yield g(); }); }` | 全走 arena 既有构造器（`new_function_declaration`/`new_function_expression`/`new_yield_expression`/`new_return_statement` 等均已存在），**本轮无需 ast/printer 增长**。DEFER：`forawait`（无最小 tracer，需完整 async-iteration 脚手架）+ `using`（**parser 不解析语句级 `using`**）+ async 方法/箭头/生成器/super/参数 |
-| 6e | `moduletransforms`：CJS/ESM/implied + externalModuleInfo | `import {x} from "m"`→`require` | factory + module 格式查询 |
-| 6f | `jsxtransforms` + `inliners` | `<a/>`→`createElement`；const enum 内联 | factory + checker 求值（inliners） |
+| **6e** ✅ 子集 | `moduletransforms`：**`externalmoduleinfo`** 结构化分析（external imports / exported names / `export *` / `export =`）；CJS/ESM 变换 DEFER（基建缺口）| `collect_external_module_info` on parsed modules | 纯 AST 分析，**本轮无需 ast/printer 增长**。CJS/ESM 变换 blocked-by：emit substitution（use 重写）+ 真实 ReferenceResolver（当前 no-op）+ `TransformOptions` 无 compilerOptions |
+| **6f** ✅ 子集 | `jsxtransforms`：**classic runtime** `React.createElement` 元素/属性/子节点/fragment 降级 | `<div id="x">{x}</div>;` → `React.createElement("div", { id: "x" }, x);` | 全走 arena 既有构造器（`new_call_expression`/`new_property_access_expression`/`new_string_literal`/`new_object_literal_expression`/`new_property_assignment`/`new_keyword_expression`/`new_spread_element` 等），**本轮无需 ast/printer 增长**。DEFER：automatic runtime（`jsx`/`jsxs` + implicit import，需 compilerOptions + emitResolver）、自定义 factory/pragma、spread attr、entity 解码 |
+| 6f-2 / inliners | `inliners`：const enum 内联 | `const enum E{A=1} E.A`→`1` | checker 求值（const enum 值）|
 | 6g | `declarations`：`.d.ts` transform 框架 + tracker + diagnostics | 基础 `.d.ts` 形状 | nodebuilder/modulespecifiers + checker resolver；正确性靠 P10 |
 | 6h | 根 `destructuring` + `utilities` 其余（绑定↔赋值转换/super 定位/范围移动）+ `tstransforms/importelision`（checker 就绪后） | 数组解构展开；import elision | factory 构造器 + checker `EmitResolver` |
 
@@ -130,19 +131,21 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 
 ### `moduletransforms`（5 文件）
 
-| Go 文件 | Rust 文件 | 说明 |
-|---|---|---|
-| `moduletransforms/commonjsmodule.go` | `commonjsmodule.rs` | `NewCommonJSModuleTransformer` |
-| `moduletransforms/esmodule.go` | `esmodule.rs` | `NewESModuleTransformer` |
-| `moduletransforms/impliedmodule.go` | `impliedmodule.rs` | `NewImpliedModuleTransformer`（按 impliedFormat 分派） |
-| `moduletransforms/externalmoduleinfo.go` | `externalmoduleinfo.rs` | 收集导入/导出元信息 |
-| `moduletransforms/utilities.go` | `utilities.rs` | 子包共享工具（crate 根 `lib.rs` 聚合 mod） |
+> 子模块 `pub mod moduletransforms;` → `moduletransforms/mod.rs`。6e 落地 `externalmoduleinfo`（结构化分析），**未触碰 ast/printer**（纯 AST 分析）。
+
+| Go 文件 | Rust 文件 | 状态 | 说明 |
+|---|---|---|---|
+| `moduletransforms/externalmoduleinfo.go` | `externalmoduleinfo.rs` | ✅ 6e 子集 | `collect_external_module_info`：扫描顶层语句收集 **external imports**（`import …`/`export … from`）、**exported names**（`export { x }`、`export const`）、**`export *`** 标志、**`export =`**。DEFER：resolver 相关分类（`export {x}` 的 function-vs-binding via `GetReferencedImportDeclaration`）、`exportedBindings`/`exportedFunctions`、external-helpers import 创建（需 `GetExternalHelpersModuleName`）|
+| `moduletransforms/commonjsmodule.go` | `commonjsmodule.rs` | — DEFER(基建) | `NewCommonJSModuleTransformer`；blocked-by：**emit substitution**（`onSubstituteNode`，未移植）用于重写 import *使用*（`x`→`m_1.x`）；真实 `ReferenceResolver`（当前为 no-op 占位）；`TransformOptions` 缺 `compilerOptions`（module kind/`esModuleInterop`）；`__esModule` 标志/源文件组装 + external-module 指示器。`require` 调用降级本身可达，但忠实变换需上述全部 |
+| `moduletransforms/esmodule.go` | `esmodule.rs` | — DEFER(基建) | `NewESModuleTransformer`（import/export elision + interop helper 注入）；blocked-by：同上（substitution + resolver + compilerOptions）|
+| `moduletransforms/impliedmodule.go` | `impliedmodule.rs` | — DEFER(P5) | `NewImpliedModuleTransformer`（按 impliedFormat 分派）；blocked-by：依赖 CJS/ESM 就绪 + compilerOptions |
+| `moduletransforms/utilities.go` | `utilities.rs` | — DEFER(P5) | 子包共享工具（`getExternalModuleNameLiteral`/`rewriteModuleSpecifier` 等，多依赖 resolver/compilerOptions）|
 
 ### `jsxtransforms` / `inliners` / `declarations`
 
 | Go 文件 | Rust 文件 | 说明 |
 |---|---|---|
-| `jsxtransforms/jsx.go` | `jsxtransforms/lib.rs` | `JSXTransformer` / `NewJSXTransformer` |
+| `jsxtransforms/jsx.go` | `jsxtransforms/jsx.rs` | ✅ 6f 子集：`new_jsx_transformer`（classic runtime `React.createElement`）；DEFER automatic runtime/pragma/spread-attr |
 | `inliners/constenum.go` | `inliners/lib.rs` | `ConstEnumInliningTransformer` / `NewConstEnumInliningTransformer` |
 | `declarations/transform.go` | `declarations/transform.rs`（crate 根聚合于 `lib.rs`） | `DeclarationTransformer` / `NewDeclarationTransformer` / `DeclarationEmitHost`/`OutputPaths` |
 | `declarations/tracker.go` | `declarations/tracker.rs` | `SymbolTrackerImpl` / `NewSymbolTracker` / 可访问性追踪 |
@@ -442,6 +445,50 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 - `nullishcoalescing`/`logicalassignment`/`optionalcatch`/`taggedtemplate`/`usestrict`/`classthis`：未排期（多数 factory 即可，部分需 helper）。
 - `definitions`（`GetESTransformer` target 派发链）：依赖各 stage 就绪。
 - 各 stage 的 `--target`/compilerOptions 门控 + name-generator 唯一命名精化。
+
+## 6e worklog（red→green 推进记录）
+
+`moduletransforms`。先勘察依赖发现 CJS/ESM **变换**被多处基建缺口阻塞（见下），故本轮聚焦**可达且可测**的共享分析 `externalmoduleinfo`，逐切片红→绿：
+
+1. `named_import_is_an_external_import`（tracer）：`import { x } from "m";` → 恒等空 `ExternalModuleInfo` 红 → 实现 `collect_external_module_info`（扫描 `SourceFile` 顶层语句，`ImportDeclaration` → `external_imports`）→ 绿。
+2. `export_star_sets_flag_and_is_external_import`：`export * from "m";` → 加 `ExportDeclaration` 臂（有 module specifier → external import；无 export clause → `has_export_stars_to_export_values`）→ 红→绿。
+3. `local_named_export_records_exported_name`：`export { x };` → `add_exported_names_for_export_clause`（`NamedExports` 取 specifier name，按 text 去重）→ 红→绿。
+4. `export_equals_is_recorded`：`export = x;` → `ExportAssignment` 臂（`is_export_equals` → `export_equals`）→ 红→绿。
+5. `exported_const_records_exported_name`：`export const y = 1;` → `VariableStatement`+EXPORT modifier 臂 → `collect_exported_variable_name`（标识符绑定）→ 红→绿。
+
+**CJS/ESM 变换 DEFER（基建缺口，逐项核查）**：
+- **emit substitution（`onSubstituteNode`）未移植** → 无法重写 import *使用*（`x`→`m_1.x`）。`internal/printer/*.rs` 零命中 substitution。
+- **`ReferenceResolver` 为 no-op 占位**（`referenceresolver.rs` 所有 `get_referenced_*` 返回 `None`/空）→ 无法解析引用到声明。
+- **`TransformOptions` 仅含 `context`**（`compiler_options`/`resolver` 已 DEFER）→ 变换拿不到 module kind / `esModuleInterop`。
+- `require` 调用降级本身可达（`getExternalModuleNameLiteral` 对简单字符串 specifier 不需 resolver），但忠实的 `transformCommonJSModule` 还需 `__esModule` 标志 + 源文件组装 + external-module 指示器；强行做简化分支会偏离门控行为且对任何"使用 import 的模块"产出错误代码。
+
+**测试计数（6e 新增）**：`tsgo_transformers` +5 `#[test]`（externalmoduleinfo 5）+1 doctest（`collect_external_module_info`）。crate 合计 65 unit + 17 doctest。
+
+### upstream（ast/printer）增长（6e）
+
+- **无**。`externalmoduleinfo` 为纯 AST 分析，全走 `arena.data`/`arena.kind`/`arena.text` 读取既有节点。未触碰 `internal/ast/*` 或 `internal/printer/*`。
+
+### moduletransforms 解锁前置（建议下一基建轮）
+
+CJS/ESM/implied 变换需要一轮 **emit-substitution + 真实 ReferenceResolver + `TransformOptions` compilerOptions/resolver 线程化** 的前置基建（类比 6d-2 为 helper-依赖 stage 解锁 helper-emit 基建）。就绪后 CJS/ESM 即可逐用例红→绿。
+
+## 6f worklog（red→green 推进记录）
+
+`jsxtransforms`。JSX 在 `.tsx` 下可解析（新增 `parse_shared_tsx` 测试 helper），且 classic-runtime 元素→调用为纯结构化重写（无需 substitution/resolver），故全程可达。逐子用例红→绿（classic runtime）：
+
+1. `intrinsic_self_closing_element_lowers_to_create_element`（tracer）：`<div/>;` → 恒等 `<div />;` 红 → 实现 `jsx_visit`（`JsxSelfClosingElement` 臂）+ `lower_create_element` + `get_tag_name`（intrinsic → string literal via `tsgo_scanner::is_intrinsic_jsx_name`）+ `make_react_create_element`（`React.createElement`）→ `React.createElement("div", null);` → 绿。
+2. `component_self_closing_element_uses_identifier_tag`：`<Foo/>;` → `get_tag_name` 非 intrinsic 标识符直接复用 → `React.createElement(Foo, null);` → 直接绿。
+3. `string_attribute_becomes_props_object` + `expression_attribute_uses_inner_expression`：`<div id="x"/>` / `<div id={y}/>` → `transform_jsx_attributes_to_object_props`（ES2018+ 对象字面量路径，硬编码）+ `transform_jsx_attribute_to_object_literal_element` + `transform_jsx_attribute_initializer`（string 重建 / JsxExpression 取内层）→ `{ id: "x" }` / `{ id: y }` → 红→绿。
+4. `expression_child_becomes_trailing_argument` + `text_child_becomes_string_literal` + `nested_element_child_is_lowered`：加 `JsxElement` 臂 + children 处理（`transform_jsx_child_to_expression`：JsxExpression 取内层/spread、JsxText `fixup_whitespace_and_decode_entities`、嵌套递归）→ 红→绿。
+5. `fragment_lowers_to_react_fragment_create_element`：`<>{x}</>;` → `JsxFragment` 臂 + `lower_fragment_create_element`（`React.Fragment` + `React.createElement`）→ 红→绿。
+
+**automatic runtime（`jsx`/`jsxs`/`jsxDEV`）DEFER**：运行时选择来自 `compilerOptions.Jsx`（`--jsx react-jsx`），`TransformOptions` 无 `compiler_options`；implicit import 注入需 `emitResolver.SetReferencedImportDeclaration`（占位）。同 6e 的 compilerOptions/resolver 缺口。本端口硬编码 classic `React.createElement` 工厂。
+
+**测试计数（6f 新增）**：`tsgo_transformers` +8 `#[test]`（jsx classic runtime）+1 doctest（`new_jsx_transformer`）。crate 合计 73 unit + 18 doctest。
+
+### upstream（ast/printer）增长（6f）
+
+- **无**。JSX classic 降级全走 arena 既有构造器（`new_call_expression`/`new_property_access_expression`/`new_string_literal`/`new_object_literal_expression`/`new_property_assignment`/`new_keyword_expression`/`new_spread_element`/`new_identifier`）+ `visit_each_child`。未触碰 `internal/ast/*` 或 `internal/printer/*`。新增 `parse_shared_tsx`/`parse_shared_named` 仅在 transformers 测试 harness。
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

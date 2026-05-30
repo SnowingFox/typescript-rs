@@ -17,7 +17,19 @@ use tsgo_printer::EmitContext;
 /// parsed arena plus the root source-file id. Panics on parse diagnostics so a
 /// malformed fixture fails loudly.
 pub(crate) fn parse_shared(input: &str) -> (Rc<RefCell<EmitContext>>, NodeId) {
-    let file_name = "/main.ts";
+    parse_shared_named(input, "/main.ts")
+}
+
+/// Like [`parse_shared`] but parses as `/main.tsx`, enabling JSX syntax.
+pub(crate) fn parse_shared_tsx(input: &str) -> (Rc<RefCell<EmitContext>>, NodeId) {
+    parse_shared_named(input, "/main.tsx")
+}
+
+/// Parses `input` under the script kind implied by `file_name`.
+pub(crate) fn parse_shared_named(
+    input: &str,
+    file_name: &str,
+) -> (Rc<RefCell<EmitContext>>, NodeId) {
     let script_kind = get_script_kind_from_file_name(file_name);
     let parse = parse_source_file(
         SourceFileParseOptions {
