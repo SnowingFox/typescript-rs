@@ -1,0 +1,47 @@
+phase2 完成了？
+
+---
+
+哎？后面 phase3 和 phase4 能一起吗？还是得串行？你把整个 Roadmap 用 ASCII 流程图画出来吧，我看看哪些可以并行哪些需要串行
+
+---
+
+这个画的还是看不懂= =，用框图 + phase 来标记吧，wave 感觉怪怪的= =
+
+---
+
+用 ascii 画啊
+
+---
+
+/tdd 开始吧，完成 wave2 以及我觉得你可以一直推行下去呢？你用 subagent 去完成任务 + 纠错，你就负责主流程推进 + 标记 wave 完成，来吧，好好规划一下 plan，以及这个图我觉得你可以用 composer-2.5-fast 来画，然后每个 subagent 完成一个模块都要 subagent + tdd 模式开发 + 做完后自检，严格遵循 tdd 以及看看这个框图画的有没有问题，每个 subagent 都要读 go 源码来实现，以及遵循 tdd，遵循标准规范，来吧
+
+---
+
+Implement the plan as specified, it is attached for your reference. Do NOT edit the plan file itself.
+
+To-do's from the plan have already been created. Do not create them again. Mark them as in_progress as you work, starting with the first one. Don't stop until you have completed all the to-dos.
+
+---
+
+这不是还在干活吗，你为什么说死了？然后继续等 worker 吧，
+
+---
+
+这不是还在干活吗，你为什么说死了？然后继续等 worker 吧，不对，刚刚做完了，然后你继续下一个吧，你可以检查一下，如果没做完或者只是一些 lint 问题也可以在后面一起修复，继续 resume
+
+---
+
+subagent 还在跑，我更新一下规则，我发现 go 的单测很少，但是我们至少要确保每个函数都要有单测，反正遵循 /tdd 
+
+以及我发现 internal/checker/checker.go 这玩意超级大，我觉得我们可以拆个新目录 checker/core 放这里面，然后拆多点文件，合理一些，然后呢，单测也加上，可以加点你觉得合适的，以及 go 的单测绝对是不能少的哈
+
+然后你登 subagent 跑完了你再继续工作吧，你现在可以更新一下规则，以及这种超大文件拆分的规则
+
+---
+
+提交所有改动，然后继续
+
+---
+
+提交所有改动，然后继续，继续遵循对应的规则， /tdd 和 docs/rust-rewrite/README.md 直到完成为止
