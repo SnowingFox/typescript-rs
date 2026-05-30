@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "7301f4cc3385",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "docs/rust-rewrite/phase-4-checker/checker/impl.md",
+    "docs/rust-rewrite/phase-4-checker/checker/tests.md",
+    "internal/checker/core/declared_types.rs",
+    "internal/checker/core/declared_types_test.rs",
+    "internal/checker/core/mod.rs",
+    "internal/checker/core/program.rs",
+    "internal/checker/core/program_test.rs",
+    "internal/checker/core/test_support.rs",
+    "internal/checker/lib.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/73/01f4cc3385/0/metadata.json",
+      "transcript": "/73/01f4cc3385/0/full.jsonl",
+      "content_hash": "/73/01f4cc3385/0/content_hash.txt",
+      "prompt": "/73/01f4cc3385/0/prompt.txt"
+    }
+  ]
+}
