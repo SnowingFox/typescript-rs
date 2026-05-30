@@ -172,8 +172,8 @@ impl Checker {
                 get_type_of_property_of_type(self, program, attrs_type, &attr_name)
             {
                 if !self.is_type_assignable_to(program, value_type, prop_type) {
-                    let source = self.type_to_string(value_type);
-                    let target = self.type_to_string(prop_type);
+                    let source = super::nodebuilder::type_to_string(self, program, value_type);
+                    let target = super::nodebuilder::type_to_string(self, program, prop_type);
                     self.error(
                         program,
                         init,

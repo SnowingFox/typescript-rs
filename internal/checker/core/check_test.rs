@@ -99,9 +99,11 @@ fn missing_property_reports_diagnostic() {
     let diags = c.get_diagnostics(p.root());
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, 2339);
-    assert!(diags[0]
-        .message
-        .starts_with("Property 'baz' does not exist on type"));
+    // The object type prints as its interface name `Foo`, not `{ ... }`.
+    assert_eq!(
+        diags[0].message,
+        "Property 'baz' does not exist on type 'Foo'."
+    );
 }
 
 // Go: internal/checker/checker.go:Checker.getSignaturesOfType

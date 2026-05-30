@@ -8,10 +8,13 @@
 
 pub mod check;
 pub mod declared_types;
+pub mod emit_resolver;
 pub mod flow;
+pub mod grammar;
 pub mod inference;
 pub mod jsx;
 pub mod mapper;
+pub mod nodebuilder;
 pub mod program;
 pub mod relations;
 pub mod signatures;
@@ -24,8 +27,11 @@ pub mod types;
 #[path = "test_support.rs"]
 mod test_support;
 
+use std::cell::OnceCell;
+
 use rustc_hash::FxHashMap;
 
+use emit_resolver::EmitResolver;
 use relations::RelationCache;
 use signatures::{IndexInfo, IndexInfoArena, IndexInfoId, Signature, SignatureArena, SignatureId};
 use symbols::{
@@ -93,6 +99,8 @@ pub struct Checker {
     /// JSX tags. Resolved from lib globals in Go; until those land (P6) callers
     /// inject it via [`Checker::set_jsx_intrinsic_elements`].
     jsx_intrinsic_elements: Option<TypeId>,
+    /// The cached emit-time query handle (Go's `GetEmitResolver` `sync.Once`).
+    emit_resolver: OnceCell<EmitResolver>,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -260,6 +268,7 @@ impl Checker {
             instantiation_count: 0,
             diagnostics: Vec::new(),
             jsx_intrinsic_elements: None,
+            emit_resolver: OnceCell::new(),
             any_type,
             auto_type,
             error_type,
@@ -282,6 +291,32 @@ impl Checker {
             string_or_number_type,
             number_or_bigint_type,
         }
+    }
+
+    /// Constructs a checker for a bound `program` (the forward-compatible
+    /// `NewChecker(program)` entry point).
+    ///
+    /// In 4k this only initializes the intrinsic substrate (delegating to
+    /// [`Checker::new`]); the real `NewChecker` also binds the program's global
+    /// scope and lib types, which is wired once a real host exists.
+    ///
+    /// blocked-by: `compiler.Program` + lib globals (P6) — global/lib binding,
+    /// `getGlobalType` population, and storing the program on the checker.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker};
+    /// # fn demo<P: BoundProgram>(p: &P) -> Checker {
+    /// Checker::new_checker(p)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: allocates the intrinsic types in a fresh arena.
+    // Go: internal/checker/checker.go:NewChecker
+    pub fn new_checker(program: &dyn program::BoundProgram) -> Self {
+        // The program is not yet retained; global/lib binding lands with P6.
+        let _ = program;
+        Checker::new()
     }
 
     /// Allocates a new type, clearing the cache-only object flags that Go's
@@ -580,6 +615,25 @@ impl Checker {
     // blocked-by: lib globals (P6) — the real `JSX.IntrinsicElements` resolution.
     pub fn set_jsx_intrinsic_elements(&mut self, t: TypeId) {
         self.jsx_intrinsic_elements = Some(t);
+    }
+
+    /// Returns the checker's emit-time query handle, constructing it once
+    /// (Go's `GetEmitResolver`, cached behind a `sync.Once`).
+    ///
+    /// The returned [`EmitResolver`] is a lightweight value handle; its query
+    /// methods take the program (and checker, for type-backed queries).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// let c = Checker::new();
+    /// let _resolver = c.get_emit_resolver();
+    /// ```
+    ///
+    /// Side effects: initializes the cached resolver on first call.
+    // Go: internal/checker/checker.go:Checker.GetEmitResolver(31832)
+    pub fn get_emit_resolver(&self) -> EmitResolver {
+        *self.emit_resolver.get_or_init(EmitResolver::default)
     }
 
     /// Records the meaning(s) under which `symbol` was referenced.

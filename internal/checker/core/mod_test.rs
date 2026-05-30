@@ -182,3 +182,12 @@ fn symbol_reference_kinds_accumulate() {
     // A different symbol is unaffected.
     assert_eq!(c.symbol_reference_kinds(SymbolId(43)), SymbolFlags::empty());
 }
+
+// Go: internal/checker/checker.go:NewChecker (program-taking entry, P6 seam)
+#[test]
+fn new_checker_initializes_intrinsics() {
+    let p = crate::core::test_support::StubProgram::parse_and_bind("/a.ts", "");
+    let c = Checker::new_checker(&p);
+    assert_eq!(c.type_count(), Checker::new().type_count());
+    assert_eq!(c.type_to_string(c.string_type()), "string");
+}

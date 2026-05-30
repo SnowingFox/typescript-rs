@@ -119,7 +119,7 @@ impl Checker {
         match get_type_of_property_of_type(self, program, object_type, &name) {
             Some(t) => t,
             None => {
-                let type_str = self.type_to_string(object_type);
+                let type_str = super::nodebuilder::type_to_string(self, program, object_type);
                 self.error(
                     program,
                     name_node,
@@ -266,6 +266,16 @@ impl Checker {
     // and the rest of the statement surface.
     // Go: internal/checker/checker.go:Checker.checkSourceElement
     fn check_statement(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        self.check_grammar_modifiers(program, node);
+        // Class members carry their own modifiers (e.g. accessibility), so run
+        // the grammar checks on each. DEFER(phase-4-checker-4j+): full member
+        // checking (bodies, signatures, accessors).
+        if let NodeData::ClassDeclaration(d) = program.arena().data(node) {
+            let members = d.members.nodes.clone();
+            for member in members {
+                self.check_grammar_modifiers(program, member);
+            }
+        }
         if let NodeData::ExpressionStatement(d) = program.arena().data(node) {
             let expr = d.expression;
             self.check_expression(program, expr);

@@ -48,8 +48,10 @@ pub use core::declared_types::{
     get_property_of_type, get_type_from_type_node, get_type_of_property_of_type,
     get_type_of_symbol, resolve_structured_type_members,
 };
+pub use core::emit_resolver::EmitResolver;
 pub use core::inference::{InferenceContext, InferenceInfo, InferencePriority};
 pub use core::mapper::TypeMapper;
+pub use core::nodebuilder::{symbol_to_string, type_to_string};
 pub use core::program::BoundProgram;
 pub use core::relations::RelationKind;
 pub use core::signatures::{
