@@ -1,0 +1,89 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "df8c2fd0ebaf",
+  "session_id": "9bb44a1d-7140-42a9-b16a-7ced88c21ff5",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-30T15:33:39.644775Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "docs/rust-rewrite/phase-5-emit/transformers/impl.md",
+    "docs/rust-rewrite/phase-5-emit/transformers/tests.md",
+    "internal/compiler/host.rs",
+    "internal/compiler/host_test.rs",
+    "internal/printer/emit_expressions.rs",
+    "internal/printer/emitcontext.rs",
+    "internal/printer/emitcontext_test.rs",
+    "internal/printer/printer.rs",
+    "internal/transformers/chain.rs",
+    "internal/transformers/chain_test.rs",
+    "internal/transformers/estransforms/async_test.rs",
+    "internal/transformers/estransforms/classfields_test.rs",
+    "internal/transformers/estransforms/exponentiation_test.rs",
+    "internal/transformers/estransforms/namedevaluation_test.rs",
+    "internal/transformers/estransforms/objectrestspread_test.rs",
+    "internal/transformers/estransforms/optionalchain_test.rs",
+    "internal/transformers/jsxtransforms/jsx_test.rs",
+    "internal/transformers/moduletransforms/mod.rs",
+    "internal/transformers/tstransforms/typeeraser_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "composer-2.5-fast",
+  "turn_id": "7239791f3432",
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-30T15:33:39.635899Z",
+    "agent_lines": 580,
+    "agent_removed": 11,
+    "human_added": 4665,
+    "human_modified": 23,
+    "human_removed": 0,
+    "total_committed": 5268,
+    "total_lines_changed": 5500,
+    "agent_percentage": 10.745454545454546,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 515,
+      "user_lines_removed": 17,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "Cargo.lock": 32,
+        "Cargo.toml": 1,
+        "docs/rust-rewrite/phase-5-emit/transformers/impl.md": 33,
+        "docs/rust-rewrite/phase-5-emit/transformers/tests.md": 4,
+        "internal/compiler/Cargo.toml": 37,
+        "internal/compiler/lib.rs": 12,
+        "internal/printer/emit_expressions.rs": 5,
+        "internal/printer/emitcontext.rs": 25,
+        "internal/printer/emitcontext_test.rs": 38,
+        "internal/printer/printer.rs": 6,
+        "internal/transformers/chain.rs": 8,
+        "internal/transformers/chain_test.rs": 3,
+        "internal/transformers/estransforms/async_test.rs": 1,
+        "internal/transformers/estransforms/classfields_test.rs": 1,
+        "internal/transformers/estransforms/exponentiation_test.rs": 1,
+        "internal/transformers/estransforms/namedevaluation_test.rs": 1,
+        "internal/transformers/estransforms/objectrestspread_test.rs": 1,
+        "internal/transformers/estransforms/optionalchain_test.rs": 1,
+        "internal/transformers/jsxtransforms/jsx_test.rs": 1,
+        "internal/transformers/moduletransforms/commonjsmodule.rs": 245,
+        "internal/transformers/moduletransforms/commonjsmodule_test.rs": 40,
+        "internal/transformers/moduletransforms/mod.rs": 17,
+        "internal/transformers/tstransforms/typeeraser_test.rs": 2
+      },
+      "user_removed_per_file": {
+        "docs/rust-rewrite/phase-5-emit/transformers/impl.md": 1,
+        "internal/transformers/chain.rs": 5,
+        "internal/transformers/moduletransforms/mod.rs": 11
+      }
+    }
+  ]
+}
