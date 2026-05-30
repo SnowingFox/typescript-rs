@@ -61,60 +61,60 @@ Source map 把生成的 `.js` 里每个位置映射回原始 `.ts` 位置。prin
 
 ### `generator.rs`（Go: `internal/sourcemap/generator.go`）
 
-- [ ] `pub struct SourceIndex(i32)` / `pub struct NameIndex(i32)` + 哨兵常量　`// Go: generator.go`
-- [ ] `pub struct RawSourceMap`（serde，字段序 1:1）　`// Go: generator.go:RawSourceMap`
-- [ ] `pub struct Generator` + 全部状态字段　`// Go: generator.go:Generator`
-- [ ] `pub fn new(file, source_root, sources_directory_path, options) -> Generator`　`// Go: generator.go:NewGenerator`
-- [ ] `pub fn sources(&self) -> &[String]`（返回 rawSources）　`// Go: generator.go:Sources`
-- [ ] `pub fn add_source(&mut self, file_name) -> SourceIndex` — 相对化 + 去重　`// Go: generator.go:AddSource`
-- [ ] `pub fn set_source_content(&mut self, idx, content) -> Result<()>` — 越界错误　`// Go: generator.go:SetSourceContent`
-- [ ] `pub fn add_name(&mut self, name) -> NameIndex` — 去重　`// Go: generator.go:AddName`
-- [ ] `fn is_new_generated_position(...)` / `fn is_backtracking_source_position(...)` / `fn should_commit_mapping(...)`（私有）　`// Go: generator.go:isNewGeneratedPosition / isBacktrackingSourcePosition / shouldCommitMapping`
-- [ ] `fn append_mapping_char_code` / `fn append_base64_vlq`（私有，VLQ 自实现）　`// Go: generator.go:appendMappingCharCode / appendBase64VLQ`
-- [ ] `fn commit_pending_mapping`（私有；line `;` / comma `,` 分隔 + 5 段相对量；backtrack panic）　`// Go: generator.go:commitPendingMapping`
-- [ ] `fn add_mapping`（私有，pending/last 状态推进）　`// Go: generator.go:addMapping`
-- [ ] `pub fn add_generated_mapping(&mut self, line, char) -> Result<()>`　`// Go: generator.go:AddGeneratedMapping`
-- [ ] `pub fn add_source_mapping(&mut self, line, char, src_idx, src_line, src_char) -> Result<()>`　`// Go: generator.go:AddSourceMapping`
-- [ ] `pub fn add_named_source_mapping(&mut self, ..., name_idx) -> Result<()>`　`// Go: generator.go:AddNamedSourceMapping`
-- [ ] `pub fn raw_source_map(&mut self) -> RawSourceMap`（先 commit pending；空 sources/names → `[]` 而非 null）　`// Go: generator.go:RawSourceMap`
-- [ ] `fn bytes(&mut self) -> Vec<u8>`（私有，json marshal）　`// Go: generator.go:bytes`
-- [ ] `pub fn to_string(&mut self) -> String`（impl Display 或具名）　`// Go: generator.go:String`
-- [ ] `pub fn base64_data_url(&mut self) -> String` — `data:application/json;base64,` 前缀　`// Go: generator.go:Base64DataURL`
-- [ ] `fn base64_format_encode(value) -> char`（私有，6 位 → A-Za-z0-9+/）　`// Go: generator.go:base64FormatEncode`
+- [x] `pub struct SourceIndex(i32)` / `pub struct NameIndex(i32)` + 哨兵常量　`// Go: generator.go`
+- [x] `pub struct RawSourceMap`（serde，字段序 1:1）　`// Go: generator.go:RawSourceMap`
+- [x] `pub struct Generator` + 全部状态字段　`// Go: generator.go:Generator`
+- [x] `pub fn new(file, source_root, sources_directory_path, options) -> Generator`　`// Go: generator.go:NewGenerator`
+- [x] `pub fn sources(&self) -> &[String]`（返回 rawSources）　`// Go: generator.go:Sources`
+- [x] `pub fn add_source(&mut self, file_name) -> SourceIndex` — 相对化 + 去重　`// Go: generator.go:AddSource`
+- [x] `pub fn set_source_content(&mut self, idx, content) -> Result<()>` — 越界错误　`// Go: generator.go:SetSourceContent`
+- [x] `pub fn add_name(&mut self, name) -> NameIndex` — 去重　`// Go: generator.go:AddName`
+- [x] `fn is_new_generated_position(...)` / `fn is_backtracking_source_position(...)` / `fn should_commit_mapping(...)`（私有）　`// Go: generator.go:isNewGeneratedPosition / isBacktrackingSourcePosition / shouldCommitMapping`
+- [x] `fn append_mapping_char_code` / `fn append_base64_vlq`（私有，VLQ 自实现）　`// Go: generator.go:appendMappingCharCode / appendBase64VLQ`
+- [x] `fn commit_pending_mapping`（私有；line `;` / comma `,` 分隔 + 5 段相对量；backtrack panic）　`// Go: generator.go:commitPendingMapping`
+- [x] `fn add_mapping`（私有，pending/last 状态推进）　`// Go: generator.go:addMapping`
+- [x] `pub fn add_generated_mapping(&mut self, line, char) -> Result<()>`　`// Go: generator.go:AddGeneratedMapping`
+- [x] `pub fn add_source_mapping(&mut self, line, char, src_idx, src_line, src_char) -> Result<()>`　`// Go: generator.go:AddSourceMapping`
+- [x] `pub fn add_named_source_mapping(&mut self, ..., name_idx) -> Result<()>`　`// Go: generator.go:AddNamedSourceMapping`
+- [x] `pub fn raw_source_map(&mut self) -> RawSourceMap`（先 commit pending；空 sources/names → `[]` 而非 null）　`// Go: generator.go:RawSourceMap`
+- [x] `fn bytes(&mut self) -> Vec<u8>`（私有，json marshal）　`// Go: generator.go:bytes`
+- [x] `pub fn to_string(&mut self) -> String`（impl Display 或具名）　`// Go: generator.go:String`
+- [x] `pub fn base64_data_url(&mut self) -> String` — `data:application/json;base64,` 前缀　`// Go: generator.go:Base64DataURL`
+- [x] `fn base64_format_encode(value) -> char`（私有，6 位 → A-Za-z0-9+/）　`// Go: generator.go:base64FormatEncode`
 
 ### `decoder.rs`（Go: `internal/sourcemap/decoder.go`）
 
-- [ ] `pub struct Mapping` + `fn equals` + `fn is_source_mapping`　`// Go: decoder.go:Mapping`
-- [ ] `Missing*` 哨兵常量　`// Go: decoder.go`
-- [ ] `pub struct MappingsDecoder` + `pub fn decode_mappings(s) -> MappingsDecoder`　`// Go: decoder.go:DecodeMappings`
-- [ ] `pub fn mappings_string/pos/error/state`　`// Go: decoder.go:MappingsString/Pos/Error/State`
-- [ ] `pub fn values(&mut self) -> impl Iterator<Item=Mapping>` + `fn next`（状态机：`;`/`,`/段解析、错误分支）　`// Go: decoder.go:Values/Next`
-- [ ] `fn capture_mapping` / `fn stop_iterating` / `fn set_error` / `fn set_error_and_stop` / `fn has_reported_error` / `fn is_source_mapping_segment_end`（私有）　`// Go: decoder.go:*`
-- [ ] `fn base64_vlq_format_decode(&mut self) -> i32`（私有，VLQ 自实现解码）　`// Go: decoder.go:base64VLQFormatDecode`
-- [ ] `fn base64_format_decode(ch) -> i32`（私有，字符 → 6 位；非法 → -1）　`// Go: decoder.go:base64FormatDecode`
+- [x] `pub struct Mapping` + `fn equals` + `fn is_source_mapping`　`// Go: decoder.go:Mapping`
+- [x] `Missing*` 哨兵常量　`// Go: decoder.go`
+- [x] `pub struct MappingsDecoder` + `pub fn decode_mappings(s) -> MappingsDecoder`　`// Go: decoder.go:DecodeMappings`
+- [x] `pub fn mappings_string/pos/error/state`　`// Go: decoder.go:MappingsString/Pos/Error/State`
+- [x] `pub fn values(&mut self) -> impl Iterator<Item=Mapping>` + `fn next`（状态机：`;`/`,`/段解析、错误分支）　`// Go: decoder.go:Values/Next`
+- [x] `fn capture_mapping` / `fn stop_iterating` / `fn set_error` / `fn set_error_and_stop` / `fn has_reported_error` / `fn is_source_mapping_segment_end`（私有）　`// Go: decoder.go:*`
+- [x] `fn base64_vlq_format_decode(&mut self) -> i32`（私有，VLQ 自实现解码）　`// Go: decoder.go:base64VLQFormatDecode`
+- [x] `fn base64_format_decode(ch) -> i32`（私有，字符 → 6 位；非法 → -1）　`// Go: decoder.go:base64FormatDecode`
 
 ### `lineinfo.rs` / `source.rs` / `util.rs`
 
-- [ ] `pub struct ECMALineInfo` + `pub fn create_ecma_line_info` + `line_count` + `line_text`　`// Go: lineinfo.go:*`
-- [ ] `pub trait Source`（`text/file_name/ecma_line_map`）　`// Go: source.go:Source`
-- [ ] `pub fn try_get_source_mapping_url(line_info: Option<&ECMALineInfo>) -> String` — 从尾部行找 `//# sourceMappingURL=`　`// Go: util.go:TryGetSourceMappingURL`
+- [x] `pub struct ECMALineInfo` + `pub fn create_ecma_line_info` + `line_count` + `line_text`　`// Go: lineinfo.go:*`
+- [x] `pub trait Source`（`text/file_name/ecma_line_map`）　`// Go: source.go:Source`
+- [x] `pub fn try_get_source_mapping_url(line_info: Option<&ECMALineInfo>) -> String` — 从尾部行找 `//# sourceMappingURL=`　`// Go: util.go:TryGetSourceMappingURL`
 
 ### `source_mapper.rs`（Go: `internal/sourcemap/source_mapper.go`）
 
-- [ ] `pub trait Host`（`use_case_sensitive_file_names/get_ecma_line_info/read_file`）　`// Go: source_mapper.go:Host`
-- [ ] `pub struct MappedPosition` + `fn is_source_mapped_position`；`type SourceMappedPosition = MappedPosition`　`// Go: source_mapper.go:MappedPosition`
-- [ ] `pub struct DocumentPositionMapper` + `fn create_document_position_mapper`（私有：解码、processMapping、按源/生成位置排序去重）　`// Go: source_mapper.go:createDocumentPositionMapper`
-- [ ] `pub struct DocumentPosition { file_name, pos }`　`// Go: source_mapper.go:DocumentPosition`
-- [ ] `pub fn get_source_position(&self, loc) -> Option<DocumentPosition>`（二分 generatedMappings）　`// Go: source_mapper.go:GetSourcePosition`
-- [ ] `pub fn get_generated_position(&self, loc) -> Option<DocumentPosition>`（二分 sourceMappings）　`// Go: source_mapper.go:GetGeneratedPosition`
-- [ ] `pub fn get_document_position_mapper(host, generated_file_name) -> Option<DocumentPositionMapper>`（url/base64/`.map` 文件查找）　`// Go: source_mapper.go:GetDocumentPositionMapper`
-- [ ] `fn convert_document_to_source_mapper` / `fn try_parse_raw_source_map` / `fn try_get_source_mapping_url` / `fn try_parse_base64_url`（私有）　`// Go: source_mapper.go:*`
+- [x] `pub trait Host`（`use_case_sensitive_file_names/get_ecma_line_info/read_file`）　`// Go: source_mapper.go:Host`
+- [x] `pub struct MappedPosition` + `fn is_source_mapped_position`；`type SourceMappedPosition = MappedPosition`　`// Go: source_mapper.go:MappedPosition`
+- [x] `pub struct DocumentPositionMapper` + `fn create_document_position_mapper`（私有：解码、processMapping、按源/生成位置排序去重）　`// Go: source_mapper.go:createDocumentPositionMapper`
+- [x] `pub struct DocumentPosition { file_name, pos }`　`// Go: source_mapper.go:DocumentPosition`
+- [x] `pub fn get_source_position(&self, loc) -> Option<DocumentPosition>`（二分 generatedMappings）　`// Go: source_mapper.go:GetSourcePosition`
+- [x] `pub fn get_generated_position(&self, loc) -> Option<DocumentPosition>`（二分 sourceMappings）　`// Go: source_mapper.go:GetGeneratedPosition`
+- [x] `pub fn get_document_position_mapper(host, generated_file_name) -> Option<DocumentPositionMapper>`（url/base64/`.map` 文件查找）　`// Go: source_mapper.go:GetDocumentPositionMapper`
+- [x] `fn convert_document_to_source_mapper` / `fn try_parse_raw_source_map` / `fn try_get_source_mapping_url` / `fn try_parse_base64_url`（私有）　`// Go: source_mapper.go:*`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/sourcemap/Cargo.toml`（`name = "tsgo_sourcemap"` + path deps + `serde`/`serde_json`/`base64`/`rustc_hash`）
-- [ ] 根 `Cargo.toml` workspace members 追加本 crate
-- [ ] `lib.rs`：`mod generator; mod decoder; mod lineinfo; mod source; mod util; mod source_mapper;` + `pub use`
+- [x] `internal/sourcemap/Cargo.toml`（`name = "tsgo_sourcemap"` + path deps + `serde`/`serde_json`/`base64`/`rustc_hash`）
+- [x] 根 `Cargo.toml` workspace members 追加本 crate
+- [x] `lib.rs`：`mod generator; mod decoder; mod lineinfo; mod source; mod util; mod source_mapper;` + `pub use`
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

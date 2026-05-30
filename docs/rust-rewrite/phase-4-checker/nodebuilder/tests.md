@@ -16,25 +16,25 @@
 
 | Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
 |---|---|---|---|---|
-| `flags_bit_values` | 每个 `Flags` 常量整型值与 Go 一致 | `NoTruncation.bits()==1<<0`, `OmitParameterModifiers==1<<13`, `UseAliasDefinedOutsideCurrentScope==1<<14`, `OmitThisParameter==1<<25`, `AllowNodeModulesRelativePaths==1<<26`, `WriteCallStyleSignature==1<<27`, `UseSingleQuotesForStringLiteralType==1<<28`, `NoTypeReduction==1<<29`, `UseInstantiationExpressions==1<<30` | types.go:Flags 常量 | |
-| `flags_state_bits` | 状态位 | `InObjectTypeLiteral==1<<22`, `InTypeAlias==1<<23`, `InInitialEntityName==1<<24` | types.go:Flags | |
-| `flags_ignore_errors_composition` | `IGNORE_ERRORS` 组合成员正确 | `IGNORE_ERRORS == AllowThisInObjectLiteral\|AllowQualifiedNameInPlaceOfIdentifier\|AllowAnonymousIdentifier\|AllowEmptyUnionOrIntersection\|AllowEmptyTuple\|AllowEmptyIndexInfoType\|AllowNodeModulesRelativePaths` | types.go:FlagsIgnoreErrors | |
-| `internal_flags_bit_values` | InternalFlags 位值 | `WriteComputedProps==1<<0`, `NoSyntacticPrinter==1<<1`, `DoNotIncludeSymbolChain==1<<2`, `AllowUnresolvedNames==1<<3` | types.go:InternalFlags | |
+| `flags_bit_values` | 每个 `Flags` 常量整型值与 Go 一致 | `NoTruncation.bits()==1<<0`, `OmitParameterModifiers==1<<13`, `UseAliasDefinedOutsideCurrentScope==1<<14`, `OmitThisParameter==1<<25`, `AllowNodeModulesRelativePaths==1<<26`, `WriteCallStyleSignature==1<<27`, `UseSingleQuotesForStringLiteralType==1<<28`, `NoTypeReduction==1<<29`, `UseInstantiationExpressions==1<<30` | types.go:Flags 常量 | ✓ |
+| `flags_state_bits` | 状态位 | `InObjectTypeLiteral==1<<22`, `InTypeAlias==1<<23`, `InInitialEntityName==1<<24` | types.go:Flags | ✓ |
+| `flags_ignore_errors_composition` | `IGNORE_ERRORS` 组合成员正确（含 error 组各位 + 排除 `AllowUniqueESSymbolType`） | `IGNORE_ERRORS == AllowThisInObjectLiteral\|AllowQualifiedNameInPlaceOfIdentifier\|AllowAnonymousIdentifier\|AllowEmptyUnionOrIntersection\|AllowEmptyTuple\|AllowEmptyIndexInfoType\|AllowNodeModulesRelativePaths` | types.go:FlagsIgnoreErrors | ✓ |
+| `internal_flags_bit_values` | InternalFlags 位值 | `WriteComputedProps==1<<0`, `NoSyntacticPrinter==1<<1`, `DoNotIncludeSymbolChain==1<<2`, `AllowUnresolvedNames==1<<3` | types.go:InternalFlags | ✓ |
 
 ### SymbolTracker trait（对象安全 + mock）
 
 | Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
 |---|---|---|---|---|
-| `symbol_tracker_object_safe` | trait 可作 `dyn`，mock 实现所有方法 | 构造 `Box<dyn SymbolTracker>` 调用各方法不 panic、`track_symbol` 返回 mock 设定值 | types.go:SymbolTracker | |
+| `symbol_tracker_object_safe` | trait 可作 `dyn`，mock 实现所有方法 | 构造 `Box<dyn SymbolTracker>` / `&mut dyn SymbolTracker` 调用全部 12 个方法（共 13 次）不 panic、`track_symbol` 返回 mock 设定值（true / false 两路） | types.go:SymbolTracker | ✓ |
 
 ## 与 impl.md 的对齐核对
 
-- [ ] 每条行为级用例带 `// Go:` 锚（「依据」列即上游锚，指向实现源 `internal/nodebuilder/types.go:<Func>`，因 Go 侧无 `*_test.go`）
+- [x] 每条行为级用例带 `// Go:` 锚（「依据」列即上游锚，指向实现源 `internal/nodebuilder/types.go:<Func>`，因 Go 侧无 `*_test.go`）
 
-- [ ] 每个 Go `func Test*` 都已映射 —— **N/A**（Go 侧 0 单测）
-- [ ] expected 值均取自 Go 源里的位值字面量
-- [ ] 每条对应 impl.md 的一个实现 TODO（`Flags`/`InternalFlags`/`SymbolTracker`）
-- [ ] 与 impl.md 双向对齐无遗漏
+- [x] 每个 Go `func Test*` 都已映射 —— **N/A**（Go 侧 0 单测）
+- [x] expected 值均取自 Go 源里的位值字面量
+- [x] 每条对应 impl.md 的一个实现 TODO（`Flags`/`InternalFlags`/`SymbolTracker`）
+- [x] 与 impl.md 双向对齐无遗漏
 
 ## 推迟到后续 phase 的测试
 

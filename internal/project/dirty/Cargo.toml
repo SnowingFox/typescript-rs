@@ -1,0 +1,10 @@
+[package]
+name = "tsgo_project_dirty"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tsgo_collections = { path = "../../collections" }

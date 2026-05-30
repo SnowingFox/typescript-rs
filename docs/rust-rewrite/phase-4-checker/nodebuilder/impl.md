@@ -40,29 +40,29 @@
 
 ### `lib.rs`（Go: `types.go`）
 
-- [ ] `pub trait SymbolTracker`，逐方法（参数里 `*ast.Symbol`→`SymbolId`，`*ast.Node`→`NodeId`，`*ast.SourceFile`→`SourceFileId`）：　`// Go: types.go:SymbolTracker`
-  - [ ] `fn track_symbol(&mut self, symbol, enclosing_declaration, meaning: ast::SymbolFlags) -> bool`
-  - [ ] `fn report_inaccessible_this_error(&mut self)`
-  - [ ] `fn report_private_in_base_of_class_expression(&mut self, property_name: &str)`
-  - [ ] `fn report_inaccessible_unique_symbol_error(&mut self)`
-  - [ ] `fn report_cyclic_structure_error(&mut self)`
-  - [ ] `fn report_likely_unsafe_import_required_error(&mut self, specifier: &str, symbol_name: &str)`
-  - [ ] `fn report_truncation_error(&mut self)`
-  - [ ] `fn report_nonlocal_augmentation(&mut self, containing_file, parent_symbol, augmenting_symbol)`
-  - [ ] `fn report_non_serializable_property(&mut self, property_name: &str)`
-  - [ ] `fn report_inference_fallback(&mut self, node)`
-  - [ ] `fn push_error_fallback_node(&mut self, node)`
-  - [ ] `fn pop_error_fallback_node(&mut self)`
-- [ ] `bitflags! pub struct Flags: u32`——逐位 1:1（含 25/27/28/29/30 高位与低位空洞）：`NoTruncation`(1<<0) … `OmitThisParameter`(1<<25) `AllowNodeModulesRelativePaths`(1<<26) `WriteCallStyleSignature`(1<<27) `UseSingleQuotesForStringLiteralType`(1<<28) `NoTypeReduction`(1<<29) `UseInstantiationExpressions`(1<<30)；状态位 `InObjectTypeLiteral`(1<<22)/`InTypeAlias`(1<<23)/`InInitialEntityName`(1<<24)　`// Go: types.go:Flags`
-- [ ] `const IGNORE_ERRORS`（= `AllowThisInObjectLiteral \| AllowQualifiedNameInPlaceOfIdentifier \| AllowAnonymousIdentifier \| AllowEmptyUnionOrIntersection \| AllowEmptyTuple \| AllowEmptyIndexInfoType \| AllowNodeModulesRelativePaths`）　`// Go: types.go:FlagsIgnoreErrors`
-- [ ] `bitflags! pub struct InternalFlags: i32`：`WriteComputedProps`(1<<0) `NoSyntacticPrinter`(1<<1) `DoNotIncludeSymbolChain`(1<<2) `AllowUnresolvedNames`(1<<3)　`// Go: types.go:InternalFlags`
-- [ ] rustdoc 保留 "must modify `TypeFormatFlags` too" 警告
+- [x] `pub trait SymbolTracker`，逐方法（参数里 `*ast.Symbol`→`SymbolId`，`*ast.Node`→`NodeId`，`*ast.SourceFile`→`NodeId`，见 divergence）：　`// Go: types.go:SymbolTracker`
+  - [x] `fn track_symbol(&mut self, symbol: SymbolId, enclosing_declaration: Option<NodeId>, meaning: SymbolFlags) -> bool`
+  - [x] `fn report_inaccessible_this_error(&mut self)`
+  - [x] `fn report_private_in_base_of_class_expression(&mut self, property_name: &str)`
+  - [x] `fn report_inaccessible_unique_symbol_error(&mut self)`
+  - [x] `fn report_cyclic_structure_error(&mut self)`
+  - [x] `fn report_likely_unsafe_import_required_error(&mut self, specifier: &str, symbol_name: &str)`
+  - [x] `fn report_truncation_error(&mut self)`
+  - [x] `fn report_nonlocal_augmentation(&mut self, containing_file: NodeId, parent_symbol: SymbolId, augmenting_symbol: SymbolId)`
+  - [x] `fn report_non_serializable_property(&mut self, property_name: &str)`
+  - [x] `fn report_inference_fallback(&mut self, node: NodeId)`
+  - [x] `fn push_error_fallback_node(&mut self, node: NodeId)`
+  - [x] `fn pop_error_fallback_node(&mut self)`
+- [x] `bitflags! pub struct Flags: u32`——逐位 1:1（含 25/27/28/29/30 高位与低位空洞）：`NoTruncation`(1<<0) … `OmitThisParameter`(1<<25) `AllowNodeModulesRelativePaths`(1<<26) `WriteCallStyleSignature`(1<<27) `UseSingleQuotesForStringLiteralType`(1<<28) `NoTypeReduction`(1<<29) `UseInstantiationExpressions`(1<<30)；状态位 `InObjectTypeLiteral`(1<<22)/`InTypeAlias`(1<<23)/`InInitialEntityName`(1<<24)　`// Go: types.go:Flags`
+- [x] `const IGNORE_ERRORS`（= `AllowThisInObjectLiteral \| AllowQualifiedNameInPlaceOfIdentifier \| AllowAnonymousIdentifier \| AllowEmptyUnionOrIntersection \| AllowEmptyTuple \| AllowEmptyIndexInfoType \| AllowNodeModulesRelativePaths`）　`// Go: types.go:FlagsIgnoreErrors`
+- [x] `bitflags! pub struct InternalFlags: i32`：`WriteComputedProps`(1<<0) `NoSyntacticPrinter`(1<<1) `DoNotIncludeSymbolChain`(1<<2) `AllowUnresolvedNames`(1<<3)　`// Go: types.go:InternalFlags`
+- [x] rustdoc 保留 "must modify `TypeFormatFlags` too" 警告
 
 ### Cargo / crate 接线
 
-- [ ] `internal/nodebuilder/Cargo.toml`（`name = "tsgo_nodebuilder"` + path dep `tsgo_ast`）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` re-export `SymbolTracker` / `Flags` / `InternalFlags`
+- [x] `internal/nodebuilder/Cargo.toml`（`name = "tsgo_nodebuilder"` + path dep `tsgo_ast` + `bitflags`）
+- [x] 根 `Cargo.toml` workspace members 追加（脚手架已置入 `internal/nodebuilder`）
+- [x] `lib.rs` re-export `SymbolTracker` / `Flags` / `InternalFlags`（直接定义于 crate 根，无需额外 re-export）
 
 ## TDD 推进顺序（tracer bullet → 增量）
 
@@ -71,9 +71,12 @@
 
 ## 与 Go 的已知偏离（divergence）
 
-- `interface SymbolTracker` → `trait SymbolTracker`；接口方法的指针参数 → arena 索引（`SymbolId`/`NodeId`/`SourceFileId`）。Go 里方法是"非可选"（注释提到曾经可选），Rust trait 全部为必需方法。
-- `Flags`/`InternalFlags` 用 `bitflags` 而非裸整型，但**位值严格 1:1**（含空洞）。
+- `interface SymbolTracker` → `trait SymbolTracker`；接口方法的指针参数 → arena 索引（`SymbolId`/`NodeId`）。Go 里方法是"非可选"（注释提到曾经可选），Rust trait 全部为必需方法。
+- **`*ast.SourceFile` → `NodeId`**（而非计划里的 `SourceFileId`）：现已落地的 `tsgo_ast` crate 只导出 `NodeId`/`SymbolId`，无 `SourceFileId`；而 SourceFile 本身就是一个 AST node，故 `report_nonlocal_augmentation` 的 `containing_file` 用 `NodeId` 表示。若后续 `tsgo_ast` 引入 `SourceFileId`，可窄化此参数。
+- **可空指针 `enclosing_declaration *ast.Node` → `Option<NodeId>`**：这是 TrackSymbol 中惯例可空的参数（PORTING §3 可空指针 → `Option<Idx>`）。其余指针参数（`node`/`symbol`/`containing_file`）在调用点均为具体值，保留裸索引类型。
+- `Flags`/`InternalFlags` 用 `bitflags`（`2.11.1`，与 `tsgo_ast` 同版本）而非裸整型，但**位值严格 1:1**（含 25/27/28/29/30 的乱序高位）。
 - `InternalFlags` 底层是 `int32`（有符号），用 `bitflags ... : i32` 对齐。
+- bitflags 内常量声明顺序按 TDD 逐行为推进而成组排列（options → 高位 → state → error → 复合 `IGNORE_ERRORS`），与 Go 源声明顺序不同，但每个常量的位值与 Go 字面量逐一对齐。
 
 ## 转交 / 推迟（DEFER）
 

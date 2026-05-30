@@ -7,7 +7,7 @@
 
 | Go 测试文件 | Rust 测试位置 | 顶层测试函数数 |
 |---|---|---|
-| `internal/tracing/tracing_test.go` | `internal/tracing/lib.rs`（`#[cfg(test)] mod tests`） | 2 |
+| `internal/tracing/tracing_test.go` | `internal/tracing/lib_test.rs`（兄弟文件，`use super::*;`，经 `#[cfg(test)] #[path="lib_test.rs"] mod tests;` 挂载） | 2 |
 
 测试用 `vfstest.FromMap`（内存 FS，`useCaseSensitiveFileNames=true`）+ deterministic 模式启动，写出后读回 `trace.json`，`json.Unmarshal` 成 `[]traceEvent` 再断言。Rust 侧对应 `tsgo_vfs` 内存 FS + `serde_json` 反序列化为 `Vec<TraceEvent>`。
 
@@ -21,15 +21,17 @@
 
 | Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `a_begin_end_same_tid` | `/a.ts` 的 B 与 E 事件同 TID | `aBegin.TID == aEnd.TID` | `tracing_test.go:TestConcurrentDurationEventsUseSeparateThreadIDs` | |
-| `b_begin_end_same_tid` | `/b.ts` 的 B 与 E 事件同 TID | `bBegin.TID == bEnd.TID` | 同上 | |
-| `a_and_b_different_tid` | 两个不同文件分到不同 TID | `aBegin.TID != bBegin.TID` | 同上 | |
-| `a_thread_name` | `/a.ts` 的 tid 有 `thread_name` metadata | `thread_name == "file:/a.ts"` | 同上（`assertThreadName`） | |
-| `b_thread_name` | `/b.ts` 的 tid 有 `thread_name` metadata | `thread_name == "file:/b.ts"` | 同上 | |
-| `checker_and_variance_same_tid` | 同一 checker 的两事件同 TID | `checkBegin.TID == varianceBegin.TID` | 同上 | |
-| `checker_thread_name` | checker tid 命名 | `thread_name == "checker:0"`（即 `FIRST_SYNTHETIC_THREAD_ID=2`） | 同上 | |
-| `variance_arg_id_is_json_number` | 反序列化后 `id` 为 JSON number | `findEvent(...,"id", 1)` 命中（Go 写 `float64(1)`） | 同上 | |
-| `duration_events_well_nested_by_thread` | 每个 tid 上 B/E 严格配对、cat/name 匹配、栈清空 | 见 `assertDurationEventsAreWellNestedByThread` | 同上 | |
+| `a_begin_end_same_tid` | `/a.ts` 的 B 与 E 事件同 TID | `aBegin.TID == aEnd.TID` | `tracing_test.go:TestConcurrentDurationEventsUseSeparateThreadIDs` | ✓ |
+| `b_begin_end_same_tid` | `/b.ts` 的 B 与 E 事件同 TID | `bBegin.TID == bEnd.TID` | 同上 | ✓ |
+| `a_and_b_different_tid` | 两个不同文件分到不同 TID | `aBegin.TID != bBegin.TID` | 同上 | ✓ |
+| `a_thread_name` | `/a.ts` 的 tid 有 `thread_name` metadata | `thread_name == "file:/a.ts"` | 同上（`assertThreadName`） | ✓ |
+| `b_thread_name` | `/b.ts` 的 tid 有 `thread_name` metadata | `thread_name == "file:/b.ts"` | 同上 | ✓ |
+| `checker_and_variance_same_tid` | 同一 checker 的两事件同 TID | `checkBegin.TID == varianceBegin.TID` | 同上 | ✓ |
+| `checker_thread_name` | checker tid 命名 | `thread_name == "checker:0"`（即 `FIRST_SYNTHETIC_THREAD_ID=2`） | 同上 | ✓ |
+| `variance_arg_id_is_json_number` | 反序列化后 `id` 为 JSON number | `findEvent(...,"id", 1)` 命中（Go 写 `float64(1)`；Rust serde untagged 解析为 `Int(1)`） | 同上 | ✓ |
+| `duration_events_well_nested_by_thread` | 每个 tid 上 B/E 严格配对、cat/name 匹配、栈清空 | 见 `assertDurationEventsAreWellNestedByThread` | 同上 | ✓ |
+
+> 映射说明：上述 9 条断言由 3 个 Rust `#[test]` 覆盖——`distinct_files_get_distinct_thread_ids`（前 5 行）、`checker_events_share_thread_id_and_json_number_arg`（checker/variance/json-number 三行）、`push_begin_end_pair_well_nested` + 各用例内 `assert_well_nested`（well-nested 行）。
 
 ### TestThreadIDsAreStableAcrossFirstSeenOrder
 
@@ -37,7 +39,7 @@
 
 | Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `thread_ids_stable_across_order` | 路径→TID 映射与 begin 顺序无关 | `map(["/a","/b"]) == map(["/b","/a"])`（`assert.DeepEqual`） | `tracing_test.go:TestThreadIDsAreStableAcrossFirstSeenOrder` | |
+| `thread_ids_are_stable_across_first_seen_order` | 路径→TID 映射与 begin 顺序无关 | `map(["/a","/b"]) == map(["/b","/a"])`（`assert_eq!`） | `tracing_test.go:TestThreadIDsAreStableAcrossFirstSeenOrder` | ✓ |
 
 ### 测试辅助（需在 Rust 测试模块复刻）
 
@@ -54,16 +56,16 @@
 
 | Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
 |---|---|---|---|---|
-| `empty_session_well_formed_json` | 空会话产出合法 trace.json | start→stop，无事件 → 含 3 条 metadata 事件 + `]` 结尾，可被 `serde_json` 解析 | tracing.go:StartTracing/StopTracing | |
-| `metadata_events_present` | 头部三条 metadata | `process_name`(name=tsgo) / `thread_name`(Main) / `TracingStartedInBrowser`，均 `pid=1 tid=1 ph="M"` | tracing.go:StartTracing | |
-| `legend_sorted_by_types_path` | legend 按 typesPath 排序 | 多 tracer → `legend.json` 条目按 typesPath 字典序 | tracing.go:StopTracing（`slices.SortFunc`） | |
-| `instant_event_scope_global` | instant 事件带 `s="g"` | `Instant(...)` → 事件 `ph="I" s="g"` | tracing.go:Instant | |
-| `deterministic_skips_sampled_events` | deterministic 下 `Push(...,false)` 不产生事件 | `Push(Parse,"x",nil,false)`+end → trace 无新增 X 事件 | tracing.go:Push（deterministic 分支返回 no-op） | |
-| `deterministic_timestamps_monotonic` | deterministic 时间戳为单调计数 | 连续事件 ts 递增整数 | tracing.go:timestamp | |
-| `type_descriptor_unresolved_conditional_minus_one` | 未解析条件分支序列化为 -1 | 假 `TracedType`（conditional，true/false=None）→ `conditionalTrueType=-1`,`conditionalFalseType=-1` | tracing.go:buildTypeDescriptor | |
-| `type_descriptor_recursion_token_stable` | 同递归身份得同 token | 两个 type 同 recursionIdentity → 同 `recursionId` | tracing.go:buildTypeDescriptor | |
-| `dump_types_open_bracket_no_newline` | `[` 后不换行（type id == 行号） | dump 2 个类型 → 输出以 `[` 紧跟首个对象、`,\n` 分隔 | tracing.go:DumpTypes | |
-| `flush_threshold_appends` | 缓冲超阈值触发 AppendFile | 大量事件使缓冲 >256KiB → 文件被增量写而非内存堆积（用小阈值或大量事件验证不丢事件） | tracing.go:maybeFlushLocked | |
+| `empty_session_well_formed_json` | 空会话产出合法 trace.json | start→stop，无事件 → 含 3 条 metadata 事件 + `]` 结尾，可被 `serde_json` 解析 | tracing.go:StartTracing/StopTracing | ✓ |
+| `metadata_events_present` | 头部三条 metadata | `process_name`(name=tsgo) / `thread_name`(Main) / `TracingStartedInBrowser`，均 `pid=1 tid=1 ph="M"` | tracing.go:StartTracing | ✓ |
+| `legend_sorted_by_types_path` | legend 按 typesPath 排序 | 多 tracer（创建序 2,0,1）→ `legend.json` 条目按 typesPath 字典序（0,1,2） | tracing.go:StopTracing（`slices.SortFunc`） | ✓ |
+| `instant_event_scope_global` | instant 事件带 `s="g"` | `instant(...)` → 事件 `ph="I" s="g"` | tracing.go:Instant | ✓ |
+| `deterministic_skips_sampled_events` | deterministic 下 `push(...,false)` 不产生事件 | `push(Parse,"x",None,false)`+end → trace 无新增 X 事件 | tracing.go:Push（deterministic 分支返回 no-op） | ✓ |
+| `deterministic_timestamps_monotonic` | deterministic 时间戳为单调计数 | 连续 B/E 事件 ts 递增整数 | tracing.go:timestamp | ✓ |
+| `type_descriptor_unresolved_conditional_minus_one` | 未解析条件分支序列化为 -1 | 假 `TracedType`（conditional，true/false=None）→ `conditionalTrueType=-1`,`conditionalFalseType=-1` | tracing.go:buildTypeDescriptor | ✓ |
+| `type_descriptor_recursion_token_stable` | 同递归身份得同 token | 两个 type 同 recursionIdentity(42) → 同 `recursionId`(0) | tracing.go:buildTypeDescriptor | ✓ |
+| `dump_types_open_bracket_no_newline` | `[` 后不换行（type id == 行号） | dump 2 个类型 → 输出以 `[` 紧跟首个对象、`,\n` 分隔、`]\n` 结尾 | tracing.go:DumpTypes | ✓ |
+| `flush_threshold_appends` | 缓冲超阈值触发 AppendFile | 3000 个 B/E 对使缓冲 >256KiB → 文件被增量写且不丢事件（回读计数 3000+3000、well-nested） | tracing.go:maybeFlushLocked | ✓ |
 
 > `stable_trace_thread_id` 的精确数值（xxh3）不在 Rust 单测断言绝对值——确定性会话里文件 tid 仍走 `stableTraceThreadID`，但测试只断言"稳定/互异/有命名"，不断言具体数字（与 Go 数值对拍归 P10）。
 

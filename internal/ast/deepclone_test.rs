@@ -2,11 +2,13 @@ use crate::{NodeArena, NodeFlags, NodeId, NodeList};
 use tsgo_core::text::TextRange;
 
 // The full Go `TestDeepCloneNodeSanityCheck` (~270 table cases) builds trees via
-// `parsetestutil.ParseTypeScript`, which depends on the parser.
-// DEFER(phase-3): port the full ~270-case table once the parser lands.
-// blocked-by: tsgo_parser (P3) is not yet implemented, so source cannot be
-// parsed into trees here. This phase covers the same clone invariants with
-// hand-built trees below.
+// `parsetestutil.ParseTypeScript`, which depends on the parser. Because the
+// `ast` crate cannot depend on `tsgo_parser` (that would invert the dependency
+// edge), the parser-backed port of that table lives in
+// `internal/parser/deepclone_test.rs` (it covers the node kinds the parser
+// currently produces and grows as more productions are ported). The hand-built
+// trees below keep `ast`-local coverage of the same clone invariants
+// (distinct ids + matching child counts, synthetic vs reparse locations).
 
 // BFS the original/clone in lockstep, asserting every pair is distinct and has
 // the same number of children — the invariant from the Go sanity check.

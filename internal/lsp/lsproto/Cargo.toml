@@ -1,0 +1,15 @@
+[package]
+name = "tsgo_lsproto"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150", features = ["raw_value"] }
+tsgo_bundled = { path = "../../bundled" }
+tsgo_json = { path = "../../json" }
+tsgo_jsonrpc = { path = "../../jsonrpc" }
+tsgo_tspath = { path = "../../tspath" }

@@ -38,32 +38,32 @@
 
 ## 依赖白名单（本包新增的 crate）
 
-- `dashmap`（并发 map/set）——PORTING §10 白名单。无其它新增。
+- **无新增 crate 依赖**。实现期改用 `tsgo_collections::SyncMap`/`SyncSet`（它们正是 Go `collections.SyncMap`/`SyncSet` 的 1:1 端口，内部已基于 `dashmap`），比直接引 `dashmap` 更贴合 Go 源（`collections.SyncMap[...]` → `tsgo_collections::SyncMap<...>`），且 `tsgo_collections` 本就是已声明的依赖。
 
 ## 实现 TODO（逐文件 / 逐函数，可勾选）
 
 ### `lib.rs`（Go: `knownsymlinks.go`）
 
-- [ ] `pub struct KnownDirectoryLink { real: String, real_path: Path }`（两字段均带尾随分隔符）　`// Go: knownsymlinks.go:KnownDirectoryLink`
-- [ ] `pub struct KnownSymlinks { 4 个 DashMap/DashSet + cwd + use_case_sensitive_file_names }`　`// Go: knownsymlinks.go:KnownSymlinks`
-- [ ] `pub fn new_known_symlink(current_directory, use_case_sensitive_file_names) -> KnownSymlinks`　`// Go: knownsymlinks.go:NewKnownSymlink`
-- [ ] `pub fn has_directory(&self, symlink_path: Path) -> bool`（key 先 `ensure_trailing_directory_separator`）　`// Go: knownsymlinks.go:HasDirectory`
-- [ ] `pub fn directories(&self) -> &DashMap<Path, Option<KnownDirectoryLink>>`　`// Go: knownsymlinks.go:Directories`
-- [ ] `pub fn directories_by_realpath(&self) -> &DashMap<...>`　`// Go: knownsymlinks.go:DirectoriesByRealpath`
-- [ ] `pub fn files(&self) -> &DashMap<Path, String>`　`// Go: knownsymlinks.go:Files`
-- [ ] `pub fn files_by_realpath(&self) -> &DashMap<...>`　`// Go: knownsymlinks.go:FilesByRealpath`
-- [ ] `pub fn set_directory(&self, symlink, symlink_path, real_directory: Option<KnownDirectoryLink>)`：仅当 `real_directory` 有值且 `directories` 尚无该 key 时，往 `directories_by_realpath[real_path]` set 加 symlink；最后 `directories.insert(symlink_path, real_directory)`　`// Go: knownsymlinks.go:SetDirectory`
-- [ ] `pub fn set_file(&self, symlink, symlink_path, realpath)`：尚无该 key 时往 `files_by_realpath[to_path(realpath)]` 加 symlink；最后 `files.insert`　`// Go: knownsymlinks.go:SetFile`
-- [ ] `pub fn set_symlinks_from_resolutions(&self, for_each_resolved_module, for_each_resolved_type_reference_directive)`：两个回调里各 `process_resolution(original_path, resolved_file_name)`　`// Go: knownsymlinks.go:SetSymlinksFromResolutions`
-- [ ] `pub fn process_resolution(&self, original_path, resolved_file_name)`：空串短路；`set_file`；`guess_directory_symlink` 命中且非 ignored path → `set_directory`（real/real_path 均加尾随分隔符）　`// Go: knownsymlinks.go:ProcessResolution`
-- [ ] `fn guess_directory_symlink(&self, a, b, cwd) -> (String, String)`：把 a/b 拆成 path components，从尾部往前比较——只要两侧倒数第二段都不是 `node_modules`/`@scope` 且最后一段规范名相等就同步弹出；最终若发生过弹出则返回两侧公共目录，否则 `("","")`　`// Go: knownsymlinks.go:guessDirectorySymlink`
-- [ ] `fn is_node_modules_or_scoped_package_directory(&self, s) -> bool`：`s != "" && (canonical(s)=="node_modules" || s.starts_with('@'))`　`// Go: knownsymlinks.go:isNodeModulesOrScopedPackageDirectory`
+- [x] `pub struct KnownDirectoryLink { real: String, real_path: Path }`（两字段均带尾随分隔符）　`// Go: knownsymlinks.go:KnownDirectoryLink`
+- [x] `pub struct KnownSymlinks { 4 个 SyncMap/SyncSet + cwd + use_case_sensitive_file_names }`　`// Go: knownsymlinks.go:KnownSymlinks`
+- [x] `pub fn new_known_symlink(current_directory, use_case_sensitive_file_names) -> KnownSymlinks`　`// Go: knownsymlinks.go:NewKnownSymlink`
+- [x] `pub fn has_directory(&self, symlink_path: Path) -> bool`（key 先 `ensure_trailing_directory_separator`）　`// Go: knownsymlinks.go:HasDirectory`
+- [x] `pub fn directories(&self) -> &SyncMap<Path, Option<KnownDirectoryLink>>`　`// Go: knownsymlinks.go:Directories`
+- [x] `pub fn directories_by_realpath(&self) -> &SyncMap<Path, Arc<SyncSet<String>>>`　`// Go: knownsymlinks.go:DirectoriesByRealpath`
+- [x] `pub fn files(&self) -> &SyncMap<Path, String>`　`// Go: knownsymlinks.go:Files`
+- [x] `pub fn files_by_realpath(&self) -> &SyncMap<Path, Arc<SyncSet<String>>>`　`// Go: knownsymlinks.go:FilesByRealpath`
+- [x] `pub fn set_directory(&self, symlink, symlink_path, real_directory: Option<KnownDirectoryLink>)`：仅当 `real_directory` 有值且 `directories` 尚无该 key 时，往 `directories_by_realpath[real_path]` set 加 symlink；最后 `directories.store(symlink_path, real_directory)`　`// Go: knownsymlinks.go:SetDirectory`
+- [x] `pub fn set_file(&self, symlink, symlink_path, realpath)`：尚无该 key 时往 `files_by_realpath[to_path(realpath)]` 加 symlink；最后 `files.store`　`// Go: knownsymlinks.go:SetFile`
+- [x] `pub fn set_symlinks_from_resolutions(&self, for_each_resolved_module, for_each_resolved_type_reference_directive)`：两个回调里各 `process_resolution(original_path, resolved_file_name)`　`// Go: knownsymlinks.go:SetSymlinksFromResolutions`
+- [x] `pub fn process_resolution(&self, original_path, resolved_file_name)`：空串短路；`set_file`；`guess_directory_symlink` 命中且非 ignored path → `set_directory`（real/real_path 均加尾随分隔符）　`// Go: knownsymlinks.go:ProcessResolution`
+- [x] `fn guess_directory_symlink(&self, a, b, cwd) -> (String, String)`：把 a/b 拆成 path components，从尾部往前比较——只要两侧倒数第二段都不是 `node_modules`/`@scope` 且最后一段规范名相等就同步弹出；最终若发生过弹出则返回两侧公共目录，否则 `("","")`　`// Go: knownsymlinks.go:guessDirectorySymlink`
+- [x] `fn is_node_modules_or_scoped_package_directory(&self, s) -> bool`：`s != "" && (canonical(s)=="node_modules" || s.starts_with('@'))`　`// Go: knownsymlinks.go:isNodeModulesOrScopedPackageDirectory`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/symlinks/Cargo.toml`（`name = "tsgo_symlinks"` + path deps：`tsgo_ast` `tsgo_collections` `tsgo_core` `tsgo_module` `tsgo_tspath`）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` re-export `KnownSymlinks` / `KnownDirectoryLink` / `new_known_symlink`
+- [x] `internal/symlinks/Cargo.toml`（`name = "tsgo_symlinks"` + path deps：`tsgo_ast` `tsgo_collections` `tsgo_core` `tsgo_module` `tsgo_tspath`）— 已 scaffold；无新增 crate 依赖（用 `tsgo_collections::SyncMap`/`SyncSet` 取代 `dashmap`）
+- [x] 根 `Cargo.toml` workspace members 追加（已 scaffold）
+- [x] `lib.rs` 直接以 crate 根 `pub` 暴露 `KnownSymlinks` / `KnownDirectoryLink` / `new_known_symlink`（无需额外 `pub use`）
 
 ## TDD 推进顺序（tracer bullet → 增量）
 
@@ -76,10 +76,13 @@
 
 ## 与 Go 的已知偏离（divergence）
 
-- `SyncMap`/`SyncSet` → `DashMap`/`DashSet`。
-- `*KnownDirectoryLink` 可空 → `Option<KnownDirectoryLink>`。
-- **`SetDirectory` 的 check-then-act 原子性**：Go 用 `directories.Load` 守卫再 `Store`，本身在并发下也非严格原子（与 realpath set 登记之间有窗口）；Rust 用 `DashMap` 时同样保持 best-effort 语义（不强行加全局锁），与 Go 行为一致。rustdoc 标注。
-- 测试 `TestKnownSymlinksThreadSafety` 用 goroutine + channel；Rust 用 `std::thread::scope`（PORTING §6）。
+- Go `collections.SyncMap`/`SyncSet` → `tsgo_collections::SyncMap`/`SyncSet`（**而非**直接 `dashmap::DashMap`/`DashSet`；前者是 Go 类型的 1:1 端口、内部即 `dashmap`，映射更直）。
+- Go `*collections.SyncSet[string]`（指针，多 key 可共享同一 set）→ `Arc<SyncSet<String>>`（`Arc` 克隆共享内层 set，对应 Go 指针语义；`SyncSet` 自身非 `Clone`）。
+- `*KnownDirectoryLink` 可空 → `SyncMap` 值取 `Option<KnownDirectoryLink>`（`None` 表示 Go 的 nil，即"已知不是 symlink 目录"）。
+- `NewKnownSymlink` 返回 `*KnownSymlinks`（堆指针）→ `new_known_symlink` 返回 `KnownSymlinks`（值）。
+- `SetSymlinksFromResolutions` 的双层高阶回调：Go 的 `func(callback, file)` → Rust `FnOnce(&mut dyn FnMut(&ResolvedModule, &str, ResolutionMode, Path), Option<&SourceFileData>)`；`file` 始终为 `None`（与 Go 传 `nil` 一致），`ast.SourceFile` 在 arena 端口里对应 `tsgo_ast::SourceFileData`。
+- **`SetDirectory` 的 check-then-act 原子性**：Go 用 `directories.Load` 守卫再 `Store`，本身在并发下也非严格原子（与 realpath set 登记之间有窗口）；Rust 同样保持 best-effort 语义（不强行加全局锁），与 Go 行为一致。
+- 测试 `TestKnownSymlinksThreadSafety` 用 goroutine + channel；Rust 用 `std::thread::scope`（PORTING §6）。该测试验证既有方法的并发安全（emergent property），无新增实现，故直接绿。
 
 ## 转交 / 推迟（DEFER）
 

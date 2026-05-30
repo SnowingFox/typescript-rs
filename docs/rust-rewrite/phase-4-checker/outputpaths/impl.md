@@ -44,33 +44,33 @@ emit 阶段在真正打印代码之前，必须先决定"产物写到哪里"。`
 
 ### `lib.rs`（Go: `internal/outputpaths/outputpaths.go`）
 
-- [ ] `pub trait OutputPathsHost` — `common_source_directory()/get_current_directory()/use_case_sensitive_file_names()`　`// Go: outputpaths.go:OutputPathsHost`
-- [ ] `pub struct OutputPaths` + 4 getter `pub fn js_file_path/source_map_file_path/declaration_file_path/declaration_map_path(&self) -> &str`　`// Go: outputpaths.go:OutputPaths`
-- [ ] `pub fn get_output_paths_for(source_file, options, host, force_dts_emit) -> OutputPaths` — 组装四类路径；处理 json 文件同位置跳过、`EmitDeclarationOnly`、`forceDtsEmit`　`// Go: outputpaths.go:GetOutputPathsFor`
-- [ ] `pub fn for_each_emitted_file(host, options, action, source_files, force_dts_emit) -> bool` — 遍历直到 action 返回 true　`// Go: outputpaths.go:ForEachEmittedFile`
-- [ ] `pub fn get_output_js_file_name(input, options, host) -> String` — `EmitDeclarationOnly` 返回空；json 同位置返回空　`// Go: outputpaths.go:GetOutputJSFileName`
-- [ ] `pub fn get_output_js_file_name_worker(input, options, host) -> String`　`// Go: outputpaths.go:GetOutputJSFileNameWorker`
-- [ ] `pub fn get_output_declaration_file_name_worker(input, options, host) -> String` — declarationDir/outDir 选择 + `GetDeclarationEmitExtensionForPath`　`// Go: outputpaths.go:GetOutputDeclarationFileNameWorker`
-- [ ] `pub fn get_output_extension(file_name, jsx) -> &'static str` — json/jsx/mjs/cjs/js 分派（match）　`// Go: outputpaths.go:GetOutputExtension`
-- [ ] `pub fn get_declaration_emit_output_file_path(file, options, host) -> String`　`// Go: outputpaths.go:GetDeclarationEmitOutputFilePath`
-- [ ] `pub fn get_source_file_path_in_new_dir(file_name, new_dir, cur_dir, common_src_dir, case_sensitive) -> String` — 用 `ContainsPath` 判前缀　`// Go: outputpaths.go:GetSourceFilePathInNewDir`
-- [ ] `pub fn get_source_file_path_in_new_dir_worker(...) -> String` — 用 `HasPrefix(canonFile, commonDir)` 判前缀（注意与上一函数判定方式不同，见偏离）　`// Go: outputpaths.go:GetSourceFilePathInNewDirWorker`
-- [ ] `fn get_output_path_without_changing_extension(input, output_dir, host) -> String`（私有）　`// Go: outputpaths.go:getOutputPathWithoutChangingExtension`
-- [ ] `fn get_own_emit_output_file_path(file_name, options, host, extension) -> String`（私有）　`// Go: outputpaths.go:getOwnEmitOutputFilePath`
-- [ ] `pub fn get_source_map_file_path(js_file_path, options) -> String` — `SourceMap && !InlineSourceMap` 才返回 `path + ".map"`　`// Go: outputpaths.go:GetSourceMapFilePath`
-- [ ] `pub fn get_build_info_file_name(options, opts: ComparePathsOptions) -> String` — incremental/build 判定 + TsBuildInfoFile/ConfigFilePath/outDir/rootDir 组合　`// Go: outputpaths.go:GetBuildInfoFileName`
+- [x] `pub trait OutputPathsHost` — `common_source_directory()/get_current_directory()/use_case_sensitive_file_names()`　`// Go: outputpaths.go:OutputPathsHost`
+- [x] `pub struct OutputPaths` + 4 getter `pub fn js_file_path/source_map_file_path/declaration_file_path/declaration_map_path(&self) -> &str`　`// Go: outputpaths.go:OutputPaths`
+- [x] `pub fn get_output_paths_for(source_file, options, host, force_dts_emit) -> OutputPaths` — 组装四类路径；处理 json 文件同位置跳过、`EmitDeclarationOnly`、`forceDtsEmit`　`// Go: outputpaths.go:GetOutputPathsFor`
+- [x] `pub fn for_each_emitted_file(host, options, action, source_files, force_dts_emit) -> bool` — 遍历直到 action 返回 true　`// Go: outputpaths.go:ForEachEmittedFile`
+- [x] `pub fn get_output_js_file_name(input, options, host) -> String` — `EmitDeclarationOnly` 返回空；json 同位置返回空　`// Go: outputpaths.go:GetOutputJSFileName`
+- [x] `pub fn get_output_js_file_name_worker(input, options, host) -> String`　`// Go: outputpaths.go:GetOutputJSFileNameWorker`
+- [x] `pub fn get_output_declaration_file_name_worker(input, options, host) -> String` — declarationDir/outDir 选择 + `GetDeclarationEmitExtensionForPath`　`// Go: outputpaths.go:GetOutputDeclarationFileNameWorker`
+- [x] `pub fn get_output_extension(file_name, jsx) -> &'static str` — json/jsx/mjs/cjs/js 分派（match）　`// Go: outputpaths.go:GetOutputExtension`
+- [x] `pub fn get_declaration_emit_output_file_path(file, options, host) -> String`　`// Go: outputpaths.go:GetDeclarationEmitOutputFilePath`
+- [x] `pub fn get_source_file_path_in_new_dir(file_name, new_dir, cur_dir, common_src_dir, case_sensitive) -> String` — 用 `ContainsPath` 判前缀　`// Go: outputpaths.go:GetSourceFilePathInNewDir`
+- [x] `pub fn get_source_file_path_in_new_dir_worker(...) -> String` — 用 `HasPrefix(canonFile, commonDir)` 判前缀（注意与上一函数判定方式不同，见偏离）　`// Go: outputpaths.go:GetSourceFilePathInNewDirWorker`
+- [x] `fn get_output_path_without_changing_extension(input, output_dir, host) -> String`（私有）　`// Go: outputpaths.go:getOutputPathWithoutChangingExtension`
+- [x] `fn get_own_emit_output_file_path(file_name, options, host, extension) -> String`（私有）　`// Go: outputpaths.go:getOwnEmitOutputFilePath`
+- [x] `pub fn get_source_map_file_path(js_file_path, options) -> String` — `SourceMap && !InlineSourceMap` 才返回 `path + ".map"`　`// Go: outputpaths.go:GetSourceMapFilePath`
+- [x] `pub fn get_build_info_file_name(options, opts: ComparePathsOptions) -> String` — incremental/build 判定 + TsBuildInfoFile/ConfigFilePath/outDir/rootDir 组合　`// Go: outputpaths.go:GetBuildInfoFileName`
 
 ### `commonsourcedirectory.rs`（Go: `internal/outputpaths/commonsourcedirectory.go`）
 
-- [ ] `fn compute_common_source_directory_of_filenames(file_names, cur_dir, case_sensitive) -> String`（私有）— 逐文件取规范化路径分量、求公共前缀；全 `.d.ts` 时回退 `currentDirectory`　`// Go: commonsourcedirectory.go:computeCommonSourceDirectoryOfFilenames`
-- [ ] `pub fn get_computed_common_source_directory(emitted_files, cur_dir, case_sensitive) -> String` — 上者 + `EnsureTrailingDirectorySeparator`　`// Go: commonsourcedirectory.go:GetComputedCommonSourceDirectory`
-- [ ] `pub fn get_common_source_directory(options, files: impl Fn()->Vec<String>, cur_dir, case_sensitive, check_belong: Option<...>) -> String` — rootDir / configFilePath 目录 / 计算 三分支 + 尾分隔符　`// Go: commonsourcedirectory.go:GetCommonSourceDirectory`
+- [x] `fn compute_common_source_directory_of_filenames(file_names, cur_dir, case_sensitive) -> String`（私有）— 逐文件取规范化路径分量、求公共前缀；全 `.d.ts` 时回退 `currentDirectory`　`// Go: commonsourcedirectory.go:computeCommonSourceDirectoryOfFilenames`
+- [x] `pub fn get_computed_common_source_directory(emitted_files, cur_dir, case_sensitive) -> String` — 上者 + `EnsureTrailingDirectorySeparator`　`// Go: commonsourcedirectory.go:GetComputedCommonSourceDirectory`
+- [x] `pub fn get_common_source_directory(options, files: impl Fn()->Vec<String>, cur_dir, case_sensitive, check_belong: Option<...>) -> String` — rootDir / configFilePath 目录 / 计算 三分支 + 尾分隔符　`// Go: commonsourcedirectory.go:GetCommonSourceDirectory`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/outputpaths/Cargo.toml`（`name = "tsgo_outputpaths"` + path deps：`tsgo_ast` `tsgo_core` `tsgo_tspath`）
-- [ ] 根 `Cargo.toml` workspace members 追加本 crate
-- [ ] `lib.rs` 声明 `mod commonsourcedirectory;` + `pub use`
+- [x] `internal/outputpaths/Cargo.toml`（`name = "tsgo_outputpaths"` + path deps：`tsgo_ast` `tsgo_core` `tsgo_tspath`）
+- [x] 根 `Cargo.toml` workspace members 追加本 crate
+- [x] `lib.rs` 声明 `mod commonsourcedirectory;` + `pub use`
 
 ## TDD 推进顺序（tracer bullet → 增量）
 
@@ -83,8 +83,9 @@ emit 阶段在真正打印代码之前，必须先决定"产物写到哪里"。`
 
 ## 与 Go 的已知偏离（divergence）
 
-- **两套前缀判定并存**：`GetSourceFilePathInNewDir` 用 `tspath.ContainsPath`（带 case 选项的分量比较），而 `GetSourceFilePathInNewDirWorker` 用 `strings.HasPrefix(canonFile, commonDir)`（裸字符串前缀）。这是 Go 上游历史遗留的两个实现，**必须 1:1 保留两者各自的判定方式**，不要统一，否则边界路径会偏。
-- `outputDir *string` 的"nil vs 空串"语义 → `Option<&str>`，注意 Go 里 `len(options.OutDir) > 0` 的判断要对齐（空串当作未设置）。
+- **两套前缀判定并存**：`GetSourceFilePathInNewDir` 用 `tspath.ContainsPath`（带 case 选项的分量比较），而 `GetSourceFilePathInNewDirWorker` 用 `strings.HasPrefix(canonFile, commonDir)`（裸字符串前缀）。这是 Go 上游历史遗留的两个实现，**必须 1:1 保留两者各自的判定方式**，不要统一，否则边界路径会偏。**已落地并由专门用例钉死**：`source_file_path_in_new_dir_uses_contains_path` 与 `..._worker_uses_has_prefix` 用**同一组输入**（`/src2/a.ts`, common=`/src`）断言**不同结果**（`/src2/a.ts` vs `/out/2/a.ts`），杜绝被悄悄统一。
+- `outputDir *string` 的"nil vs 空串"语义 → `Option<&str>`，注意 Go 里 `len(options.OutDir) > 0` 的判断要对齐（空串当作未设置）。已落地：`get_declaration_emit_output_file_path` 的 `output_dir: Option<&str>` 区分 declarationDir/outDir/None。
+- **`SourceFileLike` 抽象（本轮新增的受控偏离）**：Go 里 `GetOutputPathsFor`/`ForEachEmittedFile` 直接吃 `*ast.SourceFile`，且调 `ast.IsJsonSourceFile`。但 `tsgo_ast` 目前**未移植** `SourceFile`（只有代表性节点子集），故本包定义 `pub trait SourceFileLike { file_name(); script_kind(); }`，两函数泛型化 `&impl SourceFileLike`；`is_json_source_file` 作私有 helper 本地移植（`script_kind() == ScriptKind::Json`，与 `ast.IsJsonSourceFile` 等价）。`tsgo_ast` 后续 ship `SourceFile` 后，为其 `impl SourceFileLike` 即可，调用点不变。该 trait 带 `// DEFER(phase-4)` + `// blocked-by:` 说明（见 `lib.rs`）。`tsgo_ast` 依赖仍保留于 `Cargo.toml`（镜像 Go import 边、为回填铺路）。
 
 ## 转交 / 推迟（DEFER）
 

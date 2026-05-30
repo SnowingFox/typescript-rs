@@ -1,0 +1,17 @@
+[package]
+name = "tsgo_packagejson"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tsgo_collections = { path = "../collections" }
+tsgo_core = { path = "../core" }
+tsgo_diagnostics = { path = "../diagnostics" }
+tsgo_json = { path = "../json" }
+tsgo_semver = { path = "../semver" }
+tsgo_tspath = { path = "../tspath" }

@@ -151,19 +151,19 @@ Go 的 `dirty.Map`/`Box`/`SyncMap` 实现"基于 base 不可变 map 的写时复
 
 ### `dirty/`（先行，是快照增量底座）
 
-- [ ] `interfaces.rs`：`Cloneable` / `Value` trait　`// Go: dirty/interfaces.go`
-- [ ] `entry.rs`：`mapEntry`（key/original/value/dirty/delete + getters）　`// Go: dirty/entry.go`
-- [ ] `box.rs`：`Box::{new,value,original,dirty,set,change,change_if,delete,locked,finalize}`　`// Go: dirty/box.go:Box.*`
-- [ ] `map.rs`：`Map::{new,get,add,change,try_delete,delete,range,clear,finalize}` + `MapEntry::{change,replace,change_if,delete,locked}`　`// Go: dirty/map.go:*`
-- [ ] `syncmap.rs`：`SyncMap::{new,load,load_or_store,delete,range,finalize,finalize_with}` + `SyncMapEntry`（含 `proxy_for` 路由：`value/dirty/change/change_if/delete/delete_if/locked`）+ `FinalizationHooks`　`// Go: dirty/syncmap.go:*`（**并发**）
-- [ ] `mapbuilder.rs`：`MapBuilder::{new,set,delete,clear,has,build}`　`// Go: dirty/mapbuilder.go:*`
-- [ ] `cloneablemap.rs` / `util.rs`：`CloneableMap`/`CloneMapIfNil`　`// Go: dirty/cloneablemap.go / util.go`
+- [x] `interfaces.rs`：`Cloneable` / `Value` trait　`// Go: dirty/interfaces.go`
+- [x] `entry.rs`：`mapEntry`（key/original/value/dirty/delete + getters）　`// Go: dirty/entry.go`
+- [x] `box.rs`：`Box::{new,value,original,dirty,set,change,change_if,delete,locked,finalize}`　`// Go: dirty/box.go:Box.*`
+- [x] `map.rs`（落地为 `lib.rs`，crate 根）：`Map::{new,get,add,change,try_delete,delete,range,clear,finalize}` + `MapEntry::{change,replace,change_if,delete,locked}`　`// Go: dirty/map.go:*`
+- [x] `syncmap.rs`：`SyncMap::{new,load,load_or_store,delete,range,finalize,finalize_with}` + `SyncMapEntry`（含 `proxy_for` 路由：`value/dirty/change/change_if/delete/delete_if/locked`）+ `FinalizationHooks`　`// Go: dirty/syncmap.go:*`（**并发**）
+- [x] `mapbuilder.rs`：`MapBuilder::{new,set,delete,clear,has,build}`　`// Go: dirty/mapbuilder.go:*`
+- [x] `cloneablemap.rs` / `util.rs`：`CloneableMap`/`CloneMapIfNil`　`// Go: dirty/cloneablemap.go / util.go`
 
 ### `logging/`
 
-- [ ] `logger.rs`：`Logger` trait（Error/Errorf/Warn/Warnf/Info/Infof/Log/Logf/Verbose/IsVerbose/SetVerbose）+ 时间戳 logger（nil-safe）+ `new_logger`/`format_time`（`[15:04:05.000]`）　`// Go: logging/logger.go:*`
-- [ ] `logtree.rs`：`LogTree::{new,log,logf,fork,embed,string,...}`（root 累积 count/stringLength，递归缩进输出，`======== name ========` 头）　`// Go: logging/logtree.go:*`
-- [ ] `logcollector.rs`：`LogCollector`/`new_test_logger`（固定时间 `Unix(1349085672,0)`）　`// Go: logging/logcollector.go:*`
+- [x] `logger.rs`（→ `lib.rs`，crate 根）：`Logger` trait（Error/Errorf/Warn/Warnf/Info/Infof/Log/Logf/Verbose/IsVerbose/SetVerbose）+ 时间戳 logger + `new_logger`/`format_time`（`[HH:MM:SS.mmm]`，UTC）　`// Go: logging/logger.go:*`
+- [x] `logtree.rs`：`LogTree::{new,log,logf,fork,embed,string,...}`（root 累积 count/stringLength，递归缩进输出，`======== name ========` 头）　`// Go: logging/logtree.go:*`
+- [x] `logcollector.rs`：`LogCollector`/`new_test_logger`（固定时间 `Unix(1349085672,0)`）　`// Go: logging/logcollector.go:*`
 
 ### `background/`
 

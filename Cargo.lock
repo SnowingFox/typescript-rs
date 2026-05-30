@@ -30,6 +30,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -573,6 +579,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_astnav"
+version = "0.0.0"
+dependencies = [
+ "tsgo_ast",
+ "tsgo_core",
+ "tsgo_parser",
+ "tsgo_scanner",
+]
+
+[[package]]
+name = "tsgo_binder"
+version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "rustc-hash",
+ "tsgo_ast",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_debug",
+ "tsgo_diagnostics",
+ "tsgo_parser",
+ "tsgo_scanner",
+ "tsgo_tspath",
+]
+
+[[package]]
 name = "tsgo_bundled"
 version = "0.0.0"
 dependencies = [
@@ -580,6 +612,34 @@ dependencies = [
  "tsgo_repo",
  "tsgo_tspath",
  "tsgo_vfs",
+]
+
+[[package]]
+name = "tsgo_checker"
+version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "rustc-hash",
+ "tsgo_ast",
+ "tsgo_astnav",
+ "tsgo_binder",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_debug",
+ "tsgo_diagnostics",
+ "tsgo_evaluator",
+ "tsgo_jsnum",
+ "tsgo_module",
+ "tsgo_modulespecifiers",
+ "tsgo_nodebuilder",
+ "tsgo_parser",
+ "tsgo_printer",
+ "tsgo_pseudochecker",
+ "tsgo_scanner",
+ "tsgo_stringutil",
+ "tsgo_tracing",
+ "tsgo_tsoptions",
+ "tsgo_tspath",
 ]
 
 [[package]]
@@ -627,6 +687,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_diagnosticwriter"
+version = "0.0.0"
+dependencies = [
+ "tsgo_core",
+ "tsgo_diagnostics",
+ "tsgo_locale",
+ "tsgo_scanner",
+ "tsgo_tspath",
+]
+
+[[package]]
+name = "tsgo_evaluator"
+version = "0.0.0"
+dependencies = [
+ "tsgo_ast",
+ "tsgo_core",
+ "tsgo_jsnum",
+]
+
+[[package]]
 name = "tsgo_glob"
 version = "0.0.0"
 dependencies = [
@@ -670,6 +750,100 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_lsproto"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tsgo_bundled",
+ "tsgo_json",
+ "tsgo_jsonrpc",
+ "tsgo_tspath",
+]
+
+[[package]]
+name = "tsgo_module"
+version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "rustc-hash",
+ "tsgo_ast",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_diagnostics",
+ "tsgo_packagejson",
+ "tsgo_semver",
+ "tsgo_stringutil",
+ "tsgo_tspath",
+ "tsgo_vfs",
+]
+
+[[package]]
+name = "tsgo_modulespecifiers"
+version = "0.0.0"
+dependencies = [
+ "regex",
+ "tsgo_ast",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_debug",
+ "tsgo_json",
+ "tsgo_module",
+ "tsgo_outputpaths",
+ "tsgo_packagejson",
+ "tsgo_stringutil",
+ "tsgo_symlinks",
+ "tsgo_tsoptions",
+ "tsgo_tspath",
+]
+
+[[package]]
+name = "tsgo_nodebuilder"
+version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "tsgo_ast",
+]
+
+[[package]]
+name = "tsgo_outputpaths"
+version = "0.0.0"
+dependencies = [
+ "tsgo_ast",
+ "tsgo_core",
+ "tsgo_tspath",
+]
+
+[[package]]
+name = "tsgo_packagejson"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_diagnostics",
+ "tsgo_json",
+ "tsgo_semver",
+ "tsgo_tspath",
+]
+
+[[package]]
+name = "tsgo_parser"
+version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "tsgo_ast",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_debug",
+ "tsgo_diagnostics",
+ "tsgo_scanner",
+ "tsgo_stringutil",
+ "tsgo_tspath",
+]
+
+[[package]]
 name = "tsgo_pprof"
 version = "0.0.0"
 dependencies = [
@@ -677,8 +851,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_printer"
+version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "rustc-hash",
+ "tsgo_ast",
+ "tsgo_binder",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_debug",
+ "tsgo_evaluator",
+ "tsgo_nodebuilder",
+ "tsgo_parser",
+ "tsgo_scanner",
+ "tsgo_sourcemap",
+ "tsgo_stringutil",
+ "tsgo_tsoptions",
+ "tsgo_tspath",
+]
+
+[[package]]
+name = "tsgo_project_dirty"
+version = "0.0.0"
+dependencies = [
+ "tsgo_collections",
+]
+
+[[package]]
+name = "tsgo_project_logging"
+version = "0.0.0"
+
+[[package]]
+name = "tsgo_pseudochecker"
+version = "0.0.0"
+dependencies = [
+ "tsgo_ast",
+]
+
+[[package]]
 name = "tsgo_repo"
 version = "0.0.0"
+
+[[package]]
+name = "tsgo_scanner"
+version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "rustc-hash",
+ "tsgo_ast",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_debug",
+ "tsgo_diagnostics",
+ "tsgo_jsnum",
+ "tsgo_stringutil",
+]
 
 [[package]]
 name = "tsgo_semver"
@@ -689,10 +917,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_sourcemap"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "rustc-hash",
+ "serde",
+ "tsgo_core",
+ "tsgo_debug",
+ "tsgo_json",
+ "tsgo_scanner",
+ "tsgo_stringutil",
+ "tsgo_tspath",
+]
+
+[[package]]
 name = "tsgo_stringutil"
 version = "0.0.0"
 dependencies = [
  "regex",
+]
+
+[[package]]
+name = "tsgo_symlinks"
+version = "0.0.0"
+dependencies = [
+ "tsgo_ast",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_module",
+ "tsgo_tspath",
+]
+
+[[package]]
+name = "tsgo_tracing"
+version = "0.0.0"
+dependencies = [
+ "rustc-hash",
+ "serde",
+ "tsgo_ast",
+ "tsgo_json",
+ "tsgo_scanner",
+ "tsgo_tspath",
+ "tsgo_vfs",
+ "xxh3",
+]
+
+[[package]]
+name = "tsgo_tsoptions"
+version = "0.0.0"
+dependencies = [
+ "tsgo_ast",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_debug",
+ "tsgo_diagnostics",
+ "tsgo_glob",
+ "tsgo_jsnum",
+ "tsgo_locale",
+ "tsgo_module",
+ "tsgo_outputpaths",
+ "tsgo_parser",
+ "tsgo_scanner",
+ "tsgo_stringutil",
+ "tsgo_tspath",
+ "tsgo_vfs",
 ]
 
 [[package]]
@@ -902,6 +1191,12 @@ dependencies = [
  "unicode-xid",
  "wasmparser",
 ]
+
+[[package]]
+name = "xxh3"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a291e51a49d327a9e7edbf9db6e320fdd1aa7ae06afcddc252f3e041e5aed01"
 
 [[package]]
 name = "zerofrom"

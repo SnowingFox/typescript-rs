@@ -23,6 +23,8 @@
 | 3 | crate 布局 | 仓库根一个 **Cargo workspace**；每个 `internal/<pkg>` = 一个 crate，名 `tsgo_<pkg>`。 |
 | 4 | 分阶段 | 按真实依赖 DAG 的 **10 个 phase**（见 README）。每个包/子阶段一个目录，含 `impl.md` + `tests.md`。 |
 | 5 | 注释 | 所有公开项必须有 rustdoc `///`，含 `# Examples`（input/output）与 **Side effects** 说明。 |
+| 5b | 单测覆盖 | **每个函数都要有单测**（即使 Go 没测）；Go 现有 `*_test.go` 全量移植一条不少。详见 §8.5/§8.6。 |
+| 5c | 超大文件 | Go 巨无霸文件（如 `checker.go`）拆成子目录多文件（如 `checker/core/`），各带单测。详见 §2「超大文件拆分规则」。 |
 | 6 | 测试范围 | 早期按包把 `*_test.go` 单测 1:1 移植作 gate；`fourslash`(4250) + `testdata`(294MB) 推迟到 **P10** 做端到端 parity。 |
 | 7 | AST 所有权 | **arena + 类型化索引（`NodeId`）**；零 `unsafe`；`Parent`/子节点都用索引。 |
 | 8 | 并发 | **真并发**（要性能收益）：数据并行用 `rayon`，生产者/消费者用 `std::thread` scoped + channel；输出保持确定性以便断言。CPU-bound，不引入 tokio。 |
@@ -67,6 +69,18 @@ mod tests;
 
 - `<file>_test.rs` 以 `use super::*;` 开头，即可像 Go 同包测试一样访问 `<file>.rs` 的私有项。
 - `#[path]` 相对当前文件目录解析，故测试文件与实现文件**同目录并排**，与 `.go`/`_test.go` 布局一致。
+
+### 超大文件拆分规则（mega-file decomposition）
+
+Go 里有若干"巨无霸"单文件（最典型 `internal/checker/checker.go` 数万行；也包括 `internal/checker/*.go` 的几个大文件、`ls`/`parser` 的大文件）。**1:1 同名映射对这种文件不适用**——一个几万行的 `.rs` 既不可维护、也无法 TDD、还会拖垮编译。规则：
+
+- **阈值**：单个 Go 文件 **> ~1500 行**（或语义上明显多职责）时，**拆成一个子目录模块**，按职责分多个内聚 `.rs`，每个 `.rs` 配兄弟 `<stem>_test.rs`。
+- **目录约定**：在该包下开一个子目录承载拆分件。`checker.go` → **`internal/checker/core/`** 子目录（用户指定），里面按子系统分文件，例如：
+  `core/mod.rs`（`Checker` 结构 + 入口）、`core/relations.rs`（关系/子类型）、`core/inference.rs`（推断）、`core/instantiation.rs`（实例化）、`core/flow.rs`（控制流分析）、`core/types.rs`（类型构造）、`core/symbols.rs`（符号解析）… 每个都带 `*_test.rs`。
+- **映射可追溯**：拆分后，在该包 `impl.md` 写一张"Go 源文件 → Rust 子文件"对照表，每个 Rust 函数仍带 `// Go: internal/<pkg>/<file>.go:<Func>` 锚点（锚到**原** Go 文件/函数，不因拆分而丢失来源）。
+- **每函数单测照旧**（见 §8.6）：拆出来的每个文件里的函数都要有单测。
+- 这是**受认可的、必要的对 1:1 文件映射的偏离**，须在该包 `impl.md` 顶部"拆分说明"小节记录（哪个大文件拆成了哪些子文件、为什么）。
+- 同理适用于超大**测试**：一个 Go `xxx_test.go` 若过大，可拆成 `<sub>_test.rs` 多个，按被测子文件就近放置。
 
 ### crate 命名
 
@@ -193,10 +207,14 @@ pub fn encode_uri(input: &str) -> String { /* ... */ }
    Rust 侧对应用 `#[test]` 逐 case 或 `rstest` 参数化。
 3. **ground truth 用 Go 实测值**：expected 值取自 Go 测试里的字面量，不得用 Rust 侧推断。
 4. **`// Go:` 锚点**：每个 Rust 测试文件 / 用例标 `// Go: internal/<pkg>/<file>_test.go:<TestFunc>/<case-name>`。
-5. **0 直接单测的包**（`scanner`/`evaluator`/`json`/`glob`/`nodebuilder` 等）：
-   `tests.md` 明确写"Go 侧无直接单测；行为由 P10 conformance/fourslash parity 兜底"，
-   并**补充**少量行为级 Rust 测试（基于公开接口、用 Go 实测值或 spec 已知值）覆盖关键路径。
-6. `tests.md` 的"完成"列：`✓`=Rust 已有对应用例且 `cargo test` 通过；留空=未写/未过；`—`=推迟到指定 phase。
+5. **Go 现有单测一条都不能少**：所有 `*_test.go` 的 `func Test*` 及其表驱动子用例**必须全量移植**，不得挑选、不得省略。
+6. **🔴 每个函数都必须有单测（即使 Go 没测）**：Go 的单测覆盖很稀疏，但我们的标准更高——**每个公开函数（`pub fn`）、以及行为不平凡的私有函数，都必须至少有一条 Rust 单测**，遵循 `/tdd` 红→绿写出（不是事后补）。
+   - Go 有对应测试的函数：移植其全部子用例（见 5），expected 取 Go 字面量。
+   - **Go 没有测试的函数**：自己写行为级单测——优先用 Go 实现的确定性语义 / TS spec 已知值做 expected；纯函数给 input→output，有副作用的给可观察行为。
+   - 旧表述"0 直接单测的包只补少量 + 靠 P10 兜底"**作废**：P10 conformance/fourslash 仍是端到端兜底，但**不能替代每函数单测**。0-Go-test 的包（`scanner`/`evaluator`/`json`/`glob`/`nodebuilder`/`locale`/`pprof`/`repo` 等）同样要做到"每函数一测"。
+   - 真正无法单测的函数（如纯 I/O 编排、需完整下游栈）才允许 `—` 推迟，并在 `tests.md` 注明 `blocked-by` 与目标 phase。
+7. `tests.md` 的"完成"列：`✓`=Rust 已有对应用例且 `cargo test` 通过；留空=未写/未过；`—`=推迟到指定 phase（须带 `blocked-by`）。
+8. **收口自检**：包收口前，对照该 crate 的 `pub fn` 清单核对——每个都应能在 `<stem>_test.rs` 找到至少一条 `#[test]`（或 doctest）覆盖；缺的要么补测、要么显式 `—`+`blocked-by`。
 
 ## 9. 每个模块的 TDD 循环（执行期，文档先于代码）
 

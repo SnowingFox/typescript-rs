@@ -1,0 +1,17 @@
+[package]
+name = "tsgo_tracing"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+rustc-hash = "2.1.2"
+serde = { version = "1.0.228", features = ["derive"] }
+tsgo_ast = { path = "../ast" }
+tsgo_json = { path = "../json" }
+tsgo_scanner = { path = "../scanner" }
+tsgo_tspath = { path = "../tspath" }
+tsgo_vfs = { path = "../vfs" }
+xxh3 = "0.1.1"

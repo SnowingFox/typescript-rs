@@ -1,0 +1,11 @@
+[package]
+name = "tsgo_nodebuilder"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+bitflags = "2.11.1"
+tsgo_ast = { path = "../ast" }

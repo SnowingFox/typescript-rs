@@ -1,0 +1,14 @@
+[package]
+name = "tsgo_symlinks"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tsgo_ast = { path = "../ast" }
+tsgo_collections = { path = "../collections" }
+tsgo_core = { path = "../core" }
+tsgo_module = { path = "../module" }
+tsgo_tspath = { path = "../tspath" }

@@ -1,0 +1,26 @@
+[package]
+name = "tsgo_printer"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+bitflags = "2.11.1"
+rustc-hash = "2.1.2"
+tsgo_ast = { path = "../ast" }
+tsgo_binder = { path = "../binder" }
+tsgo_collections = { path = "../collections" }
+tsgo_core = { path = "../core" }
+tsgo_debug = { path = "../debug" }
+tsgo_evaluator = { path = "../evaluator" }
+tsgo_nodebuilder = { path = "../nodebuilder" }
+tsgo_scanner = { path = "../scanner" }
+tsgo_sourcemap = { path = "../sourcemap" }
+tsgo_stringutil = { path = "../stringutil" }
+tsgo_tsoptions = { path = "../tsoptions" }
+tsgo_tspath = { path = "../tspath" }
+
+[dev-dependencies]
+tsgo_parser = { path = "../parser" }

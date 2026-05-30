@@ -41,29 +41,29 @@
 
 ### `lib.rs`（Go: `internal/evaluator/evaluator.go`）
 
-- [ ] `pub enum EvalValue { None, Str(String), Num(jsnum::Number), Bool(bool), BigInt(jsnum::PseudoBigInt) }` — 取代 Go 的 `Value any`
-- [ ] `pub struct Result { value, is_syntactically_string, resolved_other_files, has_external_references }` — 4 字段，全 `pub`　`// Go: evaluator.go:Result`
-- [ ] `pub fn new_result(value, is_syntactically_string, resolved_other_files, has_external_references) -> Result` — 构造器　`// Go: evaluator.go:NewResult`
-- [ ] `pub trait/type Evaluator`（entity 求值回调签名 `(NodeId, Option<NodeId>) -> Result`）　`// Go: evaluator.go:Evaluator`
-- [ ] `pub fn new_evaluator(eval_entity, outer_expressions_to_skip: OuterExpressionKinds) -> impl Evaluator` — 工厂；内部递归 `eval`　`// Go: evaluator.go:NewEvaluator`
-  - [ ] `SkipOuterExpressions(expr, skip | OEKParentheses)` 预处理（复用 `tsgo_ast`）
-  - [ ] `KindPrefixUnaryExpression`：`+`（原值）/ `-`（取负）/ `~`（`BitwiseNOT`），仅当操作数求值为 `Num`
-  - [ ] `KindBinaryExpression`：先求左右；`is_syntactically_string = (left||right).is_str && op==Plus`；数字×数字时 `| & >> >>> << ^ * / + - % **` 共 12 个运算分支；否则 (str|num)+(str|num) 且 op==Plus → 字符串拼接（num 侧用 `Number::to_string`）
-  - [ ] `KindStringLiteral | KindNoSubstitutionTemplateLiteral` → `Result{ Str(text), is_syntactically_string=true, false, false }`
-  - [ ] `KindTemplateExpression` → 调 `evaluate_template_expression`
-  - [ ] `KindNumericLiteral` → `Num(jsnum::from_string(text))`
-  - [ ] `KindIdentifier` → `eval_entity(expr, location)`
-  - [ ] `KindElementAccessExpression | KindPropertyAccessExpression`：仅当 `is_entity_name_expression(expr.expression())` 才 `eval_entity`
-  - [ ] 兜底 → `Result{ None, is_syntactically_string, resolved_other_files, has_external_references }`
-- [ ] `fn evaluate_template_expression(expr, location, eval) -> Result` — head.text + 逐 span：任一 span 值为 `None` 即返回 `Result{None, is_syntactically_string=true,...}`；否则 `AnyToString(value)` 拼接 + literal.text，OR 累积两个 bool　`// Go: evaluator.go:evaluateTemplateExpression`
-- [ ] `pub fn any_to_string(v: &EvalValue) -> String` — `Str`→原样、`Num`/`BigInt`→`.to_string()`、`Bool`→`"true"/"false"`；其余 `panic!("Unhandled case in AnyToString")`　`// Go: evaluator.go:AnyToString`
-- [ ] `pub fn is_truthy(v: &EvalValue) -> bool` — `Str`→非空、`Num`→`!=0 && !is_nan`、`Bool`→原值、`BigInt`→非零；其余 `panic!`　`// Go: evaluator.go:IsTruthy`
+- [x] `pub enum EvalValue { None, Str(String), Num(jsnum::Number), Bool(bool), BigInt(jsnum::PseudoBigInt) }` — 取代 Go 的 `Value any`
+- [x] `pub struct Result { value, is_syntactically_string, resolved_other_files, has_external_references }` — 4 字段，全 `pub`　`// Go: evaluator.go:Result`
+- [x] `pub fn new_result(value, is_syntactically_string, resolved_other_files, has_external_references) -> Result` — 构造器　`// Go: evaluator.go:NewResult`
+- [x] `pub struct Evaluator<F>`（entity 求值回调签名 `Fn(&NodeArena, NodeId, Option<NodeId>) -> Result`；回调显式带 `&NodeArena` 是 arena 模型的必要偏离）　`// Go: evaluator.go:Evaluator`
+- [x] `pub fn new_evaluator(eval_entity, outer_expressions_to_skip: OuterExpressionKinds) -> Evaluator<F>` — 工厂；`Evaluator::evaluate` 方法递归（取代 Go 自引用闭包）　`// Go: evaluator.go:NewEvaluator`
+  - [x] `skip_outer_expressions(expr, skip | PARENTHESES)` 预处理（本地移植：`tsgo_ast` 尚未移植该工具；当前仅括号可达，其余 OEK 种类无 NodeData→惰性）
+  - [x] `KindPrefixUnaryExpression`：`+`（原值）/ `-`（取负，`Number::from(-f64)`）/ `~`（`bitwise_not`），仅当操作数求值为 `Num`
+  - [x] `KindBinaryExpression`：先求左右；`is_syntactically_string = (left||right).is_str && op==Plus`；数字×数字时 `| & >> >>> << ^ * / + - % **` 共 12 个运算分支；否则 (str|num)+(str|num) 且 op==Plus → 字符串拼接（num 侧用 `Number::to_string`）
+  - [x] `KindStringLiteral`（+`KindNoSubstitutionTemplateLiteral` 同组）→ `Result{ Str(text), is_syntactically_string=true, false, false }`（**NoSub 模板字面量推迟**，见下）
+  - [ ] `KindTemplateExpression` → 调 `evaluate_template_expression` — **DEFER(P4)**：`tsgo_ast` 未移植 Template/TemplateSpan/NoSubstitutionTemplate 的 `NodeData` 与构造器，无法访问 head/spans，亦无法构造测试 → 落到兜底 `None`，待 AST 模板节点移植后回填
+  - [x] `KindNumericLiteral` → `Num(from_string(text))`
+  - [x] `KindIdentifier` → `eval_entity(expr, location)`
+  - [x] `KindElementAccessExpression | KindPropertyAccessExpression`：仅当 `is_entity_name_expression(expr.expression())` 才 `eval_entity`（`is_entity_name_expression`/`expression_of`/`name_of` 本地移植，因 `tsgo_ast` 未移植这些工具）
+  - [x] 兜底 → `Result{ None, is_syntactically_string, resolved_other_files, has_external_references }`
+- [ ] `fn evaluate_template_expression(expr, location, eval) -> Result` — **DEFER(P4)**：blocked-by `tsgo_ast` 模板 `NodeData` 未移植（同上）
+- [x] `pub fn any_to_string(v: &EvalValue) -> String` — `Str`→原样、`Num`/`BigInt`→`.to_string()`、`Bool`→`core::if_else(..,"true","false")`；`None` → `panic!("Unhandled case in AnyToString")`　`// Go: evaluator.go:AnyToString`
+- [x] `pub fn is_truthy(v: &EvalValue) -> bool` — `Str`→非空、`Num`→`!=0 && !is_nan`、`Bool`→原值、`BigInt`→`!= PseudoBigInt::default()`；`None` → `panic!`　`// Go: evaluator.go:IsTruthy`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/evaluator/Cargo.toml`（`name = "tsgo_evaluator"` + path deps：`tsgo_ast` `tsgo_core` `tsgo_jsnum`）
-- [ ] 根 `Cargo.toml` workspace members 追加 `internal/evaluator`
-- [ ] `lib.rs` 顶部 `pub use` 导出 `Result` / `EvalValue` / `new_evaluator` / `any_to_string` / `is_truthy`
+- [x] `internal/evaluator/Cargo.toml`（`name = "tsgo_evaluator"` + path deps：`tsgo_ast` `tsgo_core` `tsgo_jsnum`）
+- [x] 根 `Cargo.toml` workspace members 追加 `internal/evaluator`（脚手架阶段已加入）
+- [x] `lib.rs` 直接以 `pub` 定义 `Result` / `EvalValue` / `Evaluator` / `OuterExpressionKinds` / `new_result` / `new_evaluator` / `any_to_string` / `is_truthy`（已在 crate 根可见，无需额外 `pub use`）
 
 ## TDD 推进顺序（tracer bullet → 增量）
 
@@ -76,9 +76,13 @@
 ## 与 Go 的已知偏离（divergence）
 
 - Go `Value any` → Rust `EvalValue` 判别枚举：调用方（checker）原本对 `result.Value.(jsnum.Number)` 做断言，移植后改为 `match`/`if let EvalValue::Num(n)`。
-- Go 用递归闭包 `var evaluate Evaluator; evaluate = func(...)`；Rust 改用持有回调的结构体方法递归（无法安全表达自引用闭包）。结构 1:1，行为一致。
-- AST 访问 `expr.AsXxx().Field` → `arena` 句柄访问器（PORTING §5）。
+- Go 用递归闭包 `var evaluate Evaluator; evaluate = func(...)`；Rust 改用持有回调的结构体方法 `Evaluator::evaluate` 递归（无法安全表达自引用闭包）。结构 1:1，行为一致。
+- entity 回调签名 `func(expr, location) Result` → `Fn(&NodeArena, NodeId, Option<NodeId>) -> Result`：因 Rust 走 arena+`NodeId`，回调需显式拿到 `&NodeArena`（PORTING §5 的必要偏离）。
+- AST 访问 `expr.AsXxx().Field` → `arena.data(id)` 上的 `match NodeData`（PORTING §5）。
+- `jsnum::Number` 未实现 `+ - * / Neg` 运算符 → 算术经 `Number::from(f64::from(l) <op> f64::from(r))`（JS number 即 IEEE754 double，与 Go `type Number float64` 的运算语义一致）。
+- **`tsgo_ast` 尚为代表性子集**：`SkipOuterExpressions`/`OuterExpressionKinds`/`OEKParentheses`、`IsEntityNameExpression`、`Node.Expression()`/`Node.Name()` 在 Rust 侧**尚未移植**。受"仅可编辑 `internal/evaluator/**`"边界约束，已在本 crate 内**本地移植**这些小工具（`skip_outer_expressions`/`is_outer_expression`/`is_entity_name_expression`/`expression_of`/`name_of` + 本地 `OuterExpressionKinds`），待上游 `tsgo_ast` 补齐后再上移并改为复用。
 
 ## 转交 / 推迟（DEFER）
 
-- 无。本包不依赖后续 phase。entity 求值（`evaluateEntity`）由 checker 提供，不在本包范围内。
+- **模板字面量求值（`KindTemplateExpression` + `evaluate_template_expression` + `KindNoSubstitutionTemplateLiteral`）— DEFER(P4)**：blocked-by `tsgo_ast` 未移植 `TemplateExpression`/`TemplateSpan`/`NoSubstitutionTemplateLiteral` 的 `NodeData` 与构造器（当前为代表性子集）。既无法访问 head/spans，也无法构造测试节点，故这些输入落到兜底 `None`。AST 模板节点移植后回填实现 + 对应行为级测试（`eval_no_substitution_template` / `eval_template_with_number_span` / `eval_template_span_none_short_circuits`）。
+- 其余无。entity 求值（`evaluateEntity`）由 checker 提供，不在本包范围内。

@@ -1,0 +1,24 @@
+[package]
+name = "tsgo_tsoptions"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tsgo_ast = { path = "../ast" }
+tsgo_collections = { path = "../collections" }
+tsgo_core = { path = "../core" }
+tsgo_debug = { path = "../debug" }
+tsgo_diagnostics = { path = "../diagnostics" }
+tsgo_glob = { path = "../glob" }
+tsgo_jsnum = { path = "../jsnum" }
+tsgo_locale = { path = "../locale" }
+tsgo_module = { path = "../module" }
+tsgo_outputpaths = { path = "../outputpaths" }
+tsgo_parser = { path = "../parser" }
+tsgo_scanner = { path = "../scanner" }
+tsgo_stringutil = { path = "../stringutil" }
+tsgo_tspath = { path = "../tspath" }
+tsgo_vfs = { path = "../vfs" }

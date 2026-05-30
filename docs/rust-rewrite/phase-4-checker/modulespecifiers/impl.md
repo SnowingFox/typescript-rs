@@ -49,77 +49,88 @@
 
 ## 实现 TODO（逐文件 / 逐函数，可勾选）
 
+> **完成状态（wave 4 落地）**：除依赖未移植的 AST 节点图（`tsgo_ast` 尚无
+> `Node`/`SourceFile`/`StringLiteralLike`）与 `tsoptions`（P6）的部分入口外，全部移植完成。
+> 6 个 Go `func Test*`（含子用例）+ 补充行为级单测全部 red→green；`cargo test`（含 doctest）/
+> `cargo clippy --all-targets --all-features -D warnings` / 本包 C1–C8 全绿。
+
 ### `compare.rs`（Go: `compare.go`）
 
-- [ ] `pub fn count_path_components(path: &str) -> usize`（去掉前导 `./` 后数 `/`）　`// Go: compare.go:CountPathComponents`
+- [x] `pub fn count_path_components(path: &str) -> usize`（去掉前导 `./` 后数 `/`）　`// Go: compare.go:CountPathComponents`
 
 ### `types.rs`（Go: `types.go`）
 
-- [ ] `pub trait SourceFileForSpecifierGeneration { fn path; fn file_name; fn imports; fn is_js }`　`// Go: types.go:SourceFileForSpecifierGeneration`
-- [ ] `pub trait CheckerShape { fn get_symbol_at_location; fn get_aliased_symbol }`　`// Go: types.go:CheckerShape`
-- [ ] `pub trait ModuleSpecifierGenerationHost`（13 方法）　`// Go: types.go:ModuleSpecifierGenerationHost`
-- [ ] `#[repr(u8)] enum ResultKind { None, NodeModules, Paths, Redirect, Relative, Ambient }`　`// Go: types.go:ResultKind`
-- [ ] `pub struct ModulePath { file_name, is_in_node_modules, is_redirect }`　`// Go: types.go:ModulePath`
-- [ ] `enum ImportModuleSpecifierPreference`（None/Shortest/ProjectRelative/Relative/NonRelative）+ `as_str`　`// Go: types.go`
-- [ ] `enum ImportModuleSpecifierEndingPreference`（None/Auto/Minimal/Index/Js）　`// Go: types.go`
-- [ ] `pub struct UserPreferences { import_module_specifier_preference, import_module_specifier_ending, auto_import_specifier_exclude_regexes }`　`// Go: types.go:UserPreferences`
-- [ ] `pub struct ModuleSpecifierOptions { override_import_mode: ResolutionMode }`　`// Go: types.go:ModuleSpecifierOptions`
-- [ ] `enum RelativePreferenceKind { Relative, NonRelative, Shortest, ExternalNonRelative }`　`// Go: types.go`
-- [ ] `enum ModuleSpecifierEnding { Minimal, Index, JsExtension, TsExtension }`　`// Go: types.go`
-- [ ] `enum MatchingMode { Exact, Directory, Pattern }`　`// Go: types.go`
+- [x] `pub trait SourceFileForSpecifierGeneration { fn path; fn file_name; fn imports; fn is_js }`（**偏离**：`imports()` 返回 `Vec<String>`（说明符文本），因为 `tsgo_ast` 尚无 `StringLiteralLike` 节点；现有移植消费方只读 `.Text()`）　`// Go: types.go:SourceFileForSpecifierGeneration`
+- [x] `pub trait HasFileName`（本地定义，因 `tsgo_ast` 未移植 `ast.HasFileName`）　`// Go: ast.go:HasFileName`
+- [ ] ~~`pub trait CheckerShape`~~ → **DEFER(phase-checker)**：`blocked-by: tsgo_ast` 的 Node/`GetSymbolAtLocation` 图未移植（仅被 ambient-module 生成使用）　`// Go: types.go:CheckerShape`
+- [x] `pub trait ModuleSpecifierGenerationHost`（**偏离**：省略两个取 `*ast.StringLiteralLike` 的方法 `GetResolvedModuleFromModuleSpecifier`/`GetModeForUsageLocation`，待 `computeModuleSpecifiers` 的 existing-import 环移植；见 lib.rs DEFER）　`// Go: types.go:ModuleSpecifierGenerationHost`
+- [x] `pub struct SourceOutputAndProjectReference { source, output_dts }`（本地定义，**偏离**：`tsgo_tsoptions::SourceOutputAndProjectReference`(P6) 未移植）　`// Go: tsoptions/parsedcommandline.go`
+- [x] `#[repr(u8)] enum ResultKind { None, NodeModules, Paths, Redirect, Relative, Ambient }`　`// Go: types.go:ResultKind`
+- [x] `pub struct ModulePath { file_name, is_in_node_modules, is_redirect }`　`// Go: types.go:ModulePath`
+- [x] `enum ImportModuleSpecifierPreference`（None/Shortest/ProjectRelative/Relative/NonRelative）+ `as_str`/`from_str`　`// Go: types.go`
+- [x] `enum ImportModuleSpecifierEndingPreference`（None/Auto/Minimal/Index/Js）+ `as_str`/`from_str`　`// Go: types.go`
+- [x] `pub struct UserPreferences { import_module_specifier_preference, import_module_specifier_ending, auto_import_specifier_exclude_regexes }`　`// Go: types.go:UserPreferences`
+- [x] `pub struct ModuleSpecifierOptions { override_import_mode: ResolutionMode }`　`// Go: types.go:ModuleSpecifierOptions`
+- [x] `enum RelativePreferenceKind { Relative, NonRelative, Shortest, ExternalNonRelative }`　`// Go: types.go`
+- [x] `enum ModuleSpecifierEnding { Minimal, Index, JsExtension, TsExtension }`　`// Go: types.go`
+- [x] `enum MatchingMode { Exact, Directory, Pattern }`　`// Go: types.go`
 
 ### `preferences.rs`（Go: `preferences.go`）
 
-- [ ] `fn should_allow_importing_ts_extension(options, from_file_name) -> bool`　`// Go: preferences.go:shouldAllowImportingTsExtension`
-- [ ] `fn uses_extensions_on_imports(file) -> bool`　`// Go: preferences.go:usesExtensionsOnImports`
-- [ ] `fn infer_preference(resolution_mode, source_file, module_resolution_is_nodenext) -> ModuleSpecifierEnding`　`// Go: preferences.go:inferPreference`
-- [ ] `fn get_module_specifier_ending_preference(pref, resolution_mode, options, source_file) -> ModuleSpecifierEnding`　`// Go: preferences.go:getModuleSpecifierEndingPreference`
-- [ ] `fn get_preferred_ending(prefs, host, options, importing_file, old_specifier, resolution_mode) -> ModuleSpecifierEnding`　`// Go: preferences.go:getPreferredEnding`
-- [ ] `pub struct ModuleSpecifierPreferences { relative_preference, get_allowed_endings, exclude_regexes }`　`// Go: preferences.go:ModuleSpecifierPreferences`
-- [ ] `pub fn get_allowed_endings_in_preferred_order(...) -> Vec<ModuleSpecifierEnding>`（按 preferredEnding × allowImportingTsExtension × nodenext-ESM 的分支矩阵；`debug::assert_never` 兜底）　`// Go: preferences.go:GetAllowedEndingsInPreferredOrder`
-- [ ] `fn get_module_specifier_preferences(prefs, host, options, importing_file, old_specifier) -> ModuleSpecifierPreferences`　`// Go: preferences.go:getModuleSpecifierPreferences`
+- [x] `fn should_allow_importing_ts_extension(options, from_file_name) -> bool`　`// Go: preferences.go:shouldAllowImportingTsExtension`
+- [x] `fn uses_extensions_on_imports(file) -> bool`　`// Go: preferences.go:usesExtensionsOnImports`
+- [x] `fn infer_preference(resolution_mode, source_file, module_resolution_is_nodenext) -> ModuleSpecifierEnding`　`// Go: preferences.go:inferPreference`
+- [x] `fn get_module_specifier_ending_preference(pref, resolution_mode, options, source_file) -> ModuleSpecifierEnding`　`// Go: preferences.go:getModuleSpecifierEndingPreference`
+- [x] `fn get_preferred_ending(prefs, host, options, importing_file, old_specifier, resolution_mode) -> ModuleSpecifierEnding`　`// Go: preferences.go:getPreferredEnding`
+- [x] `pub struct ModuleSpecifierPreferences<'a> { relative_preference, get_allowed_endings: Box<dyn Fn>, exclude_regexes }`（闭包成员保留为 `Box<dyn Fn + 'a>`）　`// Go: preferences.go:ModuleSpecifierPreferences`
+- [x] `pub fn get_allowed_endings_in_preferred_order(...) -> Vec<ModuleSpecifierEnding>`（分支矩阵；Rust 穷尽 `match` 替代 `assert_never` 兜底）　`// Go: preferences.go:GetAllowedEndingsInPreferredOrder`
+- [x] `fn get_module_specifier_preferences(prefs, host, options, importing_file, old_specifier) -> ModuleSpecifierPreferences`　`// Go: preferences.go:getModuleSpecifierPreferences`
 
 ### `util.rs`（Go: `util.go`）
 
-- [ ] `fn compare_paths_by_redirect`　`// Go: util.go:comparePathsByRedirect`
-- [ ] `pub fn path_is_bare_specifier(path) -> bool`　`// Go: util.go:PathIsBareSpecifier`
-- [ ] `pub fn is_excluded_by_regex(specifier, excludes) -> bool` + `fn string_to_regex(pattern) -> Option<Regex>`（带缓存）　`// Go: util.go:IsExcludedByRegex/stringToRegex`
-- [ ] `fn ensure_path_is_non_module_name(path) -> String`　`// Go: util.go:ensurePathIsNonModuleName`
-- [ ] `pub fn get_js_extension_for_declaration_file_extension(ext) -> String`　`// Go: util.go:GetJSExtensionForDeclarationFileExtension`
-- [ ] `pub fn try_get_real_file_name_for_non_js_declaration_file_name(file_name) -> String`（`.d.json.ts`→`.json`、`.module.d.css.ts`→`.module.css`、纯 `.d.ts`→`""`）　`// Go: util.go:TryGetRealFileNameForNonJSDeclarationFileName`
-- [ ] `fn get_js_extension_for_file` / `extension_from_path` / `try_get_any_file_from_path`　`// Go: util.go`
-- [ ] `fn get_paths_relative_to_root_dirs` / `is_path_relative_to_parent` / `get_relative_path_if_in_same_volume` / `package_json_paths_are_equal` / `prefers_ts_extension`　`// Go: util.go`
-- [ ] `fn replace_first_star(s, replacement) -> String`　`// Go: util.go:replaceFirstStar`
-- [ ] `pub struct NodeModulePathParts{...}` + `pub fn get_node_module_path_parts(full_path) -> Option<NodeModulePathParts>`　`// Go: util.go:GetNodeModulePathParts`
-- [ ] `pub fn get_node_modules_package_name(...) -> String`　`// Go: util.go:GetNodeModulesPackageName`
-- [ ] `fn all_keys_start_with_dot(obj) -> bool`　`// Go: util.go:allKeysStartWithDot`
-- [ ] `pub fn get_package_name_from_directory(path) -> String`　`// Go: util.go:GetPackageNameFromDirectory`
-- [ ] `pub fn process_entrypoint_ending(...)`　`// Go: util.go:ProcessEntrypointEnding`
+- [x] `fn compare_paths_by_redirect`（Go `int` → Rust `Ordering`）　`// Go: util.go:comparePathsByRedirect`
+- [x] `pub fn path_is_bare_specifier(path) -> bool`　`// Go: util.go:PathIsBareSpecifier`
+- [x] `pub fn is_excluded_by_regex(specifier, excludes) -> bool` + `fn string_to_regex(pattern) -> Option<Regex>`（`regex` crate + `LazyLock<RwLock<HashMap>>` 缓存，>1000 清空）　`// Go: util.go:IsExcludedByRegex/stringToRegex`
+- [x] `fn ensure_path_is_non_module_name(path) -> String`　`// Go: util.go:ensurePathIsNonModuleName`
+- [x] `pub fn get_js_extension_for_declaration_file_extension(ext) -> String`　`// Go: util.go:GetJSExtensionForDeclarationFileExtension`
+- [x] `pub fn try_get_real_file_name_for_non_js_declaration_file_name(file_name) -> String`　`// Go: util.go:TryGetRealFileNameForNonJSDeclarationFileName`
+- [x] `fn get_js_extension_for_file` / `extension_from_path` / `try_get_any_file_from_path`（**偏离**：`tryGetAnyFileFromPath` 中 `tsoptions.GetSupportedExtensions(AllowJs, [node,json])` 在此参数下归约为 `ALL_SUPPORTED_EXTENSIONS`，直接使用之，因 `GetSupportedExtensions` 未移植）　`// Go: util.go`
+- [x] `fn get_paths_relative_to_root_dirs` / `is_path_relative_to_parent` / `get_relative_path_if_in_same_volume` / `package_json_paths_are_equal` / `prefers_ts_extension`　`// Go: util.go`
+- [x] `fn replace_first_star(s, replacement) -> String`　`// Go: util.go:replaceFirstStar`
+- [x] `pub struct NodeModulePathParts{...}` + `pub fn get_node_module_path_parts(full_path) -> Option<NodeModulePathParts>`（索引 `i32` 以保 `-1` 语义）　`// Go: util.go:GetNodeModulePathParts`
+- [ ] ~~`pub fn get_node_modules_package_name(...)`~~ → **DEFER(phase-checker)**：`blocked-by: tsgo_ast` 未移植 `ast.SourceFile`（签名取 `*ast.SourceFile`）　`// Go: util.go:GetNodeModulesPackageName`
+- [x] `fn all_keys_start_with_dot(obj) -> bool`（Go 中亦为未使用辅助；`#[allow(dead_code)]`）　`// Go: util.go:allKeysStartWithDot`
+- [x] `pub fn get_package_name_from_directory(path) -> String`　`// Go: util.go:GetPackageNameFromDirectory`
+- [x] `pub fn process_entrypoint_ending(...)`　`// Go: util.go:ProcessEntrypointEnding`
 
 ### `lib.rs`（Go: `specifiers.go`，按子区块勾选）
 
-- [ ] `pub fn get_module_specifiers(...) -> Vec<String>`　`// Go: specifiers.go:GetModuleSpecifiers`
-- [ ] `pub fn get_module_specifiers_with_info(...)`　`// Go: specifiers.go:GetModuleSpecifiersWithInfo`
-- [ ] `pub fn get_module_specifiers_for_file_with_info(...)`　`// Go: specifiers.go:GetModuleSpecifiersForFileWithInfo`
-- [ ] `fn try_get_module_name_from_ambient_module(module_symbol, checker) -> String`　`// Go: specifiers.go:tryGetModuleNameFromAmbientModule`
-- [ ] `fn get_info(...)` / `fn get_all_module_paths[_worker](...)`　`// Go: specifiers.go:getAllModulePaths`
-- [ ] `fn contains_ignored_path(s) -> bool` / `pub fn contains_node_modules(s) -> bool`　`// Go: specifiers.go:containsIgnoredPath/ContainsNodeModules`
-- [ ] `pub fn get_each_file_name_of_module(importing_file, imported_file, host, prefer_symlinks) -> Vec<ModulePath>`（含 symlink 展开 + ignored-path 兜底"至少返回 1 条"）　`// Go: specifiers.go:GetEachFileNameOfModule`
-- [ ] `fn compute_module_specifiers(...)`（核心：对每条 ModulePath 试 paths/node_modules/exports/relative）　`// Go: specifiers.go:computeModuleSpecifiers`
-- [ ] `fn get_local_module_specifier(...)`（相对/baseUrl 本地说明符）　`// Go: specifiers.go:getLocalModuleSpecifier`
-- [ ] `fn process_ending(...)`　`// Go: specifiers.go:processEnding`
-- [ ] `fn try_get_module_name_from_root_dirs(...)`　`// Go: specifiers.go:tryGetModuleNameFromRootDirs`
-- [ ] `fn try_get_module_name_as_node_module(...)` + `fn try_directory_with_package_json(...)`　`// Go: specifiers.go:tryGetModuleNameAsNodeModule`
-- [ ] `fn try_get_module_name_from_exports(...)` / `from_package_json_imports(...)`　`// Go: specifiers.go:tryGetModuleNameFromExports/...Imports`
-- [ ] `fn try_get_module_name_from_paths(...)` + `fn validate_ending(...)`　`// Go: specifiers.go:tryGetModuleNameFromPaths`
-- [ ] `fn try_get_module_name_from_exports_or_imports(options, host, target_file_path, package_dir, key, target, conditions, mode, is_imports, is_pattern) -> String`（通配 `*` 匹配 + trailer）　`// Go: specifiers.go:tryGetModuleNameFromExportsOrImports`
-- [ ] `pub fn get_module_specifier(...)` / `pub fn update_module_specifier(...)` / `fn get_module_specifier_with_preferences(...)`　`// Go: specifiers.go:GetModuleSpecifier/UpdateModuleSpecifier`
+> lib.rs = 1574 行（略超 ~1500 阈值）。判断**不拆**：它 1:1 映射 `specifiers.go`，是一套
+> 内聚的"file→specifier"算法；拆分会割裂算法且增加风险，故按 §2"borderline，仅在有帮助时拆"
+> 保持单文件。
+
+- [ ] ~~`pub fn get_module_specifiers(...)`~~ → **DEFER(phase-checker)**：`blocked-by: tsgo_ast` 的 ambient-module 遍历 + `GetSourceFileOfModule`　`// Go: specifiers.go:GetModuleSpecifiers`
+- [ ] ~~`pub fn get_module_specifiers_with_info(...)`~~ → **DEFER(phase-checker)**：同上　`// Go: specifiers.go:GetModuleSpecifiersWithInfo`
+- [x] `pub fn get_module_specifiers_for_file_with_info(...)`（**已移植**，端到端可测）　`// Go: specifiers.go:GetModuleSpecifiersForFileWithInfo`
+- [ ] ~~`fn try_get_module_name_from_ambient_module(...)`~~ → **DEFER(phase-checker)**：`blocked-by: tsgo_ast` Node 图（`IsModuleWithStringLiteralName`/`FindAncestor`/`decl.Name().Text()` 等）　`// Go: specifiers.go:tryGetModuleNameFromAmbientModule`
+- [x] `fn get_info(...)` / `fn get_all_module_paths[_worker](...)`（`get_all_module_paths` 仅被 DEFER 入口调用 → `#[allow(dead_code)]`）　`// Go: specifiers.go:getAllModulePaths`
+- [x] `fn contains_ignored_path(s) -> bool` / `pub fn contains_node_modules(s) -> bool`　`// Go: specifiers.go:containsIgnoredPath/ContainsNodeModules`
+- [x] `pub fn get_each_file_name_of_module(...)`（含 symlink 展开 + ignored-path 兜底"至少返回 1 条"）　`// Go: specifiers.go:GetEachFileNameOfModule`
+- [x] `fn compute_module_specifiers(...)`（核心；**偏离**：existing-import 复用环 DEFER，需 `StringLiteralLike` 节点 + host 的 2 个 node 方法；生成式说明符正确性不受影响）　`// Go: specifiers.go:computeModuleSpecifiers`
+- [x] `fn get_local_module_specifier(...)`　`// Go: specifiers.go:getLocalModuleSpecifier`
+- [x] `fn process_ending(...)`　`// Go: specifiers.go:processEnding`
+- [x] `fn try_get_module_name_from_root_dirs(...)`　`// Go: specifiers.go:tryGetModuleNameFromRootDirs`
+- [x] `fn try_get_module_name_as_node_module(...)` + `fn try_directory_with_package_json(...)`　`// Go: specifiers.go:tryGetModuleNameAsNodeModule`
+- [x] `fn try_get_module_name_from_exports(...)` / `from_package_json_imports(...)`　`// Go: specifiers.go:tryGetModuleNameFromExports/...Imports`
+- [x] `fn try_get_module_name_from_paths(...)` + `fn validate_ending(...)`　`// Go: specifiers.go:tryGetModuleNameFromPaths`
+- [x] `fn try_get_module_name_from_exports_or_imports(...)`（通配 `*` 匹配 + trailer）　`// Go: specifiers.go:tryGetModuleNameFromExportsOrImports`
+- [ ] ~~`pub fn get_module_specifier(...)` / `pub fn update_module_specifier(...)` / `fn get_module_specifier_with_preferences(...)`~~ → **DEFER(phase-checker)**：`blocked-by: tsgo_ast` 未移植 `ast.SourceFile`（签名取 `*ast.SourceFile`）　`// Go: specifiers.go:GetModuleSpecifier/UpdateModuleSpecifier`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/modulespecifiers/Cargo.toml`（`name = "tsgo_modulespecifiers"` + path deps）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` 声明 `mod types; mod preferences; mod util; mod compare;` + re-export
+- [x] `internal/modulespecifiers/Cargo.toml`（`name = "tsgo_modulespecifiers"` + path deps + `regex`；dev-dep `tsgo_json`）
+- [x] 根 `Cargo.toml` workspace members 已含本包
+- [x] `lib.rs` 声明 `mod types; mod preferences; mod util; mod compare;` + re-export（`#[cfg(test)] mod test_support;`）
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

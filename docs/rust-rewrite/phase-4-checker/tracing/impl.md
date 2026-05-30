@@ -73,64 +73,65 @@ enum ArgValue { Str(String), Int(i64), Bool(bool), Float(f64) }
 
 **Trait（解耦 checker）**
 
-- [ ] `pub trait Tracer { fn record_type(&self, t: ...); fn dump_types(&self) -> Result<(), Error>; }`　`// Go: tracing.go:Tracer`
-- [ ] `pub trait TracedType { ... ~30 个访问器 ... }`（`id`/`format_flags`/`is_conditional`/`symbol`/`alias_symbol`/`alias_type_arguments`/各 type-specific 访问器/`display`）　`// Go: tracing.go:TracedType`
+- [x] `pub trait Tracer { fn record_type(&self, t: Box<dyn TracedType + Send + Sync>); fn dump_types(&self) -> Result<(), TraceError>; }`　`// Go: tracing.go:Tracer`
+- [x] `pub trait TracedType { ... ~30 个访问器 ... }`（`id`/`format_flags`/`is_conditional`/`symbol`/`alias_symbol`/`alias_type_arguments`/各 type-specific 访问器/`display`；node 访问器返回 `Option<NodeId>`）　`// Go: tracing.go:TracedType`
 
 **核心类型**
 
-- [ ] `pub struct Tracing { ... }`（fs/traceDir/tracePath/configFilePath/legend/tracers/缓冲/线程表/deterministic/计数器/startTime/Mutex/flushErr）　`// Go: tracing.go:Tracing`
-- [ ] `pub enum Phase { Parse, Program, Bind, Check, CheckTypes, Emit, Session }`（值为字符串字面量，用于事件 `cat`）　`// Go: tracing.go:Phase`
-- [ ] `struct TraceRecord { config_file_path, trace_path, types_path, checker_id }`（serde，`omitzero`→`skip_serializing_if`）　`// Go: tracing.go:TraceRecord`
-- [ ] `struct TraceEvent { pid, tid, ph, cat, ts, name, s, dur: Option<f64>, args }`（serde）　`// Go: tracing.go:traceEvent`
+- [x] `pub struct Tracing<'fs> { ... }`（fs: `&(dyn Fs + Send + Sync)`/traceDir/tracePath/configFilePath + `Mutex<TraceState>`{legend/tracers/缓冲/线程表/计数器/flushErr} + metadataTs/deterministic/startTime/`AtomicBool`）　`// Go: tracing.go:Tracing`
+- [x] `pub enum Phase { Parse, Program, Bind, Check, CheckTypes, Emit, Session }`（`as_str()` 返字符串字面量，用于事件 `cat`）　`// Go: tracing.go:Phase`
+- [x] `pub struct TraceRecord { config_file_path, trace_path, types_path, checker_id }`（serde，`omitzero`→`skip_serializing_if`）　`// Go: tracing.go:TraceRecord`
+- [x] `struct TraceEvent { pid, tid, ph, cat, ts, name, s, dur: Option<f64>, args: Option<Args> }`（serde；crate-private 如 Go）　`// Go: tracing.go:traceEvent`
 
 **会话生命周期**
 
-- [ ] `pub fn start_tracing(fs, trace_dir, config_file_path, deterministic: bool) -> Result<Tracing, Error>` — 写 `[` + 3 条 metadata 事件 + `WriteFile` 截断初始化　`// Go: tracing.go:StartTracing`
-- [ ] `fn timestamp(&self) -> f64` — deterministic 时 `++counter`，否则 `time.Since(startTime)` 纳秒/1000　`// Go: tracing.go:timestamp`
-- [ ] `pub fn stop_tracing(&self) -> Result<(), Error>` — **先**逐 tracer `dump_types()`（无锁），**再**加锁：flush 剩余 + 写 `\n]\n`、写排序后的 `legend.json`　`// Go: tracing.go:StopTracing`
+- [x] `pub fn start_tracing(fs, trace_dir, config_file_path, deterministic: bool) -> Result<Tracing, TraceError>` — 写 `[` + 3 条 metadata 事件 + `WriteFile` 截断初始化　`// Go: tracing.go:StartTracing`
+- [x] `fn timestamp(&mut self, deterministic, start_time) -> f64` — deterministic 时 `++counter`，否则 `start_time.elapsed()` 纳秒/1000　`// Go: tracing.go:timestamp`
+- [x] `pub fn stop_tracing(&self) -> Result<(), TraceError>` — **先**逐 tracer `dump_types()`（无锁），**再**加锁：flush 剩余 + 写 `\n]\n`、写排序后的 `legend.json`　`// Go: tracing.go:StopTracing`
 
 **事件写入**
 
-- [ ] `fn write_event(&mut self, e: TraceEvent)`（marshal 到 buffer，deterministic 序列化）　`// Go: tracing.go:writeEvent/writeEventTo`
-- [ ] `fn maybe_flush_locked(&mut self)` — buffer 超 `FLUSH_THRESHOLD`(256KiB) 则 `AppendFile`；flushErr 已置则丢弃缓冲并 no-op　`// Go: tracing.go:maybeFlushLocked`
-- [ ] `pub fn instant(&self, phase, name, args)` — 写 `,\n` + `I` 事件（`s="g"`）；nil/未启动早退；锁内二次检查 started　`// Go: tracing.go:Instant`
-- [ ] `pub fn push(&self, phase, name, args, separate_begin_and_end: bool) -> impl FnOnce()`（或 `PushGuard`）— 见下分支　`// Go: tracing.go:Push`
+- [x] `fn write_event(&mut self, e: &TraceEvent)`（`marshal` 到 buffer；args 为 `BTreeMap` 故 key 已排序，等价 Go `Deterministic(true)`）　`// Go: tracing.go:writeEvent/writeEventTo`
+- [x] `fn maybe_flush_locked(&mut self, fs, trace_path)` — buffer 超 `FLUSH_THRESHOLD`(256KiB) 则 `AppendFile`；flushErr 已置则丢弃缓冲并 no-op　`// Go: tracing.go:maybeFlushLocked`
+- [x] `pub fn instant(&self, phase, name, args)` — 写 `,\n` + `I` 事件（`s="g"`）；未启动早退；锁内二次检查 started　`// Go: tracing.go:Instant`
+- [x] `pub fn push(&self, phase, name, args, separate_begin_and_end: bool) -> Box<dyn FnOnce() + '_>`（闭包，对齐 Go `func()`）— 见下分支　`// Go: tracing.go:Push`
   - 分支 A `separate_begin_and_end=true`：立即写 `B`，返回写 `E` 的闭包（同一 tid，闭包内重取锁）。
   - 分支 B（采样）`deterministic`：返回 no-op 闭包（确定性模式跳过采样事件以免 flaky）。
   - 分支 C（采样）非确定性：clone args、记 startTime，闭包计算 dur，仅当跨 10ms 采样边界才写 `X` 事件。
 
 **线程 ID 分配（稳定性命门）**
 
-- [ ] `fn thread_id_locked(&mut self, args) -> i32` — 查/建 `traceThreadKey`，分配后写一条 `thread_name` metadata　`// Go: tracing.go:threadIDLocked`
-- [ ] `fn write_thread_name_event_locked(&mut self, tid, name)`　`// Go: tracing.go:writeThreadNameEventLocked`
-- [ ] `struct TraceThreadKey { kind, text, index, has_index }` + `enum TraceThreadKind { Checker, File }`　`// Go: tracing.go:traceThreadKey/traceThreadKind`
-- [ ] `fn trace_thread_key_from_args(args) -> Option<TraceThreadKey>` — 优先 `checkerId`(int)，否则按 `["path","fileName","containingFileName","jsFilePath","declarationFilePath"]` 顺序取首个非空 string　`// Go: tracing.go:traceThreadKeyFromArgs`
-- [ ] `fn default_thread_id(&self) -> i32`（checker+有 index+>=0 → `FIRST_SYNTHETIC_THREAD_ID+index`，否则 `stable_trace_thread_id`）　`// Go: tracing.go:defaultThreadID`
-- [ ] `fn display_name(&self) -> String`（`"checker:0"` / `"file:/a.ts"`）　`// Go: tracing.go:displayName`
-- [ ] `fn stable_trace_thread_id(key) -> i32` — xxh3(kind + ":" + (index|text))，`FIRST_FILE_THREAD_ID + sum64 % 1e9`　`// Go: tracing.go:stableTraceThreadID`
-- [ ] 常量：`MAIN_THREAD_ID=1`/`FIRST_SYNTHETIC_THREAD_ID=2`/`FIRST_FILE_THREAD_ID=1_000_000`/`FILE_THREAD_ID_HASH_RANGE=1_000_000_000`/`SAMPLE_INTERVAL=10ms`/`TRACE_FILE_NAME="trace.json"`/`FLUSH_THRESHOLD=256*1024`/`traceThreadArgKeys`　`// Go: tracing.go`（const/var 块）
+- [x] `fn thread_id_locked(&mut self, args, metadata_ts) -> i32` — 查/建 `TraceThreadKey`，分配后写一条 `thread_name` metadata；冲突线性探测　`// Go: tracing.go:threadIDLocked`
+- [x] `fn write_thread_name_event_locked(&mut self, tid, name, metadata_ts)`　`// Go: tracing.go:writeThreadNameEventLocked`
+- [x] `struct TraceThreadKey { kind, text, index, has_index }` + `enum TraceThreadKind { Checker, File }`（`Hash + Eq`）　`// Go: tracing.go:traceThreadKey/traceThreadKind`
+- [x] `fn trace_thread_key_from_args(args) -> Option<TraceThreadKey>` — 优先 `checkerId`(int)，否则按 `["path","fileName","containingFileName","jsFilePath","declarationFilePath"]` 顺序取首个非空 string　`// Go: tracing.go:traceThreadKeyFromArgs`
+- [x] `fn default_thread_id(&self) -> i32`（checker+有 index+>=0 → `FIRST_SYNTHETIC_THREAD_ID+index`，否则 `stable_trace_thread_id`）　`// Go: tracing.go:defaultThreadID`
+- [x] `fn display_name(&self) -> String`（`"checker:0"` / `"file:/a.ts"`）　`// Go: tracing.go:displayName`
+- [x] `fn stable_trace_thread_id(key) -> i32` — `xxh3::hash64_with_seed(kind + ":" + (index|text), 0)`，`FIRST_FILE_THREAD_ID + sum64 % 1e9`（数值对拍 DEFER P10）　`// Go: tracing.go:stableTraceThreadID`
+- [x] 常量：`MAIN_THREAD_ID=1`/`FIRST_SYNTHETIC_THREAD_ID=2`/`FIRST_FILE_THREAD_ID=1_000_000`/`FILE_THREAD_ID_HASH_RANGE=1_000_000_000`/`SAMPLE_INTERVAL_MICROS=10_000`/`TRACE_FILE_NAME="trace.json"`/`FLUSH_THRESHOLD=256*1024`/`TRACE_THREAD_ARG_KEYS`　`// Go: tracing.go`（const/var 块）
 
 **每-checker 类型 tracer**
 
-- [ ] `pub struct TypeTracer { fs, checker_index, types_path, types: Mutex<Vec<...>> }`　`// Go: tracing.go:typeTracer`
-- [ ] `fn new_type_tracer(&self, checker_index: i32) -> TypeTracer`（在 `Tracing` 上；追加 legend 条目）　`// Go: tracing.go:NewTypeTracer`
-- [ ] `impl Tracer for TypeTracer::record_type`（锁内 push）　`// Go: tracing.go:typeTracer.RecordType`
-- [ ] `impl Tracer for TypeTracer::dump_types` — 锁内 clone types→释放→逐个 `build_type_descriptor`→`marshal`→以 `[`开头、`,\n`分隔、`]\n`结尾写文件（**"`[`后不换行"以使 type id == 行号**）　`// Go: tracing.go:typeTracer.DumpTypes`
+- [x] `struct TypeTracer<'fs> { fs, types_path, types: Mutex<Vec<Box<dyn TracedType + Send + Sync>>> }`（crate-private 如 Go；checker_index 不需保留）　`// Go: tracing.go:typeTracer`
+- [x] `fn new_type_tracer(&self, checker_index: i32) -> Arc<dyn Tracer + Send + Sync + '_>`（在 `Tracing` 上；追加 legend 条目 + tracers）　`// Go: tracing.go:NewTypeTracer`
+- [x] `impl Tracer for TypeTracer::record_type`（锁内 push）　`// Go: tracing.go:typeTracer.RecordType`
+- [x] `impl Tracer for TypeTracer::dump_types` — `mem::take` types→释放锁→逐个 `build_type_descriptor`→`marshal`→以 `[`开头、`,\n`分隔、`]\n`结尾写文件（**"`[`后不换行"以使 type id == 行号**）　`// Go: tracing.go:typeTracer.DumpTypes`
 
 **类型描述符**
 
-- [ ] `pub struct TypeDescriptor { ... 30+ 字段 ... }`（serde；注意 `conditionalTrueType/FalseType` 是 `Option<i32>`，未解析分支序列化为 `-1`）　`// Go: tracing.go:TypeDescriptor`
-- [ ] `pub struct Location { path, start: Option<LineAndChar>, end }` + `pub struct LineAndChar { line, character }`（1-indexed）　`// Go: tracing.go:Location/LineAndChar`
-- [ ] `fn build_type_descriptor(&self, typ: &dyn TracedType, recursion_identity_map: &mut FxHashMap<RecursionId, usize>) -> TypeDescriptor`　`// Go: tracing.go:buildTypeDescriptor`
-  - 递归身份分配 token（首见 = `map.len()`）；intrinsic/symbol 名（优先 aliasSymbol，`EscapeAllInternalSymbolNames`）；tuple/union/intersection/aliasArgs/keyof/indexedAccess/conditional(含 -1 分支)/substitution/reference(含 location)/reverseMapped/evolvingArray/pattern/firstDeclaration/display。
-- [ ] `fn map_type_ids(types: &[&dyn TracedType]) -> Option<Vec<u32>>`　`// Go: tracing.go:mapTypeIds`
-- [ ] `fn get_location(node) -> Option<Location>` — `GetSourceFileOfNode` → `GetTokenPosOfNode` + `GetECMALineAndUTF16CharacterOfPosition`（行列 +1）　`// Go: tracing.go:getLocation`
+- [x] `pub struct TypeDescriptor { ... 30+ 字段 ... }`（serde `rename_all="camelCase"`；`conditionalTrueType/FalseType` 是 `Option<i32>`，未解析分支序列化为 `-1`；location 字段 DEFER P10）　`// Go: tracing.go:TypeDescriptor`
+- [x] `pub struct Location { path, start: Option<LineAndChar>, end }` + `pub struct LineAndChar { line, character }`（1-indexed）　`// Go: tracing.go:Location/LineAndChar`
+- [x] `pub fn build_type_descriptor(typ: &dyn TracedType, recursion_identity_map: &mut FxHashMap<RecursionId, usize>) -> TypeDescriptor`　`// Go: tracing.go:buildTypeDescriptor`
+  - 已实现：递归身份 token（首见 = `map.len()`）；intrinsic/symbol 名（优先 aliasSymbol，`escape_all_internal_symbol_names`）；tuple/union/intersection/aliasArgs/keyof/indexedAccess/conditional(含 -1 分支)/substitution/reference(target+typeArgs)/reverseMapped/evolvingArray/display。
+  - **DEFER(phase-10)**：location 派生字段（`reference_location`/`destructuring_pattern`/`first_declaration`）走 `get_location` 故恒 `None`。
+- [x] `fn map_type_ids(types: &[&dyn TracedType]) -> Vec<u32>`（调用点 `Some(...)` 包裹）　`// Go: tracing.go:mapTypeIds`
+- [x] `fn get_location(node: NodeId) -> Option<Location>` — **DEFER(phase-10) stub 恒返 `None`**；blocked-by：`tsgo_ast` 无 `get_source_file_of_node`、`tsgo_scanner` 推迟 `GetECMALine*`/`GetTokenPosOfNode`。wiring 已就位，落地仅改函数体　`// Go: tracing.go:getLocation`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/tracing/Cargo.toml`（`name = "tsgo_tracing"`，path deps：`tsgo_ast` `tsgo_json` `tsgo_scanner` `tsgo_tspath` `tsgo_vfs`；外部 `xxh3` `indexmap` `serde` `serde_json`）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` 公开 `Tracing`/`Tracer`/`TracedType`/`Phase`/`TypeDescriptor`/`Location`/`LineAndChar`/`TraceRecord`
+- [x] `internal/tracing/Cargo.toml`（`name = "tsgo_tracing"`，path deps：`tsgo_ast` `tsgo_json` `tsgo_scanner` `tsgo_tspath` `tsgo_vfs`；外部 `serde`(derive) `rustc_hash` `xxh3`。**偏离**：未用 `indexmap`（事件 args 改 `BTreeMap` 已满足排序确定性）；`serde_json` 经 `tsgo_json` 复用）
+- [x] 根 `Cargo.toml` workspace members 追加（脚手架已就位）
+- [x] `lib.rs` 公开 `Tracing`/`Tracer`/`TracedType`/`Phase`/`TypeDescriptor`/`Location`/`LineAndChar`/`TraceRecord`/`TraceError`/`ArgValue`/`Args`/`RecursionId`/`build_type_descriptor`
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

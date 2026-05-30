@@ -3,6 +3,20 @@
 **完成列**：`✓`=Rust 已有对应 `#[test]` 且 `cargo test` 通过；留空=未写/未过；`—`=推迟到指定 phase。
 **Go 测试规模**：8 测试文件 / 17 `func Test*`（+`TestMain`+2 Benchmark）/ 共约 100+ 子用例。
 
+## 本轮实现状态（wave 3）
+
+`cargo test -p tsgo_tsoptions` = **73 单测 + 13 doctest 全绿**。本轮断言级覆盖的测试（✓）：
+
+- **一致性 gate**：`TestParseCompilerOptionNoMissingFields`（`parsinghelpers_test.rs:parse_compiler_option_no_missing_fields`，遍历字段表）✓；`TestCompilerOptionsDeclaration`（`optionsfields_test.rs:compiler_options_declaration_bijection`，双向 + json 名核对）✓。
+- **`TestAffectsBuildInfo`**（`declscompiler_test.rs:affects_buildinfo_superset_of_semantic`）✓。
+- **`TestGetWildcardDirectories_NonASCIICharacters`** 全 4 子用例（`wildcarddirectories_test.rs`）✓ + 递归/非递归行为级用例 ✓。
+- **`TestResponseFileDoesNotPanic`** 2 子用例 ✓；**`TestParseCommandLineTypeRootsRelativePath`** ✓。
+- **`TestParseBuildCommandLine` extraScenarios**（builders / singleThreaded+builders / 0 / 负 / 非法类型）5 条 ✓ + `parse build without options`(默认`.`) / `clean+force invalid` 行为级 ✓。
+- **命令行行为级**（替代 golden）：`--lib es6`、显式 boolean false、tsconfig-only null、缺参 enum 报错、未知选项 5023 ✓。
+- **值解析/枚举/名字映射/声明表/affects-* 函数/merge/绝对路径**：每个 `pub fn` 均有单测（§8.6）✓。
+
+**DEFER（本轮未做，下一 wave / P10）**：`TestParseConfigFileTextToJson`、`TestParseJsonConfigFileContent`、`TestParseJsonSourceFileConfigFileContent`、`TestParseTypeAcquisition`、`TestExtendedConfigErrorsAppearOnCacheHit`、`TestParsedCommandLine/PossiblyMatchesFileName`、`TestCustomConditionsNullOverride`、`TestParseSrcCompiler`、以及所有 submodule/golden 行（依赖 tsconfig 全链 / JSON-AST 转换 / `vfsmatch.ReadDirectory` / module 解析）。
+
 ## 测试文件 → Rust 测试模块
 
 | Go 测试文件 | Rust 测试位置 | 顶层测试函数数 |
@@ -154,14 +168,14 @@
 
 | Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `response_file_empty` | `@`（空文件名）不 panic | `[@]` → `Errors>0`（无 panic） | `TestResponseFileDoesNotPanic/empty response file` | |
-| `response_file_relative_missing` | `@blah`（不存在）不 panic | `[@blah]` → `Errors>0` | `.../relative response file` | |
+| `response_file_empty` | `@`（空文件名）不 panic | `[@]` → `Errors>0`（无 panic） | `TestResponseFileDoesNotPanic/empty response file` | ✓ |
+| `response_file_relative_missing` | `@blah`（不存在）不 panic | `[@blah]` → `Errors>0` | `.../relative response file` | ✓ |
 
 ### TestParseCommandLineTypeRootsRelativePath（直接断言）
 
 | Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `typeroots_relative_to_absolute` | typeRoots 相对路径转绝对 | `[--typeRoots t bug.ts]`（cwd=/home/project）→ typeRoots 长度 1、绝对路径、以 `/t` 结尾 | `TestParseCommandLineTypeRootsRelativePath` | |
+| `typeroots_relative_to_absolute` | typeRoots 相对路径转绝对 | `[--typeRoots t bug.ts]`（cwd=/home/project）→ typeRoots 长度 1、绝对路径、以 `/t` 结尾 | `TestParseCommandLineTypeRootsRelativePath` | ✓ |
 
 ### TestCustomConditionsNullOverride（直接断言）
 
@@ -213,17 +227,17 @@
 | `bcl_excludedirs_invalid` | `[--excludeDirectories **/../*]` | `errors on invalid excludeDirectories` | — |
 | `bcl_excludefiles` | `[--excludeFiles **/temp/*.ts]` | `parse --excludeFiles` | — |
 | `bcl_excludefiles_invalid` | `[--excludeFiles **/../*]` | `errors on invalid excludeFiles` | — |
-| `bcl_builders` | `[--builders 2]` | `parse --builders`（extraScenario，本地） | |
-| `bcl_singlethreaded_builders` | `[--singleThreaded --builders 2]` | `--singleThreaded and --builders together` | |
-| `bcl_builders_zero_err` | `[--builders 0]`（minValue=1） | `reports error when --builders is 0` | |
-| `bcl_builders_negative_err` | `[--builders -1]` | `reports error when --builders is negative` | |
-| `bcl_builders_invalid_type_err` | `[--builders invalid]` | `reports error when --builders is invalid type` | |
+| `bcl_builders` | `[--builders 2]` | `parse --builders`（extraScenario，本地） | ✓ |
+| `bcl_singlethreaded_builders` | `[--singleThreaded --builders 2]` | `--singleThreaded and --builders together` | ✓ |
+| `bcl_builders_zero_err` | `[--builders 0]`（minValue=1） | `reports error when --builders is 0` | ✓ |
+| `bcl_builders_negative_err` | `[--builders -1]` | `reports error when --builders is negative` | ✓ |
+| `bcl_builders_invalid_type_err` | `[--builders invalid]` | `reports error when --builders is invalid type` | ✓ |
 
 ### TestAffectsBuildInfo（直接断言）
 
 | Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `affects_buildinfo_superset_of_semantic` | 所有 affectsSemanticDiagnostics 的选项必 affectsBuildInfo | 遍历 `OptionsDeclarations`：`AffectsSemanticDiagnostics ⇒ AffectsBuildInfo` | `TestAffectsBuildInfo` | |
+| `affects_buildinfo_superset_of_semantic` | 所有 affectsSemanticDiagnostics 的选项必 affectsBuildInfo | 遍历 `OptionsDeclarations`：`AffectsSemanticDiagnostics ⇒ AffectsBuildInfo` | `TestAffectsBuildInfo` | ✓ |
 
 ---
 
@@ -235,10 +249,10 @@
 
 | Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `wildcard_norwegian` | 挪威字符 æ | cwd 含 `TobiasLægreid` → 非 nil | `.../Norwegian character æ in path` | |
-| `wildcard_japanese` | 日文字符 | cwd `/Users/ユーザー/プロジェクト`, exclude `テスト` → 非 nil | `.../Japanese characters in path` | |
-| `wildcard_chinese` | 中文字符 | cwd `/home/用户/项目`, include `源代码/**/*.js` → 非 nil | `.../Chinese characters in path` | |
-| `wildcard_various_unicode` | 多种 Unicode | cwd `/Users/Müller/café/naïve/résumé` → 非 nil | `.../Various Unicode characters` | |
+| `wildcard_norwegian` | 挪威字符 æ | cwd 含 `TobiasLægreid` → 非 nil | `.../Norwegian character æ in path` | ✓ |
+| `wildcard_japanese` | 日文字符 | cwd `/Users/ユーザー/プロジェクト`, exclude `テスト` → 非 nil | `.../Japanese characters in path` | ✓ |
+| `wildcard_chinese` | 中文字符 | cwd `/home/用户/项目`, include `源代码/**/*.js` → 非 nil | `.../Chinese characters in path` | ✓ |
+| `wildcard_various_unicode` | 多种 Unicode | cwd `/Users/Müller/café/naïve/résumé` → 非 nil | `.../Various Unicode characters` | ✓ |
 
 > 补充（impl 行为级，超出 Go 断言）：可加 `recursive vs non-recursive` 判定用例（`/a/b/**/d` 递归、`/a/b/*` 非递归），expected 取自 `getWildcardDirectoryFromSpec` 注释里的语义说明。
 
@@ -250,7 +264,7 @@
 
 | Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `parse_compiler_option_no_missing_fields` | `CompilerOptions` 每个导出字段都被 `parse_compiler_options` switch 覆盖 | 遍历字段（用 json tag 名）→ `parse_compiler_options(key, zero, &mut co)` 返回 true | `TestParseCompilerOptionNoMissingFields` | |
+| `parse_compiler_option_no_missing_fields` | `CompilerOptions` 每个导出字段都被 `parse_compiler_options` switch 覆盖 | 遍历字段（用 json tag 名）→ `parse_compiler_options(key, zero, &mut co)` 返回 true | `TestParseCompilerOptionNoMissingFields` | ✓ |
 
 > **反射替代 gate**：Rust 不能用 reflect，需用字段表/宏枚举字段名。此测试是"巨型 switch 完整性"的护栏，必须保留。
 
@@ -277,7 +291,7 @@
 
 | Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `compiler_options_declaration_bijection` | 声明 ↔ CompilerOptions 字段双向覆盖 | 每个声明有对应字段、每个字段有声明（除 internalOptions 7 项 + skipped `plugins`）；json tag == `name+",omitzero"` | `TestCompilerOptionsDeclaration` | |
+| `compiler_options_declaration_bijection` | 声明 ↔ CompilerOptions 字段双向覆盖 | 每个声明有对应字段、每个字段有声明（除 internalOptions 7 项 + skipped `plugins`）；json tag == `name+",omitzero"` | `TestCompilerOptionsDeclaration` | ✓ |
 
 > internalOptions：`allowNonTsExtensions`/`build`/`configFilePath`/`noDtsResolution`/`noEmitForJsFiles`/`pathsBasePath`/`suppressOutputPathCheck`。skipped：`plugins`。
 

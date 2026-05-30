@@ -332,7 +332,51 @@ Rust：`arena.new_identifier(text) -> NodeId`：`push` 一个 `Node{ kind: KindI
 
 ## 转交 / 推迟（DEFER）
 
-- **`deepclone_test.go` 整体依赖 parser**：测试用 `parsetestutil.ParseTypeScript(input)` 建树再克隆。parser 在 P3。故该测试的 red→green **完整收口推迟到 P3**（`// DEFER(phase-3): blocked-by tsgo_parser`）；P2 内用**手工建树**覆盖代表性 case 验证 `DeepCloneNode`/`VisitEachChild`/`for_each_child` 正确性。详见 tests.md。
+- **`deepclone_test.go` 整体依赖 parser**：测试用 `parsetestutil.ParseTypeScript(input)` 建树再克隆。parser 在 P3。~~故该测试的 red→green **完整收口推迟到 P3**~~ **【P3 已回填】**：真实解析版位于 `internal/parser/deepclone_test.rs`（`ast` crate 不能依赖 `tsgo_parser`，否则倒置依赖边），用 `parse_source_file` + `arena.deep_clone_node` 跑 Go BFS 不变量（28 个代表性 case，随产生式扩展）。P2 的手工建树子集仍保留于 `ast/deepclone_test.rs`，覆盖 `DeepCloneNode`/`VisitEachChild`/`for_each_child`/合成位置/reparse 路径。
+
+### P3 期对 `tsgo_ast` 的**附加完成**（parser 切片驱动，additive，未破坏既有公开 API）
+
+> parser 拥有"补全 `NodeData`"职责。本轮按 parser 切片所需，**新增**（不改名/不重构既有）：
+
+- `NodeData` 新 variant + 构造器 + `for_each_child`(lib.rs) + `visit_each_child`(visitor.rs)：
+  - `EmptyStatement`（无 payload）`// Go: ast_generated.go:EmptyStatement`
+  - `ConditionalExpression`（`ConditionalExpressionData{condition, question_token, when_true, colon_token, when_false}`）`// Go: ast_generated.go:ConditionalExpression`
+  - `SourceFile`（`Box<SourceFileData>`：statements/end_of_file_token/file_name/script_kind/language_variant/is_declaration_file/external_module_indicator）`// Go: ast.go:SourceFile`
+- `NodeArena::data_mut(id) -> &mut NodeData`（in-place 改 SourceFile flag）。
+- `utilities.rs` 新增纯谓词（kind 区间/集合判定）：`node_is_missing`/`node_is_present`/`is_keyword`/`is_keyword_kind`/`is_punctuation_kind`/`is_token_kind`/`is_modifier_kind`/`is_assignment_operator`/`is_left_hand_side_expression_kind`　`// Go: utilities.go / ast_generated.go`
+- `cargo test -p tsgo_ast` + `clippy -D warnings` 在以上附加后保持全绿。
+- 仍待补全（后续 parser 切片驱动）：其余 `NodeData` variant（JSX/JSDoc/剩余类型节点族）及其工厂/遍历覆盖。
+
+#### Round 2 附加（parser depth-first 驱动；全程 additive，`tsgo_ast` 保持全绿）
+
+为支撑 parser 的全量语句/声明语法，又**新增**了下列 `NodeData` variant（每个都带构造器 + `for_each_child`(lib.rs) + `visit_each_child`(visitor.rs)，并新增 `visit_modifiers` 助手处理 `ModifierList` 子节点）：
+
+- 语句：`ThrowStatement`、`IfStatement`、`DoStatement`、`WhileStatement`、`WithStatement`、`SwitchStatement`、`CaseBlock`、`CaseOrDefaultClause`、`BreakStatement`、`ContinueStatement`、`LabeledStatement`、`DebuggerStatement`、`VariableStatement`(+modifiers)、`VariableDeclarationList`、`VariableDeclaration`、`ObjectBindingPattern`/`ArrayBindingPattern`、`BindingElement`、`OmittedExpression`、`ComputedPropertyName`、`ForStatement`、`ForInOrOfStatement`、`TryStatement`、`CatchClause`。
+- 声明：`FunctionDeclaration`、`ParameterDeclaration`、`TypeParameterDeclaration`、`ClassDeclaration`/`ClassExpression`、`HeritageClause`、`ExpressionWithTypeArguments`、`MethodDeclaration`、`PropertyDeclaration`、`GetAccessorDeclaration`/`SetAccessorDeclaration`、`ConstructorDeclaration`、`IndexSignatureDeclaration`、`ClassStaticBlockDeclaration`、`SemicolonClassElement`、`InterfaceDeclaration`、`TypeAliasDeclaration`、`EnumDeclaration`/`EnumMember`、`PropertySignature`/`MethodSignature`/`CallSignature`/`ConstructSignature`、`ModuleDeclaration`/`ModuleBlock`、`ImportDeclaration`/`ImportClause`/`NamespaceImport`/`NamedImports`/`ImportSpecifier`/`ExternalModuleReference`/`ImportEqualsDeclaration`/`ExportDeclaration`/`NamedExports`/`NamespaceExport`/`ExportSpecifier`/`ExportAssignment`/`NamespaceExportDeclaration`。
+- 类型：`TypeReference`、`ArrayType`、`IndexedAccessType`、`UnionType`/`IntersectionType`、`ParenthesizedType`、`LiteralType`、`TypeLiteral`（keyword 类型复用 child-less `Token`）。
+- `utilities.rs` 新增谓词：`modifier_to_flag`、`is_parameter_property_modifier`、`is_class_member_modifier`。
+- deepclone 真实解析回填（`internal/parser/deepclone_test.rs`）随之扩展到 ~60 case，覆盖以上新节点。
+
+#### Round 3 附加（表达式 + 完整类型语法；全程 additive，`tsgo_ast` 保持全绿）
+
+为支撑 parser 的剩余表达式与完整类型语法，又**新增**了下列 `NodeData` variant（每个都带构造器 + `for_each_child`(lib.rs) + `visit_each_child`(visitor.rs)）：
+
+- 表达式：`ObjectLiteralExpression`、`PropertyAssignment`、`ShorthandPropertyAssignment`、`SpreadAssignment`、`FunctionExpression`、`ArrowFunction`、`DeleteExpression`/`TypeOfExpression`/`VoidExpression`/`AwaitExpression`、`YieldExpression`、`AsExpression`/`SatisfiesExpression`、`TypeAssertionExpression`、`NonNullExpression`、`MetaProperty`、`TemplateExpression`/`TemplateSpan`/`TaggedTemplateExpression`、`RegularExpressionLiteral`/`NoSubstitutionTemplateLiteral`/`TemplateHead`/`TemplateMiddle`/`TemplateTail`（text-bearing leaf，已入 `text()`/`is_text_data`）。
+- 类型：`FunctionType`/`ConstructorType`（共享 `SignatureTypeData`）、`ConditionalType`、`InferType`、`TypeOperator`、`MappedType`、`TupleType`、`NamedTupleMember`、`RestType`、`OptionalType`、`ThisType`（无 payload）、`TypeQuery`、`ImportType`、`TemplateLiteralType`、`TemplateLiteralTypeSpan`、`TypePredicate`。
+- 复用既有 payload 结构：`PropertyAssignment`↔`PropertyDeclarationData`、`FunctionExpression`↔`FunctionDeclarationData`、`ObjectLiteralExpression`↔`ListData`、`TupleType`↔`TypeListData`、`RestType`/`OptionalType`↔`ParenTypeData`、`TemplateLiteralType`↔`TemplateExpressionData`、`TemplateLiteralTypeSpan`↔`TemplateSpanData`（其 `expression` 字段在类型 span 中承载 type 子节点）。
+- deepclone 真实解析回填（`internal/parser/deepclone_test.rs`）随之扩展到 ~95 case，覆盖以上全部新节点（BFS 不变量 + 子节点计数）。
+
+#### Round 4 附加（JSX / 装饰器 / import 属性；全程 additive，`tsgo_ast` 保持全绿）
+
+为支撑 parser 收尾（JSX/JSON/装饰器/import 属性/模块引用），又**新增**了下列 `NodeData` variant（每个都带构造器 + `for_each_child` + `visit_each_child`）：
+
+- 装饰器/import 属性：`Decorator`、`ImportAttributes`、`ImportAttribute`。
+- JSX（13 个）：`JsxElement`、`JsxSelfClosingElement`、`JsxOpeningElement`、`JsxClosingElement`、`JsxFragment`、`JsxOpeningFragment`、`JsxClosingFragment`、`JsxAttributes`、`JsxAttribute`、`JsxSpreadAttribute`、`JsxNamespacedName`、`JsxExpression`、`JsxText`（text-bearing leaf，已入 `text()`/`is_text_data`）。
+- `SourceFileData` **新增字段** `imports: Vec<NodeId>`（顶层 import/re-export 模块说明符；由 parser 的 `collect_external_module_references` 回填）；`new_source_file` 初始化为空。
+- `utilities.rs` 的 `modifier_to_flag` 增加 `Kind::Decorator → ModifierFlags::DECORATOR`。
+- deepclone 真实解析回填扩展到 **~107 case**（TS + 新增 TSX/JSON 表），覆盖以上全部新节点。
+- **JSON SourceFile** 复用既有 `SourceFile`/`ExpressionStatement`/`ArrayLiteralExpression` 等节点（无新增节点）。
+- **DEFER**：JSDoc 节点族（`JSDoc`/`JSDocText`/各 `@tag` 节点）随 JSDoc+reparser 子系统整体推迟（见 parser `impl.md`）。
 - **`positionmap_test.go` 的 `BenchmarkComputePositionMap_CheckerTS`**：读 `_submodules/TypeScript/src/compiler/checker.ts`，缺文件时 `b.Skip`。Rust 用 `criterion`，缺文件跳过。benchmark 非 gate，记为可选。
 - **`set_parse_jsdoc_for_node`**：JSDoc 懒解析回调由 parser（P3）注入；本包仅留注册点。`// DEFER(phase-3)`。
 - **`utilities.rs` 中依赖 scanner 的项**（`skip_trivia`/`get_token_pos_of_node` 等）：`// DEFER(phase-3): blocked-by tsgo_scanner`。

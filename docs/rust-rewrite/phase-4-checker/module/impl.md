@@ -40,10 +40,28 @@
 
 | Go 文件 | Rust 文件 | 说明 |
 |---|---|---|
-| `internal/module/resolver.go` | `internal/module/lib.rs` | crate 根。`Resolver`/`resolutionState`/`tracer`/`resolved` + 全部解析算法（~60 个函数） |
-| `internal/module/types.go` | `internal/module/types.rs` | `ResolutionHost`、`ModeAwareCacheKey`、`NodeResolutionFeatures`、`PackageId`、`ResolvedModule`、`ResolvedTypeReferenceDirective`、`extensions` |
+| `internal/module/resolver.go` | **拆成多文件**（见下"拆分说明"） | `Resolver`/`resolutionState`/`tracer`/`resolved` + 全部解析算法 |
+| `internal/module/types.go` | `internal/module/types.rs` | `ResolutionHost`、`ModeAwareCacheKey`、`NodeResolutionFeatures`、`PackageId`、`ResolvedModule`、`ResolvedTypeReferenceDirective`、`extensions`(→`Extensions`) |
 | `internal/module/cache.go` | `internal/module/cache.rs` | `ModeAwareCache`、`moduleResolutionCache`、`typeRefDirectiveResolutionCache`、`caches`、`newCaches`、`getRedirectConfigName` |
-| `internal/module/util.go` | `internal/module/util.rs` | `IsApplicableVersionedTypesKey`、`ParseNodeModuleFromPath`、`ParsePackageName`、`MangleScopedPackageName`/`Unmangle...`、`GetTypesPackageName`/`GetPackageNameFromTypesPackageName`、`ComparePatternKeys`、`GetResolutionDiagnostic`、`TryGetJSExtensionForFile` |
+| `internal/module/util.go` | `internal/module/util.rs` | `IsApplicableVersionedTypesKey`、`ParseNodeModuleFromPath`(+`moveToNextDirectorySeparatorIfAvailable`)、`ParsePackageName`、`MangleScopedPackageName`/`Unmangle...`、`GetTypesPackageName`/`GetPackageNameFromTypesPackageName`、`ComparePatternKeys`、`GetResolutionDiagnostic`、`TryGetJSExtensionForFile` |
+
+## 拆分说明（mega-file decomposition，PORTING §2）
+
+`resolver.go` 约 2363 行（>1500 阈值），按职责拆成以下 Rust 文件（均在 `internal/module/`，
+crate 根仍是 `lib.rs`）。每个 Rust 函数仍带 `// Go: resolver.go:<Func>` 锚点锚回原 Go 文件；
+每个 `.rs` 配兄弟 `<stem>_test.rs`（C6）。
+
+| Rust 文件 | 承载的 Go `resolver.go` 函数 |
+|---|---|
+| `lib.rs`（crate 根） | `Resolver`/`ResolverOptions`/`NewResolver`/`NewResolverWithOptions`、`ResolveModuleName`/`ResolveTypeReferenceDirective`/`ResolvePackageDirectory`/`GetPackageScopeForPath`、`resolveConfig`/`ResolveConfig`、`GetAutomaticTypeDirectiveNames`、`GetCompilerOptionsWithRedirect`、`resolved`(→`Resolved`/`ResolvedExt`)、`tracer`/`DiagAndArgs`、`ParsedPatterns`/`TryParsePatterns`/`MatchPatternOrExact`、`normalizePathForCJSResolution`、`matchesPatternWithTrailer`、`extensionIsOk`、`resolutionKindSpecificLoader`(→`Loader`) |
+| `state.rs` | `resolutionState`/`newResolutionState`、`GetConditions`/`getNodeResolutionFeatures`、`resolveNodeLike[Worker]`、`conditionMatches`、`getPackageScopeForPath`、`createResolvedModule[HandlingSymlink]`/`createResolvedTypeReferenceDirective`、`getOriginalAndResolvedFileName`、`realPath`、`getTraceFunc`(→`version_paths_of`) |
+| `node_modules.rs` | `loadModuleFromNearestNodeModulesDirectory[Worker]`、`loadModuleFromImmediateNodeModulesDirectory`、`loadModuleFromSpecificNodeModulesDirectory`(+loader) |
+| `node_resolution.rs` | `loadModuleFromSelfNameReference`、`loadModuleFromImports`、`loadModuleFromExports`、`loadModuleFromExportsOrImports`、`loadModuleFromTargetExportOrImport`、`tryLoadInputFileForPath`、`getOutputDirectoriesForBaseDirectory` |
+| `file_load.rs` | `nodeLoadModuleByRelativeName`、`loadModuleFromFile[NoImplicitExtensions]`、`tryAddingExtensions`、`tryExtension`、`tryFile[Lookup]`、`loadNodeModuleFromDirectory[Worker]`(+loader)、`loadFileNameFromPackageJSONField`、`getPackageFile` |
+| `package_info.rs` | `getPackageJsonInfo`、`getPackageId`、`readPackageJsonPeerDependencies`、`validatePackageJSONField`、`getPackageJSONPathField` |
+| `paths.rs` | `tryLoadModuleUsingOptionalResolutionSettings`、`getParsedPatternsForPaths`(state+Resolver)、`tryLoadModuleUsingPathsIfEligible`、`tryLoadModuleUsingPaths`、`tryLoadModuleUsingRootDirs`、loader dispatch |
+| `type_ref.rs` | `resolveTypeReferenceDirective`、`getCandidateFromTypeRoot`、`mangleScopedPackageName`(state)、`resolveFromTypeRoot`、`tryResolveFromTypingsLocation` |
+| `entrypoints.rs` | `Ending`、`ResolvedEntrypoint`/`SymlinkOrRealpath`、`GetEntrypointsFromPackageJsonInfo`、`createResolvedEntrypointHandlingSymlink`、`loadEntrypointsFromExportMap`、`getMatchedStarForPatternEntrypoint` |
 
 ## 依赖白名单（本包新增的 crate）
 
@@ -54,68 +72,68 @@
 
 ### `types.rs`（Go: `types.go`）
 
-- [ ] `pub trait ResolutionHost { fn fs; fn get_current_directory }`　`// Go: types.go:ResolutionHost`
-- [ ] `pub struct ModeAwareCacheKey { name: String, mode: ResolutionMode }`　`// Go: types.go:ModeAwareCacheKey`
-- [ ] `pub trait ResolvedProjectReference { fn config_name; fn compiler_options }`　`// Go: types.go:ResolvedProjectReference`
-- [ ] `bitflags! NodeResolutionFeatures`（Imports/SelfName/Exports/ExportsPatternTrailers/ImportsPatternRoot + None/All/Node16Default/NodeNextDefault/BundlerDefault）　`// Go: types.go:NodeResolutionFeatures`
-- [ ] `pub struct PackageId{ name, sub_module_name, version, peer_dependencies }` + `Display`(`pkg@ver+peer`) + `package_name()`　`// Go: types.go:PackageId`
-- [ ] `pub struct ResolvedModule{ resolution_diagnostics, resolved_file_name, original_path, extension, resolved_using_ts_extension, package_id, is_external_library_import, alternate_result }` + `is_resolved()`　`// Go: types.go:ResolvedModule`
-- [ ] `pub struct ResolvedTypeReferenceDirective{ ... primary, ... }` + `is_resolved()`　`// Go: types.go:ResolvedTypeReferenceDirective`
-- [ ] `bitflags! Extensions` + `to_string()` + `to_array()`（按 TS/JS/Declaration/Json 拼 `tspath` 扩展名列表）　`// Go: types.go:extensions`
+- [x] `pub trait ResolutionHost { fn fs; fn get_current_directory }`　`// Go: types.go:ResolutionHost`
+- [x] `pub struct ModeAwareCacheKey { name: String, mode: ResolutionMode }`　`// Go: types.go:ModeAwareCacheKey`
+- [x] `pub trait ResolvedProjectReference { fn config_name; fn compiler_options }`　`// Go: types.go:ResolvedProjectReference`
+- [x] `bitflags! NodeResolutionFeatures`（Imports/SelfName/Exports/ExportsPatternTrailers/ImportsPatternRoot + None/All/Node16Default/NodeNextDefault/BundlerDefault）　`// Go: types.go:NodeResolutionFeatures`
+- [x] `pub struct PackageId{ name, sub_module_name, version, peer_dependencies }` + `Display`(`pkg@ver+peer`) + `package_name()`　`// Go: types.go:PackageId`
+- [x] `pub struct ResolvedModule{ resolution_diagnostics, resolved_file_name, original_path, extension, resolved_using_ts_extension, package_id, is_external_library_import, alternate_result }` + `is_resolved()`　`// Go: types.go:ResolvedModule`
+- [x] `pub struct ResolvedTypeReferenceDirective{ ... primary, ... }` + `is_resolved()`　`// Go: types.go:ResolvedTypeReferenceDirective`
+- [x] `bitflags! Extensions` + `to_string()` + `to_array()`（按 TS/JS/Declaration/Json 拼 `tspath` 扩展名列表）　`// Go: types.go:extensions`
 
 ### `cache.rs`（Go: `cache.go`）
 
-- [ ] `type ModeAwareCache<T> = FxHashMap<ModeAwareCacheKey, T>`　`// Go: cache.go:ModeAwareCache`
-- [ ] `struct ModuleResolutionCacheKey{ containing_directory, module_name, resolution_mode, redirect_config_name }` + `ModuleResolutionCache{ DashMap }` + `get`/`set`　`// Go: cache.go:moduleResolutionCache`
-- [ ] `struct TypeRefDirectiveResolutionCacheKey{ ..., from_inferred_types_containing_file }` + cache + `get`/`set`　`// Go: cache.go:typeRefDirectiveResolutionCache`
-- [ ] `struct Caches{ package_json_info_cache, module_resolution_cache, type_ref_directive_resolution_cache, parsed_patterns_for_paths: OnceCell }`　`// Go: cache.go:caches`
-- [ ] `fn new_caches(current_directory, use_case_sensitive_file_names, options) -> Caches`　`// Go: cache.go:newCaches`
-- [ ] `fn get_redirect_config_name(redirect: Option<&dyn ResolvedProjectReference>) -> String`　`// Go: cache.go:getRedirectConfigName`
+- [x] `type ModeAwareCache<T> = FxHashMap<ModeAwareCacheKey, T>`　`// Go: cache.go:ModeAwareCache`
+- [x] `struct ModuleResolutionCacheKey{ containing_directory, module_name, resolution_mode, redirect_config_name }` + `ModuleResolutionCache{ DashMap }` + `get`/`set`　`// Go: cache.go:moduleResolutionCache`
+- [x] `struct TypeRefDirectiveResolutionCacheKey{ ..., from_inferred_types_containing_file }` + cache + `get`/`set`　`// Go: cache.go:typeRefDirectiveResolutionCache`
+- [x] `struct Caches{ package_json_info_cache, module_resolution_cache, type_ref_directive_resolution_cache, parsed_patterns_for_paths: OnceCell }`　`// Go: cache.go:caches`
+- [x] `fn new_caches(current_directory, use_case_sensitive_file_names, options) -> Caches`　`// Go: cache.go:newCaches`
+- [x] `fn get_redirect_config_name(redirect: Option<&dyn ResolvedProjectReference>) -> String`　`// Go: cache.go:getRedirectConfigName`
 
 ### `util.rs`（Go: `util.go`）
 
-- [ ] `pub const INFERRED_TYPES_CONTAINING_FILE: &str = "__inferred type names__.ts"`　`// Go: util.go`
-- [ ] `pub fn is_applicable_versioned_types_key(key) -> bool`（`types@<range>` 且 range.test(tsVersion)）　`// Go: util.go:IsApplicableVersionedTypesKey`
-- [ ] `pub fn parse_node_module_from_path(resolved, is_folder) -> String`　`// Go: util.go:ParseNodeModuleFromPath`
-- [ ] `pub fn parse_package_name(module_name) -> (String, String)`（处理 `@scope/`）　`// Go: util.go:ParsePackageName`
-- [ ] `pub fn mangle_scoped_package_name` / `unmangle_scoped_package_name`（`@a/b`↔`a__b`）　`// Go: util.go:MangleScopedPackageName/UnmangleScopedPackageName`
-- [ ] `pub fn get_types_package_name` / `get_package_name_from_types_package_name`（`@types/` 前缀）　`// Go: util.go:GetTypesPackageName/GetPackageNameFromTypesPackageName`
-- [ ] `pub fn compare_pattern_keys(a, b) -> i32`（`*` 通配 key 排序：base 长者优先、无 `*` 者更长…）　`// Go: util.go:ComparePatternKeys`
-- [ ] `pub fn get_resolution_diagnostic(options, resolved_module, file) -> Option<&'static Message>`（按扩展名 + jsx/allowJs/resolveJsonModule/allowArbitraryExtensions 选诊断）　`// Go: util.go:GetResolutionDiagnostic`
-- [ ] `pub fn try_get_js_extension_for_file(file_name, options) -> String`（`.ts`/`.d.ts`→`.js`，`.tsx`→jsx 时 `.jsx` 否则 `.js`，`.mts`→`.mjs` 等）　`// Go: util.go:TryGetJSExtensionForFile`
+- [x] `pub const INFERRED_TYPES_CONTAINING_FILE: &str = "__inferred type names__.ts"`　`// Go: util.go`
+- [x] `pub fn is_applicable_versioned_types_key(key) -> bool`（`types@<range>` 且 range.test(tsVersion)）　`// Go: util.go:IsApplicableVersionedTypesKey`
+- [x] `pub fn parse_node_module_from_path(resolved, is_folder) -> String`　`// Go: util.go:ParseNodeModuleFromPath`
+- [x] `pub fn parse_package_name(module_name) -> (String, String)`（处理 `@scope/`）　`// Go: util.go:ParsePackageName`
+- [x] `pub fn mangle_scoped_package_name` / `unmangle_scoped_package_name`（`@a/b`↔`a__b`）　`// Go: util.go:MangleScopedPackageName/UnmangleScopedPackageName`
+- [x] `pub fn get_types_package_name` / `get_package_name_from_types_package_name`（`@types/` 前缀）　`// Go: util.go:GetTypesPackageName/GetPackageNameFromTypesPackageName`
+- [x] `pub fn compare_pattern_keys(a, b) -> i32`（`*` 通配 key 排序：base 长者优先、无 `*` 者更长…）　`// Go: util.go:ComparePatternKeys`
+- [x] `pub fn get_resolution_diagnostic(options, resolved_module, file) -> Option<&'static Message>`（按扩展名 + jsx/allowJs/resolveJsonModule/allowArbitraryExtensions 选诊断）　`// Go: util.go:GetResolutionDiagnostic`
+- [x] `pub fn try_get_js_extension_for_file(file_name, options) -> String`（`.ts`/`.d.ts`→`.js`，`.tsx`→jsx 时 `.jsx` 否则 `.js`，`.mts`→`.mjs` 等）　`// Go: util.go:TryGetJSExtensionForFile`
 
 ### `lib.rs`（Go: `resolver.go`，按子区块勾选）
 
-- [ ] `enum Resolved { ContinueSearching, Unresolved, Found{ path, extension, package_id, original_path, resolved_using_ts_extension } }` + `is_resolved()`/`should_continue_searching()`　`// Go: resolver.go:resolved`
-- [ ] `struct Tracer{ traces: Vec<DiagAndArgs> }` + `write`/`get_traces`；`struct DiagAndArgs{ message, args }`　`// Go: resolver.go:tracer`
-- [ ] `struct ResolutionState{ request 字段 + state 字段 }` + `new_resolution_state`（按 ModuleResolutionKind 设 features/esmMode/conditions/extensions）　`// Go: resolver.go:resolutionState/newResolutionState`
-- [ ] `pub fn get_compiler_options_with_redirect(options, redirect) -> &CompilerOptions`　`// Go: resolver.go:GetCompilerOptionsWithRedirect`
-- [ ] `pub struct Resolver{ caches, host, compiler_options, typings_location, project_name }`　`// Go: resolver.go:Resolver`
-- [ ] `pub fn new_resolver` / `new_resolver_with_options`（`ResolverOptions{ package_json_cache }`）　`// Go: resolver.go:NewResolver/NewResolverWithOptions`
-- [ ] **公开入口**：
-  - [ ] `pub fn resolve_module_name(&self, module_name, containing_file, resolution_mode, redirect) -> (ResolvedModule, Vec<DiagAndArgs>)`　`// Go: resolver.go:ResolveModuleName`
-  - [ ] `pub fn resolve_type_reference_directive(...) -> (ResolvedTypeReferenceDirective, Vec<DiagAndArgs>)`　`// Go: resolver.go:ResolveTypeReferenceDirective`
-  - [ ] `pub fn resolve_package_directory(...)`　`// Go: resolver.go:ResolvePackageDirectory`
-  - [ ] `pub fn get_package_scope_for_path(&self, dir) -> Option<InfoCacheEntry>`　`// Go: resolver.go:GetPackageScopeForPath`
-  - [ ] `pub fn get_entrypoints_from_package_json_info(...)` + `ResolvedEntrypoint`/`SymlinkOrRealpath`　`// Go: resolver.go:GetEntrypointsFromPackageJsonInfo`
-- [ ] **node-like 解析链**（`resolveNodeLike`/`Worker`、`loadModuleFromSelfNameReference`、`loadModuleFromImports`、`loadModuleFromExports`、`loadModuleFromExportsOrImports`、`loadModuleFromTargetExportOrImport`、`tryLoadInputFileForPath`、`getOutputDirectoriesForBaseDirectory`）　`// Go: resolver.go:resolveNodeLike...`
-- [ ] **node_modules 上溯**（`loadModuleFromNearestNodeModulesDirectory[Worker]`、`loadModuleFromImmediateNodeModulesDirectory`、`loadModuleFromSpecificNodeModulesDirectory`）　`// Go: resolver.go:loadModuleFromNearestNodeModulesDirectory...`
-- [ ] **文件加载 / 扩展名**（`nodeLoadModuleByRelativeName`、`loadModuleFromFile[NoImplicitExtensions]`、`tryAddingExtensions`、`tryExtension`、`tryFile[Lookup]`、`extensionIsOk`）　`// Go: resolver.go:loadModuleFromFile...`
-- [ ] **package.json 目录加载**（`loadNodeModuleFromDirectory[Worker]`、`loadFileNameFromPackageJSONField`、`getPackageFile`、`getPackageJsonInfo`、`getPackageId`、`readPackageJsonPeerDependencies`、`validatePackageJSONField`、`getPackageJSONPathField`）—— **注意 candidate 规范化竞态修复**　`// Go: resolver.go:loadNodeModuleFromDirectoryWorker/getPackageJsonInfo`
-- [ ] **paths / rootDirs**（`tryLoadModuleUsingOptionalResolutionSettings`、`tryLoadModuleUsingPathsIfEligible`、`tryLoadModuleUsingPaths`、`tryLoadModuleUsingRootDirs`、`getParsedPatternsForPaths`、`TryParsePatterns`、`MatchPatternOrExact`、`matchesPatternWithTrailer`、`replaceFirstStar` 等）　`// Go: resolver.go:tryLoadModuleUsingPaths...`
-- [ ] **typeRoots / type ref**（`resolveTypeReferenceDirective`、`getCandidateFromTypeRoot`、`resolveFromTypeRoot`、`mangleScopedPackageName`）　`// Go: resolver.go:resolveTypeReferenceDirective`
-- [ ] **typings location 回退**（`tryResolveFromTypingsLocation`）、**config 解析**（`resolveConfig`、`ResolveConfig`）　`// Go: resolver.go:tryResolveFromTypingsLocation/ResolveConfig`
-- [ ] **结果构造 + symlink**（`createResolvedModule[HandlingSymlink]`、`createResolvedTypeReferenceDirective`、`getOriginalAndResolvedFileName`、`realPath`）　`// Go: resolver.go:createResolvedModule...`
-- [ ] **条件 / 特性**（`conditionMatches`、`GetConditions`、`getNodeResolutionFeatures`、`getTraceFunc`）　`// Go: resolver.go:GetConditions/getNodeResolutionFeatures`
-- [ ] **entrypoints 导出枚举**（`loadEntrypointsFromExportMap`、`getMatchedStarForPatternEntrypoint`、`createResolvedEntrypointHandlingSymlink`）　`// Go: resolver.go:loadEntrypointsFromExportMap`
-- [ ] `pub fn get_automatic_type_directive_names(options, host) -> Vec<String>`　`// Go: resolver.go:GetAutomaticTypeDirectiveNames`
-- [ ] 工具：`normalizePathForCJSResolution`、`moveToNextDirectorySeparatorIfAvailable`　`// Go: resolver.go`
+- [x] `enum Resolved { ContinueSearching, Unresolved, Found{ path, extension, package_id, original_path, resolved_using_ts_extension } }` + `is_resolved()`/`should_continue_searching()`　`// Go: resolver.go:resolved`
+- [x] `struct Tracer{ traces: Vec<DiagAndArgs> }` + `write`/`get_traces`；`struct DiagAndArgs{ message, args }`　`// Go: resolver.go:tracer`
+- [x] `struct ResolutionState{ request 字段 + state 字段 }` + `new_resolution_state`（按 ModuleResolutionKind 设 features/esmMode/conditions/extensions）　`// Go: resolver.go:resolutionState/newResolutionState`
+- [x] `pub fn get_compiler_options_with_redirect(options, redirect) -> &CompilerOptions`　`// Go: resolver.go:GetCompilerOptionsWithRedirect`
+- [x] `pub struct Resolver{ caches, host, compiler_options, typings_location, project_name }`　`// Go: resolver.go:Resolver`
+- [x] `pub fn new_resolver` / `new_resolver_with_options`（`ResolverOptions{ package_json_cache }`）　`// Go: resolver.go:NewResolver/NewResolverWithOptions`
+- [x] **公开入口**：
+  - [x] `pub fn resolve_module_name(&self, module_name, containing_file, resolution_mode, redirect) -> (ResolvedModule, Vec<DiagAndArgs>)`　`// Go: resolver.go:ResolveModuleName`
+  - [x] `pub fn resolve_type_reference_directive(...) -> (ResolvedTypeReferenceDirective, Vec<DiagAndArgs>)`　`// Go: resolver.go:ResolveTypeReferenceDirective`
+  - [x] `pub fn resolve_package_directory(...)`　`// Go: resolver.go:ResolvePackageDirectory`
+  - [x] `pub fn get_package_scope_for_path(&self, dir) -> Option<InfoCacheEntry>`　`// Go: resolver.go:GetPackageScopeForPath`
+  - [x] `pub fn get_entrypoints_from_package_json_info(...)` + `ResolvedEntrypoint`/`SymlinkOrRealpath`　`// Go: resolver.go:GetEntrypointsFromPackageJsonInfo`
+- [x] **node-like 解析链**（`resolveNodeLike`/`Worker`、`loadModuleFromSelfNameReference`、`loadModuleFromImports`、`loadModuleFromExports`、`loadModuleFromExportsOrImports`、`loadModuleFromTargetExportOrImport`、`tryLoadInputFileForPath`、`getOutputDirectoriesForBaseDirectory`）　`// Go: resolver.go:resolveNodeLike...`
+- [x] **node_modules 上溯**（`loadModuleFromNearestNodeModulesDirectory[Worker]`、`loadModuleFromImmediateNodeModulesDirectory`、`loadModuleFromSpecificNodeModulesDirectory`）　`// Go: resolver.go:loadModuleFromNearestNodeModulesDirectory...`
+- [x] **文件加载 / 扩展名**（`nodeLoadModuleByRelativeName`、`loadModuleFromFile[NoImplicitExtensions]`、`tryAddingExtensions`、`tryExtension`、`tryFile[Lookup]`、`extensionIsOk`）　`// Go: resolver.go:loadModuleFromFile...`
+- [x] **package.json 目录加载**（`loadNodeModuleFromDirectory[Worker]`、`loadFileNameFromPackageJSONField`、`getPackageFile`、`getPackageJsonInfo`、`getPackageId`、`readPackageJsonPeerDependencies`、`validatePackageJSONField`、`getPackageJSONPathField`）—— **注意 candidate 规范化竞态修复**　`// Go: resolver.go:loadNodeModuleFromDirectoryWorker/getPackageJsonInfo`
+- [x] **paths / rootDirs**（`tryLoadModuleUsingOptionalResolutionSettings`、`tryLoadModuleUsingPathsIfEligible`、`tryLoadModuleUsingPaths`、`tryLoadModuleUsingRootDirs`、`getParsedPatternsForPaths`、`TryParsePatterns`、`MatchPatternOrExact`、`matchesPatternWithTrailer`、`replaceFirstStar` 等）　`// Go: resolver.go:tryLoadModuleUsingPaths...`
+- [x] **typeRoots / type ref**（`resolveTypeReferenceDirective`、`getCandidateFromTypeRoot`、`resolveFromTypeRoot`、`mangleScopedPackageName`）　`// Go: resolver.go:resolveTypeReferenceDirective`
+- [x] **typings location 回退**（`tryResolveFromTypingsLocation`）、**config 解析**（`resolveConfig`、`ResolveConfig`）　`// Go: resolver.go:tryResolveFromTypingsLocation/ResolveConfig`
+- [x] **结果构造 + symlink**（`createResolvedModule[HandlingSymlink]`、`createResolvedTypeReferenceDirective`、`getOriginalAndResolvedFileName`、`realPath`）　`// Go: resolver.go:createResolvedModule...`
+- [x] **条件 / 特性**（`conditionMatches`、`GetConditions`、`getNodeResolutionFeatures`、`getTraceFunc`）　`// Go: resolver.go:GetConditions/getNodeResolutionFeatures`
+- [x] **entrypoints 导出枚举**（`loadEntrypointsFromExportMap`、`getMatchedStarForPatternEntrypoint`、`createResolvedEntrypointHandlingSymlink`）　`// Go: resolver.go:loadEntrypointsFromExportMap`
+- [x] `pub fn get_automatic_type_directive_names(options, host) -> Vec<String>`　`// Go: resolver.go:GetAutomaticTypeDirectiveNames`
+- [x] 工具：`normalizePathForCJSResolution`、`moveToNextDirectorySeparatorIfAvailable`　`// Go: resolver.go`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/module/Cargo.toml`（`name = "tsgo_module"` + path deps）
-- [ ] 根 `Cargo.toml` workspace members 追加
-- [ ] `lib.rs` 声明 `mod types; mod cache; mod util;` + re-export 公开 API
+- [x] `internal/module/Cargo.toml`（`name = "tsgo_module"` + path deps）
+- [x] 根 `Cargo.toml` workspace members 追加
+- [x] `lib.rs` 声明 `mod types; mod cache; mod util;` + re-export 公开 API
 
 ## TDD 推进顺序（tracer bullet → 增量）
 
@@ -128,11 +146,17 @@
 
 ## 与 Go 的已知偏离（divergence）
 
-- `*resolved` 三态（nil/空/有值）→ `enum Resolved`（显式三分支）。
-- `tracer` nil-receiver 容忍 → `Option<Tracer>` + `&mut self`。
-- `SyncMap` → `DashMap`，`sync.Once` → `OnceCell`；并发竞态语义（LoadOrStore）保持。
-- vfs I/O 通过 `&dyn Vfs`（P1）；测试用 `vfstest::from_map`。
-- 大量 `func(...) *resolved` 链式"继续搜索 / 命中"控制流：用 `?`-风格 early-return + `Option`/`Resolved` 匹配表达，结构 1:1。
+- `*resolved` 三态（nil/空/有值）→ `type Resolved = Option<ResolvedInner>` + `ResolvedExt` 扩展 trait（`should_continue_searching`/`is_resolved`），`continue_searching()`/`unresolved()` 工厂。三态语义 1:1。
+- `tracer` nil-receiver 容忍 → `Option<Tracer>` + 自由函数 `write_trace(&mut Option<Tracer>, ...)`（便于与 `ResolutionState` 其它字段不相交借用）；trace 实参以 `Vec<String>` 存储（Go `[]any`），trace 输出本身推迟到 P10。
+- `SyncMap` → `tsgo_collections::SyncMap`(DashMap)，`sync.Once` → `OnceLock`(Resolver，保 `Sync`)/`OnceCell`(per-request state)；并发竞态语义（`LoadOrStore`）保持，回归测试 `...Race` 复现并通过。
+- vfs I/O 通过 `&dyn Fs`（P1）；测试用 `vfstest::MapFs::from_map`。
+- **`ResolutionDiagnostics: []*ast.Diagnostic` → `Vec<ResolutionDiagnostic>`**：`tsgo_ast::Diagnostic` 尚未移植，`ResolutionDiagnostic{message, args}` 仅保留消息 + 字符串化实参（`tryLoadInputFileForPath` 的 rootDir 歧义诊断）。blocked-by: `tsgo_ast::Diagnostic`。
+- **`GetResolutionDiagnostic(file *ast.SourceFile)` → `get_resolution_diagnostic(..., is_declaration_file: bool)`**：Go 仅读 `file.IsDeclarationFile`，而 `tsgo_ast` 暂无可用 `SourceFile` 句柄，故直接传该 bool。blocked-by: `tsgo_ast::SourceFile`。
+- **`getPackageJsonInfo` 返回 `*InfoCacheEntry` → `Option<PackageJsonInfo>`**：Rust `InfoCacheEntry.contents` 是 owned，无法像 Go 那样共享 `Contents` 另造 entry；`PackageJsonInfo{entry: Arc<InfoCacheEntry>, package_directory}` 携带共享 entry + 请求目录。cache-miss store 用赢家目录、cache-hit 用请求目录（PR #50740 语义保持）。配合 candidate 规范化使竞态修复 1:1 复现。
+- `getParsedPatternsForPaths`（state）返回 owned `ParsedPatterns` clone（Go 返回 `*ParsedPatterns`）：避免跨 `&mut self` loader 调用持有 `&self`；`paths` 罕见，开销可忽略，完整性靠 P10。
+- `resolutionKindSpecificLoader` 闭包 → `enum Loader` + `invoke_loader`（避免闭包捕获 `&mut self`）。
+- `packagejson.Parse` 失败时 Go 保留部分字段；Rust serde 解析为 all-or-nothing（失败→`Fields::default()` + `parseable=false`）。仅影响 malformed `package.json` 边界，合法 JSON 一致。
+- 大量 `func(...) *resolved` 链式"继续搜索 / 命中"控制流：用 early-return + `Resolved`/`ResolvedExt` 匹配表达，结构 1:1。
 
 ## 转交 / 推迟（DEFER）
 

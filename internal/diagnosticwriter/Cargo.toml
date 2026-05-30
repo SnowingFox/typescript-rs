@@ -1,0 +1,20 @@
+[package]
+name = "tsgo_diagnosticwriter"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+# DEFER(phase-5): tsgo_ast dependency intentionally omitted for now.
+# blocked-by: tsgo_ast::Diagnostic / SourceFileLike not yet ported. Every
+# ast-dependent item (AstDiagnostic, wrap_ast_diagnostic[s],
+# from_ast_diagnostics, compare_ast_diagnostics,
+# write_flattened_ast_diagnostic_message) is deferred, so nothing here uses ast.
+# Re-add `tsgo_ast = { path = "../ast" }` when those land.
+tsgo_core = { path = "../core" }
+tsgo_diagnostics = { path = "../diagnostics" }
+tsgo_locale = { path = "../locale" }
+tsgo_scanner = { path = "../scanner" }
+tsgo_tspath = { path = "../tspath" }

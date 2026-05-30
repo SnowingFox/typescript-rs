@@ -7,6 +7,25 @@
 
 > 字符串约定：`\n` = 换行，`\t` = 制表符，`\"`/`\'` = 转义引号，反引号原样。input/output 均为 Go 测试里的字面量。
 
+## 实现进度（本轮 subagent）
+
+| Go 测试文件 | 顶层函数 | 已移植并全绿 | 推迟 |
+|---|---|---|---|
+| `utilities_test.go` | 4 | **4 ✓**（`escape_string_table`/`escape_non_ascii_string_table`/`escape_jsx_attribute_string_table`/`is_recognized_triple_slash_comment_table`，全子用例对齐 Go 字面量） | 0 |
+| `namegenerator_test.go` | 36 | **16 ✓**（temp 1-3/scoped/scoped_reserved、loop 1-3/scoped、unique 1-2/scoped、unique_private 1-2/scoped） | **20**（所有 `generated_name_for_*` node-based 用例，`— DEFER(phase-4)`，blocked-by binder Locals + 跨 arena `generateNameForNode`/`isUniqueLocalName`） |
+| `printer_test.go` | 65 | **~46**（`TestEmit` 全部已实现 NodeKind 家族子用例 + 21 parenthesizer func） | 见下（解析器受限子用例 + 37 parenthesizer + 4 name-gen-emit transform） |
+
+### Round 2：emit 核心 + parenthesizer 进度
+
+- **`TestEmit`（~290 子用例）**：表达式/语句/声明/类型/JSX 全家族已逐 NodeKind 移植并全绿（Rust 测试按家族分布在 `printer_test.rs`/`emit_expressions_test.rs`/`emit_statements_test.rs`/`emit_declarations_test.rs`/`emit_types_test.rs`/`emit_jsx_test.rs`，每条 expected 取自 Go 字面量）。**解析器受限推迟的子用例**（`tsgo_parser` 限制，非 printer 责任）：`ImportExpression`(`import()` 死循环，`#[ignore]`)、`VariableStatement` 的 `using`/`await using`、`ModuleDeclaration` 的 `global{}`、`TupleType` 的 `[a?]`/`[a?: b]`。
+- **parenthesizer（58 func）**：已移植 `TestParenthesizeBinary`(15 子用例) + `Conditional1/2` + `SpreadElement1` + `Call4` + `New2` + `AsExpression`（共 ~21），见 `parenthesizer_test.rs`（合成 AST 经 `check_synthetic`）。其余 ~37 条合成 AST 用例 round 3 续。
+- **name-gen + transform-emit（4 func）**：`TestNameGeneration`/`No/TrailingCommaAfterTransform`/`PartiallyEmittedExpression` 仍 DEFER（依赖 transformers/visitor + node-based 名字）。
+- 测试总数：`cargo test -p tsgo_printer` = **160 unit + 18 doctests 全绿**（1 `#[ignore]`：`import()`）。gate-code.sh **C1–C8 GREEN**。
+
+额外（每函数单测，§8.6）：`emitflags`/`generatedidentifierflags`/`emittextwriter`/`textwriter`/`emitcontext`/`factory` 各文件均带兄弟 `<stem>_test.rs`（Go 无对应测试，按行为级单测补齐）。
+
+下面表格中 `完成` 列：本轮已落地的用例标 `✓`，emit/parenthesizer/node-based 名字相关标 `—`（DEFER phase-4）。
+
 ## 测试文件 → Rust 测试模块
 
 | Go 测试文件 | Rust 测试位置 | 顶层测试函数数 |

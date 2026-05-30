@@ -1,0 +1,12 @@
+[package]
+name = "tsgo_outputpaths"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tsgo_ast = { path = "../ast" }
+tsgo_core = { path = "../core" }
+tsgo_tspath = { path = "../tspath" }

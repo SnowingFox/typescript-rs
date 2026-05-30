@@ -46,52 +46,52 @@
 ### `lib.rs`（Go: `internal/diagnosticwriter/diagnosticwriter.go`）
 
 类型 / 适配：
-- [ ] `pub trait FileLike`　`// Go: diagnosticwriter.go:FileLike`
-- [ ] `pub trait Diagnostic`（`file/pos/end/len/code/category/localize/message_chain/related_information`）　`// Go: diagnosticwriter.go:Diagnostic`
-- [ ] `pub struct AstDiagnostic` + `impl Diagnostic`（含 `message_chain`/`related_information` 包裹子诊断）　`// Go: diagnosticwriter.go:ASTDiagnostic`
-- [ ] `pub fn wrap_ast_diagnostic(d) -> AstDiagnostic`　`// Go: diagnosticwriter.go:WrapASTDiagnostic`
-- [ ] `pub fn wrap_ast_diagnostics(diags) -> Vec<AstDiagnostic>`　`// Go: diagnosticwriter.go:WrapASTDiagnostics`
-- [ ] `pub fn from_ast_diagnostics(diags) -> Vec<Box<dyn Diagnostic>>`　`// Go: diagnosticwriter.go:FromASTDiagnostics`
-- [ ] `pub fn to_diagnostics<T: Diagnostic>(diags) -> Vec<Box<dyn Diagnostic>>`　`// Go: diagnosticwriter.go:ToDiagnostics`
-- [ ] `pub fn compare_ast_diagnostics(a, b) -> Ordering`　`// Go: diagnosticwriter.go:CompareASTDiagnostics`
-- [ ] `pub struct FormattingOptions { locale, compare_paths_options, new_line }`　`// Go: diagnosticwriter.go:FormattingOptions`
-- [ ] `pub type FormattedWriter` + `fn write_with_style_and_reset`（私有默认实现）　`// Go: diagnosticwriter.go:FormattedWriter / writeWithStyleAndReset`
+- [x] `pub trait FileLike`　`// Go: diagnosticwriter.go:FileLike`
+- [x] `pub trait Diagnostic`（`file/pos/end/len/code/category/localize/message_chain/related_information`；`message_chain`/`related_information` 返回 `Vec<&dyn Diagnostic>`）　`// Go: diagnosticwriter.go:Diagnostic`
+- [ ] `pub struct AstDiagnostic` + `impl Diagnostic` — **DEFER(phase-5): blocked-by tsgo_ast::Diagnostic 未移植**　`// Go: diagnosticwriter.go:ASTDiagnostic`
+- [ ] `pub fn wrap_ast_diagnostic(d) -> AstDiagnostic` — **DEFER(phase-5): blocked-by tsgo_ast::Diagnostic**　`// Go: diagnosticwriter.go:WrapASTDiagnostic`
+- [ ] `pub fn wrap_ast_diagnostics(diags) -> Vec<AstDiagnostic>` — **DEFER(phase-5): blocked-by tsgo_ast::Diagnostic**　`// Go: diagnosticwriter.go:WrapASTDiagnostics`
+- [ ] `pub fn from_ast_diagnostics(diags) -> Vec<Box<dyn Diagnostic>>` — **DEFER(phase-5): blocked-by tsgo_ast::Diagnostic**　`// Go: diagnosticwriter.go:FromASTDiagnostics`
+- [x] `pub fn to_diagnostics<T: Diagnostic + 'static>(diags: Vec<T>) -> Vec<Box<dyn Diagnostic>>`　`// Go: diagnosticwriter.go:ToDiagnostics`
+- [ ] `pub fn compare_ast_diagnostics(a, b) -> Ordering` — **DEFER(phase-5): blocked-by tsgo_ast::CompareDiagnostics**　`// Go: diagnosticwriter.go:CompareASTDiagnostics`
+- [x] `pub struct FormattingOptions { locale, compare_paths_options, new_line }`　`// Go: diagnosticwriter.go:FormattingOptions`
+- [x] `pub type FormattedWriter` + `fn write_with_style_and_reset`（私有默认实现）　`// Go: diagnosticwriter.go:FormattedWriter / writeWithStyleAndReset`
 
 pretty 输出：
-- [ ] `pub fn format_diagnostics_with_color_and_context(out, diags, opts)` — 逐条间插 newLine　`// Go: diagnosticwriter.go:FormatDiagnosticsWithColorAndContext`
-- [ ] `pub fn format_diagnostic_with_color_and_context(out, diag, opts)` — location + category + `TSxxxx` + 扁平消息 + 代码片段 + relatedInformation　`// Go: diagnosticwriter.go:FormatDiagnosticWithColorAndContext`
-- [ ] `fn write_code_snippet(out, file, start, length, squiggle_color, indent, opts)`（私有）— gutter 行号、5 行折叠省略、`~` 波浪线（首行/末行/中间三分支）、tab→空格、UTF-16 计宽　`// Go: diagnosticwriter.go:writeCodeSnippet`
+- [x] `pub fn format_diagnostics_with_color_and_context(out, diags, opts)` — 逐条间插 newLine　`// Go: diagnosticwriter.go:FormatDiagnosticsWithColorAndContext`
+- [x] `pub fn format_diagnostic_with_color_and_context(out, diag, opts)` — location + category + `TSxxxx` + 扁平消息 + 代码片段 + relatedInformation　`// Go: diagnosticwriter.go:FormatDiagnosticWithColorAndContext`
+- [x] `fn write_code_snippet(out, file, start, length, squiggle_color, indent, opts)`（私有）— gutter 行号、5 行折叠省略、`~` 波浪线（首行/末行/中间三分支）、tab→空格、UTF-16 计宽　`// Go: diagnosticwriter.go:writeCodeSnippet`
 
 消息扁平化：
-- [ ] `pub fn flatten_diagnostic_message(d, new_line, locale) -> String`　`// Go: diagnosticwriter.go:FlattenDiagnosticMessage`
-- [ ] `pub fn write_flattened_ast_diagnostic_message(out, d, newline, locale)`　`// Go: diagnosticwriter.go:WriteFlattenedASTDiagnosticMessage`
-- [ ] `pub fn write_flattened_diagnostic_message(out, d, newline, locale)`　`// Go: diagnosticwriter.go:WriteFlattenedDiagnosticMessage`
-- [ ] `fn flatten_diagnostic_message_chain(out, chain, new_line, locale, level)`（私有，递归缩进）　`// Go: diagnosticwriter.go:flattenDiagnosticMessageChain`
-- [ ] `fn get_category_format(category) -> &'static str`（私有；未知 category → panic）　`// Go: diagnosticwriter.go:getCategoryFormat`
+- [x] `pub fn flatten_diagnostic_message(d, new_line, locale) -> String`　`// Go: diagnosticwriter.go:FlattenDiagnosticMessage`
+- [ ] `pub fn write_flattened_ast_diagnostic_message(out, d, newline, locale)` — **DEFER(phase-5): blocked-by tsgo_ast::Diagnostic**　`// Go: diagnosticwriter.go:WriteFlattenedASTDiagnosticMessage`
+- [x] `pub fn write_flattened_diagnostic_message(out, d, newline, locale)`　`// Go: diagnosticwriter.go:WriteFlattenedDiagnosticMessage`
+- [x] `fn flatten_diagnostic_message_chain(out, chain, new_line, locale, level)`（私有，递归缩进）　`// Go: diagnosticwriter.go:flattenDiagnosticMessageChain`
+- [x] `fn get_category_format(category) -> &'static str`（私有；Rust `Category` 为封闭枚举，match 穷尽，无 Go 的未知→panic 分支）　`// Go: diagnosticwriter.go:getCategoryFormat`
 
 位置 / 紧凑输出：
-- [ ] `pub fn write_location(out, file, pos, opts, writer)` — `relativePath:line+1:col+1` 着色　`// Go: diagnosticwriter.go:WriteLocation`
-- [ ] `pub fn write_format_diagnostics(out, diags, opts)`　`// Go: diagnosticwriter.go:WriteFormatDiagnostics`
-- [ ] `pub fn write_format_diagnostic(out, diag, opts)` — `path(line,col): category TSxxxx: msg`　`// Go: diagnosticwriter.go:WriteFormatDiagnostic`
+- [x] `pub fn write_location(out, file, pos, opts, writer)` — `relativePath:line+1:col+1` 着色（opts 非空，折掉 Go 的 nil 分支）　`// Go: diagnosticwriter.go:WriteLocation`
+- [x] `pub fn write_format_diagnostics(out, diags, opts)`　`// Go: diagnosticwriter.go:WriteFormatDiagnostics`
+- [x] `pub fn write_format_diagnostic(out, diag, opts)` — `path(line,col): category TSxxxx: msg`　`// Go: diagnosticwriter.go:WriteFormatDiagnostic`
 
 错误汇总：
-- [ ] `pub struct ErrorSummary { total_error_count, global_errors, errors_by_file, sorted_files }`　`// Go: diagnosticwriter.go:ErrorSummary`
-- [ ] `pub fn write_error_summary_text(out, all_diags, opts)` — `Found 1 error` / `Found N errors in M files` 等本地化分支　`// Go: diagnosticwriter.go:WriteErrorSummaryText`
-- [ ] `fn get_error_summary(diags) -> ErrorSummary`（私有；只数 `CategoryError`，按 FileName 排序）　`// Go: diagnosticwriter.go:getErrorSummary`
-- [ ] `fn write_tabular_errors_display(out, summary, opts)`（私有；左对齐宽度计算）　`// Go: diagnosticwriter.go:writeTabularErrorsDisplay`
-- [ ] `fn pretty_path_for_file_error(file, file_errors, opts) -> String`（私有）　`// Go: diagnosticwriter.go:prettyPathForFileError`
+- [x] `pub struct ErrorSummary { total_error_count, global_errors, errors_by_file, sorted_files }`（`errors_by_file` 用 `HashMap<String, _>` 按文件名分组）　`// Go: diagnosticwriter.go:ErrorSummary`
+- [x] `pub fn write_error_summary_text(out, all_diags, opts)` — `Found 1 error` / `Found N errors in M files` 等本地化分支　`// Go: diagnosticwriter.go:WriteErrorSummaryText`
+- [x] `fn get_error_summary(diags) -> ErrorSummary`（私有；只数 `CategoryError`，按 FileName 排序）　`// Go: diagnosticwriter.go:getErrorSummary`
+- [x] `fn write_tabular_errors_display(out, summary, opts)`（私有；左对齐宽度计算）　`// Go: diagnosticwriter.go:writeTabularErrorsDisplay`
+- [x] `fn pretty_path_for_file_error(file, file_errors, opts) -> String`（私有）　`// Go: diagnosticwriter.go:prettyPathForFileError`
 
 状态行 / 屏幕：
-- [ ] `pub fn format_diagnostics_status_with_color_and_time(out, time, diag, opts)`　`// Go: diagnosticwriter.go:FormatDiagnosticsStatusWithColorAndTime`
-- [ ] `pub fn format_diagnostics_status_and_time(out, time, diag, opts)`　`// Go: diagnosticwriter.go:FormatDiagnosticsStatusAndTime`
-- [ ] `pub static SCREEN_STARTING_CODES: &[i32]`　`// Go: diagnosticwriter.go:ScreenStartingCodes`
-- [ ] `pub fn try_clear_screen(out, diag, options) -> bool` — watch 模式清屏 `\x1B[2J\x1B[3J\x1B[H`　`// Go: diagnosticwriter.go:TryClearScreen`
+- [x] `pub fn format_diagnostics_status_with_color_and_time(out, time, diag, opts)`　`// Go: diagnosticwriter.go:FormatDiagnosticsStatusWithColorAndTime`
+- [x] `pub fn format_diagnostics_status_and_time(out, time, diag, opts)`　`// Go: diagnosticwriter.go:FormatDiagnosticsStatusAndTime`
+- [x] `pub static SCREEN_STARTING_CODES: LazyLock<[i32; 2]>`（`var` → `LazyLock`，仍由消息 `.code()` 派生）　`// Go: diagnosticwriter.go:ScreenStartingCodes`
+- [x] `pub fn try_clear_screen(out, diag, options) -> bool` — watch 模式清屏 `\x1B[2J\x1B[3J\x1B[H`　`// Go: diagnosticwriter.go:TryClearScreen`
 
 ### Cargo / crate 接线
 
-- [ ] `internal/diagnosticwriter/Cargo.toml`（`name = "tsgo_diagnosticwriter"` + path deps：`tsgo_ast` `tsgo_core` `tsgo_diagnostics` `tsgo_locale` `tsgo_scanner` `tsgo_tspath`）
-- [ ] 根 `Cargo.toml` workspace members 追加本 crate
-- [ ] `lib.rs` 公开 re-export
+- [x] `internal/diagnosticwriter/Cargo.toml`（`name = "tsgo_diagnosticwriter"` + path deps：`tsgo_core` `tsgo_diagnostics` `tsgo_locale` `tsgo_scanner` `tsgo_tspath`）。`tsgo_ast` 依赖暂时移除——见下方 DEFER。
+- [x] 根 `Cargo.toml` workspace members 追加本 crate（脚手架已就绪）
+- [x] `lib.rs` 公开 re-export（所有公开项直接定义在 `lib.rs` 根，无需额外 re-export）
 
 ## TDD 推进顺序（tracer bullet → 增量）
 
@@ -102,13 +102,20 @@ pretty 输出：
 5. `get_error_summary` + `write_error_summary_text` + `write_tabular_errors_display`。
 6. `try_clear_screen` / 状态行函数（收尾）。
 
-## 与 Go 的已知偏离（divergence）
+## 与 Go 的已知偏离（divergence，实测落地）
 
-- `ASTDiagnostic` 用 Go 结构体嵌入（`*ast.Diagnostic`）做方法转发；Rust 改组合 + 手写 `impl Diagnostic`，行为 1:1。
-- `errorsByFile` map 在 Go 里是无序 map 再 sort；Rust 直接用 `IndexMap` + 显式 sort，保证输出确定性（断言前提）。
-- 波浪线/缩进宽度：Go 用 `core.UTF16Len` 计宽，Rust 必须同口径（不能按 byte 或 char），否则非 ASCII 行的 `~` 数量会偏。
+- **输出目标**：Go 用 `io.Writer`；Rust 用 `&mut dyn std::fmt::Write`（测试用 `&mut String` 收集断言）。所有 `fmt.Fprint` → `write_str`/`write!`，与 Go 一致**忽略写错误**。
+- `ASTDiagnostic`：Go 结构体嵌入（`*ast.Diagnostic`）做方法转发；Rust 计划组合 + 手写 `impl Diagnostic`，但**本轮 DEFER**（ast 未移植）。
+- `Diagnostic::message_chain`/`related_information` 返回 `Vec<&dyn Diagnostic>`（借用子节点）而非 Go 的新建接口值切片——对所有渲染器足够且零分配。
+- `errorsByFile`：Go 是无序 map（按 `FileLike` 指针为 key）再 sort；Rust 用 `std::collections::HashMap<String, _>`（**按文件名分组**）+ 显式 `sorted_files.sort()`。输出确定性由 sorted_files 排序保证，与 Go 等价（Go 也是无序 map + sort）。
+- `getCategoryFormat`：Go 对未知 category `panic`；Rust `Category` 为封闭枚举，match 穷尽，**无 panic 分支**（不可能命中）。
+- `WriteLocation`：Go 接受可空 `formatOpts`（nil 时用裸文件名）；Rust 取 `&FormattingOptions`（非空），始终相对化，**折掉 nil 分支**（所有调用点都传非空）。
+- `writeCodeSnippet` 波浪线宽度：Go 用 `strings.Repeat`（负数会 panic）；Rust 在 `~`/空格 repeat 处加 `.max(0)` 钳制，避免退化 span（起始列落在右裁剪后行尾之外）导致的 panic/超大分配。波浪线/缩进仍按 `core::utf16_len` 计宽（不按 byte/char），与 Go 同口径。
+- `ScreenStartingCodes`：Go 是包级 `var`（运行期由消息 `.code()` 初始化）；Rust 用 `LazyLock<[i32;2]>`，同样由 `STARTING_COMPILATION_IN_WATCH_MODE`/`FILE_CHANGE_DETECTED_...` 的 `.code()` 派生（6031/6032）。
+- **依赖**：`tsgo_ast` 依赖暂从本 crate `Cargo.toml` 移除（本轮无任何 ast 用法），避免被并行 worker 半成品的 ast 阻塞编译；ast 落地后随 `AstDiagnostic` 一并恢复。
 
 ## 转交 / 推迟（DEFER）
 
-- Go 侧 0 直接单测 → 行为由 **P10**（`tsc --pretty` baseline、watch 输出对拍）兜底；本轮补行为级 Rust 测试（见 tests.md）。
+- **ast 适配层全部 DEFER(phase-5)，blocked-by `tsgo_ast::Diagnostic` / `SourceFileLike` / `CompareDiagnostics` 尚未移植**：`AstDiagnostic`(+`impl Diagnostic`)、`wrap_ast_diagnostic`、`wrap_ast_diagnostics`、`from_ast_diagnostics`、`compare_ast_diagnostics`、`write_flattened_ast_diagnostic_message`。这些不写占位 `todo!()`（避免 C7/C5 噪声），待 ast 表面就绪后按 red→green 补。其余非 ast 函数本轮已全部落地并测试。
+- Go 侧 0 直接单测 → 行为由 **P10**（`tsc --pretty` baseline、watch 输出对拍）兜底；本轮补行为级 Rust 测试（见 tests.md，21 个 `#[test]` + 1 doctest 全绿）。
 - LSP 诊断侧的 `Diagnostic` 实现（非 `ASTDiagnostic`）在 P8 `lsp` 落地；本包只定义 trait，LSP 适配 `// DEFER(phase-8)`。

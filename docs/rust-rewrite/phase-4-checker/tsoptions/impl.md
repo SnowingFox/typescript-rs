@@ -6,6 +6,35 @@
 **依赖（crate）**：`tsgo_ast` `tsgo_collections` `tsgo_core` `tsgo_diagnostics` `tsgo_glob` `tsgo_jsnum` `tsgo_locale` `tsgo_module` `tsgo_modulespecifiers` `tsgo_outputpaths` `tsgo_parser` `tsgo_scanner` `tsgo_stringutil` `tsgo_tspath` `tsgo_vfs`（含 `vfs/vfsmatch`）`tsgo_debug`。镜像 Go import 边。
 **Go 源**：`internal/tsoptions/`（16 个非测试 `.go` + 子目录 `tsoptionstest/` 2 个 = 18 文件；最大 `tsconfigparsing.go` 1815 行 + `declscompiler.go` 1265 行）
 
+## 本轮实现状态（wave 3 — 已落地 / 已推迟）
+
+> 严格 TDD（红→绿垂直切片）逐行为推进。`cargo test -p tsgo_tsoptions` = **73 单测 + 13 doctest 全绿**；`cargo clippy -p tsgo_tsoptions --all-targets -- -D warnings` 干净。
+
+**§2 MEGA-FILE SPLIT（Go 文件 → Rust 文件，本轮落地）：**
+
+| Go 文件 | Rust 文件 | 状态 |
+|---|---|---|
+| `commandlineoption.go` | `commandlineoption.rs` | ✅ 全量 |
+| `enummaps.go` | `enummaps.rs` | ✅ 全量 |
+| `declscompiler.go` | `declscompiler.rs`（含 affects-* 比较，reflect 替代在 `optionsfields.rs`）| ✅ |
+| `declsbuild.go` / `declswatch.go` / `declstypeacquisition.go` | 同名 `.rs` | ✅ |
+| `namemap.go` | `namemap.rs` | ✅ 全量 |
+| `parsinghelpers.go` | `parsinghelpers.rs`（值解析 + `parse_compiler_options` 巨型 switch + watch/type/build + merge + 绝对路径）| ✅ |
+| （reflect 替代）| **`optionsfields.rs`（新增）**：`CompilerOptions` 字段表（go/json 名 + 宏生成 merge / for-each / 一致性）| ✅ |
+| `diagnostics.go` | `diagnostics.rs` | ✅ |
+| `errors.go` | `errors.rs`（+ tsconfigparsing 的 spec/locale 校验）| ✅（node-anchored 诊断推迟，CLI 无 sourceFile）|
+| `commandlineparser.go` | `commandlineparser.rs` | ✅ 全量（含 `ParseCommandLine`/`ParseBuildCommandLine`/响应文件）|
+| `wildcarddirectories.go` | `wildcarddirectories.rs` | ✅ 全量 |
+| `parsedcommandline.go` | `parsedcommandline.rs` | ⚠️ 核心数据 + `NewParsedCommandLine` + 访问器；惰性缓存方法（wildcard/输出名/references/`PossiblyMatchesFileName`）**DEFER**（需 module/outputpaths/glob + ConfigFileSpecs）|
+| `parsedbuildcommandline.go` | `parsedbuildcommandline.rs` | ⚠️ 数据完成；`resolvedProjectPaths`/`locale` 缓存 DEFER |
+| `tsoptionstest/vfsparseconfighost.go` | `tsoptionstest/mod.rs` | ✅ `VfsParseConfigHost`；`GetParsedCommandLine` DEFER（依赖 tsconfig 全链）|
+
+**本轮 DEFER（blocked-by 见 README「转交/推迟」）：**
+
+- `tsconfigparsing.rs` 全文（`ParseConfigFileTextToJson` / `ParseJsonConfigFileContent` / `ParseJsonSourceFileConfigFileContent` / extends 合并 / `${configDir}` / filespec 校验 / 通配展开 / references / type-acquisition-from-tsconfig）—— 依赖 JSON-AST→值转换（`convertToObject` 等）+ `vfsmatch.ReadDirectory` 展开 + `module.ResolveConfig`，体量最大，整体推迟到下一 wave / P10。其测试在 tests.md 多标 `—`（submodule/golden）。
+- `showconfig.rs`（`ConvertToTSConfig` + `serializeCompilerOptions` + implied options）—— help/`--showConfig` 输出，DEFER。
+- `CommandLineOption` 的 `Description`/`Category`/message 型 `DefaultValueDescription` 字段：仅供 help/showConfig，本轮置空（功能字段全部精确填充），DEFER 到对应路径落地。
+
 ## 这个包是什么（业务说明）
 
 `tsoptions` 是编译器的"配置前端"。它把两类外部输入翻译成结构化的 `core.CompilerOptions` / `WatchOptions` / `BuildOptions` / `TypeAcquisition` + 文件名列表 + project references：

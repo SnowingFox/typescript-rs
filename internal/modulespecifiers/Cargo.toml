@@ -1,0 +1,24 @@
+[package]
+name = "tsgo_modulespecifiers"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+regex = "1.12.3"
+tsgo_ast = { path = "../ast" }
+tsgo_collections = { path = "../collections" }
+tsgo_core = { path = "../core" }
+tsgo_debug = { path = "../debug" }
+tsgo_module = { path = "../module" }
+tsgo_outputpaths = { path = "../outputpaths" }
+tsgo_packagejson = { path = "../packagejson" }
+tsgo_stringutil = { path = "../stringutil" }
+tsgo_symlinks = { path = "../symlinks" }
+tsgo_tsoptions = { path = "../tsoptions" }
+tsgo_tspath = { path = "../tspath" }
+
+[dev-dependencies]
+tsgo_json = { path = "../json" }

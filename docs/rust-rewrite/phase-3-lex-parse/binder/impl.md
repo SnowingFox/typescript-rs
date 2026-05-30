@@ -18,6 +18,27 @@ binder 还顺带：识别 `"use strict"` prologue、容器/this-容器/block-sco
 
 为什么在 P3：binder 依赖 ast（P2）、parser+scanner（P3），是 checker（P4）的直接前置。**binder 产出的 Symbol 表 + flow 图正是 P4 checker 的输入地基**。
 
+## 执行状态（wave 2 实现）
+
+**已实现并全绿**（`cargo test -p tsgo_binder` = 31 单测 + 10 doctest；`clippy -D warnings` 干净；`fmt` 干净；rustdoc `missing_docs` 干净）：
+
+- 符号机制：`new_symbol`/`declare_symbol(_ex)`（建/合并/冲突诊断分支）/`addDeclarationToSymbol`/`SetValueDeclaration`/`getDeclarationName`/`getDisplayName`/`GetSymbolNameForPrivateIdentifier`/`getOptionalSymbolFlagForNode`。
+- 表分发：`declareModuleMember`/`declareClassMember`/`declareSourceFileMember`/`declareSymbolAndAddToSymbolTable`。
+- 遍历：`bind`（声明派发 + 递归）/`bindContainer`/`bindChildren`/`bindEachChild`/`bindEachStatementFunctionsFirst`/`GetContainerFlags`/`FindUseStrictPrologue`。
+- 声明绑定：function/class(+prototype)/interface/enum/var+binding-element/param/property/method/accessor/type-param/type-alias/export-assignment/export-decl/import-clause/namespace-export/module(非 ambient)。
+- 流图：`newFlowNode(Ex)`/`create*Label`/`createReduceLabel`/`createFlowCondition`/`createFlowMutation`/`createFlowSwitchClause`/`createFlowCall`/`newFlowList`/`combineFlowLists`/`setFlowNodeReferenced`/`addAntecedent`/`finishFlowLabel`；语句/表达式流：condition/if/while/do/for/for-in-of/return/throw/break/continue/try/switch/case/labeled/expression-statement/prefix/postfix/binary(+logical)/conditional/destructuring/var-decl/binding-element/parameter/initializer；窄化谓词族（`isNarrowing*`/`isNarrowable*`）。
+
+**关键偏离（Rust arena 模型，必要）**：Symbol/Flow 用 `Vec<Symbol>`+`SymbolId`、`Vec<FlowNode>`+`FlowNodeId` arena；`node.Symbol`/`node.LocalSymbol`/`node.FlowNode`/容器 `locals` 改用 binder 侧 `FxHashMap` 边表（ast 零改动）。Go 的 `declareSymbol(table, ...)` 传 map → 改传 `TableLoc{Locals(NodeId)|Members(SymbolId)|Exports(SymbolId)}` 句柄以避免 `&mut self` 别名。switch-clause / reduce-label 的合成数据存 binder 侧 `flow_switch_data`/`flow_reduce_data`（"流状态留在 binder"，ast 未扩展）。`ActiveLabel` 链 → `Vec` 栈。`SetValueDeclaration`/`GetLocalSymbolForExportDefault` 因符号在 binder arena → 改为接受 `&mut [Symbol]`/边表的自由函数。
+
+**DEFER（推迟，标 `// TODO(port)` / 对应 phase）**：
+- JS/CommonJS expando 与 `module.exports=`/`this.x=`/`Object.defineProperty` 赋值族（`bindModuleExportsAssignment`/`bindExpandoPropertyAssignment`/`bindDeferredExpandoAssignment(s)`/`bindThisPropertyAssignment`/`bindExportsOrObjectDefineProperty`/`lookupEntity`/`lookupName`/`setCommonJSModuleIndicator`/`bindCommonJSTypeExports`）——`// DEFER`：需 JS 文件语义，TS 输入未触达。
+- ambient module（`bindModuleDeclaration` 的引号名/global/augmentation 分支）、`declareModuleSymbol`、JSON source file。
+- 严格模式检查族（`checkStrictMode*`/`checkContextualIdentifier`/`checkPrivateIdentifier`）——本切片不绑定（对当前测试输入为 no-op）。
+- optional-chain 流（`bindOptionalChain*`）——结构占位（`isOptionalChain`/`isOutermostOptionalChain` 已实现但 root 流图精确化推迟）。
+- `FindUseStrictPrologue` 的 ES5 转义精确判定（缺源文本，改比 cooked 文本，见 DIVERGENCE）。
+- `NameResolver.Resolve`（需 checker hook，`// DEFER(phase-4-checker)`）；`ReferenceResolver.GetReferenced*`（emit 期，`// DEFER(phase-5)`）。
+- `BenchmarkBind` → P10。
+
 ## 所有权 / 类型映射（本包关键决策）
 
 通用规则见 PORTING.md §3/§5。Symbol/Flow 图是与 AST 并列的**第二张图**，沿用 arena 思路。本包特有决策：
@@ -49,9 +70,18 @@ binder 还顺带：识别 `"use strict"` prologue、容器/this-容器/block-sco
 
 ## 文件清单 → Rust 模块
 
+### 拆分说明（mega-file decomposition，§2）
+
+`internal/binder/binder.go` 约 2800 行（> 1500 阈值），按职责拆成 4 个内聚 `.rs`（各带兄弟 `<stem>_test.rs`），每个函数仍带锚到**原** `binder.go:<Func>` 的 `// Go:` 注释：
+
+- `lib.rs`：`Binder`/`BindResult`/`ContainerFlags`/`TableLoc`/`ActiveLabel` + 入口 `bind_source_file` + 派发 `bind` + `bind_container`/`bind_children` + `GetContainerFlags`/`FindUseStrictPrologue`/`SetValueDeclaration` + 诊断/flow-arena 分配。
+- `symbols.rs`：`new_symbol`/`declare_symbol(_ex)`/`declare*Member`/`addDeclarationToSymbol`/名字与各 `bind*Declaration`。
+- `flow.rs`：flow 创建族 + 语句/表达式流绑定 + 窄化谓词族。
+- `astquery.rs`：binder 本地的 ast 谓词/访问器移植（`ast.IsXxx`/`GetNameOfDeclaration`/`GetCombinedModifierFlags` 等尚未进 `tsgo_ast` 的部分）。
+
 | Go 文件 | Rust 文件 | 说明 |
 |---|---|---|
-| `internal/binder/binder.go` | `internal/binder/lib.rs`（crate 根） | `Binder`/`ContainerFlags`/`ActiveLabel`、`BindSourceFile`、`declareSymbol(Ex)`/`declareSymbolAndAddToSymbolTable`/`declareModuleMember`、符号名/显示名、各 `bindXxx`（声明/语句/表达式/流）、`bindContainer`/`bindChildren`/`GetContainerFlags`、flow 创建族（`newFlowNode`/`createBranchLabel`/`createFlowCondition`/`addAntecedent`/`finishFlowLabel`…）、`FindUseStrictPrologue`/`SetValueDeclaration`/`GetSymbolNameForPrivateIdentifier`。`mod nameresolver; mod referenceresolver;`。 |
+| `internal/binder/binder.go` | `internal/binder/{lib,symbols,flow,astquery}.rs`（拆分） | 见上「拆分说明」。`mod nameresolver; mod referenceresolver;` 仍由 `lib.rs` 声明。 |
 | `internal/binder/nameresolver.go` | `internal/binder/nameresolver.rs` | `NameResolver` 结构 + `Resolve(...)`（作用域链查名）+ `GetLocalSymbolForExportDefault`。 |
 | `internal/binder/referenceresolver.go` | `internal/binder/referenceresolver.rs` | `ReferenceResolver` trait + `ReferenceResolverHooks` + `referenceResolver` 实现 + `NewReferenceResolver`，`GetReferenced*`（导出容器/导入声明/值声明/成员值声明/元素访问名）。 |
 
@@ -67,69 +97,69 @@ binder 还顺带：识别 `"use strict"` prologue、容器/this-容器/block-sco
 
 ### `lib.rs` — 入口与符号机制（Go: `binder.go`）
 
-- [ ] `bitflags! ContainerFlags`（None/IsContainer/IsBlockScopedContainer/IsControlFlowContainer/IsFunctionLike/IsFunctionExpression/HasLocals/IsInterface/IsObjectLiteralOrClassExpressionMethodOrAccessor/IsThisContainer/PropagatesThisKeyword）　`// Go: binder.go:ContainerFlags`
-- [ ] `struct Binder`（全部字段，见类型映射）+ `ActiveLabel`（+ `BreakTarget()`/`ContinueTarget()`）+ `ExpandoAssignmentInfo`　`// Go: binder.go:Binder/ActiveLabel/ExpandoAssignmentInfo`
-- [ ] `pub fn bind_source_file(file)`（`IsBound()` 快路径 → `bind_source_file_inner`）　`// Go: binder.go:BindSourceFile/bindSourceFile`
-- [ ] `fn bind_source_file_inner(file)`（`BindOnce`：取 binder→`unreachableFlow`→`bind(file)`→`bindDeferredExpandoAssignments`→回写 `SymbolCount`/`ClassifiableNames`/`NestedCJSExports`）　`// Go: binder.go:bindSourceFile`
-- [ ] `fn new_symbol(flags, name)->SymbolId`（`symbolCount++` + arena 分配）　`// Go: binder.go:newSymbol`
-- [ ] `fn declare_symbol(table, parent, node, includes, excludes)->SymbolId`　`// Go: binder.go:declareSymbol`
-- [ ] `fn declare_symbol_ex(table, parent, node, includes, excludes, is_replaceable_by_method, is_computed_name)->SymbolId`（**核心**：默认导出名、missing 名、查表、`isReplaceableByMethod` 规则、`excludes` 冲突 → `Duplicate_identifier`/`Cannot_redeclare_block_scoped_variable`/`A_module_cannot_have_multiple_default_exports`/enum-merge 诊断 + related info、accessor 升级、`addDeclarationToSymbol`、设 `Parent`）　`// Go: binder.go:declareSymbolEx`
-- [ ] `fn get_declaration_name(node)->Option<String>`（export=/default、ambient module 引号名/global、private id、属性名字面量、computed 字面量/signed numeric、构造/call/new/index/export*/exportEquals 内部名）　`// Go: binder.go:getDeclarationName`
-- [ ] `fn get_display_name(node)->String`　`// Go: binder.go:getDisplayName`
-- [ ] `pub fn get_symbol_name_for_private_identifier(class_symbol, desc)->String`　`// Go: binder.go:GetSymbolNameForPrivateIdentifier`
-- [ ] `fn declare_module_member(node, flags, excludes)->SymbolId` / `declare_symbol_and_add_to_symbol_table(node, flags, excludes)->SymbolId` / `addDeclarationToSymbol`（在 ast 或本包）　`// Go: binder.go:declareModuleMember/declareSymbolAndAddToSymbolTable`
-- [ ] `pub fn set_value_declaration(symbol, node)`　`// Go: binder.go:SetValueDeclaration`
+- [x] `bitflags! ContainerFlags`（None/IsContainer/IsBlockScopedContainer/IsControlFlowContainer/IsFunctionLike/IsFunctionExpression/HasLocals/IsInterface/IsObjectLiteralOrClassExpressionMethodOrAccessor/IsThisContainer/PropagatesThisKeyword）　`// Go: binder.go:ContainerFlags`
+- [x] `struct Binder`（全部字段，见类型映射）+ `ActiveLabel`（→ `Vec` 栈）　`// Go: binder.go:Binder/ActiveLabel`（`ExpandoAssignmentInfo` DEFER：随 JS expando）
+- [x] `pub fn bind_source_file(arena, file) -> BindResult`　`// Go: binder.go:BindSourceFile/bindSourceFile`（`IsBound`/`BindOnce`/池化 DEFER）
+- [x] `fn bind_source_file_inner(file)`（`unreachableFlow`→`bind(file)`→回写计数/classifiable）　`// Go: binder.go:bindSourceFile`（`bindDeferredExpandoAssignments`/`NestedCJSExports` DEFER）
+- [x] `fn new_symbol(flags, name)->SymbolId`（`symbolCount++` + Vec 分配）　`// Go: binder.go:newSymbol`
+- [x] `fn declare_symbol(table, parent, node, includes, excludes)->SymbolId`　`// Go: binder.go:declareSymbol`
+- [x] `fn declare_symbol_ex(...)->SymbolId`（**核心**：默认导出名、missing 名、查表、`isReplaceableByMethod`、`excludes` 冲突 → `Duplicate_identifier`/`Cannot_redeclare_block_scoped_variable`/`A_module_cannot_have_multiple_default_exports`/enum-merge 诊断 + related info、accessor 升级、`addDeclarationToSymbol`、设 `Parent`）　`// Go: binder.go:declareSymbolEx`
+- [x] `fn get_declaration_name(node)->String`（export=/default、ambient module 引号名/global、private id、属性名字面量、computed 字面量/signed numeric、构造/call/new/index/export*/exportEquals 内部名）　`// Go: binder.go:getDeclarationName`
+- [x] `fn get_display_name(node)->String`　`// Go: binder.go:getDisplayName`
+- [x] `pub fn get_symbol_name_for_private_identifier(class_symbol, desc)->String`　`// Go: binder.go:GetSymbolNameForPrivateIdentifier`
+- [x] `fn declare_module_member` / `declare_class_member` / `declare_source_file_member` / `declare_symbol_and_add_to_symbol_table` / `add_declaration_to_symbol`　`// Go: binder.go:declareModuleMember/declareSymbolAndAddToSymbolTable`
+- [x] `pub fn set_value_declaration(symbols, arena, symbol, node)`　`// Go: binder.go:SetValueDeclaration`
 
 ### `lib.rs` — 容器与遍历（Go: `binder.go`）
 
-- [ ] `fn bind(&mut self, node)->bool`（总分发：按 Kind 调对应 `bindXxx`，设 `node.Symbol`/`node.FlowNode`，递归 `bindContainer`/`bindChildren`）　`// Go: binder.go:bind`
-- [ ] `fn bind_container(node, container_flags)`（save/restore container/thisContainer/blockScopeContainer/currentFlow 等，按 flags 初始化新流）　`// Go: binder.go:bindContainer`
-- [ ] `fn bind_children(node)` / `bind_each_child` / `bind_each(nodes)` / `bind_node_list` / `bind_modifiers` / `bind_each_statement_functions_first`　`// Go: binder.go:bindChildren/bindEach*/bindModifiers`
-- [ ] `pub fn get_container_flags(node)->ContainerFlags`（按 Kind 大 match）　`// Go: binder.go:GetContainerFlags`
-- [ ] `pub fn find_use_strict_prologue(sf, statements)->Option<NodeId>`　`// Go: binder.go:FindUseStrictPrologue`
+- [x] `fn bind(&mut self, node)`（总分发：按 Kind 调对应 `bindXxx`，设 `node.Symbol`/`node.FlowNode`，递归 `bindContainer`/`bindChildren`）　`// Go: binder.go:bind`
+- [x] `fn bind_container(node, container_flags)`（save/restore container/thisContainer/blockScopeContainer/currentFlow 等，按 flags 初始化新流）　`// Go: binder.go:bindContainer`
+- [x] `fn bind_children(node)` / `bind_each_child` / `bind_each(nodes)` / `bind_each_statement_functions_first`　`// Go: binder.go:bindChildren/bindEach*`
+- [x] `pub fn get_container_flags(arena, node)->ContainerFlags`（按 Kind 大 match）　`// Go: binder.go:GetContainerFlags`
+- [x] `pub fn find_use_strict_prologue(arena, statements)->Option<NodeId>`　`// Go: binder.go:FindUseStrictPrologue`（DIVERGENCE：缺源文本，比 cooked 文本）
 
 ### `lib.rs` — 声明绑定族（Go: `binder.go`）
 
-- [ ] `bind_module_declaration`/`bind_namespace_export_declaration`/`bind_import_clause`/`bind_export_declaration`/`bind_export_assignment`　`// Go: binder.go:bind*Declaration/bind*Export*`
-- [ ] `bind_class_like_declaration`/`bind_property_or_method_or_accessor`/`bind_property_worker`/`bind_function_or_constructor_type`　`// Go: binder.go:bindClassLikeDeclaration/...`
-- [ ] `bind_function_expression`/`bind_function_declaration`/`bind_call_expression`/`bind_parameter`/`bind_type_parameter`　`// Go: binder.go:bindFunction*/bindCallExpression/bindParameter/bindTypeParameter`
-- [ ] `bind_variable_declaration_or_binding_element`/`bind_block_scoped_declaration`/`bind_anonymous_declaration`/`bind_enum_declaration`/`bind_jsx_attributes`/`bind_jsx_attribute`　`// Go: binder.go:bind*`
-- [ ] JS/CommonJS：`bind_module_exports_assignment`/`bind_expando_property_assignment`/`bind_deferred_expando_assignment(s)`/`bind_common_js_type_exports`/`bind_exports_or_object_define_property`/`bind_this_property_assignment`　`// Go: binder.go:bind*Expando*/bindModuleExportsAssignment/bindExportsOrObjectDefineProperty/bindThisPropertyAssignment`
+- [x] `bind_module_declaration`(非 ambient)/`bind_namespace_export_declaration`/`bind_import_clause`/`bind_export_declaration`/`bind_export_assignment`　`// Go: binder.go:bind*Declaration/bind*Export*`
+- [x] `bind_class_like_declaration`(+prototype)/`bind_property_or_method_or_accessor`/`bind_property_worker`/`bind_function_or_constructor_type`　`// Go: binder.go:bindClassLikeDeclaration/...`
+- [x] `bind_function_expression`/`bind_function_declaration`/`bind_parameter`/`bind_type_parameter`　`// Go: binder.go:bindFunction*/bindParameter/bindTypeParameter`（`bind_call_expression` JS-only DEFER）
+- [x] `bind_variable_declaration_or_binding_element`/`bind_block_scoped_declaration`/`bind_anonymous_declaration`/`bind_enum_declaration`/`bind_jsx_attributes`/`bind_jsx_attribute`　`// Go: binder.go:bind*`
+- [ ] JS/CommonJS：`bind_module_exports_assignment`/`bind_expando_property_assignment`/`bind_deferred_expando_assignment(s)`/`bind_common_js_type_exports`/`bind_exports_or_object_define_property`/`bind_this_property_assignment`　`// DEFER：需 JS 文件语义　// Go: binder.go:bind*Expando*/...`
 
 ### `lib.rs` — flow 图创建（Go: `binder.go`）
 
-- [ ] `fn new_flow_node(flags)->FlowNodeId` / `new_flow_node_ex(flags, node, antecedent)->FlowNodeId`　`// Go: binder.go:newFlowNode/newFlowNodeEx`
-- [ ] `create_loop_label`/`create_branch_label`/`create_reduce_label`　`// Go: binder.go:createLoopLabel/createBranchLabel/createReduceLabel`
-- [ ] `create_flow_condition(flags, antecedent, expr)->FlowNodeId`（不可达短路、常量条件、`isNarrowingExpression`）　`// Go: binder.go:createFlowCondition`
-- [ ] `create_flow_mutation`/`create_flow_switch_clause`/`create_flow_call`（设 `hasFlowEffects`、异常目标 antecedent）　`// Go: binder.go:createFlow*`
-- [ ] `new_flow_list(head, tail)->FlowListId` / `combine_flow_lists` / `new_single_declaration(decl)->Vec<NodeId>`　`// Go: binder.go:newFlowList/combineFlowLists/newSingleDeclaration`
-- [ ] `fn set_flow_node_referenced(flow)`（Referenced→Shared）/ `add_antecedent(label, antecedent)`（去重追加）/ `finish_flow_label(label)->FlowNodeId`（空→unreachable、单→折叠）　`// Go: binder.go:setFlowNodeReferenced/addAntecedent/finishFlowLabel`
+- [x] `fn new_flow_node(flags)->FlowNodeId` / `new_flow_node_ex(flags, node, antecedent)->FlowNodeId`　`// Go: binder.go:newFlowNode/newFlowNodeEx`
+- [x] `create_loop_label`/`create_branch_label`/`create_reduce_label`（合成数据存 `flow_reduce_data`）　`// Go: binder.go:createLoopLabel/createBranchLabel/createReduceLabel`
+- [x] `create_flow_condition(flags, antecedent, expr)->FlowNodeId`（不可达短路、常量条件、`isNarrowingExpression`）　`// Go: binder.go:createFlowCondition`
+- [x] `create_flow_mutation`/`create_flow_switch_clause`(数据存 `flow_switch_data`)/`create_flow_call`（设 `hasFlowEffects`、异常目标 antecedent）　`// Go: binder.go:createFlow*`
+- [x] `new_flow_list(head, tail)->FlowListId` / `combine_flow_lists`　`// Go: binder.go:newFlowList/combineFlowLists`（`newSingleDeclaration` 直接 `Vec`）
+- [x] `fn set_flow_node_referenced(flow)`（Referenced→Shared）/ `add_antecedent`（去重追加）/ `finish_flow_label`（空→unreachable、单→折叠）　`// Go: binder.go:setFlowNodeReferenced/addAntecedent/finishFlowLabel`
 
 ### `lib.rs` — 语句/表达式流绑定族（Go: `binder.go`）
 
-- [ ] 条件/循环：`bind_condition`/`bind_iterative_statement`/`bind_while_statement`/`bind_do_statement`/`bind_for_statement`/`bind_for_in_or_for_of_statement`/`bind_if_statement`　`// Go: binder.go:bind*Statement`
-- [ ] 跳转：`bind_return_statement`/`bind_throw_statement`/`bind_break_statement`/`bind_continue_statement`/`bind_break_or_continue_statement`/`bind_break_or_continue_flow`　`// Go: binder.go:bind*`
-- [ ] try/switch/labeled：`bind_try_statement`/`bind_switch_statement`/`bind_case_block`/`bind_case_or_default_clause`/`bind_labeled_statement`/`bind_expression_statement`　`// Go: binder.go:bind*`
-- [ ] 表达式流：`bind_prefix/postfix_unary_expression_flow`/`bind_binary_expression_flow`/`bind_logical_like_expression`/`bind_destructuring_assignment_flow`/`bind_destructuring_target_flow`/`bind_assignment_target_flow`/`bind_delete_expression_flow`/`bind_conditional_expression_flow`/`bind_variable_declaration_flow`/`bind_initialized_variable_flow`　`// Go: binder.go:bind*Flow`
-- [ ] 辅助谓词：`is_narrowing_expression`/`isNarrowableReference` 等（在 binder.go 后段）　`// Go: binder.go:isNarrowing*`
+- [x] 条件/循环：`bind_condition`/`bind_iterative_statement`/`bind_while_statement`/`bind_do_statement`/`bind_for_statement`/`bind_for_in_or_for_of_statement`/`bind_if_statement`　`// Go: binder.go:bind*Statement`
+- [x] 跳转：`bind_return_statement`/`bind_throw_statement`/`bind_break_statement`/`bind_continue_statement`/`bind_break_or_continue_statement`/`bind_break_or_continue_flow`　`// Go: binder.go:bind*`
+- [x] try/switch/labeled：`bind_try_statement`/`bind_switch_statement`/`bind_case_block`/`bind_case_or_default_clause`/`bind_labeled_statement`/`bind_expression_statement`　`// Go: binder.go:bind*`
+- [x] 表达式流：`bind_prefix/postfix_unary_expression_flow`/`bind_binary_expression_flow`/`bind_logical_like_expression`/`bind_destructuring_assignment_flow`/`bind_destructuring_target_flow`/`bind_assignment_target_flow`/`bind_conditional_expression_flow`/`bind_variable_declaration_flow`/`bind_initialized_variable_flow`　`// Go: binder.go:bind*Flow`（`bind_delete_expression_flow`/optional-chain DEFER）
+- [x] 辅助谓词：`is_narrowing_expression`/`is_narrowable_reference`/`contains_narrowable_reference`/`has_narrowable_argument`/`is_narrowing_binary_expression`/`is_narrowable_operand`/`is_narrowing_type_of_operands`　`// Go: binder.go:isNarrowing*`
 
 ### `nameresolver.rs`（Go: `internal/binder/nameresolver.go`）
 
-- [ ] `struct NameResolver { CompilerOptions, GetSymbolOfDeclaration, Error, Globals, ArgumentsSymbol, RequireSymbol, Lookup, SymbolReferenced, ...hooks }`　`// Go: nameresolver.go:NameResolver`
-- [ ] `fn resolve(&mut self, location, name, meaning, name_not_found_message, is_use, exclude_globals)->Option<SymbolId>`（作用域链向上：locals/`isGlobalSourceFile` 跳过、函数 like 的类型参数/参数可见性、各容器 exports/members、`const` as-const 特判、did-you-mean 收集、失败/成功回调）　`// Go: nameresolver.go:Resolve`
-- [ ] `pub fn get_local_symbol_for_export_default(symbol)->Option<SymbolId>`　`// Go: nameresolver.go:GetLocalSymbolForExportDefault`
+- [x] `struct NameResolver`（结构占位 + `globals`）　`// Go: nameresolver.go:NameResolver`（checker hook 字段 `// DEFER(phase-4-checker)`）
+- [ ] `fn resolve(...)->Option<SymbolId>`（作用域链解析）　`// DEFER(phase-4-checker)`：需 `GetSymbolOfDeclaration`/`Error`/`Lookup` 等 hook
+- [x] `pub fn get_local_symbol_for_export_default(symbols, node_local_symbol, arena, symbol)->Option<SymbolId>`　`// Go: nameresolver.go:GetLocalSymbolForExportDefault`
 
 ### `referenceresolver.rs`（Go: `internal/binder/referenceresolver.go`）
 
-- [ ] `trait ReferenceResolver`（6 方法）+ `struct ReferenceResolverHooks`（8 回调）　`// Go: referenceresolver.go:ReferenceResolver/ReferenceResolverHooks`
-- [ ] `struct ReferenceResolverImpl { resolver, options, hooks }` + `pub fn new_reference_resolver(options, hooks)->impl ReferenceResolver`　`// Go: referenceresolver.go:referenceResolver/NewReferenceResolver`
-- [ ] `get_referenced_export_container`/`get_referenced_import_declaration`/`get_referenced_value_declaration(s)`/`get_element_access_expression_name`/`get_referenced_member_value_declaration`（+ 内部 `getResolvedSymbol`/`getMergedSymbol` 等 hook 包装）　`// Go: referenceresolver.go:GetReferenced*/getResolvedSymbol/...`
+- [x] `trait ReferenceResolver`（6 方法）+ `struct ReferenceResolverHooks`（占位）　`// Go: referenceresolver.go:ReferenceResolver/ReferenceResolverHooks`
+- [x] `struct ReferenceResolverImpl` + `pub fn new_reference_resolver(hooks)->ReferenceResolverImpl`　`// Go: referenceresolver.go:referenceResolver/NewReferenceResolver`
+- [ ] `get_referenced_export_container`/`get_referenced_import_declaration`/`get_referenced_value_declaration(s)`/`get_element_access_expression_name`/`get_referenced_member_value_declaration` 的实体　`// DEFER(phase-5)`：emit 期 + checker hook（当前返回 None 占位）
 
 ### Cargo / crate 接线
 
-- [ ] `internal/binder/Cargo.toml`（`name = "tsgo_binder"` + path deps：ast/scanner/core/collections/debug/diagnostics/tspath）
-- [ ] 根 `Cargo.toml` workspace members 追加 `internal/binder`
-- [ ] `lib.rs` 声明 `mod nameresolver; mod referenceresolver;` + re-export（`bind_source_file`/`NameResolver`/`ReferenceResolver`/`NewReferenceResolver`/`GetContainerFlags`/`SetValueDeclaration`/`FindUseStrictPrologue`/`GetSymbolNameForPrivateIdentifier`/`GetLocalSymbolForExportDefault`）
+- [x] `internal/binder/Cargo.toml`（`name = "tsgo_binder"` + path deps + `bitflags`/`rustc-hash`；dev-dep `tsgo_parser` 供测试解析真实源）
+- [x] 根 `Cargo.toml` workspace members 已含 `internal/binder`（未改动）
+- [x] `lib.rs` 声明 `mod astquery; mod flow; mod symbols; pub mod nameresolver; pub mod referenceresolver;` + re-export（`bind_source_file`/`BindResult`/`ContainerFlags`/`get_container_flags`/`find_use_strict_prologue`/`set_value_declaration`/`get_symbol_name_for_private_identifier`/`NameResolver`/`ReferenceResolver`/`new_reference_resolver`）
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

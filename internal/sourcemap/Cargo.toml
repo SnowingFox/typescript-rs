@@ -1,0 +1,18 @@
+[package]
+name = "tsgo_sourcemap"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+base64 = "0.22.1"
+rustc-hash = "2.1.2"
+serde = { version = "1.0.228", features = ["derive"] }
+tsgo_core = { path = "../core" }
+tsgo_debug = { path = "../debug" }
+tsgo_json = { path = "../json" }
+tsgo_scanner = { path = "../scanner" }
+tsgo_stringutil = { path = "../stringutil" }
+tsgo_tspath = { path = "../tspath" }

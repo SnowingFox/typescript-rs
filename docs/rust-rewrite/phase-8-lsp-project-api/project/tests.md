@@ -43,10 +43,10 @@
 
 | Rust 测试 | 验证内容 | Go 对照 | 完成 |
 |---|---|---|---|
-| `syncmap_proxy_for_race_condition` | 两 goroutine 并发 Change 同一 key → 一个 entry 设 proxyFor 指向另一个，两者最终值一致、皆 dirty | `.../proxy for race condition` | |
-| `syncmap_proxy_operations_delegation` | proxy 的 Change/ChangeIf/Value/Dirty/Locked 全部转发到 target | `.../proxy operations delegation` | |
-| `syncmap_proxy_delete_operations` | proxy 的 Delete/DeleteIf 转发到 target，key 被删除 | `.../proxy delete operations` | |
-| `syncmap_no_proxy_when_no_race` | 单 entry 修改 → proxyFor 为 nil，dirty=true，值="changed" | `.../no proxy when no race` | |
+| `proxy_for_race_condition` | 两 goroutine 并发 Change 同一 key → 一个 entry 设 proxyFor 指向另一个，两者最终值一致、皆 dirty | `.../proxy for race condition` | ✓ |
+| `proxy_operations_delegation` | proxy 的 Change/ChangeIf/Value/Dirty/Locked 全部转发到 target | `.../proxy operations delegation` | ✓ |
+| `proxy_delete_operations` | proxy 的 Delete/DeleteIf 转发到 target，key 被删除 | `.../proxy delete operations` | ✓ |
+| `no_proxy_when_no_race` | 单 entry 修改 → proxyFor 为 nil，dirty=true，值="changed" | `.../no proxy when no race` | ✓ |
 
 ### `background/queue_test.go` → `TestQueue`（4 子用例）
 
@@ -61,8 +61,8 @@
 
 | Rust 测试 | 验证内容 | Go 对照 | 完成 |
 |---|---|---|---|
-| `logtree_implements_logger` | `LogTree` 实现 `Log(...)` 接口（编译期断言） | `TestLogTreeImplementsLogger` | |
-| `logtree_smoke` | 占位（Go 当前为空 body）；Rust 补：Fork/Embed/String 树形输出 + 头 `======== name ========` | `TestLogTree` | |
+| `logtree_implements_logger` | `LogTree` 实现 `Log(...)` 接口（编译期断言） | `TestLogTreeImplementsLogger` | ✓ |
+| `logtree_smoke`（拆分为 `logtree_log_then_string` / `logtree_fork_nests` / `logtree_embed_inlines` / `logtree_string_on_non_root_panics` / `logtree_fork_snapshots_verbose`） | Go 当前为空 body；Rust 补：Fork/Embed/String 树形输出 + 头 `======== name ========` + 非 root String panic + verbose 快照 | `TestLogTree` | ✓ |
 
 ### `ata/validatepackagename_test.go` → `TestValidatePackageName`（11 子用例）
 

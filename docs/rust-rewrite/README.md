@@ -45,8 +45,8 @@ flowchart LR
 
 - [x] **P1 地基** — `stringutil` `json` `collections` `tspath` `jsnum` `semver` `glob` `core` `debug` `vfs` `locale` `repo` `pprof` `jsonrpc` `bundled`（15 crate 全绿，663 测试 pass，gate C1–C8 GREEN）
 - [x] **P2 诊断+AST** — `diagnostics` `ast`（17 crate workspace 全绿；diagnostics 30 单测+7 doctest；ast 用 arena+NodeId/enum NodeData/bitflags，52 单测+22 doctest，positionmap 绿，deepclone 全表 DEFER(phase-3) 待 parser）
-- [ ] **P3 词法/语法** — `scanner` `parser` `astnav` `binder`
-- [ ] **P4 类型检查（含 checker 全部构建前置）** — `evaluator` `module` `modulespecifiers` `packagejson` `symlinks` `nodebuilder` `pseudochecker` `outputpaths` `sourcemap` `tracing` `tsoptions` `printer` `checker`
+- [x] **P3 词法/语法** — `scanner` `parser`(4 轮深化,语法完整;JSDoc reparser backlog) `astnav` `binder`(按 §2 拆 4 文件)。parser 104 单测 / ast 扩至全量 NodeData
+- [ ] **P4 类型检查** — 构建前置全部 ✅：`evaluator` `module`(12文件) `modulespecifiers` `packagejson` `symlinks` `nodebuilder` `pseudochecker` `outputpaths` `sourcemap` `tracing` `tsoptions`(14文件) `printer`(emit核心,§2拆10文件) ｜ 🔄 仅剩 `checker`(波5)。backlog: printer 第3轮(comment/sourcemap/node-names) + tsoptions tsconfigparsing + parser JSDoc/import()bug
 - [ ] **P5 Emit** — `transformers` `diagnosticwriter`
 - [ ] **P6 编译管线** — `compiler`
 - [ ] **P7 语言服务** — `lsproto` `project/dirty` `project/logging` `ls/lsconv` `ls/lsutil` `ls/change` `ls/autoimport` `format` `ls`
