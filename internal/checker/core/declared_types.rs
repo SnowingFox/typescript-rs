@@ -57,10 +57,26 @@ pub fn get_declared_type_of_symbol(
     if flags.intersects(SymbolFlags::ENUM) {
         return get_declared_type_of_enum(checker, program, symbol);
     }
-    // DEFER(phase-4-checker-4d): type parameters, enum members, and non-local
-    // aliases. blocked-by: type-parameter declaration handling (4d) and module
-    // alias resolution.
+    if flags.contains(SymbolFlags::TYPE_PARAMETER) {
+        return get_declared_type_of_type_parameter(checker, symbol);
+    }
+    // DEFER(phase-4-checker-4f+): enum members and non-local aliases.
+    // blocked-by: enum-member evaluation (4g) and module alias resolution.
     checker.error_type()
+}
+
+// Go: internal/checker/checker.go:Checker.getDeclaredTypeOfTypeParameter
+fn get_declared_type_of_type_parameter(checker: &mut Checker, symbol: SymbolId) -> TypeId {
+    if let Some(cached) = checker
+        .declared_type_links
+        .try_get(&symbol)
+        .and_then(|l| l.declared_type)
+    {
+        return cached;
+    }
+    let t = checker.new_type_parameter(Some(symbol));
+    checker.declared_type_links.get(symbol).declared_type = Some(t);
+    t
 }
 
 // Go: internal/checker/checker.go:Checker.getDeclaredTypeOfClassOrInterface
@@ -146,8 +162,10 @@ fn collect_local_type_parameters(
         };
         if let Some(list) = type_param_nodes {
             for node in list.nodes {
-                let sym = program.symbol_of_node(node);
-                result.push(checker.new_type_parameter(sym));
+                match program.symbol_of_node(node) {
+                    Some(sym) => result.push(get_declared_type_of_type_parameter(checker, sym)),
+                    None => result.push(checker.new_type_parameter(None)),
+                }
             }
         }
     }
@@ -513,6 +531,57 @@ pub fn get_property_of_type(checker: &Checker, t: TypeId, name: &str) -> Option<
         Some(target) => get_property_of_type(checker, target, name),
         None => obj.members.get(name).copied(),
     }
+}
+
+/// Returns the type of the property named `name` on type `t`.
+///
+/// For a generic type reference (`Foo<string>`), the property's declared type
+/// is instantiated through the reference's `type parameters -> type arguments`
+/// mapper, so e.g. a `value: T` member of `Box<string>` yields `string`. Builds
+/// on 4d's `create_type_reference`.
+///
+/// DEFER(phase-4-checker-4f+): union/intersection property-type synthesis and
+/// index-signature value types.
+/// blocked-by: union-property synthesis (later) and index signatures.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{get_type_of_property_of_type, BoundProgram, Checker, TypeId};
+/// fn demo<P: BoundProgram>(c: &mut Checker, p: &P, t: TypeId) {
+///     let _ = get_type_of_property_of_type(c, p, t, "value");
+/// }
+/// ```
+///
+/// Side effects: may build the property type and instantiate it.
+// Go: internal/checker/checker.go:Checker.getTypeOfPropertyOfType
+pub fn get_type_of_property_of_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    t: TypeId,
+    name: &str,
+) -> Option<TypeId> {
+    let prop = get_property_of_type(checker, t, name)?;
+    let prop_type = get_type_of_symbol(checker, program, prop, None);
+    // Instantiate through the reference's type-argument mapper, if any.
+    let reference = checker.get_type(t).as_object().and_then(|o| {
+        o.target
+            .map(|target| (target, o.resolved_type_arguments.clone()))
+    });
+    if let Some((target, args)) = reference {
+        let params = checker
+            .get_type(target)
+            .as_object()
+            .map(|o| o.type_parameters.clone())
+            .unwrap_or_default();
+        if !params.is_empty() && params.len() == args.len() {
+            let mapper = super::mapper::TypeMapper::Array {
+                sources: params,
+                targets: args,
+            };
+            return Some(checker.instantiate_type(prop_type, &mapper));
+        }
+    }
+    Some(prop_type)
 }
 
 /// Returns the resolved properties of a type as `(name, symbol)` pairs.

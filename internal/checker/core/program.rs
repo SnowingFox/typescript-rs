@@ -10,6 +10,7 @@
 //! In tests a minimal stub (parse via `tsgo_parser` + bind via `tsgo_binder`)
 //! implements it; later phases plug in the real program.
 
+use tsgo_ast::flow::{FlowList, FlowListId, FlowNode, FlowNodeId};
 use tsgo_ast::{NodeArena, NodeId, Symbol, SymbolId, SymbolTable};
 
 /// A bound source file the checker can answer symbol queries against.
@@ -43,6 +44,18 @@ pub trait BoundProgram {
 
     /// The `locals` table of a locals-bearing container node, if it has one.
     fn locals(&self, container: NodeId) -> Option<&SymbolTable>;
+
+    /// The control-flow node attached to `node` (Go's `node.FlowNode`), if any.
+    ///
+    /// The binder sets this on narrowable references (identifiers, `this`,
+    /// property/element access) and removes it for unreachable code.
+    fn flow_node_of(&self, node: NodeId) -> Option<FlowNodeId>;
+
+    /// The flow node for `id` in the binder's control-flow graph.
+    fn flow_node(&self, id: FlowNodeId) -> FlowNode;
+
+    /// The flow-list cell for `id` (a cons cell of label antecedents).
+    fn flow_list(&self, id: FlowListId) -> FlowList;
 }
 
 #[cfg(test)]

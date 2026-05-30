@@ -6,13 +6,18 @@
 //! type construction. Later sub-phases (4b..4k) add `relations`, `inference`,
 //! `instantiation`, `flow`, and the rest.
 
+pub mod check;
 pub mod declared_types;
+pub mod flow;
+pub mod inference;
+pub mod jsx;
 pub mod mapper;
 pub mod program;
 pub mod relations;
 pub mod signatures;
 pub mod symbols;
 pub mod symbols_query;
+pub mod type_facts;
 pub mod types;
 
 #[cfg(test)]
@@ -81,6 +86,13 @@ pub struct Checker {
     instantiation_depth: u32,
     /// Total `instantiate_type` calls for the current statement (Go's `instantiationCount`).
     instantiation_count: u32,
+    /// Diagnostics recorded while checking (Go accumulates into a per-file
+    /// `DiagnosticsCollection`; 4g keeps a flat list for the single stub file).
+    diagnostics: Vec<check::Diagnostic>,
+    /// The `JSX.IntrinsicElements` type, used to resolve intrinsic (lowercase)
+    /// JSX tags. Resolved from lib globals in Go; until those land (P6) callers
+    /// inject it via [`Checker::set_jsx_intrinsic_elements`].
+    jsx_intrinsic_elements: Option<TypeId>,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -246,6 +258,8 @@ impl Checker {
             relations: RelationCache::default(),
             instantiation_depth: 0,
             instantiation_count: 0,
+            diagnostics: Vec::new(),
+            jsx_intrinsic_elements: None,
             any_type,
             auto_type,
             error_type,
@@ -546,6 +560,26 @@ impl Checker {
     pub fn get_union_type(&mut self, members: &[TypeId]) -> TypeId {
         intern_union(&mut self.types, &mut self.union_types, members.to_vec())
             .unwrap_or(self.never_type)
+    }
+
+    /// Sets the `JSX.IntrinsicElements` type used to resolve intrinsic JSX tags.
+    ///
+    /// This is the injection point standing in for lib-global resolution until
+    /// the real `JSX` namespace is available (P6).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{Checker, ObjectFlags, ObjectType};
+    /// let mut c = Checker::new();
+    /// let t = c.new_object_type(ObjectFlags::INTERFACE, None, ObjectType::default());
+    /// c.set_jsx_intrinsic_elements(t);
+    /// ```
+    ///
+    /// Side effects: stores the type id on the checker.
+    // Go: internal/checker/jsx.go:Checker.getJsxType(JsxNames.IntrinsicElements) (injected)
+    // blocked-by: lib globals (P6) — the real `JSX.IntrinsicElements` resolution.
+    pub fn set_jsx_intrinsic_elements(&mut self, t: TypeId) {
+        self.jsx_intrinsic_elements = Some(t);
     }
 
     /// Records the meaning(s) under which `symbol` was referenced.

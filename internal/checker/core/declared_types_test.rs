@@ -151,6 +151,48 @@ fn type_reference_with_arguments_resolves_member() {
     assert_eq!(p.symbol(value).name, "value");
 }
 
+// Go: internal/checker/checker.go:Checker.getTypeOfPropertyOfType (instantiated through reference)
+#[test]
+fn type_of_property_through_reference_is_instantiated() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface Box<T> {\n  value: T;\n}");
+    let mut c = Checker::new();
+    let box_ty = get_declared_type_of_symbol(&mut c, &p, local(&p, "Box"), None);
+    let tp = c
+        .get_type(box_ty)
+        .as_object()
+        .expect("object")
+        .type_parameters[0];
+    // Model `value: T` by setting the value member's type to the type parameter.
+    let value_sym = get_property_of_type(&c, box_ty, "value").expect("value member");
+    c.value_symbol_links.get(value_sym).resolved_type = Some(tp);
+
+    let string_ty = c.string_type();
+    let box_string = c.create_type_reference(box_ty, vec![string_ty]); // Box<string>
+                                                                       // Through `Box<string>`, `value` has type `string`.
+    let value_type = get_type_of_property_of_type(&mut c, &p, box_string, "value");
+    assert_eq!(value_type, Some(string_ty));
+    // The bare generic still yields the type parameter.
+    assert_eq!(
+        get_type_of_property_of_type(&mut c, &p, box_ty, "value"),
+        Some(tp)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getDeclaredTypeOfTypeParameter
+#[test]
+fn declared_type_of_type_parameter_symbol() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface Box<T> {\n  value: T;\n}");
+    let mut c = Checker::new();
+    // Building Box's declared type registers its type parameter symbol's type.
+    let box_ty = get_declared_type_of_symbol(&mut c, &p, local(&p, "Box"), None);
+    let tp = c
+        .get_type(box_ty)
+        .as_object()
+        .expect("object")
+        .type_parameters[0];
+    assert!(c.get_type(tp).as_type_parameter().is_some());
+}
+
 // Go: internal/checker/checker.go:Checker.getGlobalType
 #[test]
 fn get_global_type_resolves_builds_and_caches() {

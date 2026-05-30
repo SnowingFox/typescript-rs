@@ -6,6 +6,7 @@
 //! (notably the port of Go's `TestGetSymbolAtLocation`). It lives behind
 //! `cfg(test)`, so `tsgo_parser`/`tsgo_binder` are dev-dependencies only.
 
+use tsgo_ast::flow::{FlowList, FlowListId, FlowNode, FlowNodeId};
 use tsgo_ast::{NodeArena, NodeId, Symbol, SymbolId, SymbolTable};
 use tsgo_binder::bind_source_file;
 use tsgo_core::scriptkind::ScriptKind;
@@ -23,10 +24,19 @@ pub(crate) struct StubProgram {
 impl StubProgram {
     /// Parses `text` as a `.ts` file named `file_name` and binds it.
     pub(crate) fn parse_and_bind(file_name: &str, text: &str) -> StubProgram {
+        StubProgram::parse_and_bind_with(file_name, text, ScriptKind::Ts)
+    }
+
+    /// Parses `text` as a `.tsx` file (JSX enabled) named `file_name` and binds it.
+    pub(crate) fn parse_and_bind_tsx(file_name: &str, text: &str) -> StubProgram {
+        StubProgram::parse_and_bind_with(file_name, text, ScriptKind::Tsx)
+    }
+
+    fn parse_and_bind_with(file_name: &str, text: &str, script_kind: ScriptKind) -> StubProgram {
         let opts = SourceFileParseOptions {
             file_name: file_name.to_string(),
         };
-        let mut parsed = parse_source_file(opts, text, ScriptKind::Ts);
+        let mut parsed = parse_source_file(opts, text, script_kind);
         let bind = bind_source_file(&mut parsed.arena, parsed.source_file);
         StubProgram {
             arena: parsed.arena,
@@ -55,5 +65,17 @@ impl BoundProgram for StubProgram {
 
     fn locals(&self, container: NodeId) -> Option<&SymbolTable> {
         self.bind.locals.get(&container)
+    }
+
+    fn flow_node_of(&self, node: NodeId) -> Option<FlowNodeId> {
+        self.bind.node_flow.get(&node).copied()
+    }
+
+    fn flow_node(&self, id: FlowNodeId) -> FlowNode {
+        self.bind.flow_nodes[id.0 as usize]
+    }
+
+    fn flow_list(&self, id: FlowListId) -> FlowList {
+        self.bind.flow_lists[id.0 as usize]
     }
 }
