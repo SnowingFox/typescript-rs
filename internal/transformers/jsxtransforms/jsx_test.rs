@@ -7,6 +7,7 @@ fn check_downlevel(input: &str, expected: &str) {
     let (ec, source_file) = parse_shared_tsx(input);
     let mut tx = new_jsx_transformer(&TransformOptions {
         context: Some(Rc::clone(&ec)),
+        ..Default::default()
     });
     let result = tx.transform_source_file(source_file);
     assert_eq!(emit(&ec, result, input), expected, "downlevel({input:?})");
@@ -18,6 +19,23 @@ fn check_downlevel(input: &str, expected: &str) {
 #[test]
 fn intrinsic_self_closing_element_lowers_to_create_element() {
     check_downlevel("<div/>;", "React.createElement(\"div\", null);");
+}
+
+// Go: internal/transformers/jsxtransforms/jsx.go:getJsxFactoryCallee (automatic runtime)
+// Under `jsx: react-jsx` (track-2 `compiler_options.jsx`), `<div/>` lowers to the
+// automatic-runtime `jsx("div", {})` call (props is `{}`, not `null`). The
+// implicit `react/jsx-runtime` import injection is DEFER'd.
+#[test]
+fn automatic_runtime_self_closing_element_lowers_to_jsx_call() {
+    let (ec, source_file) = parse_shared_tsx("<div/>;");
+    let mut opts = TransformOptions {
+        context: Some(Rc::clone(&ec)),
+        ..Default::default()
+    };
+    opts.compiler_options.jsx = tsgo_core::compileroptions::JsxEmit::ReactJsx;
+    let mut tx = new_jsx_transformer(&opts);
+    let result = tx.transform_source_file(source_file);
+    assert_eq!(emit(&ec, result, "<div/>;"), "jsx(\"div\", {});");
 }
 
 // Go: internal/transformers/jsxtransforms/jsx.go:getTagName (component identifier)

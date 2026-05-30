@@ -7,6 +7,7 @@ fn check_downlevel(input: &str, expected: &str) {
     let (ec, source_file) = parse_shared(input);
     let mut tx = new_async_transformer(&TransformOptions {
         context: Some(Rc::clone(&ec)),
+        ..Default::default()
     });
     let result = tx.transform_source_file(source_file);
     assert_eq!(emit(&ec, result, input), expected, "downlevel({input:?})");

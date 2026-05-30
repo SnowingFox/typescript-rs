@@ -40,4 +40,5 @@ members = [
     "internal/printer",
     "internal/checker",
     "internal/transformers",
+    "internal/compiler",
 ]

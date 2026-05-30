@@ -94,6 +94,15 @@ flowchart LR
 5. **跑 `bash docs/rust-rewrite/scripts/gate.sh --strict` 全绿**（文档+代码门禁，见 [gates.md](./references/gates.md)）。
 6. 勾选文档，更新本 README 进度（gate 未全绿不得打 `[x]`）。
 
+## 子代理（subagent）执行约定
+
+> 本项目用 subagent 并行/串行推进移植。所有起 subagent 的场景遵守以下约定。
+
+1. **一律用英文给 subagent 写 prompt / 交流**（与代码、注释、测试同语言，保持上下文一致、避免歧义）。
+2. **每个 subagent 必须遵循 `/tdd` 与本 README**（红→绿逐行为、严禁横切；收口判据同「实施纪律」）。
+3. **并行安全 = 编辑边界不重叠 + 之间无构建依赖边**：两个 lane 只有在「各自只改互不重叠的 crate」且「彼此不在对方构建依赖链上」时才可并行；否则一个 lane 的 TDD 红 / 半改非编译态会拖垮另一个的 `-p` 构建。`checker → transformers → compiler` 这条链上的包两两有构建依赖，只能单 lane 串行推进。
+4. **并行期间各 lane 用 `cargo <cmd> -p <crate>` 限定 gate**（不要 `--workspace`），避免互相编译对方 in-flight 的 crate。
+
 ## 质量 Gate（文档 gate + 代码 gate）
 
 把上面的实施纪律**硬化为可运行门禁**。脚本在 `scripts/`，说明见 **[references/gates.md](./references/gates.md)**。

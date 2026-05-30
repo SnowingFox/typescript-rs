@@ -94,10 +94,11 @@ fn attribute_type_mismatch_reports_diagnostic() {
 fn value_element_unresolved_reports_cannot_find_name() {
     // Driven through `check_source_file` so the JSX dispatch in `check_expression`
     // is exercised too.
-    let p = StubProgram::parse_and_bind_tsx("/a.tsx", "<Foo/>;");
-    let mut c = Checker::new();
-    c.check_source_file(&p, p.root());
-    let diags = c.get_diagnostics(p.root());
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_tsx("/a.tsx", "<Foo/>;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, 2304);
     assert_eq!(diags[0].message, "Cannot find name 'Foo'.");
@@ -106,15 +107,16 @@ fn value_element_unresolved_reports_cannot_find_name() {
 // Go: internal/checker/jsx.go:Checker.checkJsxElement / checkJsxChildren
 #[test]
 fn element_children_are_typed() {
-    let p = StubProgram::parse_and_bind_tsx(
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_tsx(
         "/a.tsx",
         "interface IntrinsicElements {\n  div: number;\n}\n<div>{y}</div>;",
-    );
-    let mut c = Checker::new();
-    let it = get_declared_type_of_symbol(&mut c, &p, sym(&p, "IntrinsicElements"), None);
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p) as std::rc::Rc<dyn BoundProgram>);
+    let it = get_declared_type_of_symbol(&mut c, &*p, sym(&p, "IntrinsicElements"), None);
     c.set_jsx_intrinsic_elements(it);
-    c.check_source_file(&p, p.root());
-    let diags = c.get_diagnostics(p.root());
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
     // The child expression `{y}` references an undefined name.
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, 2304);
@@ -124,10 +126,11 @@ fn element_children_are_typed() {
 // Go: internal/checker/jsx.go:Checker.checkJsxFragment
 #[test]
 fn fragment_children_are_typed() {
-    let p = StubProgram::parse_and_bind_tsx("/a.tsx", "<>{z}</>;");
-    let mut c = Checker::new();
-    c.check_source_file(&p, p.root());
-    let diags = c.get_diagnostics(p.root());
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_tsx("/a.tsx", "<>{z}</>;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
     // A fragment types its `{z}` child, reporting the undefined name.
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, 2304);

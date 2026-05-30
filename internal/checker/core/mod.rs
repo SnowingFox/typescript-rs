@@ -28,10 +28,13 @@ pub mod types;
 mod test_support;
 
 use std::cell::OnceCell;
+use std::rc::Rc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use tsgo_ast::NodeId;
 
 use emit_resolver::EmitResolver;
+use program::BoundProgram;
 use relations::RelationCache;
 use signatures::{IndexInfo, IndexInfoArena, IndexInfoId, Signature, SignatureArena, SignatureId};
 use symbols::{
@@ -42,14 +45,31 @@ use types::{
     TypeFlags, TypeId, TypeParameter, UnionType,
 };
 
+/// The bound program a checker retains (Go's `c.program` pointer field).
+///
+/// A thin wrapper around an `Rc<dyn BoundProgram>` whose only job is to give the
+/// shared, non-`Debug` trait object a `Debug` impl so [`Checker`] can keep
+/// `#[derive(Debug)]`.
+// Go: internal/checker/checker.go:Checker.program
+struct RetainedProgram(Rc<dyn BoundProgram>);
+
+impl std::fmt::Debug for RetainedProgram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BoundProgram")
+    }
+}
+
 /// The TypeScript type checker.
 ///
 /// Round 4a builds only the foundation: the [`TypeArena`], the intrinsic type
-/// singletons, and the per-symbol link stores. The real entry point
-/// `NewChecker(program)` — which binds a whole `Program` and drives checking —
-/// is deferred until a `Program`/host exists (Phase 6); [`Checker::new`] here
-/// constructs just the intrinsic substrate so type construction and printing
-/// can be exercised in isolation.
+/// singletons, and the per-symbol link stores. From sub-phase 4l on, the
+/// program-taking entry point [`Checker::new_checker`] retains its
+/// [`BoundProgram`] (Go's `c.program`), so the per-file driving surface
+/// ([`Checker::check_source_file`]/[`Checker::get_diagnostics`]) works off the
+/// retained program — the shape a multi-checker pool drives.
+///
+/// [`Checker::new`] still constructs just the intrinsic substrate (no program)
+/// so type construction and printing can be exercised in isolation.
 ///
 /// Go's `Checker` has ~300 fields; only those needed by 4a are present. Each
 /// later sub-phase (4b..4k) adds the fields and methods its subsystem needs.
@@ -101,6 +121,14 @@ pub struct Checker {
     jsx_intrinsic_elements: Option<TypeId>,
     /// The cached emit-time query handle (Go's `GetEmitResolver` `sync.Once`).
     emit_resolver: OnceCell<EmitResolver>,
+    /// The bound program this checker was constructed over (Go's `c.program`),
+    /// or `None` for an intrinsic-only checker built via [`Checker::new`].
+    /// Retained so the per-file driving surface needs no per-call program.
+    program: Option<RetainedProgram>,
+    /// Files already type-checked, so re-checking is a no-op (Go's per-file
+    /// `sourceFileLinks.typeChecked`). Keeps diagnostics from doubling when a
+    /// file is checked then re-requested through [`Checker::get_diagnostics`].
+    checked_files: FxHashSet<NodeId>,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -269,6 +297,8 @@ impl Checker {
             diagnostics: Vec::new(),
             jsx_intrinsic_elements: None,
             emit_resolver: OnceCell::new(),
+            program: None,
+            checked_files: FxHashSet::default(),
             any_type,
             auto_type,
             error_type,
@@ -293,30 +323,69 @@ impl Checker {
         }
     }
 
-    /// Constructs a checker for a bound `program` (the forward-compatible
-    /// `NewChecker(program)` entry point).
+    /// Constructs a checker over a bound `program`, retaining it (Go's
+    /// `NewChecker(program)`, which stores `c.program = program`).
     ///
-    /// In 4k this only initializes the intrinsic substrate (delegating to
-    /// [`Checker::new`]); the real `NewChecker` also binds the program's global
-    /// scope and lib types, which is wired once a real host exists.
+    /// The program is shared (`Rc`), mirroring Go where one `*Program` is shared
+    /// by every checker in the pool; cloning the handle is how a pool seeds its K
+    /// checkers from one program. After construction the per-file driving surface
+    /// — [`Checker::check_source_file`] and [`Checker::get_diagnostics`] — works
+    /// off the retained program with no per-call program argument.
     ///
-    /// blocked-by: `compiler.Program` + lib globals (P6) — global/lib binding,
-    /// `getGlobalType` population, and storing the program on the checker.
+    /// blocked-by: `compiler.Program` + lib globals (P6) — the real `NewChecker`
+    /// additionally binds the program's global scope and lib types and populates
+    /// `getGlobalType`; 4l only retains the program and initializes intrinsics.
     ///
     /// # Examples
     /// ```
+    /// use std::rc::Rc;
     /// use tsgo_checker::{BoundProgram, Checker};
-    /// # fn demo<P: BoundProgram>(p: &P) -> Checker {
+    /// # fn demo(p: Rc<dyn BoundProgram>) -> Checker {
     /// Checker::new_checker(p)
     /// # }
     /// ```
     ///
-    /// Side effects: allocates the intrinsic types in a fresh arena.
+    /// Side effects: retains the program and allocates the intrinsic types.
     // Go: internal/checker/checker.go:NewChecker
-    pub fn new_checker(program: &dyn program::BoundProgram) -> Self {
-        // The program is not yet retained; global/lib binding lands with P6.
-        let _ = program;
-        Checker::new()
+    pub fn new_checker(program: Rc<dyn BoundProgram>) -> Self {
+        // Retain the program (Go's `c.program = program`); global/lib binding
+        // and `getGlobalType` population still land with P6.
+        let mut checker = Checker::new();
+        checker.program = Some(RetainedProgram(program));
+        checker
+    }
+
+    /// Returns the program this checker was constructed over (Go's `c.program`),
+    /// or `None` for an intrinsic-only checker built via [`Checker::new`].
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// // An intrinsic-only checker has no program.
+    /// assert!(Checker::new().program().is_none());
+    /// ```
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/checker.go:Checker.program
+    pub fn program(&self) -> Option<&dyn BoundProgram> {
+        self.program.as_ref().map(|p| p.0.as_ref())
+    }
+
+    /// Clones the shared handle to the retained program, if any.
+    ///
+    /// Returning an owned `Rc` lets a `&mut self` driver (e.g.
+    /// [`Checker::check_source_file`]) walk the program while mutating the
+    /// checker, without holding a borrow of `self`.
+    // Go: internal/checker/checker.go:Checker.program (shared pointer)
+    pub(crate) fn retained_program(&self) -> Option<Rc<dyn BoundProgram>> {
+        self.program.as_ref().map(|p| Rc::clone(&p.0))
+    }
+
+    /// Records that `file` has been type-checked, returning `true` the first
+    /// time (the caller should check it) and `false` afterwards.
+    // Go: internal/checker/checker.go:Checker.checkSourceFile (links.typeChecked)
+    pub(crate) fn mark_file_checked(&mut self, file: NodeId) -> bool {
+        self.checked_files.insert(file)
     }
 
     /// Allocates a new type, clearing the cache-only object flags that Go's

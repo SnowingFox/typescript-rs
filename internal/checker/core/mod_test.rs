@@ -186,8 +186,24 @@ fn symbol_reference_kinds_accumulate() {
 // Go: internal/checker/checker.go:NewChecker (program-taking entry, P6 seam)
 #[test]
 fn new_checker_initializes_intrinsics() {
-    let p = crate::core::test_support::StubProgram::parse_and_bind("/a.ts", "");
-    let c = Checker::new_checker(&p);
+    let p = std::rc::Rc::new(crate::core::test_support::StubProgram::parse_and_bind(
+        "/a.ts", "",
+    ));
+    let c = Checker::new_checker(p);
     assert_eq!(c.type_count(), Checker::new().type_count());
     assert_eq!(c.type_to_string(c.string_type()), "string");
+}
+
+// Go: internal/checker/checker.go:NewChecker (retains `c.program = program`)
+#[test]
+fn new_checker_retains_program() {
+    use crate::core::program::BoundProgram;
+    let p = std::rc::Rc::new(crate::core::test_support::StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string;",
+    ));
+    let root = p.root();
+    let c = Checker::new_checker(p);
+    // The checker exposes the program it was constructed over.
+    assert_eq!(c.program().map(|prog| prog.root()), Some(root));
 }

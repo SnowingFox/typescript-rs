@@ -655,6 +655,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_compiler"
+version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "rustc-hash",
+ "tsgo_ast",
+ "tsgo_binder",
+ "tsgo_bundled",
+ "tsgo_checker",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_diagnostics",
+ "tsgo_json",
+ "tsgo_locale",
+ "tsgo_module",
+ "tsgo_modulespecifiers",
+ "tsgo_outputpaths",
+ "tsgo_packagejson",
+ "tsgo_parser",
+ "tsgo_printer",
+ "tsgo_repo",
+ "tsgo_scanner",
+ "tsgo_sourcemap",
+ "tsgo_stringutil",
+ "tsgo_symlinks",
+ "tsgo_tracing",
+ "tsgo_transformers",
+ "tsgo_tsoptions",
+ "tsgo_tspath",
+ "tsgo_vfs",
+]
+
+[[package]]
 name = "tsgo_core"
 version = "0.0.0"
 dependencies = [

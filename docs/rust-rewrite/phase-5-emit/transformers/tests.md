@@ -198,9 +198,18 @@
 | `estransforms::optionalchain::tests::optional_call_lowered` | estransforms | **6d** 可选调用 | `a?.();` → `… ? void 0 : a();` | `flattenChain`(call) | ✓ |
 | `estransforms::optionalchain::tests::optional_method_call_lowered` | estransforms | **6d** 单 `?.` + 尾随调用 | `a?.b();` → `… ? void 0 : a.b();` | `flattenChain` | ✓ |
 | `estransforms::optionalchain::tests::optional_chain_trailing_property_lowered` | estransforms | **6d** 尾随非可选属性段 | `a?.b.c;` → `… ? void 0 : a.b.c;` | `flattenChain` | ✓ |
+| `estransforms::optionalchain::tests::non_simple_receiver_hoists_temp` | estransforms | **6h** 非简单 receiver → hoist temp（求值一次）| `f()?.b;` → `var _a;` + `(_a = f()) === null \|\| _a === void 0 ? void 0 : _a.b;` | `visitOptionalExpression`(`AddVariableDeclaration`+`NewAssignmentExpression`) | ✓ |
+| `estransforms::optionalchain::tests::multiple_optional_links_nest_guards` | estransforms | **6h** 多 `?.`（链嵌套守卫）| `a?.b?.c;` → `var _a;` + `(_a = a === null \|\| a === void 0 ? void 0 : a.b) === null \|\| _a === void 0 ? void 0 : _a.c;` | `visitOptionalExpression`(receiver 递归 + temp) | ✓ |
+| `estransforms::optionalchain::tests::non_simple_receiver_in_nested_chain_hoists_two_temps` | estransforms | **6h** 泛化：非简单 receiver + 嵌套 → 每链一 temp（内先 `_a`、外 `_b`）| `f()?.b?.c;` → `var _a, _b;` + `(_b = (_a = f()) === null \|\| _a === void 0 ? void 0 : _a.b) === null \|\| _b === void 0 ? void 0 : _b.c;` | `visitOptionalExpression` | ✓ |
 | `estransforms::objectrestspread::tests::object_spread_only_lowers_to_assign` | estransforms | **6d** 仅 spread | `const o = { ...x };` → `Object.assign({}, x)` | `visitObjectLiteralExpression` | ✓ |
 | `estransforms::objectrestspread::tests::spread_then_property_chunks_pairwise` | estransforms | **6d** spread+属性 pairwise | `{ ...x, y }` → `Object.assign(Object.assign({}, x), { y })` | `chunkObjectLiteralElements` | ✓ |
 | `estransforms::objectrestspread::tests::property_then_spread_uses_chunk_as_target` | estransforms | **6d** 首 chunk 作 target | `{ a, ...x }` → `Object.assign({ a }, x)` | `chunkObjectLiteralElements` | ✓ |
+| `estransforms::objectrestspread::tests::object_rest_binding_lowers_to_rest_helper` | estransforms | **6g** tracer：对象 rest 绑定 → `__rest`（+ prologue helper）| `var { ...rest } = o;` → `var __rest = …;` + `var rest = __rest(o, []);` | `flattenObjectBindingOrAssignmentPattern`(rest 臂)/`NewRestHelper` | ✓ |
+| `estransforms::objectrestspread::tests::leading_binding_is_excluded_from_rest_keys` | estransforms | **6g** leading 绑定保留对象模式 + 排除 key | `var { a, ...rest } = o;` → `var { a } = o, rest = __rest(o, ["a"]);` | `flattenObjectBindingOrAssignmentPattern` | ✓ |
+| `estransforms::objectrestspread::tests::multiple_leading_bindings_list_all_rest_keys` | estransforms | **6g** 多 key（源序）| `var { a, b, ...rest } = o;` → `var { a, b } = o, rest = __rest(o, ["a", "b"]);` | `NewRestHelper` | ✓ |
+| `estransforms::objectrestspread::tests::const_declaration_kind_is_preserved` | estransforms | **6g** 保留 `const`/`let` 声明种类 | `const { x, ...rest } = o;` → `const { x } = o, rest = __rest(o, ["x"]);` | `flattenDestructuringBinding`(list flags) | ✓ |
+| `estransforms::objectrestspread::tests::renamed_leading_binding_excludes_property_key` | estransforms | **6g** 重命名绑定排除**属性**键 | `var { a: b, ...rest } = o;` → `var { a: b } = o, rest = __rest(o, ["a"]);` | `TryGetPropertyNameOfBindingOrAssignmentElement` | ✓ |
+| `estransforms::objectrestspread::tests::non_simple_initializer_with_leading_binding_is_left_unchanged` | estransforms | **6g** DEFER 守卫：非简单 init（需 var-hoist temp）保持不变 | `var { a, ...rest } = f();` → 不变 | `ensureIdentifier`(hoist DEFER) | ✓ |
 | `estransforms::namedevaluation::tests::anonymous_function_binding_gets_set_function_name` | estransforms | **6d-2** 匿名函数命名（emit-helper 基建端到端验证）| `var f = function () {};` → prologue `var __setFunctionName = …;` + `var f = __setFunctionName(function () { }, "f");` | `transformNamedEvaluationOfVariableDeclaration` | ✓ |
 | `estransforms::r#async::tests::async_function_lowers_to_awaiter_wrapper` | estransforms | **6d-3** async 函数 → `__awaiter` 包装 + `await`→`yield` | `async function f() { await g(); }` → prologue `var __awaiter = …;` + `function f() { return __awaiter(this, void 0, void 0, function* () { yield g(); }); }` | `visitFunctionDeclaration`/`transformAsyncFunctionBody` | ✓ |
 | `estransforms::r#async::tests::async_function_without_await_still_wraps` | estransforms | **6d-3** 无 await 仍包装 | `async function f() { g(); }` → `… function* () { g(); }` | `visitFunctionDeclaration` | ✓ |
@@ -218,6 +227,17 @@
 | `jsxtransforms::jsx::tests::text_child_becomes_string_literal` | jsxtransforms | **6f** 文本子节点 | `<div>hi</div>;` → `…("div", null, "hi");` | `visitJsxText` | ✓ |
 | `jsxtransforms::jsx::tests::nested_element_child_is_lowered` | jsxtransforms | **6f** 嵌套元素子节点 | `<div><span/></div>;` → 递归 createElement | `transformJsxChildToExpression` | ✓ |
 | `jsxtransforms::jsx::tests::fragment_lowers_to_react_fragment_create_element` | jsxtransforms | **6f** fragment | `<>{x}</>;` → `…(React.Fragment, null, x);` | `visitJsxOpeningFragmentCreateElement` | ✓ |
+| `printer::emitcontext::node_substitution_round_trips` | printer（additive）| **6e-2 track1** 节点替换往返 | `set/get_node_substitution` | `EmitContext` substitution | ✓ |
+| `printer::emitcontext::printer_emits_substituted_node` | printer（additive）| **6e-2 track1** emit 时替换 | 注册 `x`→`m_1.x`，emit `x;` → `m_1.x;` | `SubstituteNode`（emit hook）| ✓ |
+| `moduletransforms::commonjsmodule::tests::named_import_and_use_lower_to_require_and_member_access` | moduletransforms | **6e-2 验证** CJS import+use | `import { x } from "m"; x;`（commonjs）→ `const m_1 = require("m");\nm_1.x;` | `transformCommonJSModule`+`visitIdentifier` | ✓ |
+| `moduletransforms::commonjsmodule::tests::non_commonjs_module_kind_is_passthrough` | moduletransforms | **6e-2 track2** module 分支 | `module: none` → 原样 | compilerOptions gate | ✓ |
+| `moduletransforms::commonjsmodule::tests::export_default_becomes_exports_default_with_marker` | moduletransforms | **6e-3** export default + marker | `export default 1;` → marker + `exports.default = 1;` | `visitExportAssignment`+`createUnderscoreUnderscoreESModule` | ✓ |
+| `moduletransforms::commonjsmodule::tests::export_const_becomes_exports_assignment` | moduletransforms | **6e-3** export const | `export const y = 1;` → `exports.y = 1;` | `transformInitializedVariable` | ✓ |
+| `moduletransforms::commonjsmodule::tests::local_named_export_becomes_exports_assignment` | moduletransforms | **6e-3** export {x} | `export { x };` → `exports.x = x;` | `appendExportsOfDeclaration` | ✓ |
+| `moduletransforms::commonjsmodule::tests::default_import_uses_import_default_helper` | moduletransforms | **6e-3** default import interop | `import d from "m"; d;` → `__importDefault` + `m_1.default` | `getHelperExpressionForImport` | ✓ |
+| `moduletransforms::commonjsmodule::tests::namespace_import_uses_import_star_helper` | moduletransforms | **6e-3** namespace import interop | `import * as ns from "m"; ns;` → `__importStar` + `m_1` | `getHelperExpressionForImport` | ✓ |
+| `moduletransforms::commonjsmodule::tests::export_star_uses_export_star_helper` | moduletransforms | **6e-3** export * | `export * from "m";` → `__exportStar(require("m"), exports);` | `NewExportStarHelper` | ✓ |
+| `jsxtransforms::jsx::tests::automatic_runtime_self_closing_element_lowers_to_jsx_call` | jsxtransforms | **6e-3** JSX automatic 选择 | `<div/>`（jsx=react-jsx）→ `jsx("div", {})` | `getJsxFactoryCallee` | ✓ |
 | `printer::emithelpers::requested_helper_definition_emitted_in_prologue` | printer（additive）| **6d-2** prologue emit helper 定义 | 挂 `__setFunctionName` → 源文件顶部出现其定义 | `emitHelpers` | ✓ |
 | `printer::emithelpers::prologue_emits_helpers_in_priority_order` | printer（additive）| **6d-2** 优先级排序 | `__awaiter`(5) 先于 `__setFunctionName`(None) | `compareEmitHelpers` | ✓ |
 | `printer::emitcontext::requested_helpers_round_trip_and_dedup` | printer（additive）| **6d-2** request/read + 去重 | 双 request 记录一次；read 清空 | `RequestEmitHelper`/`ReadEmitHelpers` | ✓ |
@@ -255,8 +275,8 @@
 |---|---|---|---|
 | exponentiation | `tests/cases/conformance/es2016/exponentiationOperator/**` | `**`/`**=`（含 element/property-access 目标 + 临时变量）→ `Math.pow` | 6c-1 ✓（标识符）/ 6c-3 ✓（顶层 property/element temp 目标）/ 6c-4（非顶层作用域 temp）+ P10 |
 | classfields | `tests/cases/conformance/classes/members/privateNames/**`、`.../esnext/classFields/**`、`.../classes/members/instanceAndStaticMembers/**`、`useDefineForClassFields/**` | 实例/静态字段、私有名（WeakMap）、计算名、accessor、`super` 交互、`--target`/`useDefineForClassFields` 门控 | 6c-1/2 ✓（实例字段 + 构造器插入族）/ 6c-3 ✓（static 字段）/ 6c-4 ✓（私有实例字段 WeakMap + 计算名）/ DEFER（named-helper 私有形态、accessor、class-expr、私有 static/方法、target 门控）+ P10 |
-| optionalchain | `tests/cases/conformance/es2020/optionalChaining*/**` | `?.` 属性/元素/调用 + 链 → 保护性条件表达式 | 6d ✓（单 `?.` + 尾随段 + 简单 receiver）/ DEFER（temp-hoist receiver、多 `?.`、`(a?.b)()` this-capture、`delete`、tagged template）+ P10 |
-| objectrestspread | `tests/cases/conformance/es2018/objectRestSpread*/**`、`.../es2017/**` | 对象 spread → `Object.assign`；对象 rest 绑定 → `__rest` | 6d ✓（对象字面量 spread 子集）/ DEFER（`__rest` 绑定/参数/`for-of`/`catch`/赋值模式，需 helper-emit + 解构）+ P10 |
+| optionalchain | `tests/cases/conformance/es2020/optionalChaining*/**` | `?.` 属性/元素/调用 + 链 → 保护性条件表达式 | 6d ✓（单 `?.` + 尾随段 + 简单 receiver）/ 6h ✓（顶层语句的 temp-hoist receiver `f()?.b` + 多 `?.` `a?.b?.c`）/ DEFER（非顶层语句路径/嵌套作用域的 temp-hoist、`(a?.b)()` this-capture、`delete a?.b`、tagged template）+ P10 |
+| objectrestspread | `tests/cases/conformance/es2018/objectRestSpread*/**`、`.../es2017/**` | 对象 spread → `Object.assign`；对象 rest 绑定 → `__rest` | 6d ✓（对象字面量 spread 子集）/ 6g ✓（变量声明对象 rest 绑定子集：`var { a, ...rest } = o` → `var { a } = o, rest = __rest(o, ["a"])`，简单 init + 字面量键）/ DEFER（泛型 `FlattenDestructuringBinding`=6h：嵌套/数组模式、默认值、计算键、非简单 init temp-hoist；rest 在参数/`for-of`/`catch`/赋值模式）+ P10 |
 | namedevaluation | `tests/cases/conformance/es2022/namedEvaluation/**`、decorators/classFields 中的命名求值 | 匿名函数/类绑定 → `__setFunctionName(value, name)` | 6d-2 ✓（`var f = 匿名函数` 子集，emit-helper 基建端到端验证）/ DEFER（property/参数/binding/计算名 `__propKey`/匿名类 static 块、AssignedName 跟踪）+ P10 |
 | async | `tests/cases/conformance/es2017/asyncFunctions/**` | async 函数 → `__awaiter(this, void 0, void 0, function* () { … })` + `await`→`yield` | 6d-3 ✓（顶层 async 函数声明子集）/ DEFER（方法/accessor/箭头、async 生成器 `__asyncGenerator`、super/lexical-`this`/参数、top-level await）+ P10 |
 | forawait | `tests/cases/conformance/es2018/forAwait/**` | `for await (x of y)` → `__asyncValues` + downlevel-await + `iterator.return` 清理 try/finally | DEFER（无最小 tracer，需完整 async-iteration 脚手架）+ P10 |
@@ -270,7 +290,7 @@
 | transform | conformance 子集 | 验证内容 | 目标轮 |
 |---|---|---|---|
 | externalmoduleinfo | （无独立 baseline；由 CJS/ESM 输出间接覆盖）| import/export 结构化收集 | 6e ✓（单测覆盖：imports/export*/export names/export=）|
-| commonjsmodule | `tests/cases/compiler/**`、`.../es2015/modules/**`（`--module commonjs`）| `import`→`require`、`export`→`exports.x`、`__importStar`/`__importDefault`/`__exportStar` interop、`__esModule` 标志 | DEFER（需 emit substitution + 真实 ReferenceResolver + compilerOptions 线程化）+ P10 |
+| commonjsmodule | `tests/cases/compiler/**`、`.../es2015/modules/**`（`--module commonjs`）| `import`→`require`、`export`→`exports.x`、`__importStar`/`__importDefault`/`__exportStar` interop、`__esModule` 标志 | 6e-2 ✓（named import + use→`m_1.x`）/ 6e-3 ✓（export default/const/`{}`/`*` + default/namespace import interop + `__esModule` 标志）/ DEFER（default+named、re-export、`export =`、动态 import、strict/export-name-init、作用域正确解析需真实 ReferenceResolver）+ P10 |
 | esmodule | `.../es2015/modules/**`（`--module es2015/esnext`）| import/export elision + interop helper 注入 | DEFER（同上）+ P10 |
 
 > 6e 仅落地 `externalmoduleinfo` 结构化分析子集；CJS/ESM 变换待一轮 substitution + resolver + compilerOptions 前置基建（详见 `impl.md` 的「moduletransforms 解锁前置」）。
@@ -280,7 +300,7 @@
 | transform | conformance 子集 | 验证内容 | 目标轮 |
 |---|---|---|---|
 | jsx（classic）| `tests/cases/conformance/jsx/**`（`--jsx react`）| `<tag attrs>children</tag>` → `React.createElement(tag, props, ...children)`、fragment → `React.Fragment` | 6f ✓（intrinsic/组件标签、string/expr 属性、expr/text/嵌套 子节点、fragment）/ DEFER（spread attr、entity 解码、自定义 factory/namespace、whitespace 精确边界）+ P10 |
-| jsx（automatic）| `tests/cases/conformance/jsx/**`（`--jsx react-jsx`/`react-jsxdev`）| `jsx`/`jsxs`/`jsxDEV` + implicit `react/jsx-runtime` import | DEFER（需 compilerOptions 选择运行时 + emitResolver implicit-import 注入）+ P10 |
+| jsx（automatic）| `tests/cases/conformance/jsx/**`（`--jsx react-jsx`/`react-jsxdev`）| `jsx`/`jsxs`/`jsxDEV` + implicit `react/jsx-runtime` import | 6e-3 ✓（运行时选择经 `compiler_options.jsx`：`<div/>`→`jsx("div", {})`）/ DEFER（children-in-props、`jsxs`、implicit-import 注入需 emitResolver `SetReferencedImportDeclaration`）+ P10 |
 
 > 6f 落地 classic runtime 子集（硬编码 `React.createElement`/`React.Fragment` 工厂）；automatic runtime 与自定义 pragma/factory 待 compilerOptions/resolver 线程化（同 moduletransforms 缺口）。
 

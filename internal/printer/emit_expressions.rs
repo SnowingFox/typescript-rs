@@ -14,6 +14,11 @@ impl Printer<'_> {
     /// switch; the outer parenthesization lives in `emit_expression`).
     // Go: internal/printer/printer.go:emitExpression
     pub(crate) fn emit_expression_node(&mut self, node: NodeId) {
+        // Just-in-time substitution (Go `onSubstituteNode`): if a transform
+        // registered a replacement for this node, emit the replacement instead.
+        // Applied once — the replacement's own sub-parts are not re-substituted
+        // because they are distinct nodes not present in the table.
+        let node = self.get_node_substitution(node).unwrap_or(node);
         match self.arena().kind(node) {
             Kind::TrueKeyword | Kind::FalseKeyword | Kind::NullKeyword => {
                 self.emit_token_node(node)

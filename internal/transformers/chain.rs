@@ -18,11 +18,14 @@ use tsgo_printer::EmitContext;
 pub struct TransformOptions {
     /// The shared emit context reused across every stage of the pipeline.
     pub context: Option<SharedEmitContext>,
-    // DEFER(P5/6b): compiler_options, resolver, emit_resolver,
-    // get_emit_module_format_of_file.
-    // blocked-by: tsgo_core::CompilerOptions transform view, tsgo_binder
-    // ReferenceResolver, tsgo_printer EmitResolver, and core::ModuleKind
-    // file-format lookup are not yet ported for the transform pipeline.
+    /// The compiler options that drive transform decisions (e.g. `module`
+    /// kind selects CommonJS vs ESM emit; `jsx` selects the classic vs
+    /// automatic JSX runtime).
+    pub compiler_options: tsgo_core::compileroptions::CompilerOptions,
+    // DEFER(P5): resolver / emit_resolver. blocked-by: a real
+    // `tsgo_binder::ReferenceResolver` needs checker `resolveName`/`EmitResolver`
+    // (use-site -> declaration resolution) not yet ported for the transform
+    // pipeline; the current resolver is a no-op placeholder.
 }
 
 /// A factory that builds (or skips, via `None`) a [`Transformer`] for a pipeline

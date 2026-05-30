@@ -14,20 +14,32 @@
 //! **computed instance-field names** (key cached in a hoisted temp). Round 6d
 //! landed the two **helper-free** es stages: `optionalchain` (`a?.b` →
 //! not-null-guarded conditional) and `objectrestspread` (object spread →
-//! `Object.assign`).
+//! `Object.assign`). Round 6g deepened `objectrestspread` to consume the
+//! `__rest` helper for object **rest** bindings in variable declarations
+//! (`var { a, ...rest } = o;` → `var { a } = o, rest = __rest(o, ["a"]);`),
+//! threading the emit context like `async` (helper request + source-file
+//! attach + prologue emit).
 //!
 //! Deferred (DEFER(P5), see each `blocked-by`):
 //!
-//! - `objectrestspread` object **rest** binding (`const { a, ...rest } = o` →
-//!   `__rest`), rest in parameters / `for-of` / `catch` / assignment patterns.
-//!   blocked-by: the `__rest` helper-library emit + the destructuring
-//!   transformer, not yet ported.
-//! - `optionalchain` chains needing a hoisted temp (non-simple receiver like
-//!   `f()?.b`, multiple `?.` like `a?.b?.c`), `this`-capture for parenthesized
-//!   optional calls (`(a?.b)()`), tagged templates, and `delete a?.b`.
-//!   blocked-by: receiver temp hoisting must be threaded through the visit
-//!   (var-environment like `exponentiation`), and `this`-capture needs the
-//!   `SyntheticReferenceExpression` machinery, not yet ported.
+//! - `objectrestspread` object **rest** binding beyond the 6g variable-
+//!   declaration subset: the generic `FlattenDestructuringBinding`
+//!   (nested/array binding patterns, default values, computed property keys
+//!   needing temp caching, non-simple initializers needing a hoisted temp) =
+//!   round-6h `destructuring.go`; rest in parameters / `for-of` / `catch` /
+//!   assignment-destructuring patterns (need the parameter / assignment
+//!   flatteners + `FlattenDestructuringAssignment`).
+//! - `optionalchain` landed a 6d+6h subset: 6d lowered single-`?.` chains with a
+//!   simple receiver; 6h deepened it (ec-threaded, var-environment like
+//!   `exponentiation`) with **receiver temp-hoisting** (`f()?.b` → `var _a;
+//!   (_a = f()) === null || _a === void 0 ? void 0 : _a.b`) and **multiple
+//!   `?.`** (`a?.b?.c` → nested guards, one temp per link), both on the
+//!   top-level statement path. DEFER: temp-hoisting chains nested in
+//!   non-top-level scopes (function bodies, no var-environment active yet),
+//!   `this`-capture for parenthesized optional calls (`(a?.b)()`), tagged
+//!   templates, and `delete a?.b`. blocked-by: nested-scope variable-environment
+//!   wiring, and `this`-capture needs the `SyntheticReferenceExpression`
+//!   machinery, not yet ported.
 //! - `namedevaluation` landed a 6d-2 subset (`var f = <anonymous fn>` →
 //!   `__setFunctionName(<fn>, "f")`) as the end-to-end validation of the new
 //!   printer emit-helper infrastructure (`request_emit_helper` + unscoped

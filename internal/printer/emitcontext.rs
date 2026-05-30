@@ -84,6 +84,13 @@ pub struct EmitContext {
     /// Emit helpers requested during the current transform, in insertion order
     /// (dependencies first), drained by [`read_emit_helpers`](EmitContext::read_emit_helpers).
     requested_helpers: Vec<&'static EmitHelper>,
+    /// Just-in-time node substitutions applied by the printer at emit time: maps
+    /// an original node to the node that should be emitted in its place (e.g. an
+    /// import use `x` -> `m_1.x`). This is the Rust adaptation of Go's
+    /// `EmitContext.onSubstituteNode` callback — because the printer borrows the
+    /// context (and thus the arena) immutably during emit, the substitute node is
+    /// built ahead of time by the transform and looked up here.
+    node_substitutions: FxHashMap<NodeId, NodeId>,
 }
 
 impl EmitContext {
@@ -109,6 +116,7 @@ impl EmitContext {
             var_environments: Vec::new(),
             node_helpers: FxHashMap::default(),
             requested_helpers: Vec::new(),
+            node_substitutions: FxHashMap::default(),
         }
     }
 
@@ -212,6 +220,23 @@ impl EmitContext {
     /// Side effects: inserts into the auto-generate table.
     pub(crate) fn set_auto_generate(&mut self, name: NodeId, info: AutoGenerateInfo) {
         self.auto_generate.insert(name, info);
+    }
+
+    /// Registers a just-in-time node substitution: when the printer is about to
+    /// emit `original` as an expression, it emits `replacement` instead. Used by
+    /// module transforms to rewrite import uses (`x` -> `m_1.x`).
+    ///
+    /// Side effects: inserts into the substitution table.
+    // Go: internal/printer/printer.go:PrintHandlers.SubstituteNode (emit-time substitution)
+    pub fn set_node_substitution(&mut self, original: NodeId, replacement: NodeId) {
+        self.node_substitutions.insert(original, replacement);
+    }
+
+    /// Returns the substitute node registered for `original`, if any.
+    ///
+    /// Side effects: none (pure).
+    pub fn get_node_substitution(&self, original: NodeId) -> Option<NodeId> {
+        self.node_substitutions.get(&original).copied()
     }
 
     /// Requests that `helper` (and, first, its dependencies) be emitted for the

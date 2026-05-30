@@ -38,6 +38,28 @@
 //!
 //! This is a deliberate, structure-preserving deviation that keeps the crate
 //! 100% safe Rust (zero `unsafe`).
+//!
+//! ## Retained program (sub-phase 4l)
+//!
+//! Go's `NewChecker(program)` stores `c.program = program` — a shared,
+//! non-owning pointer into GC'd memory — and every checker in the pool shares
+//! that one `*Program`. The zero-`unsafe` analog (PORTING section 3: a shared
+//! non-null pointer maps to `Rc<T>`) is to retain the program behind an
+//! `Rc<dyn BoundProgram>`: [`Checker::new_checker`] stores it, and cloning the
+//! handle is how a pool seeds its K checkers from one program. This keeps
+//! [`Checker`] free of a lifetime parameter, so the intrinsic-only constructor
+//! [`Checker::new`] and the ~200 call sites that take `&mut Checker` are
+//! unaffected.
+//!
+//! Known divergences from Go for the retained program:
+//! - `Rc`, not a raw/GC pointer. The shared trait object is `'static`
+//!   (`Rc<dyn BoundProgram>`), so the program must own its data; the in-crate
+//!   test stub qualifies, but a *borrowing* program view (e.g. the compiler's
+//!   `BoundFile<'a>`) must first be made owned/`Rc`-shared. blocked-by:
+//!   `compiler.Program` (P6).
+//! - `Rc`, not `Arc`. The pool drives checkers sequentially today
+//!   (parallel-over-checkers is DEFER per PORTING section 6); switch the field
+//!   to `Arc<dyn BoundProgram + Send + Sync>` when that lands.
 
 pub mod core;
 pub mod tracer;

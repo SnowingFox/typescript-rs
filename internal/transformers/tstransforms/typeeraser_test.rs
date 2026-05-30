@@ -11,6 +11,7 @@ fn variable_declaration_type_is_erased() {
     let (ec, source_file) = parse_shared(input);
     let mut tx = new_type_eraser_transformer(&TransformOptions {
         context: Some(Rc::clone(&ec)),
+        ..Default::default()
     });
     let result = tx.transform_source_file(source_file);
     assert_eq!(emit(&ec, result, input), "var a;");
@@ -21,6 +22,7 @@ fn check_erase(input: &str, expected: &str) {
     let (ec, source_file) = parse_shared(input);
     let mut tx = new_type_eraser_transformer(&TransformOptions {
         context: Some(Rc::clone(&ec)),
+        ..Default::default()
     });
     let result = tx.transform_source_file(source_file);
     assert_eq!(emit(&ec, result, input), expected, "erase({input:?})");

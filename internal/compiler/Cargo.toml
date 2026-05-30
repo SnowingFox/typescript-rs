@@ -1,0 +1,38 @@
+[package]
+name = "tsgo_compiler"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+bitflags = "2.11.1"
+rustc-hash = "2.1.2"
+tsgo_ast = { path = "../ast" }
+tsgo_binder = { path = "../binder" }
+tsgo_checker = { path = "../checker" }
+tsgo_collections = { path = "../collections" }
+tsgo_core = { path = "../core" }
+tsgo_diagnostics = { path = "../diagnostics" }
+tsgo_json = { path = "../json" }
+tsgo_locale = { path = "../locale" }
+tsgo_module = { path = "../module" }
+tsgo_modulespecifiers = { path = "../modulespecifiers" }
+tsgo_outputpaths = { path = "../outputpaths" }
+tsgo_packagejson = { path = "../packagejson" }
+tsgo_parser = { path = "../parser" }
+tsgo_printer = { path = "../printer" }
+tsgo_scanner = { path = "../scanner" }
+tsgo_sourcemap = { path = "../sourcemap" }
+tsgo_stringutil = { path = "../stringutil" }
+tsgo_symlinks = { path = "../symlinks" }
+tsgo_tracing = { path = "../tracing" }
+tsgo_transformers = { path = "../transformers" }
+tsgo_tsoptions = { path = "../tsoptions" }
+tsgo_tspath = { path = "../tspath" }
+tsgo_vfs = { path = "../vfs" }
+
+[dev-dependencies]
+tsgo_bundled = { path = "../bundled" }
+tsgo_repo = { path = "../repo" }

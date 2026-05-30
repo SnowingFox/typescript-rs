@@ -164,6 +164,12 @@ impl<'a> Printer<'a> {
         self.context.arena()
     }
 
+    /// Returns the emit-time substitute registered for `node`, if any.
+    // Go: internal/printer/printer.go:substituteNode
+    pub(crate) fn get_node_substitution(&self, node: NodeId) -> Option<NodeId> {
+        self.context.get_node_substitution(node)
+    }
+
     /// Emits a whole source file, returning the produced text (with the trailing
     /// newline that the Go emitter writes).
     ///

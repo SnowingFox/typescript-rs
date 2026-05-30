@@ -39,20 +39,29 @@ use tsgo_printer::EmitContext;
 /// Side effects: allocates a transformer over the shared context.
 // Go: internal/transformers/jsxtransforms/jsx.go:NewJSXTransformer
 pub fn new_jsx_transformer(opt: &TransformOptions) -> Transformer {
+    // Track 2: `compiler_options.jsx` selects the classic vs automatic runtime.
+    let automatic = matches!(
+        opt.compiler_options.jsx,
+        tsgo_core::compileroptions::JsxEmit::ReactJsx
+            | tsgo_core::compileroptions::JsxEmit::ReactJsxDev
+    );
     new_transformer(
-        Box::new(|ec: &mut EmitContext, node: NodeId| jsx_visit(ec.arena_mut(), node)),
+        Box::new(move |ec: &mut EmitContext, node: NodeId| {
+            jsx_visit(ec.arena_mut(), node, automatic)
+        }),
         opt.context.clone(),
     )
 }
 
-/// Lowers JSX in the subtree rooted at `node`.
+/// Lowers JSX in the subtree rooted at `node`. `automatic` selects the automatic
+/// (`jsx`/`jsxs`) runtime over the classic (`React.createElement`) one.
 ///
 /// Side effects: may push rebuilt nodes onto the arena.
 // Go: internal/transformers/jsxtransforms/jsx.go:JSXTransformer.visit
-fn jsx_visit(arena: &mut NodeArena, node: NodeId) -> NodeId {
+fn jsx_visit(arena: &mut NodeArena, node: NodeId, automatic: bool) -> NodeId {
     match arena.kind(node) {
         Kind::JsxSelfClosingElement => {
-            if let Some(lowered) = lower_create_element(arena, node, &[]) {
+            if let Some(lowered) = lower_create_element(arena, node, &[], automatic) {
                 return lowered;
             }
         }
@@ -61,11 +70,11 @@ fn jsx_visit(arena: &mut NodeArena, node: NodeId) -> NodeId {
                 NodeData::JsxElement(d) => (d.opening, d.children.nodes.clone()),
                 _ => unreachable!("kind checked above"),
             };
-            if let Some(lowered) = lower_create_element(arena, opening, &children) {
+            if let Some(lowered) = lower_create_element(arena, opening, &children, automatic) {
                 return lowered;
             }
         }
-        Kind::JsxFragment => {
+        Kind::JsxFragment if !automatic => {
             let children = match arena.data(node) {
                 NodeData::JsxFragment(d) => d.children.nodes.clone(),
                 _ => unreachable!("kind checked above"),
@@ -78,7 +87,7 @@ fn jsx_visit(arena: &mut NodeArena, node: NodeId) -> NodeId {
         synthetic_location: false,
         clone_lists: false,
     };
-    arena.visit_each_child(node, opts, &mut |a, c| jsx_visit(a, c))
+    arena.visit_each_child(node, opts, &mut |a, c| jsx_visit(a, c, automatic))
 }
 
 /// Lowers an opening-like element (`<tag ...>`) plus its `children` to a
@@ -94,17 +103,42 @@ fn lower_create_element(
     arena: &mut NodeArena,
     opening_like: NodeId,
     children: &[NodeId],
+    automatic: bool,
 ) -> Option<NodeId> {
     let attributes = match arena.data(opening_like) {
         NodeData::JsxSelfClosingElement(d) | NodeData::JsxOpeningElement(d) => d.attributes,
         _ => return None,
     };
     let tag_name = get_tag_name(arena, opening_like)?;
-    let props = transform_jsx_attributes_to_object_props(arena, attributes)?;
+    if automatic {
+        // Automatic runtime: `jsx(tag, props)` with children folded into
+        // `props.children`. Only the no-children case is handled here; children
+        // (and `jsxs`) are deferred.
+        if !children.is_empty() {
+            return None;
+        }
+        // Empty attributes become `{}` (not `null`) in the automatic runtime.
+        let props = match transform_jsx_attributes_to_object_props(arena, attributes, automatic)? {
+            null_props if arena.kind(null_props) == Kind::NullKeyword => {
+                arena.new_object_literal_expression(NodeList::new(vec![]))
+            }
+            object_props => object_props,
+        };
+        let callee = arena.new_identifier("jsx");
+        let args = vec![tag_name, props];
+        return Some(arena.new_call_expression(
+            callee,
+            None,
+            None,
+            NodeList::new(args),
+            NodeFlags::NONE,
+        ));
+    }
+    let props = transform_jsx_attributes_to_object_props(arena, attributes, automatic)?;
     let callee = make_react_create_element(arena);
     let mut args = vec![tag_name, props];
     for &child in children {
-        if let Some(expression) = transform_jsx_child_to_expression(arena, child) {
+        if let Some(expression) = transform_jsx_child_to_expression(arena, child, automatic) {
             args.push(expression);
         }
     }
@@ -122,7 +156,8 @@ fn lower_fragment_create_element(arena: &mut NodeArena, children: &[NodeId]) -> 
     let callee = make_react_create_element(arena);
     let mut args = vec![tag_name, props];
     for &child in children {
-        if let Some(expression) = transform_jsx_child_to_expression(arena, child) {
+        // Fragments are classic-runtime only (the automatic arm is gated off).
+        if let Some(expression) = transform_jsx_child_to_expression(arena, child, false) {
             args.push(expression);
         }
     }
@@ -134,7 +169,11 @@ fn lower_fragment_create_element(arena: &mut NodeArena, children: &[NodeId]) -> 
 ///
 /// Side effects: may push rebuilt nodes onto the arena.
 // Go: internal/transformers/jsxtransforms/jsx.go:transformJsxChildToExpression
-fn transform_jsx_child_to_expression(arena: &mut NodeArena, child: NodeId) -> Option<NodeId> {
+fn transform_jsx_child_to_expression(
+    arena: &mut NodeArena,
+    child: NodeId,
+    automatic: bool,
+) -> Option<NodeId> {
     match arena.kind(child) {
         Kind::JsxText => {
             let text = match arena.data(child) {
@@ -154,7 +193,7 @@ fn transform_jsx_child_to_expression(arena: &mut NodeArena, child: NodeId) -> Op
                 _ => return None,
             };
             let expression = expression?;
-            let expression = jsx_visit(arena, expression);
+            let expression = jsx_visit(arena, expression, automatic);
             if dot_dot_dot.is_some() {
                 Some(arena.new_spread_element(expression))
             } else {
@@ -162,7 +201,7 @@ fn transform_jsx_child_to_expression(arena: &mut NodeArena, child: NodeId) -> Op
             }
         }
         // Nested elements/fragments are lowered recursively.
-        _ => Some(jsx_visit(arena, child)),
+        _ => Some(jsx_visit(arena, child, automatic)),
     }
 }
 
@@ -199,6 +238,7 @@ fn fixup_whitespace_and_decode_entities(text: &str) -> String {
 fn transform_jsx_attributes_to_object_props(
     arena: &mut NodeArena,
     attributes: NodeId,
+    automatic: bool,
 ) -> Option<NodeId> {
     let properties = match arena.data(attributes) {
         NodeData::JsxAttributes(d) => d.list.nodes.clone(),
@@ -215,7 +255,7 @@ fn transform_jsx_attributes_to_object_props(
             return None;
         }
         object_props.push(transform_jsx_attribute_to_object_literal_element(
-            arena, property,
+            arena, property, automatic,
         )?);
     }
     Some(arena.new_object_literal_expression(NodeList::new(object_props)))
@@ -229,6 +269,7 @@ fn transform_jsx_attributes_to_object_props(
 fn transform_jsx_attribute_to_object_literal_element(
     arena: &mut NodeArena,
     attribute: NodeId,
+    automatic: bool,
 ) -> Option<NodeId> {
     let (name, initializer) = match arena.data(attribute) {
         NodeData::JsxAttribute(d) => (d.name, d.initializer),
@@ -238,7 +279,7 @@ fn transform_jsx_attribute_to_object_literal_element(
     if arena.kind(name) != Kind::Identifier {
         return None;
     }
-    let value = transform_jsx_attribute_initializer(arena, initializer);
+    let value = transform_jsx_attribute_initializer(arena, initializer, automatic);
     Some(arena.new_property_assignment(None, name, None, None, Some(value)))
 }
 
@@ -251,6 +292,7 @@ fn transform_jsx_attribute_to_object_literal_element(
 fn transform_jsx_attribute_initializer(
     arena: &mut NodeArena,
     initializer: Option<NodeId>,
+    automatic: bool,
 ) -> NodeId {
     let Some(initializer) = initializer else {
         // `<div hidden/>` -> `{ hidden: true }`
@@ -268,12 +310,12 @@ fn transform_jsx_attribute_initializer(
                 _ => None,
             };
             match expression {
-                Some(expression) => jsx_visit(arena, expression),
+                Some(expression) => jsx_visit(arena, expression, automatic),
                 None => arena.new_keyword_expression(Kind::TrueKeyword),
             }
         }
         // JSX element initializers (`<div x={<y/>}/>`) -> visited recursively.
-        _ => jsx_visit(arena, initializer),
+        _ => jsx_visit(arena, initializer, automatic),
     }
 }
 

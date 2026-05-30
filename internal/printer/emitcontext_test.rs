@@ -106,6 +106,44 @@ fn requested_helper_pulls_in_dependencies_first() {
     assert_eq!(helpers.len(), 3);
 }
 
+// Go: internal/printer/emitcontext.go:EmitContext.set/get node substitution
+// A registered substitution round-trips; unrelated nodes have none.
+#[test]
+fn node_substitution_round_trips() {
+    let mut ec = EmitContext::new();
+    let a = ec.factory().new_identifier("a");
+    let b = ec.factory().new_identifier("b");
+    ec.set_node_substitution(a, b);
+    assert_eq!(ec.get_node_substitution(a), Some(b));
+    assert_eq!(ec.get_node_substitution(b), None);
+}
+
+// Go: internal/printer/printer.go:SubstituteNode (emit-time substitution)
+// End-to-end: the printer emits the registered substitute (`m_1.x`) in place of
+// the original identifier (`x`).
+#[test]
+fn printer_emits_substituted_node() {
+    let text = crate::test_support::emit_after("x;", |ec, source_file| {
+        // Navigate `x;` -> ExpressionStatement -> Identifier `x`.
+        let statement = match ec.arena().data(source_file) {
+            tsgo_ast::NodeData::SourceFile(d) => d.statements.nodes[0],
+            _ => unreachable!(),
+        };
+        let x = match ec.arena().data(statement) {
+            tsgo_ast::NodeData::ExpressionStatement(d) => d.expression,
+            _ => unreachable!(),
+        };
+        // Build `m_1.x` and register `x -> m_1.x`.
+        let m1 = ec.arena_mut().new_identifier("m_1");
+        let name = ec.arena_mut().new_identifier("x");
+        let access = ec
+            .arena_mut()
+            .new_property_access_expression(m1, None, name);
+        ec.set_node_substitution(x, access);
+    });
+    assert_eq!(text, "m_1.x;\n");
+}
+
 // Go: internal/printer/emitcontext.go:EmitContext.with_arena
 #[test]
 fn with_arena_preserves_existing_nodes() {

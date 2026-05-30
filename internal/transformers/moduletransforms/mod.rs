@@ -7,19 +7,25 @@
 //! names, `export *`, and `export =`. This is the foundation both the CommonJS
 //! and ESM transforms consume.
 //!
+//! Round 6e-2 unblocked the use-site rewrite path: the printer now has an
+//! emit-time **node-substitution** hook and `TransformOptions` carries
+//! `compiler_options`, so [`commonjsmodule`] lands a validating subset
+//! (`import { x } from "m"; x;` → `const m_1 = require("m"); m_1.x;`).
+//!
 //! Deferred (DEFER(P5), see each `blocked-by`):
 //!
-//! - `commonjsmodule` / `esmodule` transforms (`import`→`require`,
-//!   `export`→`exports.x`, interop helpers). blocked-by: the **emit
-//!   substitution** infrastructure (`onSubstituteNode`, not ported) needed to
-//!   rewrite import *uses* (`x` → `m_1.x`); a real `ReferenceResolver` (the
-//!   ported one is a no-op placeholder); `compilerOptions` threading through
-//!   `TransformOptions` (currently only carries the emit context) for module
-//!   kind / `esModuleInterop`; and the `GetExternalHelpersModuleName` /
-//!   external-module-indicator surface. Without these, only trivial,
-//!   binding-free cases would be correct, so the transforms are deferred.
+//! - `commonjsmodule` full surface (default/namespace import interop,
+//!   `export` lowering, `__esModule` marker / `"use strict"` / hoisting,
+//!   `export =`, dynamic `import()`, re-exports) and the whole `esmodule`
+//!   transform. blocked-by: most need further factory/helper surface; **scope-
+//!   correct** import-use rewriting needs a real `ReferenceResolver` (the ported
+//!   one is a no-op placeholder; the 6e-2 validation matches uses by name).
+//! - real `ReferenceResolver` (use-site → declaration resolution). blocked-by:
+//!   checker `resolveName`/`EmitResolver` — the binder produces declaration
+//!   symbols but not scope-aware reference resolution, which is checker work.
 //! - `externalmoduleinfo` resolver-dependent classification (function-vs-binding
-//!   for `export { x }`, `exportedBindings`/`exportedFunctions` from the
-//!   resolver). blocked-by: the no-op `ReferenceResolver`.
+//!   for `export { x }`, `exportedBindings`/`exportedFunctions`). blocked-by:
+//!   the no-op `ReferenceResolver`.
 
+pub mod commonjsmodule;
 pub mod externalmoduleinfo;

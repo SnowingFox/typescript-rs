@@ -22,6 +22,7 @@ fn chain_runs_stages_left_to_right() {
     let (ec, source_file) = parse_shared(input);
     let mut opts = TransformOptions {
         context: Some(Rc::clone(&ec)),
+        ..Default::default()
     };
     let mut factory = chain(vec![rename_factory("a", "b"), rename_factory("b", "c")]);
     let mut tx = factory(&mut opts).expect("chain produced a transformer");
@@ -37,6 +38,7 @@ fn chain_single_element_passthrough() {
     let (ec, source_file) = parse_shared(input);
     let mut opts = TransformOptions {
         context: Some(Rc::clone(&ec)),
+        ..Default::default()
     };
     let mut factory = chain(vec![rename_factory("a", "b")]);
     let mut tx = factory(&mut opts).expect("single chain produced a transformer");
@@ -52,6 +54,7 @@ fn chain_skips_none_stages() {
     let (ec, source_file) = parse_shared(input);
     let mut opts = TransformOptions {
         context: Some(Rc::clone(&ec)),
+        ..Default::default()
     };
     let skip: TransformerFactory = Box::new(|_opt| None);
     let mut factory = chain(vec![skip, rename_factory("a", "b")]);
