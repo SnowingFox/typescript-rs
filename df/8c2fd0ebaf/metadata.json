@@ -74,5 +74,17 @@
       "content_hash": "/df/8c2fd0ebaf/1/content_hash.txt",
       "prompt": "/df/8c2fd0ebaf/1/prompt.txt"
     }
-  ]
+  ],
+  "combined_attribution": {
+    "calculated_at": "2026-05-30T15:33:54.385401Z",
+    "agent_lines": 5800,
+    "agent_removed": 249,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 5800,
+    "total_lines_changed": 6049,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
 }
