@@ -46,6 +46,37 @@ fn new_unique_private_name_requires_hash() {
     let _ = ec.factory().new_unique_private_name("foo");
 }
 
+// Go: internal/printer/factory.go:NodeFactory (embedded ast.NodeFactory.NewIdentifier)
+#[test]
+fn new_identifier_is_synthesized() {
+    let mut ec = EmitContext::new();
+    let id = ec.factory().new_identifier("Infinity");
+    assert_eq!(ec.arena().kind(id), Kind::Identifier);
+    assert_eq!(ec.arena().text(id), "Infinity");
+    assert!(ec.arena().flags(id).contains(NodeFlags::SYNTHESIZED));
+}
+
+// Go: internal/printer/factory.go:NodeFactory (embedded ast.NodeFactory literal/unary builders)
+#[test]
+fn new_literals_and_prefix_unary_are_synthesized() {
+    use tsgo_ast::TokenFlags;
+    let mut ec = EmitContext::new();
+    let s = ec.factory().new_string_literal("hi", TokenFlags::NONE);
+    assert_eq!(ec.arena().kind(s), Kind::StringLiteral);
+    assert!(ec.arena().flags(s).contains(NodeFlags::SYNTHESIZED));
+
+    let n = ec.factory().new_numeric_literal("1", TokenFlags::NONE);
+    assert_eq!(ec.arena().kind(n), Kind::NumericLiteral);
+    assert!(ec.arena().flags(n).contains(NodeFlags::SYNTHESIZED));
+
+    let operand = ec.factory().new_identifier("Infinity");
+    let neg = ec
+        .factory()
+        .new_prefix_unary_expression(Kind::MinusToken, operand);
+    assert_eq!(ec.arena().kind(neg), Kind::PrefixUnaryExpression);
+    assert!(ec.arena().flags(neg).contains(NodeFlags::SYNTHESIZED));
+}
+
 // Go: internal/printer/factory.go:NodeFactory.newGeneratedIdentifier (flags combine kind + options)
 #[test]
 fn ex_options_preserve_non_kind_flags() {

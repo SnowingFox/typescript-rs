@@ -174,3 +174,24 @@ fn try_statement() {
 fn debugger_statement() {
     check_emit("debugger", "debugger;", false);
 }
+
+// Go: internal/printer/printer.go:emitNotEmittedStatement (emits nothing)
+#[test]
+fn not_emitted_statement_emits_nothing() {
+    use crate::test_support::check_synthetic;
+    use tsgo_ast::{Kind, NodeArena, NodeList};
+    use tsgo_core::languagevariant::LanguageVariant;
+    use tsgo_core::scriptkind::ScriptKind;
+
+    let mut arena = NodeArena::new();
+    let elided = arena.new_not_emitted_statement();
+    let eof = arena.new_token(Kind::EndOfFile);
+    let sf = arena.new_source_file(
+        "/file.ts",
+        ScriptKind::Ts,
+        LanguageVariant::Standard,
+        NodeList::new(vec![elided]),
+        eof,
+    );
+    check_synthetic(arena, sf, "");
+}

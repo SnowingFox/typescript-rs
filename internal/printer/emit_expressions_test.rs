@@ -355,3 +355,26 @@ fn object_literal_expression() {
     check_emit("({a:b})", "({ a: b });", false);
     check_emit("({...a})", "({ ...a });", false);
 }
+
+// Go: internal/printer/printer.go:emitPartiallyEmittedExpression (emits only the inner expression)
+#[test]
+fn partially_emitted_expression_emits_inner() {
+    use crate::test_support::check_synthetic;
+    use tsgo_ast::{Kind, NodeArena, NodeList};
+    use tsgo_core::languagevariant::LanguageVariant;
+    use tsgo_core::scriptkind::ScriptKind;
+
+    let mut arena = NodeArena::new();
+    let inner = arena.new_identifier("x");
+    let partial = arena.new_partially_emitted_expression(inner);
+    let stmt = arena.new_expression_statement(partial);
+    let eof = arena.new_token(Kind::EndOfFile);
+    let sf = arena.new_source_file(
+        "/file.ts",
+        ScriptKind::Ts,
+        LanguageVariant::Standard,
+        NodeList::new(vec![stmt]),
+        eof,
+    );
+    check_synthetic(arena, sf, "x;");
+}

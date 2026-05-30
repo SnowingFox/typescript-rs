@@ -41,8 +41,18 @@ impl Printer<'_> {
             Kind::ImportDeclaration => self.emit_import_declaration(node),
             Kind::ExportAssignment => self.emit_export_assignment(node),
             Kind::ExportDeclaration => self.emit_export_declaration(node),
+            Kind::NotEmittedStatement => self.emit_not_emitted_statement(node),
             other => panic!("unhandled statement: {other:?}"),
         }
+    }
+
+    /// Emits a [`Kind::NotEmittedStatement`](tsgo_ast::Kind::NotEmittedStatement):
+    /// no output (the elided declaration's slot is preserved only for leading
+    /// comments, which run through `enter_node`/`exit_node`).
+    // Go: internal/printer/printer.go:emitNotEmittedStatement
+    fn emit_not_emitted_statement(&mut self, node: NodeId) {
+        self.enter_node(node);
+        self.exit_node(node);
     }
 
     // Go: internal/printer/printer.go:emitEmptyStatement

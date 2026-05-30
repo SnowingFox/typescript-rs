@@ -19,6 +19,11 @@ pub struct VisitOptions {
 /// The callback applied to each visited child; returns the replacement id.
 type Visit<'a> = dyn FnMut(&mut NodeArena, NodeId) -> NodeId + 'a;
 
+/// A removal-aware visit callback: returning `None` drops the visited node from
+/// its containing list (or empties an optional single-node slot), mirroring Go's
+/// `NodeVisitor.Visit` returning `nil`.
+type VisitRemovable<'a> = dyn FnMut(&mut NodeArena, NodeId) -> Option<NodeId> + 'a;
+
 impl NodeArena {
     /// Collects the direct children of `id` via an identity [`visit_each_child`],
     /// mirroring Go's `getChildren` test helper.
@@ -245,7 +250,19 @@ impl NodeArena {
                     id
                 }
             }
-            NodeData::EmptyStatement | NodeData::DebuggerStatement => id,
+            NodeData::EmptyStatement
+            | NodeData::DebuggerStatement
+            | NodeData::NotEmittedStatement => id,
+            NodeData::PartiallyEmittedExpression(d) => {
+                let expression = visit(self, d.expression);
+                if expression != d.expression {
+                    let new = self.new_partially_emitted_expression(expression);
+                    self.copy_node_meta(new, id);
+                    new
+                } else {
+                    id
+                }
+            }
             NodeData::ThrowStatement(d) => {
                 let expression = visit(self, d.expression);
                 if expression != d.expression {
@@ -1950,6 +1967,47 @@ impl NodeArena {
                     id
                 }
             }
+        }
+    }
+
+    /// Visits each element of `list` with a removal-aware callback, dropping the
+    /// elements whose visit returns `None`, and returns the resulting
+    /// [`NodeList`] (preserving the original range).
+    ///
+    /// This is the removal-aware counterpart of the internal
+    /// [`visit_node_list`](Self::visit_node_list) helper: it lets a transform
+    /// elide nodes (type-only imports, `this` parameters, accessibility
+    /// modifiers, `implements` clauses, …) the way Go's `NodeVisitor.VisitNodes`
+    /// drops `nil` results. Single-node slots are handled by the caller via
+    /// `slot.and_then(|n| visit(arena, n))`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_ast::{NodeArena, NodeList};
+    /// let mut arena = NodeArena::new();
+    /// let a = arena.new_identifier("a");
+    /// let b = arena.new_identifier("b");
+    /// let list = NodeList::new(vec![a, b]);
+    /// let kept = arena.visit_nodes_removable(&list, &mut |_a, c| (c == a).then_some(c));
+    /// assert_eq!(kept.nodes, vec![a]);
+    /// ```
+    ///
+    /// Side effects: invokes `visit`, which may push new nodes onto the arena.
+    // Go: internal/ast/visitor.go:NodeVisitor.VisitNodes
+    pub fn visit_nodes_removable(
+        &mut self,
+        list: &NodeList,
+        visit: &mut VisitRemovable<'_>,
+    ) -> NodeList {
+        let mut nodes = Vec::with_capacity(list.nodes.len());
+        for &child in &list.nodes {
+            if let Some(replacement) = visit(self, child) {
+                nodes.push(replacement);
+            }
+        }
+        NodeList {
+            loc: list.loc,
+            nodes,
         }
     }
 

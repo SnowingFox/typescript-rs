@@ -444,6 +444,14 @@ pub enum NodeData {
     /// The root of a parsed file: its statements and end-of-file token plus
     /// file-level metadata.
     SourceFile(Box<SourceFileData>),
+    /// A statement placeholder that emits nothing, used to elide a
+    /// TypeScript-only declaration while keeping its slot (and leading comments).
+    /// Carries no children.
+    NotEmittedStatement,
+    /// An expression whose TypeScript-only wrapper (a type assertion,
+    /// `as`/`satisfies`, or non-null `!`) has been erased; only its inner
+    /// `expression` is emitted.
+    PartiallyEmittedExpression(UnaryChildData),
 }
 
 /// Payload of an [`NodeData::Identifier`].
@@ -1952,6 +1960,45 @@ impl NodeArena {
         self.new_node(
             Kind::ParenthesizedExpression,
             NodeData::ParenthesizedExpression(UnaryChildData { expression }),
+        )
+    }
+
+    /// Creates a statement that emits nothing (used to elide a TypeScript-only
+    /// declaration while preserving its slot and leading comments).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_ast::{Kind, NodeArena};
+    /// let mut arena = NodeArena::new();
+    /// let s = arena.new_not_emitted_statement();
+    /// assert_eq!(arena.kind(s), Kind::NotEmittedStatement);
+    /// ```
+    ///
+    /// Side effects: pushes a node.
+    // Go: internal/ast/ast.go:NodeFactory.NewNotEmittedStatement
+    pub fn new_not_emitted_statement(&mut self) -> NodeId {
+        self.new_node(Kind::NotEmittedStatement, NodeData::NotEmittedStatement)
+    }
+
+    /// Creates a partially-emitted expression wrapping `expression`; the wrapper
+    /// (an erased type assertion / `as` / `satisfies` / non-null) emits nothing,
+    /// only the inner expression.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_ast::{Kind, NodeArena};
+    /// let mut arena = NodeArena::new();
+    /// let inner = arena.new_identifier("x");
+    /// let p = arena.new_partially_emitted_expression(inner);
+    /// assert_eq!(arena.kind(p), Kind::PartiallyEmittedExpression);
+    /// ```
+    ///
+    /// Side effects: pushes a node.
+    // Go: internal/ast/ast.go:NodeFactory.NewPartiallyEmittedExpression
+    pub fn new_partially_emitted_expression(&mut self, expression: NodeId) -> NodeId {
+        self.new_node(
+            Kind::PartiallyEmittedExpression,
+            NodeData::PartiallyEmittedExpression(UnaryChildData { expression }),
         )
     }
 
@@ -4292,7 +4339,9 @@ impl NodeArena {
             NodeData::ReturnStatement(d) => opt(f, d.expression),
             NodeData::EmptyStatement
             | NodeData::DebuggerStatement
-            | NodeData::OmittedExpression => false,
+            | NodeData::OmittedExpression
+            | NodeData::NotEmittedStatement => false,
+            NodeData::PartiallyEmittedExpression(d) => f(d.expression),
             NodeData::VariableStatement(d) => mods(f, &d.modifiers) || f(d.declaration_list),
             NodeData::VariableDeclarationList(d) => list(f, &d.declarations),
             NodeData::VariableDeclaration(d) => {

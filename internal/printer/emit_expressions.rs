@@ -55,6 +55,7 @@ impl Printer<'_> {
             Kind::SatisfiesExpression => self.emit_as_expression(node, "satisfies"),
             Kind::NonNullExpression => self.emit_non_null_expression(node),
             Kind::ExpressionWithTypeArguments => self.emit_expression_with_type_arguments(node),
+            Kind::PartiallyEmittedExpression => self.emit_partially_emitted_expression(node),
             Kind::MetaProperty => self.emit_meta_property(node),
             Kind::JsxElement => self.emit_jsx_element(node),
             Kind::JsxSelfClosingElement => self.emit_jsx_self_closing_element(node),
@@ -767,6 +768,20 @@ impl Printer<'_> {
         };
         self.emit_expression(expression, OperatorPrecedence::Member);
         self.write_operator("!");
+        self.exit_node(node);
+    }
+
+    // Go: internal/printer/printer.go:emitPartiallyEmittedExpression
+    fn emit_partially_emitted_expression(&mut self, node: NodeId) {
+        self.enter_node(node);
+        let expression = match self.arena().data(node) {
+            NodeData::PartiallyEmittedExpression(d) => d.expression,
+            other => panic!("expected PartiallyEmittedExpression, got {other:?}"),
+        };
+        // The wrapper is transparent: outer `emit_expression` already chose
+        // parenthesization from the skipped-through inner expression, so emit the
+        // inner directly without re-applying precedence.
+        self.emit_expression_node(expression);
         self.exit_node(node);
     }
 

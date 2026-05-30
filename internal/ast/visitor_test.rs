@@ -44,3 +44,23 @@ fn visit_each_child_identity_returns_same_node() {
     let result = arena.visit_each_child(call, opts, &mut |_a, c| c);
     assert_eq!(result, call);
 }
+
+// Go: internal/ast/visitor.go:NodeVisitor.VisitNodes (nil-drop semantics)
+#[test]
+fn visit_nodes_removable_drops_none_results() {
+    let mut arena = NodeArena::new();
+    let a = arena.new_identifier("a");
+    let b = arena.new_identifier("b");
+    let c = arena.new_identifier("c");
+    let list = NodeList::new(vec![a, b, c]);
+    // Drop the middle element; keep the rest unchanged.
+    let result = arena.visit_nodes_removable(&list, &mut |_a, child| {
+        if child == b {
+            None
+        } else {
+            Some(child)
+        }
+    });
+    assert_eq!(result.nodes, vec![a, c]);
+    assert_eq!(result.loc, list.loc);
+}

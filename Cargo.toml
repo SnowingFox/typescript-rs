@@ -39,4 +39,5 @@ members = [
     "internal/modulespecifiers",
     "internal/printer",
     "internal/checker",
+    "internal/transformers",
 ]

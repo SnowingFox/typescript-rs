@@ -1770,7 +1770,7 @@ pub(crate) fn skip_partially_emitted_expressions(arena: &NodeArena, id: NodeId) 
     let mut id = id;
     while arena.kind(id) == Kind::PartiallyEmittedExpression {
         match arena.data(id) {
-            NodeData::ExpressionStatement(d) => id = d.expression,
+            NodeData::PartiallyEmittedExpression(d) => id = d.expression,
             _ => break,
         }
     }

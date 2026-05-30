@@ -964,6 +964,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_transformers"
+version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "rustc-hash",
+ "tsgo_ast",
+ "tsgo_binder",
+ "tsgo_checker",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_debug",
+ "tsgo_diagnostics",
+ "tsgo_jsnum",
+ "tsgo_modulespecifiers",
+ "tsgo_nodebuilder",
+ "tsgo_parser",
+ "tsgo_printer",
+ "tsgo_scanner",
+ "tsgo_stringutil",
+ "tsgo_tspath",
+]
+
+[[package]]
 name = "tsgo_tsoptions"
 version = "0.0.0"
 dependencies = [

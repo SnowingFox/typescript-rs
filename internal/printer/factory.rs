@@ -8,7 +8,7 @@
 use crate::emitcontext::{AutoGenerateInfo, AutoGenerateOptions, EmitContext};
 use crate::generatedidentifierflags::GeneratedIdentifierFlags;
 use crate::utilities::format_generated_name;
-use tsgo_ast::{Kind, NodeFlags, NodeId};
+use tsgo_ast::{Kind, NodeFlags, NodeId, TokenFlags};
 
 /// Combines a kind selector with the non-kind flag bits of `options`.
 fn combine_flags(
@@ -192,6 +192,94 @@ impl<'a> NodeFactory<'a> {
         options: AutoGenerateOptions,
     ) -> NodeId {
         self.new_generated_private_identifier(GeneratedIdentifierFlags::UNIQUE, text, None, options)
+    }
+
+    /// Marks a freshly created node as synthesized, mirroring Go's
+    /// `EmitContext.onCreate` hook fired by the embedded `ast.NodeFactory`.
+    ///
+    /// Side effects: sets [`NodeFlags::SYNTHESIZED`] on `id`.
+    // Go: internal/printer/emitcontext.go:EmitContext.onCreate
+    fn on_create(&mut self, id: NodeId) {
+        self.ctx.arena_mut().add_flags(id, NodeFlags::SYNTHESIZED);
+    }
+
+    /// Creates a synthesized identifier with the given `text`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_printer::emitcontext::EmitContext;
+    /// let mut ec = EmitContext::new();
+    /// let id = ec.factory().new_identifier("Infinity");
+    /// assert_eq!(ec.arena().text(id), "Infinity");
+    /// ```
+    ///
+    /// Side effects: appends a node and marks it synthesized.
+    // Go: internal/ast/ast.go:NodeFactory.NewIdentifier
+    pub fn new_identifier(&mut self, text: &str) -> NodeId {
+        let id = self.ctx.arena_mut().new_identifier(text);
+        self.on_create(id);
+        id
+    }
+
+    /// Creates a synthesized string literal with the given `text` and flags.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_printer::emitcontext::EmitContext;
+    /// use tsgo_ast::TokenFlags;
+    /// let mut ec = EmitContext::new();
+    /// let s = ec.factory().new_string_literal("hi", TokenFlags::NONE);
+    /// assert_eq!(ec.arena().text(s), "hi");
+    /// ```
+    ///
+    /// Side effects: appends a node and marks it synthesized.
+    // Go: internal/ast/ast.go:NodeFactory.NewStringLiteral
+    pub fn new_string_literal(&mut self, text: &str, token_flags: TokenFlags) -> NodeId {
+        let id = self.ctx.arena_mut().new_string_literal(text, token_flags);
+        self.on_create(id);
+        id
+    }
+
+    /// Creates a synthesized numeric literal with the given `text` and flags.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_printer::emitcontext::EmitContext;
+    /// use tsgo_ast::TokenFlags;
+    /// let mut ec = EmitContext::new();
+    /// let n = ec.factory().new_numeric_literal("1", TokenFlags::NONE);
+    /// assert_eq!(ec.arena().text(n), "1");
+    /// ```
+    ///
+    /// Side effects: appends a node and marks it synthesized.
+    // Go: internal/ast/ast.go:NodeFactory.NewNumericLiteral
+    pub fn new_numeric_literal(&mut self, text: &str, token_flags: TokenFlags) -> NodeId {
+        let id = self.ctx.arena_mut().new_numeric_literal(text, token_flags);
+        self.on_create(id);
+        id
+    }
+
+    /// Creates a synthesized prefix unary expression (`<operator><operand>`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_printer::emitcontext::EmitContext;
+    /// use tsgo_ast::Kind;
+    /// let mut ec = EmitContext::new();
+    /// let operand = ec.factory().new_identifier("Infinity");
+    /// let neg = ec.factory().new_prefix_unary_expression(Kind::MinusToken, operand);
+    /// assert_eq!(ec.arena().kind(neg), Kind::PrefixUnaryExpression);
+    /// ```
+    ///
+    /// Side effects: appends a node and marks it synthesized.
+    // Go: internal/ast/ast.go:NodeFactory.NewPrefixUnaryExpression
+    pub fn new_prefix_unary_expression(&mut self, operator: Kind, operand: NodeId) -> NodeId {
+        let id = self
+            .ctx
+            .arena_mut()
+            .new_prefix_unary_expression(operator, operand);
+        self.on_create(id);
+        id
     }
 }
 

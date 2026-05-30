@@ -1,0 +1,28 @@
+[package]
+name = "tsgo_transformers"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+bitflags = "2.11.1"
+rustc-hash = "2.1.2"
+tsgo_ast = { path = "../ast" }
+tsgo_binder = { path = "../binder" }
+tsgo_checker = { path = "../checker" }
+tsgo_collections = { path = "../collections" }
+tsgo_core = { path = "../core" }
+tsgo_debug = { path = "../debug" }
+tsgo_diagnostics = { path = "../diagnostics" }
+tsgo_jsnum = { path = "../jsnum" }
+tsgo_modulespecifiers = { path = "../modulespecifiers" }
+tsgo_nodebuilder = { path = "../nodebuilder" }
+tsgo_printer = { path = "../printer" }
+tsgo_scanner = { path = "../scanner" }
+tsgo_stringutil = { path = "../stringutil" }
+tsgo_tspath = { path = "../tspath" }
+
+[dev-dependencies]
+tsgo_parser = { path = "../parser" }
