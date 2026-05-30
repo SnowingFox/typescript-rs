@@ -1,6 +1,6 @@
 use super::*;
 use crate::generatedidentifierflags::GeneratedIdentifierFlags;
-use tsgo_ast::{Kind, NodeArena};
+use tsgo_ast::{Kind, NodeArena, NodeData};
 
 // Go: internal/printer/emitcontext.go:NewEmitContext
 #[test]
@@ -34,6 +34,40 @@ fn get_auto_generate_info_records_kind_and_id() {
     assert_eq!(info_b.flags.kind(), GeneratedIdentifierFlags::LOOP);
     // Distinct names get distinct ids.
     assert_ne!(info_a.id, info_b.id);
+}
+
+// Go: internal/printer/emitcontext.go:EmitContext.EndVariableEnvironment / AddVariableDeclaration
+#[test]
+fn variable_environment_hoists_declarations_into_a_var_statement() {
+    let mut ec = EmitContext::new();
+    ec.start_variable_environment();
+    let t1 = ec.factory().new_temp_variable();
+    ec.add_variable_declaration(t1);
+    let t2 = ec.factory().new_temp_variable();
+    ec.add_variable_declaration(t2);
+    let statements = ec.end_variable_environment();
+
+    assert_eq!(statements.len(), 1, "one hoisted `var` statement");
+    let var_statement = statements[0];
+    assert_eq!(ec.arena().kind(var_statement), Kind::VariableStatement);
+    // The statement declares both temps.
+    let declaration_list = match ec.arena().data(var_statement) {
+        NodeData::VariableStatement(d) => d.declaration_list,
+        other => panic!("expected VariableStatement, got {other:?}"),
+    };
+    let declarations = match ec.arena().data(declaration_list) {
+        NodeData::VariableDeclarationList(d) => d.declarations.nodes.clone(),
+        other => panic!("expected VariableDeclarationList, got {other:?}"),
+    };
+    assert_eq!(declarations.len(), 2);
+}
+
+// Go: internal/printer/emitcontext.go:EmitContext.EndVariableEnvironment (empty scope)
+#[test]
+fn empty_variable_environment_hoists_nothing() {
+    let mut ec = EmitContext::new();
+    ec.start_variable_environment();
+    assert!(ec.end_variable_environment().is_empty());
 }
 
 // Go: internal/printer/emitcontext.go:EmitContext.with_arena

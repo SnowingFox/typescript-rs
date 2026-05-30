@@ -263,6 +263,16 @@ impl NodeArena {
                     id
                 }
             }
+            NodeData::SyntaxList(d) => {
+                let (list, changed) = self.visit_node_list(&d.list, opts, visit);
+                if changed {
+                    let new = self.new_syntax_list(list);
+                    self.copy_node_meta(new, id);
+                    new
+                } else {
+                    id
+                }
+            }
             NodeData::ThrowStatement(d) => {
                 let expression = visit(self, d.expression);
                 if expression != d.expression {

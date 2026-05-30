@@ -17,6 +17,7 @@ use std::rc::Rc;
 use tsgo_printer::EmitContext;
 
 pub mod chain;
+pub mod estransforms;
 pub mod modifiervisitor;
 pub mod transformer;
 pub mod tstransforms;

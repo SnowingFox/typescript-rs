@@ -42,7 +42,25 @@ impl Printer<'_> {
             Kind::ExportAssignment => self.emit_export_assignment(node),
             Kind::ExportDeclaration => self.emit_export_declaration(node),
             Kind::NotEmittedStatement => self.emit_not_emitted_statement(node),
+            Kind::SyntaxList => self.emit_syntax_list_statements(node),
             other => panic!("unhandled statement: {other:?}"),
+        }
+    }
+
+    /// Emits a [`Kind::SyntaxList`](tsgo_ast::Kind::SyntaxList) in statement
+    /// position: each child statement in sequence, separated by a line break (so
+    /// a transform can return several sibling statements where one node was).
+    // Go: internal/printer/printer.go:emitList (a `SyntaxList` is flattened into its container)
+    fn emit_syntax_list_statements(&mut self, node: NodeId) {
+        let children = match self.arena().data(node) {
+            NodeData::SyntaxList(d) => d.list.nodes.clone(),
+            other => panic!("expected SyntaxList, got {other:?}"),
+        };
+        for (index, child) in children.iter().enumerate() {
+            if index > 0 {
+                self.write_line();
+            }
+            self.emit_statement(*child);
         }
     }
 

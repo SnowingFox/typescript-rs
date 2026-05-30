@@ -175,6 +175,31 @@ fn debugger_statement() {
     check_emit("debugger", "debugger;", false);
 }
 
+// Go: internal/printer/printer.go (SyntaxList in statement position: emit children in sequence)
+#[test]
+fn syntax_list_statement_emits_children_in_sequence() {
+    use crate::test_support::check_synthetic;
+    use tsgo_ast::{Kind, NodeArena, NodeList};
+    use tsgo_core::languagevariant::LanguageVariant;
+    use tsgo_core::scriptkind::ScriptKind;
+
+    let mut arena = NodeArena::new();
+    let a = arena.new_identifier("a");
+    let stmt_a = arena.new_expression_statement(a);
+    let b = arena.new_identifier("b");
+    let stmt_b = arena.new_expression_statement(b);
+    let list = arena.new_syntax_list(NodeList::new(vec![stmt_a, stmt_b]));
+    let eof = arena.new_token(Kind::EndOfFile);
+    let sf = arena.new_source_file(
+        "/file.ts",
+        ScriptKind::Ts,
+        LanguageVariant::Standard,
+        NodeList::new(vec![list]),
+        eof,
+    );
+    check_synthetic(arena, sf, "a;\nb;");
+}
+
 // Go: internal/printer/printer.go:emitNotEmittedStatement (emits nothing)
 #[test]
 fn not_emitted_statement_emits_nothing() {

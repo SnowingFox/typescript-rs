@@ -452,6 +452,10 @@ pub enum NodeData {
     /// `as`/`satisfies`, or non-null `!`) has been erased; only its inner
     /// `expression` is emitted.
     PartiallyEmittedExpression(UnaryChildData),
+    /// A synthetic list of sibling nodes produced by a transform (e.g. a class
+    /// declaration plus its hoisted static-field assignments). When emitted in a
+    /// statement position its children are emitted in sequence.
+    SyntaxList(ListData),
 }
 
 /// Payload of an [`NodeData::Identifier`].
@@ -1978,6 +1982,28 @@ impl NodeArena {
     // Go: internal/ast/ast.go:NodeFactory.NewNotEmittedStatement
     pub fn new_not_emitted_statement(&mut self) -> NodeId {
         self.new_node(Kind::NotEmittedStatement, NodeData::NotEmittedStatement)
+    }
+
+    /// Creates a synthetic [`Kind::SyntaxList`] holding `children`; used by
+    /// transforms to return several sibling statements where one node was (e.g.
+    /// a class declaration followed by its hoisted static-field assignments).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_ast::{Kind, NodeArena, NodeList};
+    /// let mut arena = NodeArena::new();
+    /// let a = arena.new_identifier("a");
+    /// let list = arena.new_syntax_list(NodeList::new(vec![a]));
+    /// assert_eq!(arena.kind(list), Kind::SyntaxList);
+    /// ```
+    ///
+    /// Side effects: pushes a node.
+    // Go: internal/ast/ast.go:NodeFactory.NewSyntaxList
+    pub fn new_syntax_list(&mut self, children: NodeList) -> NodeId {
+        self.new_node(
+            Kind::SyntaxList,
+            NodeData::SyntaxList(ListData { list: children }),
+        )
     }
 
     /// Creates a partially-emitted expression wrapping `expression`; the wrapper
@@ -4342,6 +4368,7 @@ impl NodeArena {
             | NodeData::OmittedExpression
             | NodeData::NotEmittedStatement => false,
             NodeData::PartiallyEmittedExpression(d) => f(d.expression),
+            NodeData::SyntaxList(d) => list(f, &d.list),
             NodeData::VariableStatement(d) => mods(f, &d.modifiers) || f(d.declaration_list),
             NodeData::VariableDeclarationList(d) => list(f, &d.declarations),
             NodeData::VariableDeclaration(d) => {

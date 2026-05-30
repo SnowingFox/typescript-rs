@@ -19,7 +19,10 @@
 | **6a** ✅ | 根传输基建：`transformer`（驱动）+`chain`+`modifiervisitor`+`utilities` 可达子集 | 恒等 transform 过解析后的 SourceFile → 结构等价（重 emit 同文本） | 仅 `tsgo_ast`/`tsgo_printer` 现有 API（无需 ast/printer 增长） |
 | **6b** ✅ 子集 | `tstransforms`：`typeeraser`（剥类型纯重建簇）+ `tstransforms/utilities`（`constant_expression`）；`runtimesyntax`/`legacydecorators`/`metadata`/`typeserializer`/`importelision` DEFER | `var a: number`→`var a;` 经 6a 驱动重 emit（真 stage 端到端） | 落地首个 additive `printer::NodeFactory` 节点构造器增长（`new_identifier`/`new_string_literal`/`new_numeric_literal`/`new_prefix_unary_expression`）。DEFER 项 blocked-by：移除式 visitor、`NotEmittedStatement`/`PartiallyEmittedExpression` 节点种类（需 ast/lib.rs，超范围）、checker `EmitResolver`/类型序列化 |
 | **6c-prep** ✅ | 共享降级原语：移除式访问 (`visit_nodes_removable`) + 两个省略节点种类 (`NotEmittedStatement`/`PartiallyEmittedExpression`) + **完成 typeeraser 省略**（作为证明） | 一个 transform 从 SourceFile 丢弃一条语句后重 emit 不含它 | additive 增长 `ast/{visitor.rs,lib.rs}`（移除式访问 + 2 节点种类 + 各自 `visit_each_child`/`for_each_child` 臂）与 `printer/*`（2 种类 emit）。解除 6b 的 DEFER（移除式 visitor + 节点种类）|
-| 6c | `estransforms`：`GetESTransformer` 分派 + 各 target 降级 stage（classfields + esdecorator 起步） | `a ** b`→`Math.pow` 等单 stage | 需更多 factory 构造器；移除式 visitor 已就绪（6c-prep） |
+| **6c-1** ✅ 子集 | `estransforms` part 1：`exponentiation`（tracer）+ `classfields`（实例字段→构造器赋值子集） | `a ** b`→`Math.pow(a, b)` 经驱动重 emit | 全走 arena 既有构造器，**本轮无需 ast/printer 增长**；其余 es stage + classfields 余下 → 6c-2 |
+| **6c-2** ✅ 子集 | `estransforms` part 2：完成 `classfields` 构造器插入族（既有构造器插入、`extends` 合成 `super(...arguments)`、既有 `super()` 后插入）| `class C extends B { x = 1; constructor() { super(); } }` → `super(); this.x = 1;` | 全走 arena 既有构造器，**本轮无需 ast/printer 增长**；static/私有名/accessor/temp-hoist → 6c-3 |
+| **6c-3** ✅ 子集 | 两条复用基建 + 首消费者：`EmitContext` 变量环境（temp hoist）+ `exponentiation` `**=` element/property 目标；`SyntaxList` 节点种类 + static 字段 | `a[x] **= b` → `var _a, _b; (_a=a)[_b=x]=Math.pow(_a[_b],b)`；`class C { static x = 1 }` → `class C {} C.x = 1;` | additive 增长 `printer::EmitContext`（var-env）+ `ast`（`SyntaxList` 节点种类）+ `printer`（SyntaxList emit）。私有名（WeakMap/WeakSet）、accessor、计算名、class-expr、param-props、target 门控 → 6c-4 |
+| 6c-4 | `classfields` 余下（私有名 WeakMap/WeakSet、accessor、计算名、class-expr、param-props、target 门控）→ `esdecorator` | `class C { #x = 1 }`；`@dec` | 需私有环境映射 + 私有访问表达式重写 + WeakMap brand 命名（+ helper-library emit）、checker（esdecorator 元数据）|
 | 6d | `moduletransforms`：CJS/ESM/implied + externalModuleInfo | `import {x} from "m"`→`require` | factory + module 格式查询 |
 | 6e | `jsxtransforms` + `inliners` | `<a/>`→`createElement`；const enum 内联 | factory + checker 求值（inliners） |
 | 6f | `declarations`：`.d.ts` transform 框架 + tracker + diagnostics | 基础 `.d.ts` 形状 | nodebuilder/modulespecifiers + checker resolver；正确性靠 P10 |
@@ -100,14 +103,16 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 
 ### `estransforms`（17 文件）
 
-| Go 文件 | Rust 文件 | 说明 |
-|---|---|---|
-| `estransforms/definitions.go` | `estransforms/lib.rs` | `GetESTransformer` + 各版本链 `NewES20xxTransformer`（crate 根聚合） |
-| `estransforms/async.go` | `async.rs` | `newAsyncTransformer`（async/await 降级） |
-| `estransforms/classfields.go` | `classfields.rs` | `newClassFieldsTransformer` |
-| `estransforms/classthis.go` | `classthis.rs` | class `this`/`#brand` 辅助 |
-| `estransforms/esdecorator.go` | `esdecorator.rs` | `newESDecoratorTransformer`（标准装饰器） |
-| `estransforms/exponentiation.go` | `exponentiation.rs` | `newExponentiationTransformer`（`**` → `Math.pow`） |
+> 子模块 `pub mod estransforms;` → `estransforms/mod.rs`（含全部 DEFER + blocked-by 说明）。6c-1 落地 `exponentiation`（tracer）+ `classfields` 子集，**未触碰 ast/printer**（全走 arena 既有构造器）。
+
+| Go 文件 | Rust 文件 | 状态 | 说明 |
+|---|---|---|---|
+| `estransforms/exponentiation.go` | `exponentiation.rs` | ✅ 6c-1+6c-3 | `new_exponentiation_transformer`：`a ** b`→`Math.pow(a, b)`、`a **= b`（标识符）→`a = Math.pow(a, b)`、**`a.x **= b` / `a[x] **= b`（temp hoist）**→`(_a=a).x=Math.pow(_a.x,b)` / `(_a=a)[_b=x]=Math.pow(_a[_b],b)`（顶层语句路径 ec-threaded + `var` hoist）。DEFER：非顶层作用域内的 temp-hoist `**=`（需作用域级 var-env 嵌套）|
+| `estransforms/classfields.go` | `classfields.rs` | ✅ 6c-1/2/3 子集 | `new_class_fields_transformer`：实例字段 → 构造器 `this.x = init`（完整构造器插入族）；**static 字段** → 类后 `C.x = init`（返回 `SyntaxList[class, assignment...]`）。仅纯标识符字段（有初始化器）。DEFER 6c-4：私有名 `#x`（WeakMap/WeakSet）、`accessor` 字段、计算属性名、ClassExpression、参数属性、prologue、匿名类 static、`--target`/`useDefineForClassFields` 门控 |
+| `estransforms/definitions.go` | `estransforms/lib.rs` | — DEFER(P5) | `GetESTransformer` + 各版本链 `NewES20xxTransformer`（crate 根聚合）；blocked-by：依赖各 es stage 就绪 |
+| `estransforms/async.go` | `async.rs` | — DEFER(P5) | `newAsyncTransformer`（async/await 降级） |
+| `estransforms/classthis.go` | `classthis.rs` | — DEFER(P5) | class `this`/`#brand` 辅助 |
+| `estransforms/esdecorator.go` | `esdecorator.rs` | — DEFER(P5) | `newESDecoratorTransformer`（标准装饰器）；blocked-by：checker 元数据 + helper emit |
 | `estransforms/forawait.go` | `forawait.rs` | `newforawaitTransformer` |
 | `estransforms/logicalassignment.go` | `logicalassignment.rs` | `newLogicalAssignmentTransformer`（`&&=`/`\|\|=`/`??=`） |
 | `estransforms/namedevaluation.go` | `namedevaluation.rs` | named evaluation 辅助 |
@@ -240,6 +245,66 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
   - 新增 `NodeData` 变体的爆炸半径：全工作区仅 `visit_each_child`、`for_each_child` 两处穷尽 match 需补臂（已补）；其余 crate（parser/binder/checker/…）要么按 `Kind` 分派、要么已有 catch-all，`cargo build --workspace --all-targets` 全绿，**无依赖 crate 的 match 臂被迫改动**。
 - **printer**（additive）：`emit_statements.rs`（`emit_not_emitted_statement`）、`emit_expressions.rs`（`emit_partially_emitted_expression`）、`printer.rs`（修 `skip_partially_emitted_expressions`）。
 - ast 新增节点种类已在本表「文件清单」记录；ast 包的 impl 文档无逐节点种类清单，故就近记于此（符合任务指引）。
+
+## 6c-1 worklog（red→green 推进记录）
+
+子模块 `estransforms` part 1，逐行为红→绿：
+
+1. **exponentiation tracer**（`exponentiation_operator_lowered_to_math_pow`）：恒等 stub → 红（`a ** b;` ≠ `Math.pow(a, b);`）→ 实现 `BinaryExpression`/`**` → `Math.pow(left, right)`（arena 级 `math_pow` 助手）→ 绿。**验证 es-downlevel 路径经 6a 驱动端到端运行。**
+2. `exponentiation_assignment_to_identifier_lowered`：`a **= b`（标识符目标）→ `a = Math.pow(a, b)`（红→绿）。
+3. **classfields tracer**（`instance_field_initializer_moves_to_constructor`）：恒等 → 红（`class C {\n    x = 1;\n}`）→ 实现 `try_lower_simple_class`（收集实例字段初始化器 → 合成 `constructor() { this.x = init; }`，丢弃字段声明）→ 绿。
+4. `multiple_instance_fields_move_to_constructor`：多个字段 → 多个 `this.<name> = ...`（红→绿）。
+
+> 注：合成构造器体单行打印（`constructor() { this.x = 1; }`）—— Go `Block.MultiLine` 字段未随 Rust AST 携带（printer 既有 `TODO(port)`）；本轮测的是**降级行为**（字段→构造器赋值），格式属 printer 关注点。
+
+**测试计数（6c-1 新增）**：`tsgo_transformers` +4 `#[test]`（exponentiation 2 + classfields 2）+2 doctest（两个 `new_*_transformer`）。
+
+### upstream（ast/printer）增长（6c-1）
+
+- **无**。`exponentiation` 与 `classfields` 子集全部用 arena 既有构造器（`new_identifier`/`new_property_access_expression`/`new_call_expression`/`new_binary_expression`/`new_token`/`new_keyword_expression`/`new_block`/`new_expression_statement`/`new_constructor_declaration`/`new_class_like`）+ `visit_each_child` 默认递归即可。未触碰 `internal/ast/*` 或 `internal/printer/*`。临时变量 hoist / helper emit 的 factory 增长留待 6c-2。
+
+## 6c-2 worklog（red→green 推进记录）
+
+完成 `classfields` 构造器插入族，逐行为红→绿（把 6c-1 的 `try_lower_simple_class` 扩展为完整插入逻辑，6c-1 两用例保持绿）：
+
+1. `field_inits_prepend_to_existing_constructor`：`class C { x = 1; constructor() { this.y = 2; } }` → 把字段初始化器插到既有构造器体顶部（红→绿，重构 `try_lower_simple_class` 支持既有构造器 + `build_constructor_body`/`constructor_body_statements`）。
+2. `derived_class_synthesizes_constructor_with_super`：`class C extends B { x = 1 }` → 合成 `constructor() { super(...arguments); this.x = 1; }`（红→绿，加 `heritage_has_extends` + `make_super_spread_arguments`）。
+3. `field_inits_inserted_after_super_call`：`class C extends B { x = 1; constructor() { super(); this.y = 2; } }` → 在 `super()` 之后插入（红→绿，加 `find_super_statement_index`/`is_super_call_statement`/`skip_parentheses` —— 6a-DEFER 的 super 定位助手的简化子集，未含 TryStatement 嵌套）。
+
+> 注：构造器体仍单行打印（`Block.MultiLine` 未携带，沿用 6c-1 注记）。Prologue 指令、参数属性插入位置为简化省略（DEFER 6c-3）。
+
+**测试计数（6c-2 新增）**：`tsgo_transformers` +3 `#[test]`（classfields 构造器插入族）。
+
+### upstream（ast/printer）增长（6c-2）
+
+- **无**。构造器插入族全部用 arena 既有构造器 + `visit_each_child` 默认递归。`find_super_statement_index` 等 super 定位助手作为 `classfields.rs` 私有函数实现（6a 在 `transformers/utilities.rs` DEFER 的 `FindSuperStatementIndexPath` 全量路径版——含 TryStatement 嵌套——仍 DEFER）。static 字段所需的 `SyntaxList` 节点种类 + 语句展平、temp-hoist 的 `EmitContext` 变量环境留待 6c-3。
+
+## 6c-3 worklog（red→green 推进记录）
+
+两条复用基建（smallest-infra-first）+ 首消费者，逐行为红→绿：
+
+**TRACK 1（temp hoist）**
+1. `printer::EmitContext` 变量环境（`emitcontext_test.rs`：`variable_environment_hoists_declarations_into_a_var_statement` / `empty_variable_environment_hoists_nothing`）：缺方法编译红 → 实现 `start_variable_environment`/`add_variable_declaration`/`end_variable_environment`（var-scope 栈，`end` 产出 `var <decls>;` 语句）→ 绿。Go 全量 var/let 双栈 + functions + prologue 合并简化为单 var 栈（DEFER 余下）。
+2. `exponentiation_assignment_to_property_access_hoists_temp`：`a.x **= b` → `var _a;\n(_a = a).x = Math.pow(_a.x, b);`。把 `exponentiation` 重构为 ec-threaded（SourceFile 包 var-env、ExpressionStatement/BinaryExpression 穿 ec；其余 arena-only 降级）→ 红→绿。
+3. `exponentiation_assignment_to_element_access_hoists_temps`：`a[x] **= b` → `var _a, _b;\n(_a = a)[_b = x] = Math.pow(_a[_b], b);`（两个 temp）→ 红→绿。
+
+**TRACK 2（SyntaxList → static 字段）**
+4. `SyntaxList` 节点种类：`NodeData::SyntaxList(ListData)` + `new_syntax_list` + `visit_each_child`/`for_each_child` 两臂（`Kind::SyntaxList` 早已有）。printer `emit_statements_test.rs:syntax_list_statement_emits_children_in_sequence`：合成 `SyntaxList[a;, b;]` → 缺 emit 红 → 实现 `emit_syntax_list_statements`（逐子语句 + `write_line` 分隔）→ 绿。
+5. `static_field_becomes_assignment_after_class`：`class C { static x = 1 }` → `class C {\n}\nC.x = 1;`。`try_lower_simple_class` 扩展：static 字段收集为 `C.x = init`，类后经 `SyntaxList[class, assignment]` 返回 → 红→绿。
+
+**TRACK 3（私有名）**：DEFER（见下）。
+
+**测试计数（6c-3 新增）**：`tsgo_printer` +3（var-env 2 + SyntaxList emit 1）；`tsgo_transformers` +3（exponentiation `**=` property/element 2 + classfields static 1）；`tsgo_ast` +1 doctest（`new_syntax_list`）。
+
+### upstream（ast/printer）增长（6c-3）
+
+- **printer**（additive）：`emitcontext.rs` 新增变量环境（`var_environments` 栈 + `start/add/end`）；`emit_statements.rs` 新增 `SyntaxList` 语句 emit。
+- **ast**（additive）：`lib.rs` 新增 `NodeData::SyntaxList(ListData)` 变体 + `new_syntax_list` 构造器；`for_each_child` 补一臂；`visitor.rs` `visit_each_child` 补一臂。新增 `NodeData` 变体爆炸半径：全工作区仅 `visit_each_child`/`for_each_child` 两处穷尽 match 需补臂（已补），`cargo build --workspace --all-targets` 全绿，**无依赖 crate match 臂被迫改动**。
+- **未触碰** `tsgo_binder`/`tsgo_checker`/`tsgo_parser` 逻辑。
+
+### TRACK 3（私有名 `#x`）DEFER 说明
+
+blocked-by：私有字段降级需要 (a) **私有环境映射**（`#x` → WeakMap brand 变量），(b) **私有访问表达式重写**（`this.#x` 读/写 → `_brand.get/set(this, …)`，需遍历方法体重写 `PropertyAccessExpression`-with-`PrivateIdentifier`），(c) **WeakMap brand 命名 + 类前 `var _C_x = new WeakMap();` 注入**，(d)（完整形态）`__classPrivateFieldGet/Set` helper-library import emit。这几块互锁且依赖尚未移植的私有访问遍历，留待 6c-4。
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

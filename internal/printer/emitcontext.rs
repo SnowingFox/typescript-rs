@@ -10,7 +10,7 @@
 use crate::factory::NodeFactory;
 use crate::generatedidentifierflags::GeneratedIdentifierFlags;
 use rustc_hash::FxHashMap;
-use tsgo_ast::{NodeArena, NodeId};
+use tsgo_ast::{NodeArena, NodeId, NodeList};
 
 /// Options for creating an auto-generated name.
 ///
@@ -73,6 +73,10 @@ pub struct EmitContext {
     next_auto_generate_id: u32,
     original: FxHashMap<NodeId, NodeId>,
     emit_flags: FxHashMap<NodeId, crate::emitflags::EmitFlags>,
+    /// Stack of variable environments; each scope collects the
+    /// `VariableDeclaration` node ids hoisted into it via
+    /// [`add_variable_declaration`](EmitContext::add_variable_declaration).
+    var_environments: Vec<Vec<NodeId>>,
 }
 
 impl EmitContext {
@@ -95,6 +99,7 @@ impl EmitContext {
             next_auto_generate_id: 0,
             original: FxHashMap::default(),
             emit_flags: FxHashMap::default(),
+            var_environments: Vec::new(),
         }
     }
 
@@ -198,6 +203,54 @@ impl EmitContext {
     /// Side effects: inserts into the auto-generate table.
     pub(crate) fn set_auto_generate(&mut self, name: NodeId, info: AutoGenerateInfo) {
         self.auto_generate.insert(name, info);
+    }
+
+    /// Starts a new variable environment used to collect hoisted `var`
+    /// declarations (e.g. temporaries created during a down-level lowering).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_printer::emitcontext::EmitContext;
+    /// let mut ec = EmitContext::new();
+    /// ec.start_variable_environment();
+    /// assert!(ec.end_variable_environment().is_empty());
+    /// ```
+    ///
+    /// Side effects: pushes a scope onto the variable-environment stack.
+    // Go: internal/printer/emitcontext.go:EmitContext.StartVariableEnvironment
+    pub fn start_variable_environment(&mut self) {
+        self.var_environments.push(Vec::new());
+    }
+
+    /// Hoists a `var <name>;` declaration into the current variable environment.
+    ///
+    /// Side effects: appends a fresh `VariableDeclaration` node to the arena and
+    /// records it in the current scope. No-op if no environment is active.
+    // Go: internal/printer/emitcontext.go:EmitContext.AddVariableDeclaration
+    pub fn add_variable_declaration(&mut self, name: NodeId) {
+        let declaration = self.arena.new_variable_declaration(name, None, None, None);
+        if let Some(scope) = self.var_environments.last_mut() {
+            scope.push(declaration);
+        }
+    }
+
+    /// Ends the current variable environment, returning the statements to prepend
+    /// at the start of the scope: a single `var <decls>;` statement when any
+    /// declarations were hoisted, otherwise an empty list.
+    ///
+    /// Side effects: pops the variable-environment stack; may append a
+    /// declaration-list / statement node to the arena.
+    // Go: internal/printer/emitcontext.go:EmitContext.EndVariableEnvironment
+    pub fn end_variable_environment(&mut self) -> Vec<NodeId> {
+        let scope = self.var_environments.pop().unwrap_or_default();
+        if scope.is_empty() {
+            return Vec::new();
+        }
+        let declaration_list = self
+            .arena
+            .new_variable_declaration_list(NodeList::new(scope));
+        let statement = self.arena.new_variable_statement(None, declaration_list);
+        vec![statement]
     }
 }
 

@@ -177,7 +177,19 @@
 | `printer::factory::new_identifier_is_synthesized` | printer（additive） | 工厂建标识符置 SYNTHESIZED | `new_identifier("Infinity")` | `NodeFactory.NewIdentifier` | ✓ |
 | `printer::factory::new_literals_and_prefix_unary_are_synthesized` | printer（additive） | 工厂建字面量/前缀一元置 SYNTHESIZED | string/numeric/prefix-unary | `NodeFactory.New*` | ✓ |
 | `flatten_destructuring_array` | 根 | 数组解构赋值展开 | `[a, b] = c` → 顺序赋值 | `FlattenDestructuringAssignment` | —（6g） |
-| `es2016_exponentiation` | estransforms | `a ** b` 降级（target ES2015） | `a ** b` → `Math.pow(a, b)` | `newExponentiationTransformer` | |
+| `estransforms::exponentiation::tests::exponentiation_operator_lowered_to_math_pow` | estransforms | `**` → `Math.pow`（**6c-1 tracer**） | `a ** b` → `Math.pow(a, b);` | `newExponentiationTransformer` | ✓ |
+| `estransforms::exponentiation::tests::exponentiation_assignment_to_identifier_lowered` | estransforms | `**=`（标识符目标）降级 | `a **= b` → `a = Math.pow(a, b);` | `visitExponentiationAssignmentExpression` | ✓ |
+| `estransforms::exponentiation::tests::exponentiation_assignment_to_property_access_hoists_temp` | estransforms | **6c-3** `a.x **= b` temp hoist | → `var _a;\n(_a = a).x = Math.pow(_a.x, b);` | `visitExponentiationAssignmentExpression` | ✓ |
+| `estransforms::exponentiation::tests::exponentiation_assignment_to_element_access_hoists_temps` | estransforms | **6c-3** `a[x] **= b` 双 temp hoist | → `var _a, _b;\n(_a = a)[_b = x] = Math.pow(_a[_b], b);` | `visitExponentiationAssignmentExpression` | ✓ |
+| `printer::emitcontext::variable_environment_hoists_declarations_into_a_var_statement` | printer（additive） | **6c-3** var-env：hoist 成 `var` 语句 | 2 temp → 1 `VariableStatement`（2 decls） | `EndVariableEnvironment` | ✓ |
+| `printer::emit_statements::syntax_list_statement_emits_children_in_sequence` | printer（additive） | **6c-3** `SyntaxList` 语句逐子 emit | 合成 `SyntaxList[a;, b;]` → `a;\nb;` | `emitList`(flatten) | ✓ |
+| `estransforms::classfields::tests::instance_field_initializer_moves_to_constructor` | estransforms | 实例字段 → 合成构造器赋值 | `class C { x = 1 }` → `class C { constructor() { this.x = 1; } }` | `transformClassMembers` | ✓ |
+| `estransforms::classfields::tests::multiple_instance_fields_move_to_constructor` | estransforms | 多字段 → 多赋值（源序） | `class C { x = 1; y = 2 }` → ctor `this.x=1; this.y=2;` | `transformClassMembers` | ✓ |
+| `estransforms::classfields::tests::field_inits_prepend_to_existing_constructor` | estransforms | **6c-2** 既有构造器：字段插体顶部 | `class C { x=1; constructor(){ this.y=2 } }` → `this.x=1; this.y=2;` | `transformConstructorBody` | ✓ |
+| `estransforms::classfields::tests::derived_class_synthesizes_constructor_with_super` | estransforms | **6c-2** 派生类合成构造器 + `super(...arguments)` | `class C extends B { x=1 }` → `constructor(){ super(...arguments); this.x=1 }` | `transformConstructorBody`(needsSyntheticConstructor) | ✓ |
+| `estransforms::classfields::tests::field_inits_inserted_after_super_call` | estransforms | **6c-2** 既有 `super()` 后插入字段 | `class C extends B { x=1; constructor(){ super(); this.y=2 } }` → `super(); this.x=1; this.y=2;` | `transformConstructorBodyWorker` | ✓ |
+| `estransforms::classfields::tests::static_field_becomes_assignment_after_class` | estransforms | **6c-3** static 字段 → 类后 `C.x = …` | `class C { static x = 1 }` → `class C {\n}\nC.x = 1;` | `addPropertyOrClassStaticBlockStatements` | ✓ |
+| `es2016_exponentiation`（旧占位，已被上面替代） | estransforms | `a ** b` 降级（target ES2015） | `a ** b` → `Math.pow(a, b)` | `newExponentiationTransformer` | ✓ |
 | `es2020_optional_chain` | estransforms | `a?.b` 降级（target ES2019） | `a?.b` → 三元/临时变量展开 | `newOptionalChainTransformer` | |
 | `es2020_nullish_coalescing` | estransforms | `a ?? b` 降级 | → `(a !== null && a !== void 0) ? a : b` | `newNullishCoalescingTransformer` | |
 | `get_es_transformer_target_dispatch` | estransforms | 按 target 选链 | ESNext/ES2016/older → 正确链 | `GetESTransformer` | |
@@ -201,6 +213,18 @@
 | typeserializer | （随 metadata）`decorators/**/metadata/**` | 类型 → `Object`/`Function`/`Number`… 元数据表达式 | 6c+/P10 |
 
 > 这些 baseline 不替代每函数单测（PORTING §8.6）；它们是 stage 完整后的端到端验收。6b 仅落地 typeeraser 剥类型子集与 `constant_expression`，故标记为登记项。
+
+## estransforms conformance 切片（P10 端到端兜底）
+
+`estransforms` 各 stage 的字节级正确性由 **P10 conformance parity** 对拍（`tsc --target` baseline）。6c-1 单测覆盖 `exponentiation` 全量 + `classfields` 实例字段子集；下列子集是完整化后 P10 必须绿的目标：
+
+| transform | conformance 子集 | 验证内容 | 目标轮 |
+|---|---|---|---|
+| exponentiation | `tests/cases/conformance/es2016/exponentiationOperator/**` | `**`/`**=`（含 element/property-access 目标 + 临时变量）→ `Math.pow` | 6c-1 ✓（标识符）/ 6c-3 ✓（顶层 property/element temp 目标）/ 6c-4（非顶层作用域 temp）+ P10 |
+| classfields | `tests/cases/conformance/classes/members/instanceAndStaticMembers/**`、`.../esnext/classFields/**`、`useDefineForClassFields/**` | 实例/静态字段、私有名、accessor、`super` 交互、`--target`/`useDefineForClassFields` 门控 | 6c-1/2 ✓（实例字段 + 构造器插入族）/ 6c-3 ✓（static 字段）/ 6c-4（私有名/accessor/computed/class-expr/target 门控）+ P10 |
+| esdecorator | `tests/cases/conformance/esDecorators/**` | 标准（TC39）装饰器降级 + helper emit | 6c-2+/P10 |
+
+> 6c-1 仅落地 `exponentiation`（标识符目标）与 `classfields`（无 heritage/无既有构造器的实例字段）子集；其余为登记项。
 
 ## 与 impl.md 的对齐核对
 
