@@ -70,6 +70,42 @@ fn empty_variable_environment_hoists_nothing() {
     assert!(ec.end_variable_environment().is_empty());
 }
 
+// Go: internal/printer/emitcontext.go:EmitContext.RequestEmitHelper / ReadEmitHelpers
+// Requesting the same helper twice records it once; reading returns it and
+// clears the requested set.
+#[test]
+fn requested_helpers_round_trip_and_dedup() {
+    use crate::emithelpers::SET_FUNCTION_NAME_HELPER;
+    let mut ec = EmitContext::new();
+    ec.request_emit_helper(&SET_FUNCTION_NAME_HELPER);
+    ec.request_emit_helper(&SET_FUNCTION_NAME_HELPER);
+    let helpers = ec.read_emit_helpers();
+    assert_eq!(helpers.len(), 1);
+    assert!(helpers[0].is(&SET_FUNCTION_NAME_HELPER));
+    assert!(ec.read_emit_helpers().is_empty());
+}
+
+// Go: internal/printer/emitcontext.go:EmitContext.RequestEmitHelper (dependencies)
+// Requesting a helper with dependencies records the dependencies first.
+#[test]
+fn requested_helper_pulls_in_dependencies_first() {
+    use crate::emithelpers::{
+        CREATE_BINDING_HELPER, IMPORT_STAR_HELPER, SET_MODULE_DEFAULT_HELPER,
+    };
+    let mut ec = EmitContext::new();
+    ec.request_emit_helper(&IMPORT_STAR_HELPER);
+    let helpers = ec.read_emit_helpers();
+    // Both dependencies are present and precede the dependent helper.
+    let import_star = helpers.iter().position(|h| h.is(&IMPORT_STAR_HELPER));
+    let create_binding = helpers.iter().position(|h| h.is(&CREATE_BINDING_HELPER));
+    let set_module_default = helpers
+        .iter()
+        .position(|h| h.is(&SET_MODULE_DEFAULT_HELPER));
+    assert!(create_binding < import_star);
+    assert!(set_module_default < import_star);
+    assert_eq!(helpers.len(), 3);
+}
+
 // Go: internal/printer/emitcontext.go:EmitContext.with_arena
 #[test]
 fn with_arena_preserves_existing_nodes() {

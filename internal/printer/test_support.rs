@@ -26,6 +26,40 @@ pub(crate) fn check_synthetic(mut arena: NodeArena, source_file: NodeId, expecte
     assert_eq!(actual, expected, "synthetic emit mismatch");
 }
 
+/// Parses `input`, lets `setup` mutate the emit context (e.g. attach emit
+/// helpers to the source file) before emitting, and returns the produced text.
+pub(crate) fn emit_after<F>(input: &str, setup: F) -> String
+where
+    F: FnOnce(&mut EmitContext, NodeId),
+{
+    let file_name = "/main.ts";
+    let script_kind = get_script_kind_from_file_name(file_name);
+    let parse = parse_source_file(
+        SourceFileParseOptions {
+            file_name: file_name.to_string(),
+        },
+        input,
+        script_kind,
+    );
+    assert!(
+        parse.diagnostics.is_empty(),
+        "parse error for {input:?}: {:?}",
+        parse.diagnostics
+    );
+    let source_file = parse.source_file;
+    let mut ec = EmitContext::with_arena(parse.arena);
+    setup(&mut ec, source_file);
+    let mut printer = Printer::new(
+        PrinterOptions {
+            new_line: NewLineKind::Lf,
+            ..Default::default()
+        },
+        PrintHandlers::default(),
+        &ec,
+    );
+    printer.emit_source_file(source_file, input)
+}
+
 /// Parses `input`, emits the whole source file, and returns the produced text
 /// (including the trailing newline the emitter writes).
 pub(crate) fn emit(input: &str, jsx: bool) -> String {

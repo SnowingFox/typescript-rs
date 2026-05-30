@@ -7,6 +7,7 @@
 //! (original links, emit flags, comment/source-map ranges, environments,
 //! helpers) are added alongside the emit loop.
 
+use crate::emithelpers::EmitHelper;
 use crate::factory::NodeFactory;
 use crate::generatedidentifierflags::GeneratedIdentifierFlags;
 use rustc_hash::FxHashMap;
@@ -77,6 +78,12 @@ pub struct EmitContext {
     /// `VariableDeclaration` node ids hoisted into it via
     /// [`add_variable_declaration`](EmitContext::add_variable_declaration).
     var_environments: Vec<Vec<NodeId>>,
+    /// Emit helpers attached to specific nodes (e.g. the source file), read by
+    /// the printer when emitting the helper prologue.
+    node_helpers: FxHashMap<NodeId, Vec<&'static EmitHelper>>,
+    /// Emit helpers requested during the current transform, in insertion order
+    /// (dependencies first), drained by [`read_emit_helpers`](EmitContext::read_emit_helpers).
+    requested_helpers: Vec<&'static EmitHelper>,
 }
 
 impl EmitContext {
@@ -100,6 +107,8 @@ impl EmitContext {
             original: FxHashMap::default(),
             emit_flags: FxHashMap::default(),
             var_environments: Vec::new(),
+            node_helpers: FxHashMap::default(),
+            requested_helpers: Vec::new(),
         }
     }
 
@@ -203,6 +212,54 @@ impl EmitContext {
     /// Side effects: inserts into the auto-generate table.
     pub(crate) fn set_auto_generate(&mut self, name: NodeId, info: AutoGenerateInfo) {
         self.auto_generate.insert(name, info);
+    }
+
+    /// Requests that `helper` (and, first, its dependencies) be emitted for the
+    /// current source file. De-duplicates by helper identity. Panics on a scoped
+    /// helper (the TS library has none).
+    ///
+    /// Side effects: appends to the requested-helpers list.
+    // Go: internal/printer/emitcontext.go:EmitContext.RequestEmitHelper
+    pub fn request_emit_helper(&mut self, helper: &'static EmitHelper) {
+        assert!(!helper.scoped, "cannot request a scoped emit helper");
+        for dependency in helper.dependencies {
+            self.request_emit_helper(dependency);
+        }
+        if !self.requested_helpers.iter().any(|h| h.is(helper)) {
+            self.requested_helpers.push(helper);
+        }
+    }
+
+    /// Returns and clears the helpers requested since the last read.
+    ///
+    /// Side effects: drains the requested-helpers list.
+    // Go: internal/printer/emitcontext.go:EmitContext.ReadEmitHelpers
+    pub fn read_emit_helpers(&mut self) -> Vec<&'static EmitHelper> {
+        std::mem::take(&mut self.requested_helpers)
+    }
+
+    /// Attaches one or more emit helpers to `node` (typically the source file),
+    /// de-duplicating by helper identity. The printer emits these in the module
+    /// prologue.
+    ///
+    /// Side effects: inserts into the per-node helper table.
+    // Go: internal/printer/emitcontext.go:EmitContext.AddEmitHelper
+    pub fn add_emit_helper(&mut self, node: NodeId, helper: &'static EmitHelper) {
+        let helpers = self.node_helpers.entry(node).or_default();
+        if !helpers.iter().any(|h| h.is(helper)) {
+            helpers.push(helper);
+        }
+    }
+
+    /// Returns the emit helpers attached to `node` (empty when none).
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/printer/emitcontext.go:EmitContext.GetEmitHelpers
+    pub fn get_emit_helpers(&self, node: NodeId) -> &[&'static EmitHelper] {
+        self.node_helpers
+            .get(&node)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Starts a new variable environment used to collect hoisted `var`

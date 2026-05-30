@@ -24,7 +24,8 @@
 | **6c-3** ✅ 子集 | 两条复用基建 + 首消费者：`EmitContext` 变量环境（temp hoist）+ `exponentiation` `**=` element/property 目标；`SyntaxList` 节点种类 + static 字段 | `a[x] **= b` → `var _a, _b; (_a=a)[_b=x]=Math.pow(_a[_b],b)`；`class C { static x = 1 }` → `class C {} C.x = 1;` | additive 增长 `printer::EmitContext`（var-env）+ `ast`（`SyntaxList` 节点种类）+ `printer`（SyntaxList emit）。私有名（WeakMap/WeakSet）、accessor、计算名、class-expr、param-props、target 门控 → 6c-4 |
 | **6c-4** ✅ 子集 | 收口 `classfields` 可达面：**私有实例字段**（`#x` 直接 WeakMap `.get`/`.set` 形态）+ **计算实例字段名**（key 缓存进类前 temp）| `class C { #x = 1; m() { return this.#x; } }` → `var _C_x = new WeakMap(); class C { constructor() { _C_x.set(this, 1); } m() { return _C_x.get(this); } }`；`class C { [k] = 1 }` → `var _a = k; class C { constructor() { this[_a] = 1; } }` | 全走 arena 既有构造器（`new_new_expression`/`new_variable_statement`/`new_element_access_expression` 等均已存在），**本轮无需 ast/printer 增长**。DEFER：named-helper 形态、私有 static/方法/accessor（WeakSet）、`accessor` 字段、class-expr、param-props、name-generator 唯一命名、target 门控 |
 | **6d** ✅ 子集 | `estransforms` part 2：两条**无 helper** 的 es stage：`optionalchain`（`a?.b`→保护性条件表达式）+ `objectrestspread`（对象 spread→`Object.assign`） | `a?.b;` → `a === null \|\| a === void 0 ? void 0 : a.b;`；`const o = { ...x, y };` → `const o = Object.assign(Object.assign({}, x), { y });` | 全走 arena 既有构造器（`new_conditional_expression`/`new_void_expression`/`new_object_literal_expression` 等均已存在），**本轮无需 ast/printer 增长**。DEFER：`namedevaluation`/`using`/`forawait`/`async`（**全部需 helper-library emit 基建**，Rust 侧未移植）+ optionalchain temp-hoist/this-capture + objectrestspread `__rest` 绑定 |
-| 6d-2（建议） | **printer helper-emit 基建**（`RequestEmitHelper` + unscoped helper-name 节点 + helper 定义 prologue emit），解锁 `async`/`forawait`/`using`/`namedevaluation` | `var __awaiter = …;` prologue + `__awaiter(…)` | 跨切面 printer 基建，独立成轮 |
+| **6d-2** ✅ | **printer helper-emit 基建**（`EmitHelper` 模型 + `request_emit_helper`/`read_emit_helpers` + 每节点 `add/get_emit_helper` + `compare_emit_helpers` 优先级排序 + `new_unscoped_helper_name` + 源文件 prologue emit `write_lines`），并以 `namedevaluation` tracer 端到端验证 | `var f = function(){}` → prologue `var __setFunctionName = …;` + `var f = __setFunctionName(function () { }, "f");` | additive 增长 `printer`（新增 `emithelpers.rs` + EmitContext helper 存储 + factory `new_unscoped_helper_name` + printer `emit_helpers`/`write_lines`）。解锁 `async`/`forawait`/`using`（6d-3）|
+| **6d-3** ✅ 子集 | `estransforms` part 3：**`async`** 顶层函数声明 → `__awaiter` 包装 + `await`→`yield`（复用 6d-2 helper 基建）| `async function f() { await g(); }` → prologue `var __awaiter = …;` + `function f() { return __awaiter(this, void 0, void 0, function* () { yield g(); }); }` | 全走 arena 既有构造器（`new_function_declaration`/`new_function_expression`/`new_yield_expression`/`new_return_statement` 等均已存在），**本轮无需 ast/printer 增长**。DEFER：`forawait`（无最小 tracer，需完整 async-iteration 脚手架）+ `using`（**parser 不解析语句级 `using`**）+ async 方法/箭头/生成器/super/参数 |
 | 6e | `moduletransforms`：CJS/ESM/implied + externalModuleInfo | `import {x} from "m"`→`require` | factory + module 格式查询 |
 | 6f | `jsxtransforms` + `inliners` | `<a/>`→`createElement`；const enum 内联 | factory + checker 求值（inliners） |
 | 6g | `declarations`：`.d.ts` transform 框架 + tracker + diagnostics | 基础 `.d.ts` 形状 | nodebuilder/modulespecifiers + checker resolver；正确性靠 P10 |
@@ -112,19 +113,19 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 | `estransforms/exponentiation.go` | `exponentiation.rs` | ✅ 6c-1+6c-3 | `new_exponentiation_transformer`：`a ** b`→`Math.pow(a, b)`、`a **= b`（标识符）→`a = Math.pow(a, b)`、**`a.x **= b` / `a[x] **= b`（temp hoist）**→`(_a=a).x=Math.pow(_a.x,b)` / `(_a=a)[_b=x]=Math.pow(_a[_b],b)`（顶层语句路径 ec-threaded + `var` hoist）。DEFER：非顶层作用域内的 temp-hoist `**=`（需作用域级 var-env 嵌套）|
 | `estransforms/classfields.go` | `classfields.rs` | ✅ 6c-1/2/3/4 子集 | `new_class_fields_transformer`：实例字段 → 构造器 `this.x = init`（完整构造器插入族）；**static 字段** → 类后 `C.x = init`（`SyntaxList[class, assignment...]`）；**私有实例字段** `#x`（直接 WeakMap 形态）→ 类前 `var _C_x = new WeakMap();` + 构造器 `_C_x.set(this, init)` + 成员体内私有访问重写（`obj.#x`→`_C_x.get(obj)`、`obj.#x = e`→`_C_x.set(obj, e)`）；**计算实例字段名** `[k] = init` → 类前 `var _a = k;` + 构造器 `this[_a] = init`。DEFER：named-helper 私有形态（`__classPrivateFieldGet/Set`）、私有 static 字段、私有方法/accessor（WeakSet）、`accessor` 字段、ClassExpression、参数属性、prologue、匿名类成员、name-generator 唯一命名、`--target`/`useDefineForClassFields` 门控 |
 | `estransforms/definitions.go` | `estransforms/lib.rs` | — DEFER(P5) | `GetESTransformer` + 各版本链 `NewES20xxTransformer`（crate 根聚合）；blocked-by：依赖各 es stage 就绪 |
-| `estransforms/async.go` | `async.rs` | — DEFER(P5) | `newAsyncTransformer`（async/await 降级）；blocked-by：helper-emit 基建（`__awaiter`/`__generator` via `RequestEmitHelper`）+ await→yield 生成器状态机 + super/lexical-this 捕获，均未移植 |
+| `estransforms/async.go` | `async.rs` | ✅ 6d-3 子集 | `new_async_transformer`：顶层 **async 函数声明** → `function f() { return __awaiter(this, void 0, void 0, function* () { … }); }`，body 内 `await X`→`yield X`，请求 `__awaiter` helper（prologue 注入）。DEFER：async 方法/accessor/箭头、async 生成器（`__asyncGenerator`，已加守卫不误转）、super/lexical-`this`/`arguments` 捕获、默认/rest 参数、top-level `await` |
 | `estransforms/classthis.go` | `classthis.rs` | — DEFER(P5) | class `this`/`#brand` 辅助 |
 | `estransforms/esdecorator.go` | `esdecorator.rs` | — DEFER(P5) | `newESDecoratorTransformer`（标准装饰器）；blocked-by：checker 元数据 + helper emit |
-| `estransforms/forawait.go` | `forawait.rs` | — DEFER(P5) | `for await (x of y)` 降级；blocked-by：helper-emit 基建（`__asyncValues`/`__await`）未移植 |
+| `estransforms/forawait.go` | `forawait.rs` | — DEFER(6d-3 范围) | `for await (x of y)` 降级；`__asyncValues`/`__await` helper 已就绪，但无最小 tracer——忠实降级总要发出完整 async-iteration 脚手架（`__asyncValues` 迭代器 + downlevel-`await(.next())` + generated-name 迭代器/result/value temps + `iterator.return` 清理嵌套 try/finally），本轮发不出忠实子集（部分实现会产出错误代码）。blocked-by：async-iteration 降级脚手架 |
 | `estransforms/logicalassignment.go` | `logicalassignment.rs` | — DEFER(P5) | `newLogicalAssignmentTransformer`（`&&=`/`\|\|=`/`??=`） |
-| `estransforms/namedevaluation.go` | `namedevaluation.rs` | — DEFER(P5) | named evaluation；blocked-by：所有路径 emit `__setFunctionName`/`__propKey`，需 helper-emit 基建 + `EmitContext.AssignedName` 跟踪 |
+| `estransforms/namedevaluation.go` | `namedevaluation.rs` | ✅ 6d-2 子集 | `new_named_evaluation_transformer`：`var f = <匿名函数>` → `var f = __setFunctionName(<fn>, "f")` + prologue 注入 helper 定义（6d-2 emit-helper 基建的端到端验证）。DEFER：完整 `isNamedEvaluation` 面（property/shorthand/参数/binding/属性声明/export=、计算名 `__propKey` 缓存、匿名类 `static { __setFunctionName(this,…) }`）+ `EmitContext.AssignedName` 跟踪 + target/useDefine 门控 |
 | `estransforms/nullishcoalescing.go` | `nullishcoalescing.rs` | — DEFER(P5) | `newNullishCoalescingTransformer`（`??`） |
 | `estransforms/objectrestspread.go` | `objectrestspread.rs` | ✅ 6d 子集 | `new_object_rest_spread_transformer`：对象 spread `{ ...x, y }` → `Object.assign(Object.assign({}, x), { y })`（chunk + pairwise 折叠，`NewAssignHelper` = `Object.assign` 直出，无需 helper import）。DEFER：对象 **rest** 绑定（`const { a, ...rest } = o` → `__rest`）+ 参数/`for-of`/`catch`/赋值模式（需 `__rest` helper + 解构 transformer）|
 | `estransforms/optionalcatch.go` | `optionalcatch.rs` | — DEFER(P5) | `newOptionalCatchTransformer` |
 | `estransforms/optionalchain.go` | `optionalchain.rs` | ✅ 6d 子集 | `new_optional_chain_transformer`：`a?.b` / `a?.[x]` / `a?.()` / `a?.b()` / `a?.b.c` → `a === null \|\| a === void 0 ? void 0 : <访问/调用>`（`flatten_chain` 折叠单 `?.` + 尾随非可选段，简单 receiver）。DEFER：需 temp-hoist 的 receiver（`f()?.b`）、多 `?.`（`a?.b?.c`）、括号可选调用 `this`-capture（`(a?.b)()`）、`delete a?.b`、tagged template |
 | `estransforms/taggedtemplate.go` | `taggedtemplate.rs` | — DEFER(P5) | `newTaggedTemplateLiftRestrictionTransformer` |
 | `estransforms/usestrict.go` | `usestrict.rs` | — DEFER(P5) | `NewUseStrictTransformer` |
-| `estransforms/using.go` | `using.rs` | — DEFER(P5) | `using`/`await using` → try/finally + dispose；blocked-by：helper-emit 基建（`__addDisposableResource`/`__disposeResources`）未移植 |
+| `estransforms/using.go` | `using.rs` | — DEFER(parser) | `using`/`await using` → try/finally + dispose；`__addDisposableResource`/`__disposeResources` helper 已就绪、transform 可移植，但 **`tsgo_parser` 不解析语句级 `using x = expr;`**（报 "';' expected"），无法走 parse→transform→emit；parser 不在本轮编辑范围。blocked-by：parser `using` 声明支持（`await using` 另需 async 处置）|
 | `estransforms/utilities.go` | `utilities.rs` | 子包共享工具 |
 
 ### `moduletransforms`（5 文件）
@@ -369,6 +370,78 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 ### upstream（ast/printer）增长（6d）
 
 - **无**。optionalchain + objectrestspread 全部用 arena 既有构造器（`new_conditional_expression`/`new_void_expression`/`new_numeric_literal`/`new_keyword_expression`/`new_binary_expression`/`new_property_access_expression`/`new_element_access_expression`/`new_call_expression`/`new_object_literal_expression`/`new_token`）+ `visit_each_child` 默认递归即可。未触碰 `internal/ast/*` 或 `internal/printer/*`。
+
+## 6d-2 worklog（red→green 推进记录）
+
+聚焦基建轮：移植 6d 发现缺失的 printer **emit-helper-library 基建**，解锁 namedevaluation/using/forawait/async。逐切片红→绿：
+
+1. **EmitHelper 模型 + prologue emit（tracer，端到端）** — 新建 `internal/printer/emithelpers.rs`（`EmitHelper { name, scoped, text, priority, dependencies, import_name }` + `SET_FUNCTION_NAME_HELPER` 静态）；`EmitContext` 新增每节点 `add_emit_helper`/`get_emit_helpers`；printer 新增 `emit_helpers`（在 `emit_source_file_worker` 起始调用）+ `write_lines`（split_lines + guess_indentation，逐非空行 `write_line`+`write`）。测试 `requested_helper_definition_emitted_in_prologue`：把 helper 挂到源文件 → 恒等红（helper 不出现）→ 实现 emit → 绿（prologue 完整 helper 定义 + 语句）。
+2. **request/read** — `EmitContext::request_emit_helper`（递归先入依赖 + 按名去重）+ `read_emit_helpers`（取出并清空）。测试 `requested_helpers_round_trip_and_dedup`。
+3. **依赖递归** — 以真实 `IMPORT_STAR_HELPER`（依赖 `__createBinding`+`__setModuleDefault`）验证 `request` 先记录依赖。测试 `requested_helper_pulls_in_dependencies_first`。
+4. **优先级排序** — `compare_emit_helpers`（低 priority 先、`None` 最后；相等稳定）+ printer `emit_helpers` 内 `sort_by`。测试 `compare_orders_by_priority_then_none_last`（纯）+ `prologue_emits_helpers_in_priority_order`（`__awaiter`(5) 先于 `__setFunctionName`(None)，红→绿）。
+5. **unscoped helper-name** — factory `new_unscoped_helper_name`（标识符 + `EmitFlags::HELPER_NAME`）。doctest 验证 flag 置位。printer 当前不特判 HELPER_NAME（按普通标识符 emit `__setFunctionName`），module-emit 重写留待后续。
+6. **端到端验证（namedevaluation）** — 新建 `estransforms/namedevaluation.rs`：`var f = function(){}`（匿名函数绑定标识符）→ `request_emit_helper(set_function_name)` + `var f = __setFunctionName(function () { }, "f")`；源文件边界 `read_emit_helpers` → `add_emit_helper(SF, …)`。测试 `anonymous_function_binding_gets_set_function_name` 断言 prologue helper 定义 + 重写后的调用。
+
+**测试计数（6d-2 新增）**：`tsgo_printer` +6 `#[test]`（emithelpers 4 + emitcontext 2）+1 doctest（`new_unscoped_helper_name`）；`tsgo_transformers` +1 `#[test]`（namedevaluation）+1 doctest（`new_named_evaluation_transformer`）。printer 合计 173 unit + 24 doctest；transformers 57 unit + 15 doctest。
+
+### upstream（printer）增长（6d-2）
+
+- **新增** `internal/printer/emithelpers.rs`（`EmitHelper` 模型 + `compare_emit_helpers` + helper 定义静态）。`lib.rs` 导出 `EmitHelper`。
+- **printer `EmitContext`**（additive）：`node_helpers` 表（每节点 helper）+ `requested_helpers` 列表；`add_emit_helper`/`get_emit_helpers`/`request_emit_helper`/`read_emit_helpers`。
+- **printer `factory`**（additive）：`new_unscoped_helper_name`（`EmitFlags::HELPER_NAME`）。
+- **printer `printer`**（additive）：`emit_helpers`（源文件 prologue，按优先级稳定排序）+ `write_lines`；`emit_source_file_worker` 调用 `emit_helpers`（无 helper 时无副作用，既有 167→173 测试无回归）。
+- **未触碰** `internal/ast/*`（不需要新节点种类：unscoped helper name 复用普通 `Identifier` + emit flag）。
+
+### helper 定义：已定义 vs 已消费（6d-2）
+
+| helper | 定义 | 消费者 | 状态 |
+|---|---|---|---|
+| `__setFunctionName` | ✅ | `namedevaluation.rs` | **已消费**（6d-2 验证）|
+| `__awaiter`(prio 5) | ✅ | `async.rs` | 已定义未消费（6d-3）；本轮用于优先级排序测试 |
+| `__createBinding`/`__setModuleDefault`/`__importStar`(deps) | ✅ | `moduletransforms` | 已定义未消费；本轮用于依赖递归测试 |
+| `__rest` | ✅ | `objectrestspread.rs`（rest 绑定）| 已定义未消费（6d-3）|
+| `__addDisposableResource`/`__disposeResources` | ✅ | `using.rs` | 已定义未消费（6d-3）|
+| `__importDefault`/`__exportStar` | ✅ | `moduletransforms` | 已定义未消费（6e）|
+| `__generator` | — | — | Go 本 port 无此 helper（async 用 `__awaiter` + 原生 `function*`）|
+
+## 6d-3 worklog（red→green 推进记录）
+
+`estransforms` part 3。先 probe 解析支持发现关键约束：`async`/async 箭头/`for await`/async 生成器**均可解析**，但**语句级 `using x = expr;` 不可解析**（parser 报 "';' expected"，且 parser 不在本轮编辑范围）。据此按可达性排序落地。
+
+**`async`（顶层 async 函数声明，全落地）**
+1. `async_function_lowers_to_awaiter_wrapper`（tracer）：`async function f() { await g(); }` → 恒等红 → 实现 `async_visit`（ec-threaded：SourceFile 收尾 read/attach helper、`FunctionDeclaration`+async 转换）+ `visit_async_function_declaration`（剥 async modifier）+ `build_awaiter_wrapper_body`（`return __awaiter(this, void 0, void 0, function* () { … })`、请求 `__awaiter`）+ `convert_await_to_yield`（`await X`→`yield X`，不下钻嵌套函数体）→ 绿（prologue `__awaiter` 定义 + 包装）。
+2. `async_function_without_await_still_wraps`：`async function f() { g(); }` → 仍包装（触发于 async modifier 而非 await 存在）→ 绿。
+3. `async_generator_is_left_unchanged`（守卫）：`async function* g() { yield 1; }` → 保持不变（async 生成器需 `__asyncGenerator`，已 DEFER；`is_async` 加 `asterisk_token.is_none()` 守卫避免误降级）→ 绿。
+
+**`forawait`：DEFER（范围）** — 无最小 tracer，忠实降级必发完整 async-iteration 脚手架（见 Go→Rust 行）。
+
+**`using`：DEFER（parser）** — 语句级 `using` 不可解析；transform 与 helper 均就绪，待 parser 支持。
+
+**测试计数（6d-3 新增）**：`tsgo_transformers` +3 `#[test]`（async 3）+1 doctest（`new_async_transformer`）。crate 合计 60 unit + 16 doctest。
+
+### upstream（ast/printer）增长（6d-3）
+
+- **无**。async 包装全部用 arena 既有构造器（`new_function_declaration`/`new_function_expression`/`new_yield_expression`/`new_return_statement`/`new_block`/`new_call_expression`/`new_keyword_expression`/`new_numeric_literal`/`new_void_expression`/`new_token`）+ 6d-2 的 `request_emit_helper`/`new_unscoped_helper_name`。未触碰 `internal/ast/*` 或 `internal/printer/*`。
+
+## estransforms 移植状态（6c..6d-3 收口）
+
+**已移植（行为正确的 down-level 子集）**：
+- `exponentiation`（`**`/`**=` + temp-hoist 顶层目标）— 6c-1/6c-3。
+- `classfields`（实例/static/私有 WeakMap/计算名字段 + 构造器插入族）— 6c-1..6c-4。
+- `optionalchain`（`a?.b`/`?.[]`/`?.()`/链尾随段，简单 receiver）— 6d。
+- `objectrestspread`（对象字面量 spread → `Object.assign`）— 6d。
+- `namedevaluation`（`var f = 匿名函数` → `__setFunctionName`）— 6d-2。
+- `async`（顶层 async 函数声明 → `__awaiter` 包装 + `await`→`yield`）— 6d-3。
+- **printer emit-helper 基建**（`EmitHelper` + request/read + prologue emit）— 6d-2。
+
+**DEFER（→ parser / 深度脚手架 / checker / name-generator）**：
+- `forawait`：async-iteration 脚手架（无最小 tracer）。
+- `using`/`await using`：**parser 不解析语句级 `using`**（硬阻塞，需 parser 轮）。
+- `async` 余下：方法/accessor/箭头、async 生成器（`__asyncGenerator`）、super/lexical-`this`/`arguments` 捕获、默认/rest 参数、top-level `await`。
+- `esdecorator`：checker 元数据。
+- `nullishcoalescing`/`logicalassignment`/`optionalcatch`/`taggedtemplate`/`usestrict`/`classthis`：未排期（多数 factory 即可，部分需 helper）。
+- `definitions`（`GetESTransformer` target 派发链）：依赖各 stage 就绪。
+- 各 stage 的 `--target`/compilerOptions 门控 + name-generator 唯一命名精化。
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

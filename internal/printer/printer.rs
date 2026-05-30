@@ -182,6 +182,8 @@ impl<'a> Printer<'a> {
     fn emit_source_file_worker(&mut self, node: NodeId) {
         self.writer.write_line();
 
+        self.emit_helpers(node);
+
         let statements = self.source_file_statements(node);
         // Prologue directives: no `TestEmit` case begins with a string-literal
         // expression statement, so the prologue index is always 0 here.
@@ -193,6 +195,53 @@ impl<'a> Printer<'a> {
             0,
             -1,
         );
+    }
+
+    /// Emits, in the module prologue, the verbatim text of every unscoped emit
+    /// helper attached to `node`. Returns whether any helper was emitted.
+    ///
+    /// Side effects: writes helper definitions to the output writer.
+    // Go: internal/printer/printer.go:emitHelpers
+    fn emit_helpers(&mut self, node: NodeId) -> bool {
+        let mut emitted = false;
+        // Copy the `'static` helper refs so the writer can borrow `self` mutably.
+        let mut helpers: Vec<&'static crate::emithelpers::EmitHelper> =
+            self.context.get_emit_helpers(node).to_vec();
+        // Stable-sort by priority so higher-priority helpers are emitted earlier
+        // while ties preserve attach order.
+        helpers.sort_by(|a, b| crate::emithelpers::compare_emit_helpers(a, b));
+        for helper in helpers {
+            // Scoped helpers (none in the TS library) would emit in their own
+            // scope; `--noEmitHelpers` / `--importHelpers` skipping is not yet
+            // modeled.
+            if !helper.scoped {
+                self.write_lines(helper.text);
+                emitted = true;
+            }
+        }
+        emitted
+    }
+
+    /// Writes multi-line raw text (e.g. a helper definition), stripping the
+    /// common leading indentation and prefixing each non-empty line with a line
+    /// break so it nests under the current indentation.
+    ///
+    /// Side effects: writes to the output writer.
+    // Go: internal/printer/printer.go:writeLines
+    fn write_lines(&mut self, text: &str) {
+        let lines = tsgo_stringutil::split_lines(text);
+        let indentation = tsgo_stringutil::guess_indentation(&lines);
+        for line in lines {
+            let line = if indentation > 0 && line.len() >= indentation {
+                &line[indentation..]
+            } else {
+                line
+            };
+            if !line.is_empty() {
+                self.write_line();
+                self.write(line);
+            }
+        }
     }
 
     /// Returns the statement list of a source file node.

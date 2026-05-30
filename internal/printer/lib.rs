@@ -20,6 +20,7 @@ mod emit_statements;
 mod emit_types;
 pub mod emitcontext;
 pub mod emitflags;
+pub mod emithelpers;
 pub mod emittextwriter;
 pub mod factory;
 pub mod generatedidentifierflags;
@@ -33,6 +34,7 @@ pub mod utilities;
 
 pub use emitcontext::EmitContext;
 pub use emitflags::EmitFlags;
+pub use emithelpers::EmitHelper;
 pub use emittextwriter::EmitTextWriter;
 pub use factory::NodeFactory;
 pub use generatedidentifierflags::GeneratedIdentifierFlags;

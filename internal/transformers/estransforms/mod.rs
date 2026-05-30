@@ -28,17 +28,37 @@
 //!   blocked-by: receiver temp hoisting must be threaded through the visit
 //!   (var-environment like `exponentiation`), and `this`-capture needs the
 //!   `SyntheticReferenceExpression` machinery, not yet ported.
-//! - `namedevaluation`, `using`, `forawait`, `async` (and `esdecorator`).
-//!   blocked-by: **the helper-library emit infrastructure is not ported** —
-//!   `printer::EmitContext::RequestEmitHelper`, unscoped helper-name nodes
-//!   (`NewUnscopedHelperName`), and the helper-definition prologue emit. Every
-//!   output path of these stages references a TS runtime helper
-//!   (`__setFunctionName`/`__propKey`; `__addDisposableResource`/
-//!   `__disposeResources`; `__asyncValues`/`__await`; `__awaiter`/`__generator`),
-//!   so none has a helper-free tracer. These need a dedicated printer
-//!   helper-emit-infrastructure round first; `async`/`forawait` additionally
-//!   need the await→yield generator-body state machine and `esdecorator` needs
-//!   checker metadata.
+//! - `namedevaluation` landed a 6d-2 subset (`var f = <anonymous fn>` →
+//!   `__setFunctionName(<fn>, "f")`) as the end-to-end validation of the new
+//!   printer emit-helper infrastructure (`request_emit_helper` + unscoped
+//!   helper-name + prologue emit, ported in 6d-2). DEFER: the full
+//!   `isNamedEvaluation` surface (property/shorthand/parameter/binding-element/
+//!   property-declaration/export=, computed-name `__propKey` caching, anonymous
+//!   class `static { __setFunctionName(this, …) }` blocks) + `EmitContext`
+//!   assigned-name tracking + target/`useDefineForClassFields` gating.
+//! - `async` landed a 6d-3 subset: a top-level **async function declaration**
+//!   lowers to the `__awaiter(this, void 0, void 0, function* () { … })` wrapper
+//!   with `await X` → `yield X` in the (direct) body. DEFER: async methods/
+//!   accessors/arrows, async generators (`__asyncGenerator`), super/lexical-
+//!   `this`/`arguments` capture, default/rest parameter handling, and top-level
+//!   `await` — these need the `EmitContext` super-capture + parameter/variable-
+//!   environment machinery not yet ported.
+//! - `forawait`. DEFER (scope): `for await (x of y)` has no minimal tracer — the
+//!   faithful lowering always emits the full async-iteration scaffold
+//!   (`__asyncValues` iterator + downlevel-`await` of `.next()` +
+//!   generated-name iterator/result/value temps + an `iterator.return` cleanup
+//!   nested `try/finally`). The `__asyncValues`/`__await` helpers exist, but the
+//!   generated-name + `.call`/`convertForOfStatementHead` scaffolding is too
+//!   large to land faithfully as a tracer this round; a partial version would
+//!   emit broken code. blocked-by: the async-iteration lowering scaffold.
+//! - `using`. DEFER (parser): the `tsgo_parser` crate does not parse
+//!   statement-level `using x = expr;` (reports "';' expected"), so the stage
+//!   cannot be exercised through the parse→transform→emit path, and the parser
+//!   is out of this round's edit scope. The transform itself (try/finally +
+//!   `__addDisposableResource`/`__disposeResources`, both helpers ported) is
+//!   portable once the parser supports `using`. blocked-by: parser `using`
+//!   declaration support. (`await using` additionally needs async disposal.)
+//! - `esdecorator`. blocked-by: checker metadata.
 //!
 //! - `classfields` named-helper private form (`__classPrivateFieldGet/Set`),
 //!   private static fields, private methods/accessors (`WeakSet`), `accessor`
@@ -60,7 +80,9 @@
 //!   / `taggedtemplate` / `usestrict`. blocked-by: larger `printer::NodeFactory`
 //!   constructor surface (and, for some, helper-emit) not yet ported.
 
+pub mod r#async;
 pub mod classfields;
 pub mod exponentiation;
+pub mod namedevaluation;
 pub mod objectrestspread;
 pub mod optionalchain;

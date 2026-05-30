@@ -221,6 +221,29 @@ impl<'a> NodeFactory<'a> {
         id
     }
 
+    /// Creates an identifier that references an emit helper by name (e.g.
+    /// `__setFunctionName`), marking it with the `EmitFlags::HELPER_NAME` emit
+    /// flag so module emit can rewrite it to the imported-helpers form when
+    /// needed.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_printer::emitcontext::EmitContext;
+    /// use tsgo_printer::EmitFlags;
+    /// let mut ec = EmitContext::new();
+    /// let h = ec.factory().new_unscoped_helper_name("__setFunctionName");
+    /// assert!(ec.emit_flags(h).contains(EmitFlags::HELPER_NAME));
+    /// ```
+    ///
+    /// Side effects: appends a node, marks it synthesized, and sets its emit flags.
+    // Go: internal/printer/factory.go:NodeFactory.NewUnscopedHelperName
+    pub fn new_unscoped_helper_name(&mut self, name: &str) -> NodeId {
+        let id = self.new_identifier(name);
+        self.ctx
+            .set_emit_flags(id, crate::emitflags::EmitFlags::HELPER_NAME);
+        id
+    }
+
     /// Creates a synthesized string literal with the given `text` and flags.
     ///
     /// # Examples
