@@ -22,11 +22,13 @@
 | **6c-1** ✅ 子集 | `estransforms` part 1：`exponentiation`（tracer）+ `classfields`（实例字段→构造器赋值子集） | `a ** b`→`Math.pow(a, b)` 经驱动重 emit | 全走 arena 既有构造器，**本轮无需 ast/printer 增长**；其余 es stage + classfields 余下 → 6c-2 |
 | **6c-2** ✅ 子集 | `estransforms` part 2：完成 `classfields` 构造器插入族（既有构造器插入、`extends` 合成 `super(...arguments)`、既有 `super()` 后插入）| `class C extends B { x = 1; constructor() { super(); } }` → `super(); this.x = 1;` | 全走 arena 既有构造器，**本轮无需 ast/printer 增长**；static/私有名/accessor/temp-hoist → 6c-3 |
 | **6c-3** ✅ 子集 | 两条复用基建 + 首消费者：`EmitContext` 变量环境（temp hoist）+ `exponentiation` `**=` element/property 目标；`SyntaxList` 节点种类 + static 字段 | `a[x] **= b` → `var _a, _b; (_a=a)[_b=x]=Math.pow(_a[_b],b)`；`class C { static x = 1 }` → `class C {} C.x = 1;` | additive 增长 `printer::EmitContext`（var-env）+ `ast`（`SyntaxList` 节点种类）+ `printer`（SyntaxList emit）。私有名（WeakMap/WeakSet）、accessor、计算名、class-expr、param-props、target 门控 → 6c-4 |
-| 6c-4 | `classfields` 余下（私有名 WeakMap/WeakSet、accessor、计算名、class-expr、param-props、target 门控）→ `esdecorator` | `class C { #x = 1 }`；`@dec` | 需私有环境映射 + 私有访问表达式重写 + WeakMap brand 命名（+ helper-library emit）、checker（esdecorator 元数据）|
-| 6d | `moduletransforms`：CJS/ESM/implied + externalModuleInfo | `import {x} from "m"`→`require` | factory + module 格式查询 |
-| 6e | `jsxtransforms` + `inliners` | `<a/>`→`createElement`；const enum 内联 | factory + checker 求值（inliners） |
-| 6f | `declarations`：`.d.ts` transform 框架 + tracker + diagnostics | 基础 `.d.ts` 形状 | nodebuilder/modulespecifiers + checker resolver；正确性靠 P10 |
-| 6g | 根 `destructuring` + `utilities` 其余（绑定↔赋值转换/super 定位/范围移动）+ `tstransforms/importelision`（checker 就绪后） | 数组解构展开；import elision | factory 构造器 + checker `EmitResolver` |
+| **6c-4** ✅ 子集 | 收口 `classfields` 可达面：**私有实例字段**（`#x` 直接 WeakMap `.get`/`.set` 形态）+ **计算实例字段名**（key 缓存进类前 temp）| `class C { #x = 1; m() { return this.#x; } }` → `var _C_x = new WeakMap(); class C { constructor() { _C_x.set(this, 1); } m() { return _C_x.get(this); } }`；`class C { [k] = 1 }` → `var _a = k; class C { constructor() { this[_a] = 1; } }` | 全走 arena 既有构造器（`new_new_expression`/`new_variable_statement`/`new_element_access_expression` 等均已存在），**本轮无需 ast/printer 增长**。DEFER：named-helper 形态、私有 static/方法/accessor（WeakSet）、`accessor` 字段、class-expr、param-props、name-generator 唯一命名、target 门控 |
+| **6d** ✅ 子集 | `estransforms` part 2：两条**无 helper** 的 es stage：`optionalchain`（`a?.b`→保护性条件表达式）+ `objectrestspread`（对象 spread→`Object.assign`） | `a?.b;` → `a === null \|\| a === void 0 ? void 0 : a.b;`；`const o = { ...x, y };` → `const o = Object.assign(Object.assign({}, x), { y });` | 全走 arena 既有构造器（`new_conditional_expression`/`new_void_expression`/`new_object_literal_expression` 等均已存在），**本轮无需 ast/printer 增长**。DEFER：`namedevaluation`/`using`/`forawait`/`async`（**全部需 helper-library emit 基建**，Rust 侧未移植）+ optionalchain temp-hoist/this-capture + objectrestspread `__rest` 绑定 |
+| 6d-2（建议） | **printer helper-emit 基建**（`RequestEmitHelper` + unscoped helper-name 节点 + helper 定义 prologue emit），解锁 `async`/`forawait`/`using`/`namedevaluation` | `var __awaiter = …;` prologue + `__awaiter(…)` | 跨切面 printer 基建，独立成轮 |
+| 6e | `moduletransforms`：CJS/ESM/implied + externalModuleInfo | `import {x} from "m"`→`require` | factory + module 格式查询 |
+| 6f | `jsxtransforms` + `inliners` | `<a/>`→`createElement`；const enum 内联 | factory + checker 求值（inliners） |
+| 6g | `declarations`：`.d.ts` transform 框架 + tracker + diagnostics | 基础 `.d.ts` 形状 | nodebuilder/modulespecifiers + checker resolver；正确性靠 P10 |
+| 6h | 根 `destructuring` + `utilities` 其余（绑定↔赋值转换/super 定位/范围移动）+ `tstransforms/importelision`（checker 就绪后） | 数组解构展开；import elision | factory 构造器 + checker `EmitResolver` |
 
 ## 这个包是什么（业务说明）
 
@@ -108,21 +110,21 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 | Go 文件 | Rust 文件 | 状态 | 说明 |
 |---|---|---|---|
 | `estransforms/exponentiation.go` | `exponentiation.rs` | ✅ 6c-1+6c-3 | `new_exponentiation_transformer`：`a ** b`→`Math.pow(a, b)`、`a **= b`（标识符）→`a = Math.pow(a, b)`、**`a.x **= b` / `a[x] **= b`（temp hoist）**→`(_a=a).x=Math.pow(_a.x,b)` / `(_a=a)[_b=x]=Math.pow(_a[_b],b)`（顶层语句路径 ec-threaded + `var` hoist）。DEFER：非顶层作用域内的 temp-hoist `**=`（需作用域级 var-env 嵌套）|
-| `estransforms/classfields.go` | `classfields.rs` | ✅ 6c-1/2/3 子集 | `new_class_fields_transformer`：实例字段 → 构造器 `this.x = init`（完整构造器插入族）；**static 字段** → 类后 `C.x = init`（返回 `SyntaxList[class, assignment...]`）。仅纯标识符字段（有初始化器）。DEFER 6c-4：私有名 `#x`（WeakMap/WeakSet）、`accessor` 字段、计算属性名、ClassExpression、参数属性、prologue、匿名类 static、`--target`/`useDefineForClassFields` 门控 |
+| `estransforms/classfields.go` | `classfields.rs` | ✅ 6c-1/2/3/4 子集 | `new_class_fields_transformer`：实例字段 → 构造器 `this.x = init`（完整构造器插入族）；**static 字段** → 类后 `C.x = init`（`SyntaxList[class, assignment...]`）；**私有实例字段** `#x`（直接 WeakMap 形态）→ 类前 `var _C_x = new WeakMap();` + 构造器 `_C_x.set(this, init)` + 成员体内私有访问重写（`obj.#x`→`_C_x.get(obj)`、`obj.#x = e`→`_C_x.set(obj, e)`）；**计算实例字段名** `[k] = init` → 类前 `var _a = k;` + 构造器 `this[_a] = init`。DEFER：named-helper 私有形态（`__classPrivateFieldGet/Set`）、私有 static 字段、私有方法/accessor（WeakSet）、`accessor` 字段、ClassExpression、参数属性、prologue、匿名类成员、name-generator 唯一命名、`--target`/`useDefineForClassFields` 门控 |
 | `estransforms/definitions.go` | `estransforms/lib.rs` | — DEFER(P5) | `GetESTransformer` + 各版本链 `NewES20xxTransformer`（crate 根聚合）；blocked-by：依赖各 es stage 就绪 |
-| `estransforms/async.go` | `async.rs` | — DEFER(P5) | `newAsyncTransformer`（async/await 降级） |
+| `estransforms/async.go` | `async.rs` | — DEFER(P5) | `newAsyncTransformer`（async/await 降级）；blocked-by：helper-emit 基建（`__awaiter`/`__generator` via `RequestEmitHelper`）+ await→yield 生成器状态机 + super/lexical-this 捕获，均未移植 |
 | `estransforms/classthis.go` | `classthis.rs` | — DEFER(P5) | class `this`/`#brand` 辅助 |
 | `estransforms/esdecorator.go` | `esdecorator.rs` | — DEFER(P5) | `newESDecoratorTransformer`（标准装饰器）；blocked-by：checker 元数据 + helper emit |
-| `estransforms/forawait.go` | `forawait.rs` | `newforawaitTransformer` |
-| `estransforms/logicalassignment.go` | `logicalassignment.rs` | `newLogicalAssignmentTransformer`（`&&=`/`\|\|=`/`??=`） |
-| `estransforms/namedevaluation.go` | `namedevaluation.rs` | named evaluation 辅助 |
-| `estransforms/nullishcoalescing.go` | `nullishcoalescing.rs` | `newNullishCoalescingTransformer`（`??`） |
-| `estransforms/objectrestspread.go` | `objectrestspread.rs` | `newObjectRestSpreadTransformer` |
-| `estransforms/optionalcatch.go` | `optionalcatch.rs` | `newOptionalCatchTransformer` |
-| `estransforms/optionalchain.go` | `optionalchain.rs` | `newOptionalChainTransformer`（`?.`） |
-| `estransforms/taggedtemplate.go` | `taggedtemplate.rs` | `newTaggedTemplateLiftRestrictionTransformer` |
-| `estransforms/usestrict.go` | `usestrict.rs` | `NewUseStrictTransformer` |
-| `estransforms/using.go` | `using.rs` | `newUsingDeclarationTransformer`（`using`/`await using`） |
+| `estransforms/forawait.go` | `forawait.rs` | — DEFER(P5) | `for await (x of y)` 降级；blocked-by：helper-emit 基建（`__asyncValues`/`__await`）未移植 |
+| `estransforms/logicalassignment.go` | `logicalassignment.rs` | — DEFER(P5) | `newLogicalAssignmentTransformer`（`&&=`/`\|\|=`/`??=`） |
+| `estransforms/namedevaluation.go` | `namedevaluation.rs` | — DEFER(P5) | named evaluation；blocked-by：所有路径 emit `__setFunctionName`/`__propKey`，需 helper-emit 基建 + `EmitContext.AssignedName` 跟踪 |
+| `estransforms/nullishcoalescing.go` | `nullishcoalescing.rs` | — DEFER(P5) | `newNullishCoalescingTransformer`（`??`） |
+| `estransforms/objectrestspread.go` | `objectrestspread.rs` | ✅ 6d 子集 | `new_object_rest_spread_transformer`：对象 spread `{ ...x, y }` → `Object.assign(Object.assign({}, x), { y })`（chunk + pairwise 折叠，`NewAssignHelper` = `Object.assign` 直出，无需 helper import）。DEFER：对象 **rest** 绑定（`const { a, ...rest } = o` → `__rest`）+ 参数/`for-of`/`catch`/赋值模式（需 `__rest` helper + 解构 transformer）|
+| `estransforms/optionalcatch.go` | `optionalcatch.rs` | — DEFER(P5) | `newOptionalCatchTransformer` |
+| `estransforms/optionalchain.go` | `optionalchain.rs` | ✅ 6d 子集 | `new_optional_chain_transformer`：`a?.b` / `a?.[x]` / `a?.()` / `a?.b()` / `a?.b.c` → `a === null \|\| a === void 0 ? void 0 : <访问/调用>`（`flatten_chain` 折叠单 `?.` + 尾随非可选段，简单 receiver）。DEFER：需 temp-hoist 的 receiver（`f()?.b`）、多 `?.`（`a?.b?.c`）、括号可选调用 `this`-capture（`(a?.b)()`）、`delete a?.b`、tagged template |
+| `estransforms/taggedtemplate.go` | `taggedtemplate.rs` | — DEFER(P5) | `newTaggedTemplateLiftRestrictionTransformer` |
+| `estransforms/usestrict.go` | `usestrict.rs` | — DEFER(P5) | `NewUseStrictTransformer` |
+| `estransforms/using.go` | `using.rs` | — DEFER(P5) | `using`/`await using` → try/finally + dispose；blocked-by：helper-emit 基建（`__addDisposableResource`/`__disposeResources`）未移植 |
 | `estransforms/utilities.go` | `utilities.rs` | 子包共享工具 |
 
 ### `moduletransforms`（5 文件）
@@ -302,9 +304,71 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 - **ast**（additive）：`lib.rs` 新增 `NodeData::SyntaxList(ListData)` 变体 + `new_syntax_list` 构造器；`for_each_child` 补一臂；`visitor.rs` `visit_each_child` 补一臂。新增 `NodeData` 变体爆炸半径：全工作区仅 `visit_each_child`/`for_each_child` 两处穷尽 match 需补臂（已补），`cargo build --workspace --all-targets` 全绿，**无依赖 crate match 臂被迫改动**。
 - **未触碰** `tsgo_binder`/`tsgo_checker`/`tsgo_parser` 逻辑。
 
-### TRACK 3（私有名 `#x`）DEFER 说明
+### TRACK 3（私有名 `#x`）DEFER 说明 → 6c-4 已落地直接 WeakMap 形态
 
-blocked-by：私有字段降级需要 (a) **私有环境映射**（`#x` → WeakMap brand 变量），(b) **私有访问表达式重写**（`this.#x` 读/写 → `_brand.get/set(this, …)`，需遍历方法体重写 `PropertyAccessExpression`-with-`PrivateIdentifier`），(c) **WeakMap brand 命名 + 类前 `var _C_x = new WeakMap();` 注入**，(d)（完整形态）`__classPrivateFieldGet/Set` helper-library import emit。这几块互锁且依赖尚未移植的私有访问遍历，留待 6c-4。
+6c-3 的 (a)(b)(c) 已在 6c-4 落地（见 6c-4 worklog）；(d) named-helper 形态仍 DEFER（需 helper-library import emit）。
+
+## 6c-4 worklog（red→green 推进记录）
+
+收口 `classfields` 可达面，逐子用例红→绿（6c-1/2/3 全部 10 - 4 = 6 个旧用例保持绿）：
+
+**私有实例字段 `#x`（直接 WeakMap 形态）**
+1. `private_field_initializer_uses_weakmap_set`（tracer，仅写）：`class C { #x = 1 }` → 恒等 `class C {\n    #x = 1;\n}` 红 → 实现 `build_private_env`（首遍扫描成员构建 `#x`→`_C_x` brand 映射；私有方法/accessor 或匿名类有私有成员 → 返回 `None` 整类延后）、`make_weakmap_brand_var`（`var _C_x = new WeakMap();`）、`make_private_set`（构造器 `_C_x.set(this, init)`），经 `SyntaxList[brand-var, class]` 返回 → 绿。
+2. `private_field_read_uses_weakmap_get`：`m() { return this.#x; }` → 实现 `lower_private_access`（递归重写成员体内私有访问）+ `make_private_get`（`obj.#x` → `_C_x.get(obj)`）→ 红→绿。
+3. `private_field_write_uses_weakmap_set`：`m(v) { this.#x = v; }` → 在 `lower_private_access` 顶部先拦截 `=` 赋值（`obj.#x = e` → `_C_x.set(obj, e)`，避免左值被当读取降为 `.get`）+ `make_private_set_call`（receiver-general）→ 红→绿。
+
+**计算实例字段名**
+4. `computed_field_name_is_hoisted_to_temp`：`class C { [k] = 1 }` → 恒等红 → 实现计算名分支：key 缓存进类前 `var _a = k;`（`make_temp_var` + `computed_temp_name` 确定性 `_a`/`_b`/… 命名），构造器内 `this[_a] = 1`（`make_this_element_assignment`，元素访问）→ 绿。语义关键：计算 key 必须在**类定义时求值一次**（不能内联到构造期重复求值），故 hoist 到 temp 而非内联 `this[k]`。
+
+**测试计数（6c-4 新增）**：`tsgo_transformers` +4 `#[test]`（私有字段 写/读/写 3 + 计算名 1）。crate 合计 48 unit + 12 doctest。
+
+### upstream（ast/printer）增长（6c-4）
+
+- **无**。私有字段 + 计算名降级全部用 arena 既有构造器（`new_new_expression`/`new_variable_statement`/`new_variable_declaration(_list)`/`new_element_access_expression`/`new_property_access_expression`/`new_call_expression`/`new_keyword_expression`/`new_binary_expression`/`new_token`/`new_expression_statement`/`new_class_like`/`new_syntax_list`）+ `visit_each_child` 默认递归即可。未触碰 `internal/ast/*` 或 `internal/printer/*`。
+
+## classfields 移植状态（6c-1..6c-4 收口）
+
+**已移植（直接、行为正确的 down-level 子集）**：
+- 实例字段初始化器 → 构造器 `this.x = init`（6c-1）。
+- 完整构造器插入族：合成构造器、既有构造器插入、`extends` 合成 `super(...arguments)`、既有 `super()` 后插入（6c-2）。
+- static 字段 → 类后 `C.x = init`（`SyntaxList`，6c-3）。
+- 私有实例字段 `#x`（直接 WeakMap `.get`/`.set` 形态）：类前 `var _C_x = new WeakMap();` + 构造器 `.set` + 成员体内私有读/写重写（6c-4）。
+- 计算实例字段名：key 缓存进类前 temp + 构造器 `this[_temp] = init`（6c-4）。
+
+**DEFER（→ P10 / checker / name-generator / helper-emit）**：
+- named-helper 私有形态 `__classPrivateFieldGet/Set(this, _C_x, …, "f")`（需 helper-library import emit）。
+- 私有 **static** 字段、私有 **方法/accessor**（`WeakSet` brand check）。
+- `accessor` 自动访问器（→ 合成私有 backing 字段 + get/set 重定向器；需 emit-context name generator 生成 backing 私有名 + 二遍 result visitor）。
+- **ClassExpression**（语句 hoist 需 IIFE / 逗号序列包裹，不能简单前置语句）。
+- **参数属性** `constructor(public x)`（属 `tstransforms` 的 TS-only 降级，非 estransforms）。
+- 构造器 **prologue 指令** 顺序、**匿名类** static/私有成员（需生成类名）。
+- name-generator 支撑的 **temp/brand 唯一命名**（当前 `_C_x` / `_a` 为确定性命名，存在理论碰撞）。
+- 私有访问重写当前仅覆盖**保留成员体**（方法/accessor）；**既有构造器体**与**字段初始化器内**的私有访问（`constructor(){ this.#x = 2 }`、`#y = this.#x`）尚未重写（无测试驱动，避免投机实现）。
+- `--target` / `useDefineForClassFields` **门控**（需 compilerOptions + checker）。
+
+## 6d worklog（red→green 推进记录）
+
+`estransforms` part 2。逐 stage 评估后发现 **6 个 stage 中仅 2 个无需 helper-library emit**，故只落地这两个；其余 4 个被同一基建缺口阻塞。
+
+**stage 1 — `optionalchain`（无 helper，全落地）**
+1. `optional_property_access_lowered`（tracer）：`a?.b;` → 恒等红 → 实现 `optional_chain_visit`（命中 `OPTIONAL_CHAIN` flag 的 PropertyAccess）+ `create_not_null_condition`（`left === null || right === void 0`，invert 形态）+ `make_void_zero` → `a === null || a === void 0 ? void 0 : a.b;` → 绿。
+2. `optional_element_access_lowered`：`a?.[x];` → 加 ElementAccess 臂 → 绿。
+3. `optional_call_lowered`：`a?.();` → 重构为统一的 `try_lower_optional_expression`（`flatten_chain` 折叠 receiver + 段序列 + `is_simple_copiable` 守卫）→ 绿。
+4. 回归补 `optional_method_call_lowered`（`a?.b()`）+ `optional_chain_trailing_property_lowered`（`a?.b.c`）：单 `?.` + 尾随非可选段经 flatten 自然组合 → 直接绿（验证泛化）。
+
+**stage 2 — `objectrestspread`（无 helper，spread 子集全落地）**
+5. `object_spread_only_lowers_to_assign`（tracer）：`const o = { ...x };` → 恒等红 → 实现 `chunk_object_literal_elements`（非 spread 段 chunk 成对象字面量、spread 段就地）+ `visit_object_literal_expression`（首段非对象字面量则前置 `{}`，pairwise 折叠）+ `assign_helper`（`Object.assign(...)` 直出）→ `Object.assign({}, x)` → 绿。
+6. `spread_then_property_chunks_pairwise`（`{ ...x, y }` → `Object.assign(Object.assign({}, x), { y })`）+ `property_then_spread_uses_chunk_as_target`（`{ a, ...x }` → `Object.assign({ a }, x)`）：chunk 逻辑既已完整 → 直接绿（验证 chunk 边界）。
+
+**stage 3–6 — `namedevaluation` / `using` / `forawait` / `async`：DEFER（同一硬阻塞）**
+
+经核查 Go 源：这 4 个 stage 的**每条输出路径**都引用 TS runtime helper（`__setFunctionName`/`__propKey`；`__addDisposableResource`/`__disposeResources`；`__asyncValues`/`__await`；`__awaiter`/`__generator`），且都经 `RequestEmitHelper` + `NewUnscopedHelperName` 生成。**Rust 侧 printer 尚无 helper-library emit 基建**（`internal/printer/{helpers,emitcontext,factory}.go` 的 `RequestEmitHelper`/unscoped helper-name/helper 定义 prologue 均未移植 — grep 确认 `.rs` 侧零命中）。因此这 4 个 stage **没有 helper-free tracer**，强行用普通标识符伪造 `__awaiter(...)` 会产出引用未定义 helper 的语义不完整代码，违反 TDD「只写当前测试所需的最小实现」。→ 全部 DEFER，建议先做一轮 **printer helper-emit 基建**（暂记 6d-2）再回来。
+
+**测试计数（6d 新增）**：`tsgo_transformers` +8 `#[test]`（optionalchain 5 + objectrestspread 3）+2 doctest（两个 `new_*_transformer`）。crate 合计 56 unit + 14 doctest。
+
+### upstream（ast/printer）增长（6d）
+
+- **无**。optionalchain + objectrestspread 全部用 arena 既有构造器（`new_conditional_expression`/`new_void_expression`/`new_numeric_literal`/`new_keyword_expression`/`new_binary_expression`/`new_property_access_expression`/`new_element_access_expression`/`new_call_expression`/`new_object_literal_expression`/`new_token`）+ `visit_each_child` 默认递归即可。未触碰 `internal/ast/*` 或 `internal/printer/*`。
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

@@ -189,6 +189,18 @@
 | `estransforms::classfields::tests::derived_class_synthesizes_constructor_with_super` | estransforms | **6c-2** 派生类合成构造器 + `super(...arguments)` | `class C extends B { x=1 }` → `constructor(){ super(...arguments); this.x=1 }` | `transformConstructorBody`(needsSyntheticConstructor) | ✓ |
 | `estransforms::classfields::tests::field_inits_inserted_after_super_call` | estransforms | **6c-2** 既有 `super()` 后插入字段 | `class C extends B { x=1; constructor(){ super(); this.y=2 } }` → `super(); this.x=1; this.y=2;` | `transformConstructorBodyWorker` | ✓ |
 | `estransforms::classfields::tests::static_field_becomes_assignment_after_class` | estransforms | **6c-3** static 字段 → 类后 `C.x = …` | `class C { static x = 1 }` → `class C {\n}\nC.x = 1;` | `addPropertyOrClassStaticBlockStatements` | ✓ |
+| `estransforms::classfields::tests::private_field_initializer_uses_weakmap_set` | estransforms | **6c-4** 私有字段（直接 WeakMap，仅写） | `class C { #x = 1 }` → `var _C_x = new WeakMap();` + ctor `_C_x.set(this, 1);` | `transformPrivateFieldInitializer` | ✓ |
+| `estransforms::classfields::tests::private_field_read_uses_weakmap_get` | estransforms | **6c-4** 私有读重写 | `m() { return this.#x; }` → `return _C_x.get(this);` | `createPrivateIdentifierAccess` | ✓ |
+| `estransforms::classfields::tests::private_field_write_uses_weakmap_set` | estransforms | **6c-4** 私有写重写 | `m(v) { this.#x = v; }` → `_C_x.set(this, v);` | `createPrivateIdentifierAssignment` | ✓ |
+| `estransforms::classfields::tests::computed_field_name_is_hoisted_to_temp` | estransforms | **6c-4** 计算字段名 → 类前 temp 缓存 | `class C { [k] = 1 }` → `var _a = k;` + ctor `this[_a] = 1;` | `getPropertyNameExpressionIfNeeded` | ✓ |
+| `estransforms::optionalchain::tests::optional_property_access_lowered` | estransforms | **6d** 可选属性访问 | `a?.b;` → `a === null \|\| a === void 0 ? void 0 : a.b;` | `visitOptionalExpression` | ✓ |
+| `estransforms::optionalchain::tests::optional_element_access_lowered` | estransforms | **6d** 可选元素访问 | `a?.[x];` → `… ? void 0 : a[x];` | `visitOptionalExpression` | ✓ |
+| `estransforms::optionalchain::tests::optional_call_lowered` | estransforms | **6d** 可选调用 | `a?.();` → `… ? void 0 : a();` | `flattenChain`(call) | ✓ |
+| `estransforms::optionalchain::tests::optional_method_call_lowered` | estransforms | **6d** 单 `?.` + 尾随调用 | `a?.b();` → `… ? void 0 : a.b();` | `flattenChain` | ✓ |
+| `estransforms::optionalchain::tests::optional_chain_trailing_property_lowered` | estransforms | **6d** 尾随非可选属性段 | `a?.b.c;` → `… ? void 0 : a.b.c;` | `flattenChain` | ✓ |
+| `estransforms::objectrestspread::tests::object_spread_only_lowers_to_assign` | estransforms | **6d** 仅 spread | `const o = { ...x };` → `Object.assign({}, x)` | `visitObjectLiteralExpression` | ✓ |
+| `estransforms::objectrestspread::tests::spread_then_property_chunks_pairwise` | estransforms | **6d** spread+属性 pairwise | `{ ...x, y }` → `Object.assign(Object.assign({}, x), { y })` | `chunkObjectLiteralElements` | ✓ |
+| `estransforms::objectrestspread::tests::property_then_spread_uses_chunk_as_target` | estransforms | **6d** 首 chunk 作 target | `{ a, ...x }` → `Object.assign({ a }, x)` | `chunkObjectLiteralElements` | ✓ |
 | `es2016_exponentiation`（旧占位，已被上面替代） | estransforms | `a ** b` 降级（target ES2015） | `a ** b` → `Math.pow(a, b)` | `newExponentiationTransformer` | ✓ |
 | `es2020_optional_chain` | estransforms | `a?.b` 降级（target ES2019） | `a?.b` → 三元/临时变量展开 | `newOptionalChainTransformer` | |
 | `es2020_nullish_coalescing` | estransforms | `a ?? b` 降级 | → `(a !== null && a !== void 0) ? a : b` | `newNullishCoalescingTransformer` | |
@@ -221,10 +233,13 @@
 | transform | conformance 子集 | 验证内容 | 目标轮 |
 |---|---|---|---|
 | exponentiation | `tests/cases/conformance/es2016/exponentiationOperator/**` | `**`/`**=`（含 element/property-access 目标 + 临时变量）→ `Math.pow` | 6c-1 ✓（标识符）/ 6c-3 ✓（顶层 property/element temp 目标）/ 6c-4（非顶层作用域 temp）+ P10 |
-| classfields | `tests/cases/conformance/classes/members/instanceAndStaticMembers/**`、`.../esnext/classFields/**`、`useDefineForClassFields/**` | 实例/静态字段、私有名、accessor、`super` 交互、`--target`/`useDefineForClassFields` 门控 | 6c-1/2 ✓（实例字段 + 构造器插入族）/ 6c-3 ✓（static 字段）/ 6c-4（私有名/accessor/computed/class-expr/target 门控）+ P10 |
-| esdecorator | `tests/cases/conformance/esDecorators/**` | 标准（TC39）装饰器降级 + helper emit | 6c-2+/P10 |
+| classfields | `tests/cases/conformance/classes/members/privateNames/**`、`.../esnext/classFields/**`、`.../classes/members/instanceAndStaticMembers/**`、`useDefineForClassFields/**` | 实例/静态字段、私有名（WeakMap）、计算名、accessor、`super` 交互、`--target`/`useDefineForClassFields` 门控 | 6c-1/2 ✓（实例字段 + 构造器插入族）/ 6c-3 ✓（static 字段）/ 6c-4 ✓（私有实例字段 WeakMap + 计算名）/ DEFER（named-helper 私有形态、accessor、class-expr、私有 static/方法、target 门控）+ P10 |
+| optionalchain | `tests/cases/conformance/es2020/optionalChaining*/**` | `?.` 属性/元素/调用 + 链 → 保护性条件表达式 | 6d ✓（单 `?.` + 尾随段 + 简单 receiver）/ DEFER（temp-hoist receiver、多 `?.`、`(a?.b)()` this-capture、`delete`、tagged template）+ P10 |
+| objectrestspread | `tests/cases/conformance/es2018/objectRestSpread*/**`、`.../es2017/**` | 对象 spread → `Object.assign`；对象 rest 绑定 → `__rest` | 6d ✓（对象字面量 spread 子集）/ DEFER（`__rest` 绑定/参数/`for-of`/`catch`/赋值模式，需 helper-emit + 解构）+ P10 |
+| async / forawait / using / namedevaluation | `tests/cases/conformance/es2017/asyncFunctions/**`、`.../es2018/asyncGenerators/**`、`.../esnext/usingDeclarations*/**` | `__awaiter`/`__generator`/`__asyncValues`/`__addDisposableResource`/`__setFunctionName` 等 helper 形态 | **DEFER（全部阻塞于 printer helper-emit 基建未移植）** → 需先做 helper-emit infra 轮 + P10 |
+| esdecorator | `tests/cases/conformance/esDecorators/**` | 标准（TC39）装饰器降级 + helper emit | DEFER（待 checker 元数据 + helper-emit）/P10 |
 
-> 6c-1 仅落地 `exponentiation`（标识符目标）与 `classfields`（无 heritage/无既有构造器的实例字段）子集；其余为登记项。
+> 6c-1 仅落地 `exponentiation`（标识符目标）与 `classfields`（无 heritage/无既有构造器的实例字段）子集；6c-4 收口 `classfields` 可达面（私有实例字段直接 WeakMap 形态 + 计算实例字段名）；其余（named-helper 私有形态、accessor、class-expr、私有 static/方法、参数属性、target 门控）为登记项，详见 `impl.md` 的「classfields 移植状态」。
 
 ## 与 impl.md 的对齐核对
 

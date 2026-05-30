@@ -79,3 +79,51 @@ fn field_inits_inserted_after_super_call() {
 fn static_field_becomes_assignment_after_class() {
     check_downlevel("class C { static x = 1 }", "class C {\n}\nC.x = 1;");
 }
+
+// Go: internal/transformers/estransforms/classfields.go:transformPrivateFieldInitializer
+//   + addPrivateIdentifierToEnvironment (WeakMap brand) — direct `.set`/`.get`
+//   form (the named-helper `__classPrivateFieldSet` import form is DEFER'd).
+// A private instance field is lowered to a module-scope `WeakMap` brand declared
+// before the class, and its initializer becomes `_C_x.set(this, ...)` in the
+// synthesized constructor (the brand + class are returned as a `SyntaxList`).
+#[test]
+fn private_field_initializer_uses_weakmap_set() {
+    check_downlevel(
+        "class C { #x = 1 }",
+        "var _C_x = new WeakMap();\nclass C {\n    constructor() { _C_x.set(this, 1); }\n}",
+    );
+}
+
+// Go: internal/transformers/estransforms/classfields.go:createPrivateIdentifierAccess (direct .get form)
+// A private field *read* `this.#x` inside a method body is rewritten to a
+// `_C_x.get(this)` WeakMap lookup using the class-scoped private environment.
+#[test]
+fn private_field_read_uses_weakmap_get() {
+    check_downlevel(
+        "class C { #x = 1; m() { return this.#x; } }",
+        "var _C_x = new WeakMap();\nclass C {\n    constructor() { _C_x.set(this, 1); }\n    m() { return _C_x.get(this); }\n}",
+    );
+}
+
+// Go: internal/transformers/estransforms/classfields.go:createPrivateIdentifierAssignment (direct .set form)
+// A private field *write* `this.#x = v` inside a method body is rewritten to a
+// `_C_x.set(this, v)` WeakMap store using the class-scoped private environment.
+#[test]
+fn private_field_write_uses_weakmap_set() {
+    check_downlevel(
+        "class C { #x = 1; m(v) { this.#x = v; } }",
+        "var _C_x = new WeakMap();\nclass C {\n    constructor() { _C_x.set(this, 1); }\n    m(v) { _C_x.set(this, v); }\n}",
+    );
+}
+
+// Go: internal/transformers/estransforms/classfields.go:getPropertyNameExpressionIfNeeded
+// A computed instance-field name is cached in a temp declared before the class
+// (so the key is evaluated once, at class-definition time), and the field
+// initializer becomes `this[<temp>] = ...` in the constructor.
+#[test]
+fn computed_field_name_is_hoisted_to_temp() {
+    check_downlevel(
+        "class C { [k] = 1 }",
+        "var _a = k;\nclass C {\n    constructor() { this[_a] = 1; }\n}",
+    );
+}
