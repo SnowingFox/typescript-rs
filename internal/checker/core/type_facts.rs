@@ -112,6 +112,43 @@ impl Checker {
             .collect();
         self.get_union_type(&kept)
     }
+
+    /// Returns the non-nullable form of `t`: the union constituents that are not
+    /// `null`/`undefined`/`void`.
+    ///
+    /// This is the reachable subset of Go's `GetNonNullableType` →
+    /// `getAdjustedTypeWithFacts(t, NEUndefinedOrNull)`: its core is the
+    /// constituent filter `getTypeWithFacts(t, NEUndefinedOrNull)`, which keeps
+    /// the members carrying the `NEUndefinedOrNull` fact and drops the
+    /// `undefined`/`null`/`void` ones (`undefined`/`void`/`null` are the only
+    /// reachable kinds lacking that fact). `string | undefined` reduces to
+    /// `string`, and a lone `undefined` to `never` (the empty union).
+    ///
+    /// DEFER(phase-4-checker-4az+): the `unknown` → `{} | null | undefined`
+    /// recombination (`recombineUnknownType`/`unknownUnionType`) and the
+    /// `mapType` over remaining instantiable `EQUndefinedOrNull` constituents to
+    /// `getGlobalNonNullableTypeInstantiation` (intersect with `{}` / apply the
+    /// `NonNullable<T>` global alias). blocked-by: `unknownUnionType` + the `{}`
+    /// empty-object / `NonNullable<T>` global alias (lib globals, P6).
+    // Go: internal/checker/checker.go:Checker.GetNonNullableType / getAdjustedTypeWithFacts (NEUndefinedOrNull, reachable subset)
+    pub(crate) fn get_non_null_type(&mut self, t: TypeId) -> TypeId {
+        // Go: `GetNonNullableType` is the identity outside strictNullChecks (a
+        // non-strict union never carries `null`/`undefined`).
+        if !self.strict_null_checks() {
+            return t;
+        }
+        let kept: Vec<TypeId> = self
+            .distributed_types(t)
+            .into_iter()
+            .filter(|&m| {
+                !self
+                    .get_type(m)
+                    .flags()
+                    .intersects(TypeFlags::NULLABLE | TypeFlags::VOID)
+            })
+            .collect();
+        self.get_union_type(&kept)
+    }
 }
 
 #[cfg(test)]

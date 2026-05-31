@@ -144,10 +144,29 @@ impl Checker {
             Kind::JsxFragment => self.check_jsx_fragment(program, node),
             Kind::FunctionExpression => self.check_function_expression(program, node),
             Kind::ArrowFunction => self.check_arrow_function(program, node),
+            Kind::NonNullExpression => self.check_non_null_assertion(program, node),
             // DEFER(phase-4-checker-4h+): remaining expression kinds are added in
             // later 4g slices / sub-phases.
             _ => self.error_type,
         }
+    }
+
+    // Checks a non-null assertion `expr!`: the operand's type with `null`/
+    // `undefined`/`void` removed (Go's `checkNonNullAssertion` non-optional-chain
+    // path -> `GetNonNullableType(checkExpression(node.Expression()))`).
+    //
+    // DEFER(phase-4-checker-4az+): the optional-chain form (`a?.b!`, when
+    // `node.Flags & NodeFlagsOptionalChain`), which Go routes to
+    // `checkNonNullChain` (strip the optional marker, non-null, re-propagate).
+    // blocked-by: optional-chain expression typing + optional-type markers.
+    // Go: internal/checker/checker.go:Checker.checkNonNullAssertion(10582)
+    fn check_non_null_assertion(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let expr = match program.arena().data(node) {
+            NodeData::NonNullExpression(d) => d.expression,
+            _ => return self.error_type,
+        };
+        let operand_type = self.check_expression(program, expr);
+        self.get_non_null_type(operand_type)
     }
 
     // Resolves an identifier reference to its (flow-narrowed) value type.

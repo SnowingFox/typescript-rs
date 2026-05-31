@@ -2700,6 +2700,96 @@ fn undefined_initializer_to_nullable_union_ok_under_strict() {
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
+// 4ay (genuine RED): a non-null assertion `x!` yields the operand's type with
+// `null`/`undefined` removed (Go's `checkNonNullAssertion` ->
+// `GetNonNullableType(checkExpression(expr))`). With `x: string | undefined`
+// under strictNullChecks, `x!` has type `string`, so assigning it to a `number`
+// reports `2322` whose SOURCE is the reduced `string` (not the original union).
+// Before the `NonNullExpression` arm existed, `x!` fell through to `error_type`
+// and reported nothing.
+// Go: internal/checker/checker.go:Checker.checkNonNullAssertion(10582)
+#[test]
+fn non_null_assertion_strips_undefined_then_reports_2322_against_number() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nvar n: number = x!;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// 4ay contrast (baseline, no `!`): WITHOUT the assertion, `x` keeps its declared
+// nullable union, so the SAME assignment reports `2322` whose source is the whole
+// union. The differing source string (the `undefined | string` union here vs the
+// reduced `string` above) is the observable effect of `!`. (The port orders union
+// members by type id, so `undefined` prints first — a known display divergence
+// from `tsc`, not a semantic one.)
+// Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration (union source)
+#[test]
+fn plain_nullable_reference_reports_2322_with_union_source() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nvar n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'undefined | string' is not assignable to type 'number'."
+    );
+}
+
+// 4ay guard: assigning `x!` (reduced to `string`) to a `string` target is OK
+// under strictNullChecks — the assertion removed the `undefined` that would
+// otherwise make `string | undefined` unassignable to `string`.
+// Go: internal/checker/checker.go:Checker.checkNonNullAssertion(10582)
+#[test]
+fn non_null_assertion_assignable_to_string_target() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nvar s: string = x!;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4ay (truthiness narrowing removes nullable): inside `if (x) { ... }` the truthy
+// branch narrows `x: string | undefined` to `string` (Go's
+// `narrowTypeByTruthiness` -> `getAdjustedTypeWithFacts(t, Truthy)`, which drops
+// the falsy-only `undefined`). Assigning the narrowed `x` to a `number` therefore
+// reports `2322` whose SOURCE is the reduced `string`, not the union. This rides
+// the existing 4t flow walk + 4g truthiness filter; the new observable is the
+// nullable case under strictNullChecks.
+// Go: internal/checker/flow.go:Checker.narrowTypeByTruthiness
+#[test]
+fn truthy_branch_narrows_out_nullable() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nif (x) {\n  var n: number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.resolveInstanceofExpression (right callable -> ok)
 #[test]
 fn instanceof_callable_right_reports_no_diagnostic() {
