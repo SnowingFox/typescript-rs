@@ -106,9 +106,9 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 | `tstransforms/utilities.go` | `tstransforms/utilities.rs` | ✅ 6b | `constant_expression`（+`ConstantValue`）：string/number/NaN/±Infinity/负数 → 工厂节点 |
 | `tstransforms/importelision.go` | `tstransforms/importelision.rs` | ✅ 6af+6ag+6ah 子集 | `new_import_elision_transformer(opt, resolver)` + 移除式 `import_elision_visit`（返回 `Option<NodeId>`，`None`=省略）。消费 checker `EmitResolver`（经 additive `EmitReferenceResolver`）做**作用域正确**的未引用 value import / type-only export 省略：(import 侧/6af) `ImportSpecifier`/`NamespaceImport` 未引用→丢；`NamedImports` 全丢→`None`（rebuild 用 `NodeList::new` 避免源跨度推断尾逗号）；`ImportClause` 既无 default 名又无 namedBindings→`None`→整 `ImportDeclaration` 省略；side-effect-only `import "m";`（无 clause）不省略。(export specifier 侧/6ag) `ExportSpecifier`/`NamedExports`/`ExportDeclaration` 按 `is_value_alias_declaration` 丢 type-only。(`import =`/`export =` 侧/6ah，消费 4ap) external-module `import x = require("m")` 未引用→丢（`is_referenced_alias_declaration`）；`export = <value>` 留、type-only `export = I` 丢（`is_value_alias_declaration`）。`should_emit_alias_declaration` = `is_referenced`（`IsInJSFile` 短路 DEFER）。DEFER：entity-name `import x = a.b`（需 `IsTopLevelValueImportEqualsWithEntityName`）、跨模块 re-export（需 `resolveExternalModuleSymbol`）、type-only 位置 use 续命、`verbatimModuleSyntax`/`isolatedModules` 策略 —— 见 mod.rs |
 | `tstransforms/runtimesyntax.go` | `tstransforms/runtimesyntax.rs` | ✅ 6n 子集 | `new_runtime_syntax_transformer`：**enum → IIFE**（`var E; (function(E){ E[E["A"]=0]="A"; … })(E\|\|(E={}))`：自动编号 + 显式数字初值 auto-续接 + 字符串成员无反向映射 + const enum 省略）+ **instantiated namespace → IIFE**（`export const x=1` → `N.x = 1`；未实例化 type-only namespace 省略，句法 `is_instantiated_module`）。**句法求值替代 checker `GetEnumMemberValue`**；IIFE 容器名用声明名文本（替代 `NewGeneratedNameForNode`）；body 多行经 `MULTI_LINE` emit flag（printer additive）。DEFER：const enum 成员引用 inlining（checker 常量求值）、非字面量初值常量折叠、`E.A`/`N.x` 成员引用重写（binder resolver）、exported/merged enum & namespace、嵌套/点名 namespace、`export =`、参数属性、`import=` 降级 |
-| `tstransforms/legacydecorators.go` | `tstransforms/legacydecorators.rs` | — DEFER(P5) | 实验性装饰器降级；blocked-by：checker 类型序列化 + 装饰器 helper 工厂 |
-| `tstransforms/metadata.go` | `tstransforms/metadata.rs` | — DEFER(P5) | `emitDecoratorMetadata`；blocked-by：同上（typeserializer） |
-| `tstransforms/typeserializer.go` | `tstransforms/typeserializer.rs` | — DEFER(P5) | 类型 → 元数据表达式；blocked-by：checker 类型→节点序列化 |
+| `tstransforms/legacydecorators.go` | `tstransforms/legacydecorators.rs` | ✅ 6al 子集 | `new_legacy_decorators_transformer(opt)` / `new_legacy_decorators_transformer_with_resolver(opt, resolver)`：**属性装饰器**首切片——`@dec x: number;` → 剥装饰器/类型的属性 `x;` + 尾随 `__decorate([dec, …], C.prototype/C, "x", void 0);`（instance→`C.prototype`、static→`C`），经 `SyntaxList` 展开。`design:type` 元数据（`--emitDecoratorMetadata`）经 4at `serialize_type_node_for_metadata` 序列化为 `Number`/`String`/…/`void 0`/`Object`（折叠 Go 的 metadata-注入两-transformer，metadata 居末）。`DECORATE_HELPER`/`METADATA_HELPER` 本 crate 内定义（priority 2/3）。严格 gate on `experimentalDecorators`（+metadata on `emitDecoratorMetadata`）。DEFER：class 装饰器 `let C=…;C=__decorate(...)` 包裹、method/accessor 装饰器（`Function`/`design:returntype`）、参数装饰器 `__param`+`design:paramtypes`、`TypeReference design:type`（4at→`Object`）、计算名、混合 instance/static 语句序、求值序边角 —— 见 mod.rs / 模块 doc |
+| `tstransforms/metadata.go` | `tstransforms/metadata.rs`（折入 `legacydecorators.rs`） | ✅ 6al 子集 | `design:type` 元数据注入折入 `legacydecorators` 单遍（`generate_class_element_decoration_statement` 的 metadata 臂）；`shouldAddTypeMetadata`(property) 子集。DEFER：`design:paramtypes`/`design:returntype`、`USE_NEW_TYPE_METADATA_FORMAT`、class/method 的 `Function` 类型、`injectClassTypeMetadata`（class 装饰器维度） |
+| `tstransforms/typeserializer.go` | （checker 4at `emit_resolver.rs` + `legacydecorators.rs` 的 `serialized_type_to_expression`） | ✅ 6al 子集 | 类型→元数据表达式分两段：checker 4at `serialize_type_node_for_metadata` 把 `: T` 注解 → `SerializedTypeNode` 枚举（keyword 子集）；transformer `serialized_type_to_expression` 把枚举 → AST（`Number`/`String`/`Boolean`/`BigInt`/`Symbol`/`Object` 标识符 或 `void 0`）。DEFER：`TypeReference`/union/intersection/conditional/`FunctionType`/`ArrayType`/字面量类型臂（blocked-by checker `GetTypeReferenceSerializationKind` + `serializeTypeNode` 递归，4at DEFER） |
 
 ### `estransforms`（17 文件）
 
@@ -181,8 +181,8 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 - [ ] `pub struct TypeEraserTransformer` + `pub fn new_type_eraser_transformer(opt) -> Transformer`　`// Go: typeeraser.go:NewTypeEraserTransformer`（**先做：过 TestTypeEraser**）
 - [x] `pub fn new_import_elision_transformer(opt, resolver) -> Transformer`（6af+6ag+6ah 子集）+ 移除式 `import_elision_visit`　`// Go: importelision.go:NewImportElisionTransformer`。消费 checker `EmitResolver`（经 additive `EmitReferenceResolver`）：6af 作用域正确未引用 value import 省略；6ag export specifier 侧（`is_value_alias_declaration`）；6ah external-module `import x = require("m")`（`is_referenced_alias_declaration`）+ `export =`（`is_value_alias_declaration`）。DEFER：entity-name `import x = a.b`（需 `IsTopLevelValueImportEqualsWithEntityName`）、跨模块 re-export（需 `resolveExternalModuleSymbol`）、type-only 位置续命、策略变体、`TestImportElision` 全表（~20 子用例）
 - [x] `new_runtime_syntax_transformer`（6n 子集：enum → IIFE + instantiated namespace → IIFE；见 6n worklog）　`// Go: runtimesyntax.go:NewRuntimeSyntaxTransformer`
-- [ ] `new_legacy_decorators_transformer` / `new_metadata_transformer`　`// Go: legacydecorators.go / metadata.go`
-- [ ] `get_set_accessor_value_parameter` + typeSerializer 内部　`// Go: typeserializer.go:GetSetAccessorValueParameter`
+- [x] `new_legacy_decorators_transformer` / `new_legacy_decorators_transformer_with_resolver`（6al 子集：属性装饰器 + `design:type` 元数据，消费 4at `serialize_type_node_for_metadata`；metadata 注入折入单遍，见 6al worklog）　`// Go: legacydecorators.go:NewLegacyDecoratorsTransformer / metadata.go`。DEFER：class 装饰器包裹、method/accessor/参数装饰器、`design:paramtypes`/`design:returntype`、`TypeReference design:type`
+- [ ] `get_set_accessor_value_parameter` + typeSerializer 内部（accessor 装饰器维度，DEFER）　`// Go: typeserializer.go:GetSetAccessorValueParameter`
 
 ### `estransforms`
 
@@ -1496,6 +1496,53 @@ System.register([<deps>], function (exports_1, context_1) {
 - **namespace/enum export container**（`ModuleDeclaration`/`EnumDeclaration` 容器）、**跨模块 UMD-export**（`symbolFile != referenceFile`）：blocked-by checker 4as DEFER（namespace/enum 容器解析 + `compiler.Program` P6）。
 - **shorthand-property-assignment 展开**（`{ x }` → `{ x: exports.x }`）、`IsExportName`/`IsLocalName`/auto-generate-name 的完整 gating：blocked-by 完整 `visitExpressionIdentifier` 形态 + emit-flag 接线。
 - **ESM / System 的 export 引用重写**：独立轮次（resolver 接线进 esmodule/systemmodule）。
+
+## 6al worklog — `tstransforms/legacydecorators`（`--experimentalDecorators` 首切片 — 属性装饰器 + `design:type` 元数据，消费 4at `serialize_type_node_for_metadata`）
+
+> 本轮目标：落地 P5 round 6al 的**首个端到端可观察切片**——legacy（实验性）装饰器 transform 的最小垂直切片。选定**属性装饰器 + `design:type` 元数据**形态，因为它正是行使 checker 4at `EmitResolver::serialize_type_node_for_metadata`（`: T` 注解 → 运行时构造器枚举 `SerializedTypeNode`）的最小路径。Go ground truth：`legacydecorators.go`（`visitClassDeclaration`/`transformClassDeclarationWithoutClassDecorators`/`generateClassElementDecorationExpression`/`getClassMemberPrefix`/`getExpressionForPropertyName`/`visitPropertyDeclaration`）+ `metadata.go`（`injectClassElementTypeMetadata`/`getOldTypeMetadata`/`shouldAddTypeMetadata`）+ `typeserializer.go`（`serializeTypeOfNode`/`serializeTypeNode`）+ `printer/factory.go`（`NewDecorateHelper`/`NewMetadataHelper`）+ `printer/helpers.go`（`decorateHelper`/`metadataHelper`，priority 2/3）。shape 对 `tsc --experimentalDecorators [--emitDecoratorMetadata]` 核对。
+
+### 管线折叠（受认可的对 Go 两-transformer 的偏离）
+
+Go 用两个串联 transformer：`MetadataTransformer` 先把合成 `@__metadata("design:type", T)` 装饰器注入被装饰成员的 modifier list，再由 `LegacyDecoratorsTransformer` 用 `isSyntheticMetadataDecorator` 分组、把全部装饰器（真 + 注入）收进 `__decorate([...])` 数组。本端口把两者**折成一遍**：`generate_class_element_decoration_statement` 直接构造装饰器表达式列表 `[<真装饰器>, <metadata>]`（metadata 居末，同 Go `transformAllDecoratorsOfDeclaration` 的顺序）。emit 文本与两-transformer 形态**逐字节一致**。理由：① 切片最小化；② 合成-装饰器往返纯属中间表示，对可观察输出无影响。已在模块 doc 写明此折叠。
+
+### 关键形态确认（vs Go / tsc）
+
+- **打印器单行约束**：装饰器数组 `[dec, __metadata("design:type", Number)]` 由 Rust printer 恒单行（`emit_expressions.rs` 硬编码 array 单行），Go/tsc 多行。故 expected 取单行形（同 6ae 的 array/object 内联约定）。
+- **helper 定义位置**：`__decorate`/`__metadata` helper 在本 crate `legacydecorators.rs` 内以 `pub static EmitHelper` 定义（printer crate 不在编辑范围，同 `spread.rs` 的 `SPREAD_ARRAY_HELPER`/`forawait.rs`），text/`import_name`/`priority` verbatim 自 Go `helpers.go`。priority `__decorate`=2 < `__metadata`=3 → prologue 中 decorate 定义先于 metadata（printer 按 priority 排序）。
+- **`void 0` 描述符**：属性（非 accessor）→ `__decorate(..., "x", void 0)`（Go `NewVoidZeroExpression`，使 `__decorate` 直接 `Object.defineProperty`）。
+- **成员名**：identifier 名 → 字符串字面量 `"x"`（Go `getExpressionForPropertyName`）。
+- **前缀**：instance → `C.prototype`；static → `C`（Go `getClassMemberPrefix` 的 `IsStatic` 分支）。
+- **类型剥离**：`visitPropertyDeclaration` 重建属性时丢 type/postfix（Go 传 `nil`），故 `@dec x: number;` → `x;`（即便无 typeeraser 串联）。
+
+### 诚实的 red→green 切片记录
+
+逐行为 test-first，每片先写测试再 `cargo test -p tsgo_transformers legacydecorators` 观察：
+
+1. **`instance_property_decorator_lowers_to_decorate_call`**（tracer，**genuine RED→GREEN**）：`class C { @dec x: number; }`（experimentalDecorators，无 metadata）期望 `<__decorate prologue>\nclass C {\n    x;\n}\n__decorate([dec], C.prototype, "x", void 0);`。先以恒等 skeleton 观察 RED——实测 `left: "class C {\n    @dec\n    x: number;\n}"`（装饰器+类型原样）。实现 `visit_class_declaration`（剥装饰器/类型 + 尾随 `__decorate` 语句 + SyntaxList 展开 + `__decorate` helper 注册）→ GREEN。证明 `__decorate` helper 注册 + 属性装饰器降级端到端跑通。
+2. **`property_decorator_emits_design_type_metadata`**（headline，**genuine RED→GREEN，消费 checker 4at**）：同输入 + `--emitDecoratorMetadata` + resolver 期望追加 `__metadata("design:type", Number)`（`__metadata` prologue）。slice 1 后观察 RED——实测 `left` 缺 metadata（`__decorate([dec], …)`、无 `__metadata` 定义）。实现 metadata 臂（`emit_decorator_metadata && resolver.is_some()` 时，经 `EmitReferenceResolver::serialize_type_node_for_metadata(type_node)` 取 `SerializedTypeNode`，映射成 AST 表达式，`new_metadata_helper` 包成 `__metadata("design:type", …)` 并 push 到装饰器列表末）→ GREEN。**证明 checker 4at 集成**（`Number` 来自 checker，非硬编码）。
+3. **`static_property_decorator_uses_class_name_prefix`**（**genuine RED→GREEN**）：`class C { @dec static x: number; }` 期望前缀 `C`（非 `C.prototype`）。slice 1/2 硬编码 `C.prototype`，故观察 RED——实测 `left: "…C.prototype, "x"…"`。实现 `is_static_member` + 前缀分支 → GREEN。
+4. **`string_typed_property_serializes_to_string_constructor`**（coverage，**green-on-arrival**）：`: string` → `String`。slice 2 的 `serialized_type_to_expression` 已映射全 `SerializedTypeNode` 枚举，故写完直接 GREEN——泛化守卫（pin 住 serializer 非 `Number`-only）。
+5. **`type_reference_property_serializes_to_object_fallback`**（DEFER 守卫，**green-on-arrival**）：`: D`（TypeReference）→ `Object`（checker 4at 把 TypeReference 臂 DEFER 到 `Object` 尾）。文档化 4at 边界。
+6. **`without_experimental_decorators_class_is_unchanged`**（gate 守卫，**green-on-arrival**）：experimentalDecorators off → 装饰类原样透传（无 `__decorate`）。
+7. **`class_decorator_is_left_unchanged`**（DEFER 守卫，**green-on-arrival**）：`@dec class C {}` → 原样透传（class 装饰器包裹 DEFER）。
+
+**为何 4–7 green-on-arrival（诚实说明）**：4/5 是 slice 2 metadata 映射的泛化/边界守卫（slice 2 impl 已覆盖全枚举与 `Object` 尾），6/7 是 gate/DEFER 守卫（实现里本就 gate-off/passthrough）。它们 pin 住正确性（serializer 泛化、option gate、class-装饰器不误降级），非各自的 RED 依赖。不伪造 RED（破坏再修是 TDD 文档明禁）。**硬证据**：slice 2（`Number` 真来自 checker）+ slice 5（`TypeReference`→`Object`）同绿排除"硬编码 `Number`"；slice 3（static→`C`）+ slice 1（instance→`C.prototype`）同绿排除"前缀写死"。
+
+### scope / upstream 增长（6al）
+
+> **scope**：仅 `-p tsgo_transformers`。**ZERO** ast/printer/checker 增长——消费 checker 4at `serialize_type_node_for_metadata` as-is；走 arena 既有构造器（`new_class_like`/`new_property_declaration`/`new_property_access_expression`/`new_string_literal`/`new_call_expression`/`new_array_literal_expression`/`new_void_expression`/`new_expression_statement`/`new_syntax_list`）+ 6d-2 helper infra（`request_emit_helper`/`read_emit_helpers`/`add_emit_helper` + `factory().new_unscoped_helper_name`）+ `ast::modifier_to_flag`。impl 变更仅：`EmitReferenceResolver` 加 1 个 additive passthrough `serialize_type_node_for_metadata` + 新文件 `tstransforms/legacydecorators.rs`（+ `pub mod legacydecorators;`）含 `pub static DECORATE_HELPER/METADATA_HELPER` + 2 个 additive 工厂 `new_legacy_decorators_transformer` / `new_legacy_decorators_transformer_with_resolver`。**未改任何既有公共 fn 签名**；新工厂 standalone-only（未接入 compiler 管线，同 importElision），故 `cargo build -p tsgo_compiler` 不需改 emitter 的 exhaustive 构造。未触碰 `internal/checker/**`、任何其它 crate、root Cargo、任何 `.go`、README。
+>
+> **测试计数（6al 新增）**：`tsgo_transformers` +7 `#[test]`（slice1/2/3 genuine RED→GREEN + 4 coverage/guard green-on-arrival）+ 3 doctest（`EmitReferenceResolver::serialize_type_node_for_metadata` + 两个工厂）→ **226 unit + 44 doctest**（6ak 基线 219+41）。`cargo test -p tsgo_transformers` 全绿；`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_transformers -- --check` 干净（仅改动文件）；`cargo build -p tsgo_compiler` 绿（证明公共 API additive）。
+
+### DEFER（本轮确认的 blocked-by，legacy 装饰器维度）
+
+- **class 装饰器** `@dec class C {}` → `let C = class C {}; C = __decorate([dec], C);` 包裹（含自引用 class-alias 改写、`export`/`default` 后置 export 语句）。blocked-by：`GetLocalName`/`GetDeclarationName` emit-name 形 + `classAliases` substitution（`getReferencedValueDeclaration`）+ `let`-binding 包裹。
+- **method/accessor 装饰器**：`design:type = Function`（硬编码，无 checker）、`design:returntype`、accessor 的 `getAllAccessorDeclarations` 合并。blocked-by：method/accessor 装饰形态 + `serializeReturnTypeOfNode`。
+- **参数装饰器** `__param(i, dec)` + `design:paramtypes`（`[Object, …]`）。blocked-by：`getDecoratorsOfParameters` + `serializeParameterTypesOfNode`。
+- **`TypeReference` `design:type`**（`: Date`/class → 实体构造器）：checker 4at 把 TypeReference 臂 DEFER 到 `Object`，故本轮 `: D` → `Object`。blocked-by：checker `GetTypeReferenceSerializationKind`（实体 value-ness + `printer.TypeReferenceSerializationKind`）+ `serializeTypeNode` 递归（union/intersection/conditional/`FunctionType`→`Function`/`ArrayType`→`Array`/字面量类型臂）。
+- **计算属性名**（`@dec [k]: T`）：需 Go `pendingExpressions` 内联 + temp 缓存。blocked-by：`getPropertyNameExpressionIfNeeded`。
+- **混合 instance+static 装饰成员的语句顺序**（Go instance-pass 先于 static-pass）：本轮按源序逐成员发 `__decorate`，单成员切片无差异；混合类待补。
+- **装饰器表达式求值序边角**、**重载上的装饰器**、`emitDecoratorMetadata` 的 `design:type=Function`（method/class）。
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

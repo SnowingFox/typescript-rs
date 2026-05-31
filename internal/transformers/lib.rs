@@ -15,7 +15,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use tsgo_ast::{NodeId, SymbolId};
-use tsgo_checker::{BoundProgram, EmitResolver};
+use tsgo_checker::{BoundProgram, EmitResolver, SerializedTypeNode};
 use tsgo_printer::EmitContext;
 
 pub mod chain;
@@ -242,6 +242,34 @@ impl EmitReferenceResolver {
     pub fn is_referenced_alias_declaration(&self, node: NodeId) -> bool {
         self.resolver
             .is_referenced_alias_declaration(self.program.as_ref(), node)
+    }
+
+    /// Serializes the type-annotation node `type_node` to the runtime-constructor
+    /// descriptor the legacy-decorator transform turns into the second argument
+    /// of `__metadata("design:type", <Ctor>)` (e.g. `: number` →
+    /// [`SerializedTypeNode::Number`]).
+    ///
+    /// Delegates to [`EmitResolver::serialize_type_node_for_metadata`] against
+    /// the bound program (Go's
+    /// `tstransforms/typeserializer.go:metadataSerializer.serializeTypeNode`,
+    /// driven by the metadata transform). `type_node`'s id must be the original
+    /// (pre-transform) annotation node so it resolves to the same syntactic node
+    /// in the bound program.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// use tsgo_checker::SerializedTypeNode;
+    /// # fn demo(r: &EmitReferenceResolver, ty: tsgo_ast::NodeId) -> SerializedTypeNode {
+    /// r.serialize_type_node_for_metadata(ty)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/transformers/tstransforms/typeserializer.go:metadataSerializer.serializeTypeNode
+    pub fn serialize_type_node_for_metadata(&self, type_node: NodeId) -> SerializedTypeNode {
+        self.resolver
+            .serialize_type_node_for_metadata(self.program.as_ref(), type_node)
     }
 }
 

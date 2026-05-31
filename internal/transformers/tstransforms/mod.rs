@@ -41,6 +41,7 @@
 //!   the checker `IsValueAliasDeclaration` / `markLinkedReferences` queries.
 
 pub mod importelision;
+pub mod legacydecorators;
 pub mod runtimesyntax;
 pub mod typeeraser;
 pub mod utilities;
