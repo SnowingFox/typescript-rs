@@ -166,6 +166,40 @@ impl EmitReferenceResolver {
         self.program.symbol_of_node(node)
     }
 
+    /// Returns the *export container* a value-position identifier `node`
+    /// resolves to: the `SourceFile` node when the use refers to a top-level
+    /// *exported variable* of the current module (which the CommonJS transform
+    /// rewrites into an `exports.<name>` access), else `None`.
+    ///
+    /// The CommonJS module transform consults this to rewrite a use of a local
+    /// export into a qualified `exports.<name>` access (Go's
+    /// `visitExpressionIdentifier` -> `GetReferencedExportContainer`). A use of
+    /// a non-exported local, or of an inner binding that shadows an export,
+    /// resolves to a non-exported symbol and yields `None`; an exported
+    /// function/class (a non-variable local) is referenced unqualified and so
+    /// also yields `None` when `prefix_locals` is false. Delegates to
+    /// [`EmitResolver::get_referenced_export_container`] against the bound
+    /// program.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// # fn demo(r: &EmitReferenceResolver, use_node: tsgo_ast::NodeId) -> Option<tsgo_ast::NodeId> {
+    /// r.get_referenced_export_container(use_node, false)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/binder/referenceresolver.go:referenceResolver.GetReferencedExportContainer
+    pub fn get_referenced_export_container(
+        &self,
+        node: NodeId,
+        prefix_locals: bool,
+    ) -> Option<NodeId> {
+        self.resolver
+            .get_referenced_export_container(self.program.as_ref(), node, prefix_locals)
+    }
+
     /// Reports whether the alias declaration `node` (e.g. an `export { x }`
     /// specifier) aliases something that is, transitively, a *value* — the query
     /// the export-side elision asks to keep value re-exports while dropping

@@ -1030,6 +1030,19 @@ fn register_import_use_substitutions(
                 .map(|b| b.decl.and_then(|d| resolver.symbol_of_declaration(d)))
                 .collect();
             for use_node in uses {
+                // Go: visitExpressionIdentifier checks GetReferencedExportContainer
+                // first. A use that resolves to a top-level *exported variable* of
+                // the current module has the source file as its export container,
+                // so it is qualified into an `exports.<name>` access. CommonJS
+                // passes `prefixLocals = false` (a plain use is not an export
+                // name), so exported functions/classes are referenced unqualified
+                // and yield `None`.
+                if let Some(container) = resolver.get_referenced_export_container(use_node, false) {
+                    if ec.arena().kind(container) == Kind::SourceFile {
+                        substitute_exported_name_use(ec, use_node);
+                        continue;
+                    }
+                }
                 let Some(symbol) = resolver.resolve_reference(use_node) else {
                     continue;
                 };
@@ -1067,6 +1080,22 @@ fn substitute_import_use(ec: &mut EmitContext, use_node: NodeId, binding: &Impor
         // Namespace import: `ns` -> `m_1`.
         None => ec.arena_mut().new_identifier(&require_var),
     };
+    ec.set_node_substitution(use_node, substitute);
+}
+
+/// Registers the use-site substitution for a use of a top-level exported
+/// variable: `x` → `exports.x` (a property access on the `exports` object,
+/// reusing the same `exports` identifier the export assignments reference).
+///
+/// Side effects: pushes member-access nodes; registers a node substitution.
+// Go: internal/transformers/moduletransforms/commonjsmodule.go:visitExpressionIdentifier (export-container rewrite)
+fn substitute_exported_name_use(ec: &mut EmitContext, use_node: NodeId) {
+    let name = ec.arena().text(use_node).to_string();
+    let exports = ec.arena_mut().new_identifier("exports");
+    let name_id = ec.arena_mut().new_identifier(&name);
+    let substitute = ec
+        .arena_mut()
+        .new_property_access_expression(exports, None, name_id);
     ec.set_node_substitution(use_node, substitute);
 }
 

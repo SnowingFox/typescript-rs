@@ -35,6 +35,7 @@
 | 6h | 根 `destructuring` + `utilities` 其余（绑定↔赋值转换/super 定位/范围移动）+ `tstransforms/importelision`（checker 就绪后） | 数组解构展开；import elision | factory 构造器 + checker `EmitResolver` |
 | **6af** ✅ 子集 | `tstransforms/importelision`：**作用域正确**的未引用 *value* import 省略，消费 checker 4an `EmitResolver::is_referenced`（经新增 additive `EmitReferenceResolver` 句柄）。整声明丢弃（全 binding 未引用）/ 逐 specifier 丢弃（部分引用），镜像 Go `ImportElisionTransformer` 形态 | `import { x } from "m";`（x 未用）→ ∅；`import { x } from "m"; x;` → 原样保留；`import { x } from "m"; function f(){ var x=1; x; }` → import 被省略（内层 `x` 不续命，证明真作用域解析 vs 按名匹配）| 新增 `EmitReferenceResolver`（包 `Rc<dyn BoundProgram>`+`EmitResolver`）作为 `new_import_elision_transformer(opt, resolver)` 的 **additive 入参**（**非** `TransformOptions` 字段——compiler crate 用穷举字面量构造 `TransformOptions`，加字段会破坏其编译且 compiler crate 不在编辑范围）。**无 ast/printer 增长**。DEFER：export 侧 / `import =`（需 `IsValueAliasDeclaration` / `IsTopLevelValueImportEqualsWithEntityName`）、type-only 位置 use 续命 value import、`verbatimModuleSyntax`/`isolatedModules`/`importsNotUsedAsValues` 策略变体、跨文件 alias |
 | **6aj** ✅ 子集 | `moduletransforms/commonjsmodule`：**作用域正确的 default & namespace import use-site 重写行为级覆盖**（消费 4an `resolve_reference`，复用 6ai resolver 接线）。6ai 已把 resolver 臂写成对 `ImportBinding.decl` 泛化匹配（named/default/namespace 三类同路径），但仅 named 有行为级测试；本轮补 default/namespace 的行为级覆盖 + scope guard。**无 impl 变更**（6ai 泛化臂已覆盖；观察到 GREEN 而非 RED——见 worklog 诚实记录），仅新增测试。| `import d from "m";\nd;` → `…__importDefault…\nconst m_1 = __importDefault(require("m"));\nm_1.default;`；`import * as ns from "m";\nns;` → `const m_1 = __importStar(require("m"));\nm_1;`；shadow guard：`import d from "m";\nfunction f(){ var d=1; d; }` → 内层 `d` 保持裸（resolve 到局部）| **ZERO** ast/printer/checker 增长，复用 6ai `new_common_js_module_transformer_with_resolver` + `ImportBinding.decl` + `register_import_use_substitutions` resolver 臂；既有公共 API 全未变。DEFER：export 引用重写（`GetReferencedExportContainer`）、shorthand-property 展开、ESM/System 重写、combined default+named interop 边角 |
+| **6ak** ✅ 子集 | `moduletransforms/commonjsmodule`：**CommonJS local-export use-site 重写**——消费 checker 4as `EmitResolver::get_referenced_export_container`（CJS 传 `prefix_locals=false`），把顶层**导出变量**的 value-position use 重写成 `exports.<name>`。扩展 6ai 的同一 identifier-substitution 阶段（resolver 臂）：每个 use 先查 export container，命中 SourceFile → 重写 `exports.x`，否则回落到既有 import-binding 匹配（Go `visitExpressionIdentifier` 顺序）。`EmitReferenceResolver` 加 additive `get_referenced_export_container` passthrough。不回归 6e/6w 声明降级。| `export const x = 1;\nx;` → `…__esModule…\nexports.x = void 0;\nexports.x = 1;\nexports.x;`（**genuine RED**：use 原本裸 `x;`）；scope guard：`export const x = 1;\nfunction f(){ const x=2; x; }` → 内层 `x` 保持裸（resolve 到局部，container=None）；non-export guard：`const y = 1;\ny;` → `y` 保持裸 | **ZERO** ast/printer/checker 增长（消费 4as as-is），复用 6ai resolver 接线 + 既有 `exports` 标识符 + `new_property_access_expression` + `set_node_substitution`；`EmitReferenceResolver::get_referenced_export_container` 为 additive passthrough，既有公共 fn 签名全未变。DEFER：exported function/class use-site（4as 的 `ExportHasLocal && !Variable` 守卫返回 None）、namespace/enum export container（4as DEFER）、shorthand-property 展开、ESM/System |
 
 ## 这个包是什么（业务说明）
 
@@ -1459,6 +1460,42 @@ System.register([<deps>], function (exports_1, context_1) {
 - **export 引用重写**（local `export { x }` 的 `exports.x` use-site）：blocked-by `GetReferencedExportContainer`（4an 未移植）。
 - **shorthand-property-assignment 展开**（`{ x }` → `{ x: m_1.x }`）、string-literal 名 element-access 形（`m_1["x"]`）：blocked-by `markLinkedReferences` + 完整 `visitExpressionIdentifier` 形态。
 - **combined default+named interop 边角**（超出可达最小面）、**ESM / System 的作用域正确引用重写**：独立轮次（同缺口，blocked-by resolver 接线进 esmodule/systemmodule）。
+
+## 6ak worklog — `moduletransforms/commonjsmodule` CommonJS local-export use-site 重写（消费 4as `get_referenced_export_container`）
+
+> 本轮目标：把 6ai/6aj 明确 DEFER 的 **local-export 引用重写**（`export const x = 1; x;` 的 use `x;` → `exports.x;`）补齐，由 checker 4as 落地的 `EmitResolver::get_referenced_export_container(program, node, prefix_locals) -> Option<NodeId>` 解锁。Go ground truth：`commonjsmodule.go:visitExpressionIdentifier`——当 `GetReferencedExportContainer` 返回 source file 时，identifier use 变成 `exports.<name>`（`exports` 对象上的 property access）。CJS 传 `prefix_locals = false`，故只有顶层**导出变量**被重写；exported function/class（`ExportHasLocal && !Variable`）、shadowed、非导出 use 都保持裸。
+
+### get_referenced_export_container 的消费 / 接线
+
+- **checker 侧（4as，as-is 消费，未改）**：`internal/checker/core/emit_resolver.rs:get_referenced_export_container`——以 `ExportValue | Value | Alias` meaning resolve use；若解析到带 `ExportValue` flag 的 phantom local，跟 `export_symbol` 到真正的 export symbol；`!prefix_locals && ExportHasLocal && !Variable` → 返回 None（exported fn/class 不前缀）；最后取 `parent`，当 parent 是 `ValueModule` 且 `value_declaration` 是 SourceFile 时返回该 SourceFile（否则 None）。
+- **transformers 侧（本轮）**：`EmitReferenceResolver` 加 **additive** `get_referenced_export_container(node, prefix_locals) -> Option<NodeId>` passthrough，委托给 `EmitResolver::get_referenced_export_container(self.program.as_ref(), node, prefix_locals)`。
+- **use-rewrite seam**：扩展 6ai 的 `register_import_use_substitutions` 的 resolver 臂——每个 use 标识符**先**查 `get_referenced_export_container(use, false)`，若返回 `Some(container)` 且 `arena.kind(container) == SourceFile`，则用新 helper `substitute_exported_name_use` 重写为 `exports.<name>`（复用既有 `exports` 标识符 + `new_property_access_expression`，不另造命名）并 `continue`；否则回落到既有 import-binding `resolve_reference` 匹配。顺序镜像 Go `visitExpressionIdentifier`（先 export container，后 import declaration）。
+- **为何 import use 不会误命中 export container**：import alias symbol 在 binder 里以 `parent=None` 进 module locals（非 export-context），故 `get_referenced_export_container` 在 `parent_symbol?` 处短路返回 None；既有 import 重写测试（`m_1.x`/`m_1.default`/`m_1`）全绿即验证此点未回归。
+
+### 诚实的 red→green 切片记录
+
+逐行为 test-first，每片先写测试再 `cargo test -p tsgo_transformers <name>` 观察：
+
+1. **`scoped_exported_variable_use_rewrites_to_exports_access`**（**genuine RED→GREEN**）：`export const x = 1;\nx;`（commonjs + resolver）期望 `Object.defineProperty(exports, "__esModule", { value: true });\nexports.x = void 0;\nexports.x = 1;\nexports.x;`。先观察 RED——实测 `left: "…exports.x = 1;\nx;"`（use 裸 `x;`，声明降级已正确 `exports.x = void 0;\nexports.x = 1;` 证明不回归 6e/6w）。加 passthrough + substitution 臂 → GREEN。
+2. **`scoped_export_use_shadowed_by_inner_local_is_not_rewritten`**（scope guard，**green-on-arrival**）：`export const x = 1;\nfunction f() {\n    const x = 2;\n    x;\n}` → 内层 `x` 保持裸（resolve 到局部 `const x`，container=None），仅声明降级为 `exports.x`。写完直接 GREEN。
+3. **`scoped_non_exported_local_use_stays_bare`**（non-export guard，**green-on-arrival**）：`const y = 1;\ny;` → `y` 保持裸（无 export container）、无 `__esModule` marker。写完直接 GREEN。
+
+**为何 2/3 green-on-arrival（诚实说明）**：slice 2/3 只断言 use **保持裸**——在 slice 1 impl 之前 export-container 重写根本不存在（use 永远裸），slice 1 impl 之后 resolver 对 shadowed/非导出 use 返回 None 故仍裸。它们是 slice 1 重写**作用域正确性**的回归守卫（pin 住"只有顶层导出变量被前缀"），非 slice 1 的依赖。不伪造 RED（破坏再修是 TDD 文档明禁）。
+
+**测试非空泛的硬证据**：slice 1（顶层 `x` 真被重写成 `exports.x`）证明 resolver 把 use 解析到 export container；slice 2（内层 `x` 保持裸）证明作用域正确——若按名匹配，slice 2 内层 `x` 会误写成 `exports.x`（红）；若 slice 1 的 resolver 返回 None，slice 1 会红。三片同绿排除这两种退化。
+
+### scope / upstream 增长（6ak）
+
+> **scope**：仅 `-p tsgo_transformers`。**ZERO** ast/printer/checker 增长——消费 checker 4as `get_referenced_export_container` as-is；复用 6ai `new_common_js_module_transformer_with_resolver` + `register_import_use_substitutions` resolver 臂 + 既有 `exports` 标识符构造 + `new_property_access_expression` + `set_node_substitution`。impl 变更仅：`EmitReferenceResolver` 加 1 个 additive passthrough fn + `commonjsmodule.rs` 加 1 个私有 helper `substitute_exported_name_use` + resolver 臂内插入 export-container 检查。既有公共 fn 签名（含 CJS 构造器）全未变。未触碰 `internal/checker/**`、任何其它 crate、root Cargo、任何 `.go`、README。
+>
+> **测试计数（6ak 新增）**：`tsgo_transformers` +3 `#[test]`（exported-var use genuine RED→GREEN + 2 scope/non-export guard green-on-arrival）+ 1 doctest（`EmitReferenceResolver::get_referenced_export_container`）→ **219 unit + 41 doctest**（6aj 基线 216+40）。`cargo test -p tsgo_transformers` 全绿；`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_transformers -- --check` 干净；`cargo build -p tsgo_compiler` 绿（证明公共 API additive）。
+
+### DEFER（本轮确认的 blocked-by，CJS export use-site 重写维度）
+
+- **exported function/class use-site**：Go 的 `ExportHasLocal && !Variable` 守卫使非变量导出 use 返回 None（不前缀，按 runtime local 裸引用）——4as 已实现此守卫，故本轮天然排除，无需额外代码。
+- **namespace/enum export container**（`ModuleDeclaration`/`EnumDeclaration` 容器）、**跨模块 UMD-export**（`symbolFile != referenceFile`）：blocked-by checker 4as DEFER（namespace/enum 容器解析 + `compiler.Program` P6）。
+- **shorthand-property-assignment 展开**（`{ x }` → `{ x: exports.x }`）、`IsExportName`/`IsLocalName`/auto-generate-name 的完整 gating：blocked-by 完整 `visitExpressionIdentifier` 形态 + emit-flag 接线。
+- **ESM / System 的 export 引用重写**：独立轮次（resolver 接线进 esmodule/systemmodule）。
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

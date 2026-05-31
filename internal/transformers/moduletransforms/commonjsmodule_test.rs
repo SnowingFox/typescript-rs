@@ -495,6 +495,48 @@ fn scoped_shadowed_namespace_import_use_is_not_rewritten() {
     );
 }
 
+// Go: commonjsmodule.go:visitExpressionIdentifier -> GetReferencedExportContainer
+// 6ak slice 1: with a scope-correct resolver, a module-level use of a top-level
+// *exported variable* is rewritten to a qualified `exports.<name>` access. The
+// declaration `export const x = 1;` is already lowered to `exports.x = void 0;`
+// + `exports.x = 1;` (6e/6w); this slice adds the USE-SITE rewrite `x;` ->
+// `exports.x;` (the use resolves to a top-level export of the current module,
+// whose export container is the source file). Verified against tsc --module
+// commonjs.
+#[test]
+fn scoped_exported_variable_use_rewrites_to_exports_access() {
+    check_cjs_scoped(
+        "export const x = 1;\nx;",
+        "Object.defineProperty(exports, \"__esModule\", { value: true });\nexports.x = void 0;\nexports.x = 1;\nexports.x;",
+    );
+}
+
+// Go: commonjsmodule.go:visitExpressionIdentifier (scope-correct, via
+// GetReferencedExportContainer over the resolved symbol — NOT a name match).
+// 6ak slice 2 (the headline scope-correctness property): the outer `x` is an
+// exported variable, but the only bare `x` use lives inside `function f()`
+// where an inner `const x` shadows it, so the use resolves to the non-exported
+// local and its export container is `None`. The use therefore stays bare; only
+// the declaration is lowered to `exports.x`. A textual name match would wrongly
+// rewrite the inner use to `exports.x`; the scope-correct resolver keeps it `x`.
+#[test]
+fn scoped_export_use_shadowed_by_inner_local_is_not_rewritten() {
+    check_cjs_scoped(
+        "export const x = 1;\nfunction f() {\n    const x = 2;\n    x;\n}",
+        "Object.defineProperty(exports, \"__esModule\", { value: true });\nexports.x = void 0;\nexports.x = 1;\nfunction f() {\n    const x = 2;\n    x;\n}",
+    );
+}
+
+// Go: commonjsmodule.go:visitExpressionIdentifier (GetReferencedExportContainer
+// returns nil for a non-exported local).
+// 6ak slice 3 (the non-export guard): `y` is a plain top-level local (not
+// exported), so its use has no export container and stays bare. The module has
+// no value exports, so there is no `__esModule` marker either.
+#[test]
+fn scoped_non_exported_local_use_stays_bare() {
+    check_cjs_scoped("const y = 1;\ny;", "const y = 1;\ny;");
+}
+
 // Track 2 branch: when `module` is not CommonJS, the transform is a passthrough.
 #[test]
 fn non_commonjs_module_kind_is_passthrough() {
