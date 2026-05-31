@@ -61,6 +61,53 @@ fn instance_property_decorator_lowers_to_decorate_call() {
     );
 }
 
+// Go: internal/transformers/tstransforms/legacydecorators.go:generateClassElementDecorationExpression
+// (the `descriptor` is `NewKeywordExpression(KindNullKeyword)` for a method member,
+// vs `void 0` for a property — verified against the `else` branch).
+// Verified against Go / `tsc --experimentalDecorators`:
+//   class C { @dec m() {} }
+//   =>
+//   class C { m() { } }
+//   __decorate([dec], C.prototype, "m", null);
+//
+// Tracer bullet (6ao): an instance *method* decorator lowers to a trailing
+// `__decorate([dec], C.prototype, "m", null);` statement — the 4th argument is
+// `null` (not the property's `void 0`), the method's decorator is stripped, and
+// the `__decorate` helper is emitted once in the prologue. No metadata.
+#[test]
+fn instance_method_decorator_lowers_to_decorate_call() {
+    check_legacy(
+        "class C { @dec m() {} }",
+        &format!(
+            "{}\nclass C {{\n    m() {{ }}\n}}\n__decorate([dec], C.prototype, \"m\", null);",
+            DECORATE_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:getClassMemberPrefix
+// (`ast.IsStatic(member)` -> `GetDeclarationName(node)` i.e. `C`, applied to a
+// *method* member just as for a property).
+// Verified against Go / `tsc --experimentalDecorators`:
+//   class C { @dec static m() {} }
+//   =>
+//   class C { static m() { } }
+//   __decorate([dec], C, "m", null);
+//
+// A static method decorates the class constructor directly: the `__decorate`
+// target is the bare class name `C` (not `C.prototype`), and the `static`
+// modifier is kept on the stripped method.
+#[test]
+fn static_method_decorator_uses_class_name_prefix() {
+    check_legacy(
+        "class C { @dec static m() {} }",
+        &format!(
+            "{}\nclass C {{\n    static m() {{ }}\n}}\n__decorate([dec], C, \"m\", null);",
+            DECORATE_HELPER.text
+        ),
+    );
+}
+
 // Go: internal/transformers/tstransforms/metadata.go:injectClassElementTypeMetadata
 // + typeserializer.go:serializeTypeNode (KindNumberKeyword -> "Number"), consumed
 // by legacydecorators.go:transformAllDecoratorsOfDeclaration (metadata last).
@@ -187,6 +234,66 @@ fn function_typed_property_serializes_to_function_constructor() {
         "class C { @dec x: () => void; }",
         &format!(
             "{}\n{}\nclass C {{\n    x;\n}}\n__decorate([dec, __metadata(\"design:type\", Function)], C.prototype, \"x\", void 0);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/metadata.go:getOldTypeMetadata
+// (`shouldAddTypeMetadata` true for KindMethodDeclaration -> typeserializer.go
+// `serializeTypeOfNode` KindMethodDeclaration -> `NewIdentifier("Function")`;
+// `shouldAddReturnTypeMetadata` true for *every* method -> `serializeReturnTypeOfNode`
+// with no annotation -> `NewVoidZeroExpression()`).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`
+// (modulo the DEFER'd `design:paramtypes` entry tsc inserts between the two):
+//   class C { @dec m() {} }
+//   =>
+//   class C { m() { } }
+//   __decorate([dec, __metadata("design:type", Function), __metadata("design:returntype", void 0)], C.prototype, "m", null);
+//
+// Headline (6ao): with `--emitDecoratorMetadata`, a decorated method appends a
+// `design:type` = `Function` (Go hardcodes `Function` for methods, no checker)
+// *and* a `design:returntype` (always emitted for methods; `void 0` with no
+// return annotation), in that order, after the real decorator. Both `__decorate`
+// (priority 2) and `__metadata` (priority 3) helpers land in the prologue.
+//
+// DEFER (blocked-by `serializeParameterTypesOfNode` + `getDecoratorsOfParameters`):
+// tsc also emits `__metadata("design:paramtypes", [])` between `design:type` and
+// `design:returntype`; this round omits it (the emitted shape is the faithful
+// subset Go would produce minus that entry).
+#[test]
+fn method_decorator_emits_design_type_function_and_void_returntype() {
+    check_legacy_metadata(
+        "class C { @dec m() {} }",
+        &format!(
+            "{}\n{}\nclass C {{\n    m() {{ }}\n}}\n__decorate([dec, __metadata(\"design:type\", Function), __metadata(\"design:returntype\", void 0)], C.prototype, \"m\", null);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeReturnTypeOfNode
+// (`IsFunctionLike(node) && node.Type() != nil` -> `serializeTypeNode(node.Type())`),
+// the return-type annotation routed through the same checker serialization as a
+// property's `design:type` (KindNumberKeyword -> "Number").
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`
+// (modulo the DEFER'd `design:paramtypes` entry):
+//   class C { @dec m(): number { return 1; } }
+//   =>
+//   class C { m() { return 1; } }
+//   __decorate([dec, __metadata("design:type", Function), __metadata("design:returntype", Number)], C.prototype, "m", null);
+//
+// Headline (6ao): a method's `design:returntype` serializes its *return-type
+// annotation* via the checker (`serialize_type_node_for_metadata`), exactly as a
+// property's `design:type` does — `: number` -> `Number` (not the `void 0`
+// fallback used when the annotation is absent). `design:type` stays the
+// hard-coded `Function`.
+#[test]
+fn method_decorator_serializes_return_type_annotation() {
+    check_legacy_metadata(
+        "class C { @dec m(): number { return 1; } }",
+        &format!(
+            "{}\n{}\nclass C {{\n    m() {{ return 1; }}\n}}\n__decorate([dec, __metadata(\"design:type\", Function), __metadata(\"design:returntype\", Number)], C.prototype, \"m\", null);",
             DECORATE_HELPER.text, METADATA_HELPER.text
         ),
     );

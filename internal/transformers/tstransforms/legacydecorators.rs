@@ -298,7 +298,7 @@ fn visit_class_declaration(ec: &mut EmitContext, node: NodeId, cfg: &Config) -> 
         .nodes
         .iter()
         .copied()
-        .filter(|&m| property_has_decorators(ec.arena(), m))
+        .filter(|&m| member_has_decorators(ec.arena(), m))
         .collect();
     if decorated_members.is_empty() {
         // No member decorators in the reachable subset; recurse unchanged.
@@ -310,17 +310,20 @@ fn visit_class_declaration(ec: &mut EmitContext, node: NodeId, cfg: &Config) -> 
         .unwrap_or_default();
 
     // Rebuild members, stripping decorators (and the type annotation) from each
-    // decorated property (Go's `visitPropertyDeclaration`).
+    // decorated property/method (Go's `visitPropertyDeclaration` /
+    // `visitMethodDeclaration`).
     let new_members: Vec<NodeId> = members
         .nodes
         .iter()
         .copied()
-        .map(|m| {
-            if property_has_decorators(ec.arena(), m) {
+        .map(|m| match ec.arena().kind(m) {
+            Kind::PropertyDeclaration if member_has_decorators(ec.arena(), m) => {
                 rebuild_property_without_decorators(ec.arena_mut(), m)
-            } else {
-                m
             }
+            Kind::MethodDeclaration if member_has_decorators(ec.arena(), m) => {
+                rebuild_method_without_decorators(ec.arena_mut(), m)
+            }
+            _ => m,
         })
         .collect();
     let updated_class = ec.arena_mut().new_class_like(
@@ -344,16 +347,18 @@ fn visit_class_declaration(ec: &mut EmitContext, node: NodeId, cfg: &Config) -> 
     ec.arena_mut().new_syntax_list(NodeList::new(statements))
 }
 
-/// Reports whether `member` is a property declaration carrying at least one
-/// decorator.
+/// Reports whether `member` is a property or method declaration carrying at
+/// least one decorator (the reachable subset of Go's
+/// `NodeOrChildIsDecorated`).
 ///
 /// Side effects: none (reads the arena).
-fn property_has_decorators(arena: &NodeArena, member: NodeId) -> bool {
-    matches!(
-        arena.data(member),
-        NodeData::PropertyDeclaration(d)
-            if d.modifiers.as_ref().is_some_and(|m| m.modifier_flags.contains(ModifierFlags::DECORATOR))
-    )
+fn member_has_decorators(arena: &NodeArena, member: NodeId) -> bool {
+    let modifiers = match arena.data(member) {
+        NodeData::PropertyDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::MethodDeclaration(d) => d.modifiers.as_ref(),
+        _ => None,
+    };
+    modifiers.is_some_and(|m| m.modifier_flags.contains(ModifierFlags::DECORATOR))
 }
 
 /// Rebuilds a property declaration with its decorators removed from the modifier
@@ -370,6 +375,39 @@ fn rebuild_property_without_decorators(arena: &mut NodeArena, member: NodeId) ->
     };
     let modifiers = strip_decorators(arena, modifiers.as_ref());
     arena.new_property_declaration(modifiers, name, None, None, initializer)
+}
+
+/// Rebuilds a method declaration with its decorators removed from the modifier
+/// list and its type parameters / return type / postfix token / full signature
+/// dropped, keeping the asterisk, name, parameters, and body (Go's
+/// `LegacyDecoratorsTransformer.visitMethodDeclaration`, which passes `nil` for
+/// the type parameters, return type, postfix, and full signature).
+///
+/// Side effects: pushes the rebuilt method node.
+// Go: internal/transformers/tstransforms/legacydecorators.go:visitMethodDeclaration
+fn rebuild_method_without_decorators(arena: &mut NodeArena, member: NodeId) -> NodeId {
+    let (modifiers, asterisk_token, name, parameters, body) = match arena.data(member) {
+        NodeData::MethodDeclaration(d) => (
+            d.modifiers.clone(),
+            d.asterisk_token,
+            d.name,
+            d.parameters.clone(),
+            d.body,
+        ),
+        _ => unreachable!("kind/data mismatch"),
+    };
+    let modifiers = strip_decorators(arena, modifiers.as_ref());
+    arena.new_method_declaration(
+        modifiers,
+        asterisk_token,
+        name,
+        None,
+        None,
+        parameters,
+        None,
+        None,
+        body,
+    )
 }
 
 /// Returns a copy of `modifiers` with decorator entries removed and the flag
@@ -398,8 +436,73 @@ fn strip_decorators(arena: &NodeArena, modifiers: Option<&ModifierList>) -> Opti
     })
 }
 
-/// Builds the `__decorate([...], <prefix>, "<name>", void 0);` statement for a
-/// decorated property `member` of class `class_name` (Go's
+/// Appends the `design:*` reflection-metadata decorators for `member` to
+/// `decorator_expressions` (the folded equivalent of Go's `MetadataTransformer`
+/// injecting `@__metadata(...)` into the member's modifiers, in
+/// `getOldTypeMetadata` order: `design:type`, then `design:returntype`).
+///
+/// - A **property** appends `design:type`, serialized from its type annotation
+///   (or `Object` when absent — Go's `serializeTypeNode(nil)`).
+/// - A **method** appends `design:type` = `Function` (Go's `serializeTypeOfNode`
+///   hard-codes `Function` for `KindMethodDeclaration`, no checker) and a
+///   `design:returntype` (`shouldAddReturnTypeMetadata` is true for *every*
+///   method); with no return annotation the return type serializes to `void 0`
+///   (Go's `serializeReturnTypeOfNode`).
+///
+/// DEFER (blocked-by `serializeParameterTypesOfNode` + `getDecoratorsOfParameters`):
+/// `design:paramtypes`, which Go emits between `design:type` and
+/// `design:returntype`. Also DEFER: the async-method `Promise` return form
+/// (Go's `serializeReturnTypeOfNode` `IsAsyncFunction` arm).
+///
+/// Side effects: pushes the metadata call/identifier nodes; requests the
+/// `__metadata` helper.
+// Go: internal/transformers/tstransforms/metadata.go:getOldTypeMetadata
+fn append_type_metadata(
+    ec: &mut EmitContext,
+    resolver: &EmitReferenceResolver,
+    member: NodeId,
+    decorator_expressions: &mut Vec<NodeId>,
+) {
+    match ec.arena().kind(member) {
+        Kind::PropertyDeclaration => {
+            let type_node = match ec.arena().data(member) {
+                NodeData::PropertyDeclaration(d) => d.type_node,
+                _ => None,
+            };
+            let value = match type_node {
+                Some(type_node) => serialize_type_node(ec, resolver, type_node),
+                None => ec.arena_mut().new_identifier("Object"),
+            };
+            let metadata = new_metadata_helper(ec, "design:type", value);
+            decorator_expressions.push(metadata);
+        }
+        Kind::MethodDeclaration => {
+            // Go: `serializeTypeOfNode` returns `NewIdentifier("Function")` for a
+            // method declaration — a fixed runtime constructor, not a checker query.
+            let function = ec.arena_mut().new_identifier("Function");
+            let type_meta = new_metadata_helper(ec, "design:type", function);
+            decorator_expressions.push(type_meta);
+            // DEFER: `design:paramtypes` (Go inserts it here).
+            // `design:returntype`: Go's `serializeReturnTypeOfNode` serializes the
+            // return-type annotation when present (routed through the same checker
+            // serialization as a property's `design:type`), else `void 0`.
+            let return_type = match ec.arena().data(member) {
+                NodeData::MethodDeclaration(d) => d.type_node,
+                _ => None,
+            };
+            let value = match return_type {
+                Some(return_type) => serialize_type_node(ec, resolver, return_type),
+                None => make_void_zero(ec),
+            };
+            let return_meta = new_metadata_helper(ec, "design:returntype", value);
+            decorator_expressions.push(return_meta);
+        }
+        _ => {}
+    }
+}
+
+/// Builds the `__decorate([...], <prefix>, "<name>", <descriptor>);` statement
+/// for a decorated property or method `member` of class `class_name` (Go's
 /// `generateClassElementDecorationExpression` wrapped in an expression
 /// statement). Returns `None` when the member is not actually decorated.
 ///
@@ -417,23 +520,12 @@ fn generate_class_element_decoration_statement(
         return None;
     }
 
-    // With `--emitDecoratorMetadata`, append a `design:type` metadata decorator
+    // With `--emitDecoratorMetadata`, append the `design:*` metadata decorators
     // *after* the real decorators (Go's `transformAllDecoratorsOfDeclaration`
-    // orders metadata last). The runtime constructor comes from the checker's
-    // type serialization over the property's type annotation; a property with no
-    // annotation serializes to `Object` (Go's `serializeTypeNode(nil)`).
+    // orders metadata last).
     if cfg.emit_decorator_metadata {
         if let Some(resolver) = &cfg.resolver {
-            let type_node = match ec.arena().data(member) {
-                NodeData::PropertyDeclaration(d) => d.type_node,
-                _ => None,
-            };
-            let value = match type_node {
-                Some(type_node) => serialize_type_node(ec, resolver, type_node),
-                None => ec.arena_mut().new_identifier("Object"),
-            };
-            let metadata = new_metadata_helper(ec, "design:type", value);
-            decorator_expressions.push(metadata);
+            append_type_metadata(ec, resolver, member, &mut decorator_expressions);
         }
     }
 
@@ -450,9 +542,16 @@ fn generate_class_element_decoration_statement(
     };
 
     let member_name = expression_for_property_name(ec, member);
-    // A property (not an accessor) uses `void 0` so `__decorate` invokes
-    // `Object.defineProperty` directly.
-    let descriptor = make_void_zero(ec);
+    // Go's `generateClassElementDecorationExpression`: a property (not an
+    // accessor) uses `void 0` so `__decorate` invokes `Object.defineProperty`
+    // directly; every other member (here, a method) uses `null` so `__decorate`
+    // invokes `Object.getOwnPropertyDescriptor` directly. (Accessor members with
+    // the `accessor` modifier are DEFER, so a plain property maps to `void 0`.)
+    let descriptor = if ec.arena().kind(member) == Kind::PropertyDeclaration {
+        make_void_zero(ec)
+    } else {
+        ec.arena_mut().new_keyword_expression(Kind::NullKeyword)
+    };
 
     let decorate = new_decorate_helper(
         ec,
@@ -464,25 +563,27 @@ fn generate_class_element_decoration_statement(
     Some(ec.arena_mut().new_expression_statement(decorate))
 }
 
-/// Reports whether a property member carries the `static` modifier.
+/// Reports whether a property or method member carries the `static` modifier.
 ///
 /// Side effects: none (reads the arena).
 // Go: internal/ast/utilities.go:IsStatic
 fn is_static_member(arena: &NodeArena, member: NodeId) -> bool {
-    matches!(
-        arena.data(member),
-        NodeData::PropertyDeclaration(d)
-            if d.modifiers.as_ref().is_some_and(|m| m.modifier_flags.contains(ModifierFlags::STATIC))
-    )
+    let modifiers = match arena.data(member) {
+        NodeData::PropertyDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::MethodDeclaration(d) => d.modifiers.as_ref(),
+        _ => None,
+    };
+    modifiers.is_some_and(|m| m.modifier_flags.contains(ModifierFlags::STATIC))
 }
 
-/// Collects the (real) decorator expressions of a property member, in source
-/// order.
+/// Collects the (real) decorator expressions of a property or method member, in
+/// source order.
 ///
 /// Side effects: none (reads the arena).
 fn decorator_expressions_of(arena: &NodeArena, member: NodeId) -> Vec<NodeId> {
     let modifiers = match arena.data(member) {
         NodeData::PropertyDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::MethodDeclaration(d) => d.modifiers.as_ref(),
         _ => None,
     };
     let Some(modifiers) = modifiers else {
@@ -501,14 +602,15 @@ fn decorator_expressions_of(arena: &NodeArena, member: NodeId) -> Vec<NodeId> {
         .collect()
 }
 
-/// Builds the member-name expression for a property: an identifier name becomes
-/// a string literal `"name"` (Go's `getExpressionForPropertyName`).
+/// Builds the member-name expression for a property or method: an identifier
+/// name becomes a string literal `"name"` (Go's `getExpressionForPropertyName`).
 ///
 /// Side effects: may push the string-literal node.
 // Go: internal/transformers/tstransforms/legacydecorators.go:getExpressionForPropertyName
 fn expression_for_property_name(ec: &mut EmitContext, member: NodeId) -> NodeId {
     let name = match ec.arena().data(member) {
         NodeData::PropertyDeclaration(d) => d.name,
+        NodeData::MethodDeclaration(d) => d.name,
         _ => unreachable!("kind/data mismatch"),
     };
     match ec.arena().kind(name) {
