@@ -1970,21 +1970,89 @@ lsp_object! {
 // `<Feature>Options` into each concrete `*RegistrationOptions`, so the ported
 // structs are flat too (field order mirrors the Go declaration order).
 
-/// A union of a plain glob `pattern` string or a `RelativePattern`
-/// (LSP `Pattern | RelativePattern`).
+lsp_object! {
+    /// A workspace folder inside the server (LSP `WorkspaceFolder`); also the
+    /// object arm of [`WorkspaceFolderOrURI`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:WorkspaceFolder
+    WorkspaceFolder {
+        ["The associated URI for this workspace folder."]
+        req uri: crate::URI => "uri",
+        ["The name of the workspace folder, used to refer to it in the UI."]
+        req name: String => "name",
+    }
+}
+
+/// A union of a [`WorkspaceFolder`] object or a bare `URI` string (LSP
+/// `WorkspaceFolder | URI`), used as the `baseUri` of a [`RelativePattern`].
 ///
-/// The string variant is ported; the object (`RelativePattern`) variant is kept
-/// as raw JSON because its `baseUri: WorkspaceFolderOrURI` tree is not yet
-/// ported. Exactly one variant is set.
-// DEFER: RelativePattern (baseUri: WorkspaceFolderOrURI / WorkspaceFolder).
-// blocked-by: generator pass landing the workspace-folder/URI tree.
+/// Exactly one field is set; mirrors Go's pointer-pair representation. On
+/// deserialize, a JSON object yields [`WorkspaceFolderOrURI::workspace_folder`]
+/// and a JSON string yields [`WorkspaceFolderOrURI::uri`]; any other kind is an
+/// error.
+// Go: internal/lsp/lsproto/lsp_generated.go:WorkspaceFolderOrURI
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WorkspaceFolderOrURI {
+    /// The `WorkspaceFolder` object variant.
+    pub workspace_folder: Option<WorkspaceFolder>,
+    /// The bare `URI` string variant.
+    pub uri: Option<crate::URI>,
+}
+
+impl Serialize for WorkspaceFolderOrURI {
+    // Go: lsp_generated.go:WorkspaceFolderOrURI.MarshalJSONTo
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.workspace_folder, &self.uri) {
+            (Some(f), None) => f.serialize(serializer),
+            (None, Some(u)) => u.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of WorkspaceFolderOrURI should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkspaceFolderOrURI {
+    // Go: lsp_generated.go:WorkspaceFolderOrURI.UnmarshalJSONFrom
+    //
+    // Go peeks the JSON kind: a `{` object is a WorkspaceFolder, a `"` string is
+    // a bare URI; any other kind is an error.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut out = WorkspaceFolderOrURI::default();
+        if value.is_object() {
+            out.workspace_folder = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+        } else if let Some(s) = value.as_str() {
+            out.uri = Some(crate::URI(s.to_string()));
+        } else {
+            return Err(de::Error::custom(
+                "WorkspaceFolderOrURI: expected an object or a string",
+            ));
+        }
+        Ok(out)
+    }
+}
+
+lsp_object! {
+    /// A relative glob pattern resolved against a base `WorkspaceFolder`/`URI`
+    /// (LSP `RelativePattern`); the object arm of [`PatternOrRelativePattern`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:RelativePattern
+    RelativePattern {
+        ["The workspace folder or base URI this pattern is matched against."]
+        req base_uri: WorkspaceFolderOrURI => "baseUri",
+        ["The actual glob pattern."]
+        req pattern: String => "pattern",
+    }
+}
+
+/// A union of a plain glob `pattern` string or a [`RelativePattern`]
+/// (LSP `Pattern | RelativePattern`). Exactly one variant is set.
 // Go: internal/lsp/lsproto/lsp_generated.go:PatternOrRelativePattern
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PatternOrRelativePattern {
     /// The plain glob-pattern string variant.
     pub pattern: Option<String>,
-    /// The `RelativePattern` object variant (deferred: raw JSON).
-    pub relative_pattern: Option<serde_json::Value>,
+    /// The `RelativePattern` object variant.
+    pub relative_pattern: Option<RelativePattern>,
 }
 
 impl Serialize for PatternOrRelativePattern {
@@ -2010,7 +2078,7 @@ impl<'de> Deserialize<'de> for PatternOrRelativePattern {
         if let Some(s) = value.as_str() {
             out.pattern = Some(s.to_string());
         } else if value.is_object() {
-            out.relative_pattern = Some(value);
+            out.relative_pattern = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
         } else {
             return Err(de::Error::custom(
                 "PatternOrRelativePattern: expected a string or an object",
@@ -2646,6 +2714,266 @@ impl<'de> Deserialize<'de> for DiagnosticOptionsOrRegistrationOptions {
     }
 }
 
+// === WorkspaceOptions subtree (the `ServerCapabilities.workspace` field) ===
+//
+// The workspace-specific server capabilities tree: `WorkspaceOptions` and its
+// `workspaceFolders` / `fileOperations` / `textDocumentContent` members. Each
+// struct mirrors the Go declaration (field names, optionality, order) so the
+// (de)serialization is byte-for-byte compatible.
+
+/// A union of a string or a boolean (LSP `string | boolean`).
+///
+/// Exactly one field is set; mirrors Go's pointer-pair representation. On
+/// deserialize, a JSON string yields [`StringOrBoolean::string`] and a JSON
+/// boolean yields [`StringOrBoolean::boolean`]; any other kind is an error.
+///
+/// # Examples
+/// ```
+/// let v: tsgo_lsproto::StringOrBoolean = serde_json::from_str("\"id-1\"").unwrap();
+/// assert_eq!(v.string.as_deref(), Some("id-1"));
+/// ```
+// Go: internal/lsp/lsproto/lsp_generated.go:StringOrBoolean
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StringOrBoolean {
+    /// The string variant, if the value was a JSON string.
+    pub string: Option<String>,
+    /// The boolean variant, if the value was a JSON boolean.
+    pub boolean: Option<bool>,
+}
+
+impl Serialize for StringOrBoolean {
+    // Go: lsp_generated.go:StringOrBoolean.MarshalJSONTo
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.string, self.boolean) {
+            (Some(s), None) => serializer.serialize_str(s),
+            (None, Some(b)) => serializer.serialize_bool(b),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of StringOrBoolean should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StringOrBoolean {
+    // Go: lsp_generated.go:StringOrBoolean.UnmarshalJSONFrom
+    //
+    // Go peeks the JSON kind: a `"` string fills `string`, a `t`/`f` boolean
+    // fills `boolean`; any other kind is an error.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut out = StringOrBoolean::default();
+        if let Some(s) = value.as_str() {
+            out.string = Some(s.to_string());
+        } else if let Some(b) = value.as_bool() {
+            out.boolean = Some(b);
+        } else {
+            return Err(de::Error::custom(
+                "StringOrBoolean: expected a string or a boolean",
+            ));
+        }
+        Ok(out)
+    }
+}
+
+lsp_object! {
+    /// The server's support for workspace folders (LSP
+    /// `WorkspaceFoldersServerCapabilities`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:WorkspaceFoldersServerCapabilities
+    WorkspaceFoldersServerCapabilities {
+        ["Whether the server has support for workspace folders."]
+        opt supported: bool => "supported",
+        ["Whether the server wants to receive workspace-folder change notifications (a registration id string or a boolean)."]
+        opt change_notifications: StringOrBoolean => "changeNotifications",
+    }
+}
+
+/// Whether a [`FileOperationPattern`] matches files or folders (LSP
+/// `FileOperationPatternKind`, a string enum).
+///
+/// Mirrors Go `type FileOperationPatternKind string`. A [`Cow<'static, str>`]
+/// newtype so the predefined kinds are `const`-constructible and unknown values
+/// round-trip as their raw string; (de)serializes as a plain JSON string.
+// Go: internal/lsp/lsproto/lsp_generated.go:FileOperationPatternKind
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct FileOperationPatternKind(pub Cow<'static, str>);
+
+impl FileOperationPatternKind {
+    /// The pattern matches a file only.
+    pub const FILE: FileOperationPatternKind = FileOperationPatternKind(Cow::Borrowed("file"));
+    /// The pattern matches a folder only.
+    pub const FOLDER: FileOperationPatternKind = FileOperationPatternKind(Cow::Borrowed("folder"));
+}
+
+impl Serialize for FileOperationPatternKind {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for FileOperationPatternKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(FileOperationPatternKind(Cow::Owned(String::deserialize(
+            deserializer,
+        )?)))
+    }
+}
+
+lsp_object! {
+    /// Matching options for a [`FileOperationPattern`] (LSP
+    /// `FileOperationPatternOptions`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:FileOperationPatternOptions
+    FileOperationPatternOptions {
+        ["Whether the pattern should be matched ignoring casing."]
+        opt ignore_case: bool => "ignoreCase",
+    }
+}
+
+lsp_object! {
+    /// A glob pattern (with match kind/options) used by a [`FileOperationFilter`]
+    /// (LSP `FileOperationPattern`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:FileOperationPattern
+    FileOperationPattern {
+        ["The glob pattern to match (e.g. `**/*.{ts,js}`)."]
+        req glob: String => "glob",
+        ["Whether to match files or folders with this pattern (both if absent)."]
+        opt matches: FileOperationPatternKind => "matches",
+        ["Additional options used during matching."]
+        opt options: FileOperationPatternOptions => "options",
+    }
+}
+
+lsp_object! {
+    /// A filter to describe in which file-operation requests a server is
+    /// interested (LSP `FileOperationFilter`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:FileOperationFilter
+    FileOperationFilter {
+        ["A Uri scheme like `file` or `untitled`."]
+        opt scheme: String => "scheme",
+        ["The actual file-operation pattern."]
+        reqnn pattern: FileOperationPattern => "pattern",
+    }
+}
+
+lsp_object! {
+    /// The options to register for file operations (LSP
+    /// `FileOperationRegistrationOptions`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:FileOperationRegistrationOptions
+    FileOperationRegistrationOptions {
+        ["The actual filters."]
+        reqnn filters: Vec<FileOperationFilter> => "filters",
+    }
+}
+
+lsp_object! {
+    /// Options for the server's interest in file-operation notifications and
+    /// requests (LSP `FileOperationOptions`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:FileOperationOptions
+    FileOperationOptions {
+        ["The server is interested in receiving `didCreateFiles` notifications."]
+        opt did_create: FileOperationRegistrationOptions => "didCreate",
+        ["The server is interested in receiving `willCreateFiles` requests."]
+        opt will_create: FileOperationRegistrationOptions => "willCreate",
+        ["The server is interested in receiving `didRenameFiles` notifications."]
+        opt did_rename: FileOperationRegistrationOptions => "didRename",
+        ["The server is interested in receiving `willRenameFiles` requests."]
+        opt will_rename: FileOperationRegistrationOptions => "willRename",
+        ["The server is interested in receiving `didDeleteFiles` notifications."]
+        opt did_delete: FileOperationRegistrationOptions => "didDelete",
+        ["The server is interested in receiving `willDeleteFiles` requests."]
+        opt will_delete: FileOperationRegistrationOptions => "willDelete",
+    }
+}
+
+lsp_object! {
+    /// Options for the `workspace/textDocumentContent` request (LSP
+    /// `TextDocumentContentOptions`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentContentOptions
+    TextDocumentContentOptions {
+        ["The schemes for which the server provides content."]
+        reqnn schemes: Vec<String> => "schemes",
+    }
+}
+
+lsp_object! {
+    /// Registration options for the `workspace/textDocumentContent` request (LSP
+    /// `TextDocumentContentRegistrationOptions`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentContentRegistrationOptions
+    TextDocumentContentRegistrationOptions {
+        ["The schemes for which the server provides content."]
+        reqnn schemes: Vec<String> => "schemes",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+/// A union of [`TextDocumentContentOptions`] or
+/// [`TextDocumentContentRegistrationOptions`] (LSP
+/// `TextDocumentContentOptions | TextDocumentContentRegistrationOptions`).
+///
+/// On decode, the variants are tried in declaration order (plain options first,
+/// then registration options), keeping the first that succeeds — mirroring the
+/// Go `json.Unmarshal`-and-fall-through logic. Since the plain options variant
+/// accepts any object carrying `schemes` (ignoring an extra `id`), it wins
+/// whenever it decodes, exactly as in Go. Exactly one variant is set.
+// Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentContentOptionsOrRegistrationOptions
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TextDocumentContentOptionsOrRegistrationOptions {
+    /// The plain options variant.
+    pub options: Option<TextDocumentContentOptions>,
+    /// The registration-options variant.
+    pub registration_options: Option<TextDocumentContentRegistrationOptions>,
+}
+
+impl Serialize for TextDocumentContentOptionsOrRegistrationOptions {
+    // Go: lsp_generated.go:TextDocumentContentOptionsOrRegistrationOptions.MarshalJSONTo
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.options, &self.registration_options) {
+            (Some(o), None) => o.serialize(serializer),
+            (None, Some(r)) => r.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of TextDocumentContentOptionsOrRegistrationOptions should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TextDocumentContentOptionsOrRegistrationOptions {
+    // Go: lsp_generated.go:TextDocumentContentOptionsOrRegistrationOptions.UnmarshalJSONFrom
+    //
+    // Go reads the raw value once and tries to decode it as each variant in
+    // order (options, then registration options), keeping the first success.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut out = TextDocumentContentOptionsOrRegistrationOptions::default();
+        if let Ok(v) = serde_json::from_value::<TextDocumentContentOptions>(value.clone()) {
+            out.options = Some(v);
+        } else if let Ok(v) =
+            serde_json::from_value::<TextDocumentContentRegistrationOptions>(value)
+        {
+            out.registration_options = Some(v);
+        } else {
+            return Err(de::Error::custom(
+                "TextDocumentContentOptionsOrRegistrationOptions: no variant matched",
+            ));
+        }
+        Ok(out)
+    }
+}
+
+lsp_object! {
+    /// Workspace-specific server capabilities (LSP `ServerCapabilities.workspace`,
+    /// the `WorkspaceOptions` object).
+    // Go: internal/lsp/lsproto/lsp_generated.go:WorkspaceOptions
+    WorkspaceOptions {
+        ["The server's support for workspace folders."]
+        opt workspace_folders: WorkspaceFoldersServerCapabilities => "workspaceFolders",
+        ["The server's interest in file-operation notifications/requests."]
+        opt file_operations: FileOperationOptions => "fileOperations",
+        ["The server's support for the `workspace/textDocumentContent` request."]
+        opt text_document_content: TextDocumentContentOptionsOrRegistrationOptions => "textDocumentContent",
+    }
+}
+
 lsp_object! {
     /// The capabilities the server provides (LSP `ServerCapabilities`).
     ///
@@ -2728,10 +3056,8 @@ lsp_object! {
         opt diagnostic_provider: DiagnosticOptionsOrRegistrationOptions => "diagnosticProvider",
         ["The server provides inline completions."]
         opt inline_completion_provider: BooleanOrInlineCompletionOptions => "inlineCompletionProvider",
-        ["Workspace-specific server capabilities (deferred: raw JSON)."]
-        // DEFER: WorkspaceOptions (workspaceFolders / fileOperations / textDocumentContent).
-        // blocked-by: generator pass.
-        opt workspace: serde_json::Value => "workspace",
+        ["Workspace-specific server capabilities."]
+        opt workspace: WorkspaceOptions => "workspace",
         ["Source-definition support via `custom/textDocument/sourceDefinition`."]
         opt custom_source_definition_provider: bool => "customSourceDefinitionProvider",
         ["VS auto-insert provider options."]

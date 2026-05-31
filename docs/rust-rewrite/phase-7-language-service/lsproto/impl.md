@@ -243,15 +243,64 @@
 - [x] 升级 `DiagnosticOptionsOrRegistrationOptions` → typed `DiagnosticRegistrationOptions`（含 `req` 非指针 bool）
 - [x] 升级 `SemanticTokensOptionsOrRegistrationOptions` → typed `SemanticTokensRegistrationOptions`（含 `reqnn legend`）
 
+## 续轮：`WorkspaceOptions` 子树 + `RelativePattern` 对象变体（本轮落地）
+
+> 上一轮把 registration-options base tree 落地后，lsproto 仅剩 **2 个 raw-JSON DEFER 槽**：`ServerCapabilities.workspace`（`WorkspaceOptions`）与 `PatternOrRelativePattern` 的 `RelativePattern` 对象变体。**本轮**把这两处全部升级为真实 typed 树，**清空 `ServerCapabilities` 最后一个 raw-JSON DEFER 槽**。全部编辑在 `generated.rs`(+`generated_test.rs`)，无新模块、无新第三方 crate。
+
+**落地的类型（与 Go 字段名 / optionality / embedding 1:1）**：
+- `StringOrBoolean`（`string | boolean` union）：复刻 Go `PeekKind` 派发（`"`→string、`t`/`f`→boolean，其余 err）。手写 serde，恰一变体置位。
+- `WorkspaceFoldersServerCapabilities { supported?: bool, changeNotifications?: StringOrBoolean }`（`lsp_object!`，全 `opt`）。
+- `FileOperationPatternKind`（string enum：`file`/`folder`，手写 `Cow<'static,str>` newtype，风格同 `PositionEncodingKind`）。
+- `FileOperationPatternOptions { ignoreCase?: bool }`、`FileOperationPattern { glob: req String, matches?: FileOperationPatternKind, options?: FileOperationPatternOptions }`、`FileOperationFilter { scheme?: String, pattern: reqnn FileOperationPattern }`、`FileOperationRegistrationOptions { filters: reqnn Vec<FileOperationFilter> }`、`FileOperationOptions { didCreate?/willCreate?/didRename?/willRename?/didDelete?/willDelete?: FileOperationRegistrationOptions }`（自底向上）。
+- `TextDocumentContentOptions { schemes: reqnn Vec<String> }`、`TextDocumentContentRegistrationOptions { schemes: reqnn, id?: String }`、`TextDocumentContentOptionsOrRegistrationOptions`（try-decode union：先 options 后 registration，复刻 Go fall-through——options 吃任意带 `schemes` 的对象、忽略多余 `id`，故 options 总胜，与 Go 一致）。
+- `WorkspaceOptions { workspaceFolders?, fileOperations?, textDocumentContent? }`（`lsp_object!`，全 `opt`），并把 `ServerCapabilities.workspace` 从 `serde_json::Value` 换成 `Option<WorkspaceOptions>`。
+- `WorkspaceFolder { uri: req URI, name: req String }`（`URI` 复用 `lsp.rs` 既有 newtype）、`WorkspaceFolderOrURI`（`WorkspaceFolder | URI` union：`{`→folder、`"`→URI string）、`RelativePattern { baseUri: req WorkspaceFolderOrURI, pattern: req String }`；把 `PatternOrRelativePattern.relative_pattern` 从 `Option<serde_json::Value>` 换成 `Option<RelativePattern>`（serialize 臂不变 `r.serialize()`；deserialize 对象臂改为 `serde_json::from_value::<RelativePattern>`）。
+
+**类型/所有权映射（本子树关键决策）**：
+
+| Go 构造 | Rust 表示 | 说明 |
+|---|---|---|
+| `StringOrBoolean{ String *string; Boolean *bool }` | `{ string: Option<String>, boolean: Option<bool> }` + 手写 serde | `"`→string、`t`/`f`→boolean、其余 err；恰一变体置位。 |
+| `*T json:",omitzero"`（workspace 子树各可选字段） | `lsp_object!` 的 `opt T` | skip-none、缺→`None`、`null` 拒绝、未知键忽略。 |
+| `Glob string json:"glob"`（值类型必填、无 null 守卫） | `req String` | 缺→`errMissing`、始终序列化、不拒 null（值类型）。 |
+| `Pattern *FileOperationPattern json:"pattern"`（指针必填、有 `errNull` 守卫） | `reqnn FileOperationPattern` | 缺→`errMissing`、拒 null、始终序列化。 |
+| `Filters []*FileOperationFilter json:"filters"`（必填、有 null 守卫） | `reqnn Vec<FileOperationFilter>` | 同上。 |
+| `Schemes []string json:"schemes"`（必填、有 null 守卫） | `reqnn Vec<String>` | 同上。 |
+| `type FileOperationPatternKind string`（`file`/`folder`） | 手写 `Cow<'static,str>` newtype + `const FILE/FOLDER` | 复刻 `PositionEncodingKind`；未知值原样 round-trip。 |
+| `TextDocumentContentOptionsOrRegistrationOptions`（try-decode union） | 2 `Option<变体>` + 手写 serde（依序 `from_value`） | 复刻 Go「options→registration 依序、首个成功者胜」；options 总胜（与 Go 同）。 |
+| `BaseUri WorkspaceFolderOrURI json:"baseUri"`（值类型必填、无 null 守卫） | `req base_uri: WorkspaceFolderOrURI` | union 自身处理 `{`/`"` 派发与拒绝其他 kind。 |
+| `WorkspaceFolderOrURI{ WorkspaceFolder *; URI * }` | `{ workspace_folder: Option<WorkspaceFolder>, uri: Option<URI> }` + 手写 serde | `{`→folder、`"`→URI、其余 err。 |
+| `Uri URI json:"uri"` | `req uri: crate::URI` | 复用 `lsp.rs` 的 `URI(pub String)` newtype（Go `type URI string`）。 |
+
+**红→绿推进序（slice）**：
+1. **tracer（真 RED→GREEN）**：`WorkspaceFoldersServerCapabilities` + `StringOrBoolean`（测试引用不存在类型→编译失败 RED→加 union+`lsp_object!`→GREEN）。
+2. fileOperations 链自底向上，逐个真 RED→GREEN：`FileOperationPattern`(+`FileOperationPatternKind`/`FileOperationPatternOptions`，tracer)→`FileOperationFilter`→`FileOperationRegistrationOptions`→`FileOperationOptions`。
+3. `TextDocumentContentOptions`(tracer)→`TextDocumentContentRegistrationOptions`→union→`WorkspaceOptions`→**swap `ServerCapabilities.workspace`**（headline 真 RED→GREEN：测试访问 `caps.workspace.unwrap().file_operations` 在 raw-`Value` 态编译失败 → 换 typed → GREEN）。
+4. `WorkspaceFolder`(tracer)→`WorkspaceFolderOrURI`→`RelativePattern`→**upgrade `PatternOrRelativePattern.relative_pattern`**（headline 真 RED→GREEN：测试访问 `.relative_pattern.unwrap().base_uri` 在 raw-`Value` 态编译失败 → 换 typed → GREEN）。
+5. 各 union 派发臂 / `default → {}`（全可选结构）/ 必填缺失文案为 **green-on-arrival**（诚实标注）。
+
+> 诚实记录：每个新类型的首个引用测试均为真 RED（类型/字段不存在→编译失败），实现后 GREEN；同类型的「另一 union 臂」「round-trip」「default→{}」「errMissing 文案」多为 green-on-arrival（手写 union/宏一旦成立即过）。既有 `pattern_or_relative_pattern_relative_variant_raw`（仅断言 `.is_some()` + round-trip）在升级为 typed 后仍绿（green-on-arrival）。
+
+**附加偏离（divergence）**：
+- `TextDocumentContentOptionsOrRegistrationOptions` 的 registration 变体经 deserialize 实际不可达（options 总先匹配带 `schemes` 的对象），与 Go try-order 完全一致；显式构造时仍可序列化（已测）。
+
+**实现 TODO（本轮，可勾选）**：
+
+- [x] `StringOrBoolean`（`string | boolean` union）+ `WorkspaceFoldersServerCapabilities`（tracer）　`// Go: lsp_generated.go:StringOrBoolean / WorkspaceFoldersServerCapabilities`
+- [x] fileOperations 链：`FileOperationPatternKind`/`FileOperationPatternOptions`/`FileOperationPattern`/`FileOperationFilter`/`FileOperationRegistrationOptions`/`FileOperationOptions`　`// Go: lsp_generated.go:FileOperation*`
+- [x] `TextDocumentContentOptions`/`TextDocumentContentRegistrationOptions`/`TextDocumentContentOptionsOrRegistrationOptions`（try-decode union）　`// Go: lsp_generated.go:TextDocumentContent*`
+- [x] `WorkspaceOptions` 组装 + 把 `ServerCapabilities.workspace` 从 raw JSON 换成 `Option<WorkspaceOptions>`（清空 ServerCapabilities 最后一个 raw 槽）　`// Go: lsp_generated.go:WorkspaceOptions / ServerCapabilities`
+- [x] `WorkspaceFolder`/`WorkspaceFolderOrURI`/`RelativePattern` + 把 `PatternOrRelativePattern.relative_pattern` 升级为 typed `RelativePattern`　`// Go: lsp_generated.go:WorkspaceFolder/WorkspaceFolderOrURI/RelativePattern/PatternOrRelativePattern`
+
 ## 转交 / 推迟（DEFER）
 
 - ✅ 上一轮的 `(*ClientCapabilities).Resolve()` DEFER **已解除**（落地于 `capabilities.rs`，4 组全树）。
 - ✅ 上一轮维持的 `ServerCapabilities` open-object **已退役**，落地 typed 树（高价值 11 组 provider 全 typed）。
 - ✅ 上一轮把 `ServerCapabilities` 22 个 raw-JSON DEFER provider 中的 **21 个**落成 typed option/registration 树。
-- ✅ **本轮**移植 registration-options base tree（`StaticRegistrationOptions`/`DocumentSelectorOrNull`/`DocumentFilter` union/`TextDocumentRegistrationOptions`），并把全部 **14 个** raw-JSON registration 槽（12 triple-union + diagnostic + semanticTokens）升级为 typed `*RegistrationOptions`。triple-union / `*OrRegistrationOptions` 的 registration 变体 **DEFER 已全部解除**。
-- `// DEFER`：`ServerCapabilities.workspace`（`WorkspaceOptions`）保持 `serde_json::Value`（保留 Go 字段名 + optionality）。`blocked-by:` 其字段 `workspaceFolders`(`WorkspaceFoldersServerCapabilities`) / `fileOperations`(`FileOperationOptions`→`FileOperationRegistrationOptions`→`FileOperationFilter`/`FileOperationPattern`) / `textDocumentContent`(`TextDocumentContentOptionsOrRegistrationOptions`) 均为未移植深类型，留待生成器 pass。
-- `// DEFER`：`PatternOrRelativePattern` 的 **`RelativePattern` 对象变体**（`baseUri: WorkspaceFolderOrURI`→`WorkspaceFolder`/`URI`，`pattern: string`）保持 raw JSON——`WorkspaceFolderOrURI`/`WorkspaceFolder` 深类型尚未移植。`blocked-by:` 生成器 pass。string 变体本轮已 typed，`DocumentFilter` 的 language/scheme/pattern 三变体本轮已全 typed。
-- `// DEFER`：`CodeActionKindDocumentation`（`CodeActionOptions.documentation` 的 `[]*` 元素，proposed/稀有）保持 raw JSON。`blocked-by:` 生成器 pass。
+- ✅ 上一轮移植 registration-options base tree（`StaticRegistrationOptions`/`DocumentSelectorOrNull`/`DocumentFilter` union/`TextDocumentRegistrationOptions`），并把全部 **14 个** raw-JSON registration 槽（12 triple-union + diagnostic + semanticTokens）升级为 typed `*RegistrationOptions`。triple-union / `*OrRegistrationOptions` 的 registration 变体 **DEFER 已全部解除**。
+- ✅ **本轮**移植 `WorkspaceOptions` 子树（`WorkspaceFoldersServerCapabilities`/`StringOrBoolean`/`FileOperation*` 链/`TextDocumentContent*` + union），把 `ServerCapabilities.workspace` 从 `serde_json::Value` 升级为 `Option<WorkspaceOptions>`——**`ServerCapabilities` 的最后一个 raw-JSON DEFER 槽已清空**。
+- ✅ **本轮**移植 `RelativePattern` 对象变体（`WorkspaceFolder`/`WorkspaceFolderOrURI`/`RelativePattern`），把 `PatternOrRelativePattern.relative_pattern` 从 `serde_json::Value` 升级为 `Option<RelativePattern>`——**`PatternOrRelativePattern` 两个变体现已全 typed**。
+- `// DEFER`：`CodeActionKindDocumentation`（`CodeActionOptions.documentation` 的 `[]*` 元素，proposed/稀有）保持 raw JSON。`blocked-by:` 生成器 pass。这是 `ServerCapabilities` provider 树里**唯一**剩余的 raw-JSON DEFER（不在本轮范围）。
 - `// DEFER`：新枚举 `String()` stringer（同生成器 pass；本轮 `TextDocumentSyncKind` 已含 `Display` 复刻 stringer）。
 - `// DEFER`：请求/resolved 树字段的 Go `errNull` 精确文案（低优先偏差；`null` 仍被拒绝，仅文案不同）。
 - `// DEFER`：Go 个别非指针字段（`support`/`tokenTypes` 等）建成 `Option<T>` 的统一化偏离。

@@ -1971,6 +1971,11 @@ fn every_simple_server_option_default_serializes_empty() {
     assert_empty::<TypeHierarchyOptions>();
     assert_empty::<InlineValueOptions>();
     assert_empty::<InlayHintOptions>();
+    // WorkspaceOptions subtree members that are all-optional.
+    assert_empty::<WorkspaceOptions>();
+    assert_empty::<WorkspaceFoldersServerCapabilities>();
+    assert_empty::<FileOperationOptions>();
+    assert_empty::<FileOperationPatternOptions>();
 }
 
 // Go: .../TestMarshalUnmarshalRoundTrip/InitializeParams with null processId
@@ -2556,4 +2561,465 @@ fn every_registration_options_default_serializes_document_selector() {
         serde_json::to_string(&SemanticTokensRegistrationOptions::default()).unwrap(),
         r#"{"documentSelector":null,"legend":{"tokenTypes":[],"tokenModifiers":[]}}"#
     );
+}
+
+// === WorkspaceOptions subtree (ServerCapabilities.workspace) ===
+
+// tracer (real RED->GREEN): `WorkspaceFoldersServerCapabilities` replaces a
+// not-yet-existing type. `supported` (an optional bool) round-trips, and the
+// `changeNotifications` field carries the `StringOrBoolean` union.
+// Go: lsp_generated.go:WorkspaceFoldersServerCapabilities
+#[test]
+fn workspace_folders_server_capabilities_supported_round_trip() {
+    let v = WorkspaceFoldersServerCapabilities {
+        supported: Some(true),
+        change_notifications: None,
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"supported":true}"#);
+    let back: WorkspaceFoldersServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `changeNotifications` accepts a registration-id string (the `StringOrBoolean`
+// union string arm) and round-trips. (green-on-arrival: union + macro landed.)
+// Go: lsp_generated.go:WorkspaceFoldersServerCapabilities (changeNotifications)
+#[test]
+fn workspace_folders_change_notifications_string_variant() {
+    let input = r#"{"changeNotifications":"workspace/didChangeWorkspaceFolders"}"#;
+    let v: WorkspaceFoldersServerCapabilities = serde_json::from_str(input).unwrap();
+    assert_eq!(
+        v.change_notifications.as_ref().unwrap().string.as_deref(),
+        Some("workspace/didChangeWorkspaceFolders")
+    );
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// `changeNotifications` also accepts a boolean (the union boolean arm).
+// (green-on-arrival.)
+// Go: lsp_generated.go:WorkspaceFoldersServerCapabilities (changeNotifications)
+#[test]
+fn workspace_folders_change_notifications_bool_variant() {
+    let input = r#"{"supported":true,"changeNotifications":true}"#;
+    let v: WorkspaceFoldersServerCapabilities = serde_json::from_str(input).unwrap();
+    assert_eq!(v.change_notifications.as_ref().unwrap().boolean, Some(true));
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// The `StringOrBoolean` union dispatches a string vs. a boolean and rejects any
+// other JSON kind (mirroring the Go `PeekKind` switch). (green-on-arrival.)
+// Go: lsp_generated.go:StringOrBoolean.UnmarshalJSONFrom
+#[test]
+fn string_or_boolean_union_dispatch() {
+    let s: StringOrBoolean = serde_json::from_str(r#""x""#).unwrap();
+    assert_eq!(s.string.as_deref(), Some("x"));
+    assert!(s.boolean.is_none());
+
+    let b: StringOrBoolean = serde_json::from_str("false").unwrap();
+    assert_eq!(b.boolean, Some(false));
+    assert!(b.string.is_none());
+
+    // A number is neither a string nor a boolean: rejected.
+    assert!(serde_json::from_str::<StringOrBoolean>("42").is_err());
+}
+
+// Per-type coverage (PORTING §8.6): all-optional, so default serializes to `{}`.
+// Go: lsp_generated.go:WorkspaceFoldersServerCapabilities
+#[test]
+fn workspace_folders_server_capabilities_default_empty() {
+    assert_eq!(
+        serde_json::to_string(&WorkspaceFoldersServerCapabilities::default()).unwrap(),
+        "{}"
+    );
+}
+
+// tracer (real RED->GREEN): `FileOperationPattern` (the bottom of the
+// fileOperations chain) with its required `glob`, optional `matches`
+// (`FileOperationPatternKind` string enum) and optional `options`
+// (`FileOperationPatternOptions`) round-trips in Go field order.
+// Go: lsp_generated.go:FileOperationPattern
+#[test]
+fn file_operation_pattern_round_trip() {
+    let v = FileOperationPattern {
+        glob: "**/*.ts".to_string(),
+        matches: Some(FileOperationPatternKind::FILE),
+        options: Some(FileOperationPatternOptions {
+            ignore_case: Some(true),
+        }),
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"glob":"**/*.ts","matches":"file","options":{"ignoreCase":true}}"#
+    );
+    let back: FileOperationPattern = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// real RED->GREEN: `FileOperationFilter` wraps a (required) `pattern` plus an
+// optional `scheme`; it round-trips in Go field order (scheme, pattern).
+// Go: lsp_generated.go:FileOperationFilter
+#[test]
+fn file_operation_filter_round_trip() {
+    let v = FileOperationFilter {
+        scheme: Some("file".to_string()),
+        pattern: FileOperationPattern {
+            glob: "**/*.ts".to_string(),
+            matches: Some(FileOperationPatternKind::FOLDER),
+            options: None,
+        },
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"scheme":"file","pattern":{"glob":"**/*.ts","matches":"folder"}}"#
+    );
+    let back: FileOperationFilter = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// real RED->GREEN: `FileOperationRegistrationOptions` carries the required
+// `filters` array of `FileOperationFilter`; it round-trips.
+// Go: lsp_generated.go:FileOperationRegistrationOptions
+#[test]
+fn file_operation_registration_options_round_trip() {
+    let v = FileOperationRegistrationOptions {
+        filters: vec![FileOperationFilter {
+            scheme: None,
+            pattern: FileOperationPattern {
+                glob: "**/*.ts".to_string(),
+                matches: None,
+                options: None,
+            },
+        }],
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"filters":[{"pattern":{"glob":"**/*.ts"}}]}"#);
+    let back: FileOperationRegistrationOptions = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `filters` is required: decoding `{}` reports Go `errMissing`.
+// Go: lsp_generated.go:FileOperationRegistrationOptions (missingFilters)
+#[test]
+fn file_operation_registration_options_requires_filters() {
+    let err = serde_json::from_str::<FileOperationRegistrationOptions>(r#"{}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("missing required properties: filters"),
+        "unexpected error: {err}"
+    );
+}
+
+// real RED->GREEN: `FileOperationOptions` exposes the six per-operation
+// registration slots (all optional); set ones round-trip in Go field order.
+// Go: lsp_generated.go:FileOperationOptions
+#[test]
+fn file_operation_options_round_trip() {
+    let reg = || FileOperationRegistrationOptions {
+        filters: vec![FileOperationFilter {
+            scheme: None,
+            pattern: FileOperationPattern {
+                glob: "**/*.ts".to_string(),
+                matches: None,
+                options: None,
+            },
+        }],
+    };
+    let v = FileOperationOptions {
+        did_create: Some(reg()),
+        will_rename: Some(reg()),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"didCreate":{"filters":[{"pattern":{"glob":"**/*.ts"}}]},"willRename":{"filters":[{"pattern":{"glob":"**/*.ts"}}]}}"#
+    );
+    let back: FileOperationOptions = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// Per-type coverage (PORTING §8.6): all-optional, so default serializes to `{}`.
+// Go: lsp_generated.go:FileOperationOptions
+#[test]
+fn file_operation_options_default_empty() {
+    assert_eq!(
+        serde_json::to_string(&FileOperationOptions::default()).unwrap(),
+        "{}"
+    );
+}
+
+// `glob` is required on `FileOperationPattern`; decoding `{}` reports
+// Go `errMissing`. (green-on-arrival.)
+// Go: lsp_generated.go:FileOperationPattern (missingGlob)
+#[test]
+fn file_operation_pattern_requires_glob() {
+    let err = serde_json::from_str::<FileOperationPattern>(r#"{"matches":"file"}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("missing required properties: glob"),
+        "unexpected error: {err}"
+    );
+}
+
+// `pattern` is required on `FileOperationFilter`, and (being a `reqnn` slot)
+// rejects an explicit `null`. (green-on-arrival.)
+// Go: lsp_generated.go:FileOperationFilter (missingPattern / errNull)
+#[test]
+fn file_operation_filter_pattern_required_and_rejects_null() {
+    let missing = serde_json::from_str::<FileOperationFilter>(r#"{"scheme":"file"}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        missing.contains("missing required properties: pattern"),
+        "unexpected error: {missing}"
+    );
+    assert!(serde_json::from_str::<FileOperationFilter>(r#"{"pattern":null}"#).is_err());
+}
+
+// tracer (real RED->GREEN): `TextDocumentContentOptions` carries the required
+// `schemes` array; it round-trips and `schemes` is required.
+// Go: lsp_generated.go:TextDocumentContentOptions
+#[test]
+fn text_document_content_options_round_trip() {
+    let v = TextDocumentContentOptions {
+        schemes: vec!["myscheme".to_string(), "other".to_string()],
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"schemes":["myscheme","other"]}"#);
+    let back: TextDocumentContentOptions = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+
+    let err = serde_json::from_str::<TextDocumentContentOptions>(r#"{}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("missing required properties: schemes"),
+        "unexpected error: {err}"
+    );
+}
+
+// `TextDocumentContentRegistrationOptions` adds an optional `id` next to the
+// required `schemes`; it round-trips in Go field order (schemes, id).
+// Go: lsp_generated.go:TextDocumentContentRegistrationOptions
+#[test]
+fn text_document_content_registration_options_round_trip() {
+    let v = TextDocumentContentRegistrationOptions {
+        schemes: vec!["myscheme".to_string()],
+        id: Some("reg-1".to_string()),
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"schemes":["myscheme"],"id":"reg-1"}"#);
+    let back: TextDocumentContentRegistrationOptions = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// The `TextDocumentContentOptionsOrRegistrationOptions` union tries the plain
+// options variant first (Go try-order). Because the plain options decode
+// ignores an extra `id` key, it wins even when `id` is present — exactly as Go
+// does — so the registration variant is effectively only reachable when
+// constructed. (green-on-arrival.)
+// Go: lsp_generated.go:TextDocumentContentOptionsOrRegistrationOptions.UnmarshalJSONFrom
+#[test]
+fn text_document_content_union_prefers_options() {
+    let plain: TextDocumentContentOptionsOrRegistrationOptions =
+        serde_json::from_str(r#"{"schemes":["x"]}"#).unwrap();
+    assert!(plain.options.is_some());
+    assert!(plain.registration_options.is_none());
+
+    // Go tries the options variant first; an extra `id` is ignored, so options
+    // still wins (matching Go's fall-through order).
+    let with_id: TextDocumentContentOptionsOrRegistrationOptions =
+        serde_json::from_str(r#"{"schemes":["x"],"id":"reg"}"#).unwrap();
+    assert!(with_id.options.is_some());
+
+    // The registration variant still serializes when explicitly constructed.
+    let reg = TextDocumentContentOptionsOrRegistrationOptions {
+        options: None,
+        registration_options: Some(TextDocumentContentRegistrationOptions {
+            schemes: vec!["x".to_string()],
+            id: Some("reg".to_string()),
+        }),
+    };
+    assert_eq!(
+        serde_json::to_string(&reg).unwrap(),
+        r#"{"schemes":["x"],"id":"reg"}"#
+    );
+}
+
+// `WorkspaceOptions` assembles the three workspace members; set ones round-trip
+// in Go field order (workspaceFolders, fileOperations, textDocumentContent).
+// Go: lsp_generated.go:WorkspaceOptions
+#[test]
+fn workspace_options_round_trip() {
+    let v = WorkspaceOptions {
+        workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+            supported: Some(true),
+            change_notifications: None,
+        }),
+        file_operations: Some(FileOperationOptions {
+            did_create: Some(FileOperationRegistrationOptions {
+                filters: vec![FileOperationFilter {
+                    scheme: None,
+                    pattern: FileOperationPattern {
+                        glob: "**/*.ts".to_string(),
+                        matches: None,
+                        options: None,
+                    },
+                }],
+            }),
+            ..Default::default()
+        }),
+        text_document_content: Some(TextDocumentContentOptionsOrRegistrationOptions {
+            options: Some(TextDocumentContentOptions {
+                schemes: vec!["myscheme".to_string()],
+            }),
+            registration_options: None,
+        }),
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"workspaceFolders":{"supported":true},"fileOperations":{"didCreate":{"filters":[{"pattern":{"glob":"**/*.ts"}}]}},"textDocumentContent":{"schemes":["myscheme"]}}"#
+    );
+    let back: WorkspaceOptions = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// tracer (real RED->GREEN): `ServerCapabilities.workspace` is now typed
+// `WorkspaceOptions` (was raw `serde_json::Value`). Decoding reaches the typed
+// members and the round-trip is byte-for-byte.
+// Go: lsp_generated.go:ServerCapabilities (workspace)
+#[test]
+fn server_capabilities_workspace_typed() {
+    let input = r#"{"workspace":{"workspaceFolders":{"supported":true,"changeNotifications":"id-1"},"fileOperations":{"didRename":{"filters":[{"pattern":{"glob":"**/*.ts"}}]}}}}"#;
+    let caps: ServerCapabilities = serde_json::from_str(input).unwrap();
+    let ws = caps.workspace.as_ref().unwrap();
+    assert_eq!(ws.workspace_folders.as_ref().unwrap().supported, Some(true));
+    assert_eq!(
+        ws.workspace_folders
+            .as_ref()
+            .unwrap()
+            .change_notifications
+            .as_ref()
+            .unwrap()
+            .string
+            .as_deref(),
+        Some("id-1")
+    );
+    assert!(ws.file_operations.as_ref().unwrap().did_rename.is_some());
+    assert_eq!(serde_json::to_string(&caps).unwrap(), input);
+}
+
+// Per-type coverage (PORTING §8.6): all-optional, so default serializes to `{}`.
+// Go: lsp_generated.go:WorkspaceOptions
+#[test]
+fn workspace_options_default_empty() {
+    assert_eq!(
+        serde_json::to_string(&WorkspaceOptions::default()).unwrap(),
+        "{}"
+    );
+}
+
+// === RelativePattern object variant of PatternOrRelativePattern ===
+
+// tracer (real RED->GREEN): `WorkspaceFolder` (required `uri` + `name`)
+// round-trips in Go field order, and both fields are required.
+// Go: lsp_generated.go:WorkspaceFolder
+#[test]
+fn workspace_folder_round_trip() {
+    let v = WorkspaceFolder {
+        uri: URI("file:///ws".to_string()),
+        name: "ws".to_string(),
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"uri":"file:///ws","name":"ws"}"#);
+    let back: WorkspaceFolder = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+
+    let err = serde_json::from_str::<WorkspaceFolder>(r#"{"uri":"file:///ws"}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("missing required properties: name"),
+        "unexpected error: {err}"
+    );
+}
+
+// `WorkspaceFolderOrURI` dispatches a JSON object to the `WorkspaceFolder`
+// variant and a JSON string to the bare `URI` variant (Go `PeekKind` switch).
+// Go: lsp_generated.go:WorkspaceFolderOrURI.UnmarshalJSONFrom
+#[test]
+fn workspace_folder_or_uri_dispatch() {
+    let folder: WorkspaceFolderOrURI =
+        serde_json::from_str(r#"{"uri":"file:///ws","name":"ws"}"#).unwrap();
+    assert!(folder.workspace_folder.is_some());
+    assert!(folder.uri.is_none());
+    assert_eq!(
+        serde_json::to_string(&folder).unwrap(),
+        r#"{"uri":"file:///ws","name":"ws"}"#
+    );
+
+    let uri: WorkspaceFolderOrURI = serde_json::from_str(r#""file:///ws""#).unwrap();
+    assert_eq!(uri.uri.as_ref().unwrap().0, "file:///ws");
+    assert!(uri.workspace_folder.is_none());
+    assert_eq!(serde_json::to_string(&uri).unwrap(), r#""file:///ws""#);
+
+    // A number is neither an object nor a string: rejected.
+    assert!(serde_json::from_str::<WorkspaceFolderOrURI>("7").is_err());
+}
+
+// `RelativePattern` (required `baseUri` + `pattern`) round-trips with both
+// `baseUri` arms: a bare URI string and a `WorkspaceFolder` object.
+// Go: lsp_generated.go:RelativePattern
+#[test]
+fn relative_pattern_round_trip_both_base_uri_arms() {
+    let uri_base = RelativePattern {
+        base_uri: WorkspaceFolderOrURI {
+            workspace_folder: None,
+            uri: Some(URI("file:///ws".to_string())),
+        },
+        pattern: "*.ts".to_string(),
+    };
+    let json = serde_json::to_string(&uri_base).unwrap();
+    assert_eq!(json, r#"{"baseUri":"file:///ws","pattern":"*.ts"}"#);
+    let back: RelativePattern = serde_json::from_str(&json).unwrap();
+    assert_eq!(uri_base, back);
+
+    let folder_base = RelativePattern {
+        base_uri: WorkspaceFolderOrURI {
+            workspace_folder: Some(WorkspaceFolder {
+                uri: URI("file:///ws".to_string()),
+                name: "ws".to_string(),
+            }),
+            uri: None,
+        },
+        pattern: "**/*.js".to_string(),
+    };
+    let json = serde_json::to_string(&folder_base).unwrap();
+    assert_eq!(
+        json,
+        r#"{"baseUri":{"uri":"file:///ws","name":"ws"},"pattern":"**/*.js"}"#
+    );
+    let back: RelativePattern = serde_json::from_str(&json).unwrap();
+    assert_eq!(folder_base, back);
+}
+
+// tracer (real RED->GREEN): the `relative_pattern` arm of
+// `PatternOrRelativePattern` is now the typed `RelativePattern` (was raw
+// `serde_json::Value`). Decoding an object reaches the typed `base_uri`/`pattern`
+// and the round-trip is byte-for-byte.
+// Go: lsp_generated.go:PatternOrRelativePattern.UnmarshalJSONFrom (object case)
+#[test]
+fn pattern_or_relative_pattern_relative_variant_typed() {
+    let input = r#"{"baseUri":"file:///ws","pattern":"*.ts"}"#;
+    let v: PatternOrRelativePattern = serde_json::from_str(input).unwrap();
+    assert!(v.pattern.is_none());
+    let rel = v.relative_pattern.as_ref().unwrap();
+    assert_eq!(rel.pattern, "*.ts");
+    assert_eq!(rel.base_uri.uri.as_ref().unwrap().0, "file:///ws");
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
 }

@@ -164,6 +164,39 @@
 
 > 既有 `declaration_provider_registration_variant` / `type_definition_provider_registration_variant` / `diagnostic_provider_registration_variant` / `semantic_tokens_provider_registration_variant`（断言 `.registration_options.is_some()`）在字段类型从 `Option<serde_json::Value>` 升级为 typed `Option<*RegistrationOptions>` 后**仍绿**（`.is_some()` 与构造 `registration_options: None` 对任意 `Option<T>` 不变）；公共 API 仅字段**内层类型**收紧，既有测试字面量无需改动。
 
+## 续轮：`WorkspaceOptions` 子树 + `RelativePattern` 对象变体（`generated_test.rs`）
+
+> 本轮把 `ServerCapabilities` 最后一个 raw-JSON DEFER 槽（`workspace`）与 `PatternOrRelativePattern` 的 `RelativePattern` 对象变体升级为 typed 树。Go 侧 `lsp_json_test.go` 对这些 workspace/relative-pattern 类型**无 populated serde 测试**（服务端产出值），按 PORTING §8.6 自写行为级 serde 测试，expected 取 Go `json` 标签语义 + LSP spec 字面量，测试加在既有 `generated_test.rs`。
+> red→green：每个新类型的**首个引用测试**与两处 raw→typed **swap/upgrade** 均为**真 RED→GREEN**（先引用不存在的 typed 类型/字段 → 编译失败 RED → 加类型/换字段 → GREEN）；同类型的另一 union 臂 / round-trip / `default→{}` / errMissing 文案多为 **green-on-arrival**（诚实标注）。
+
+| Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
+|---|---|---|---|---|
+| `workspace_folders_server_capabilities_supported_round_trip` | **tracer（真 RED→GREEN）**：`supported` 置位 round-trip | `{supported:true}` → `{"supported":true}` | `lsp_generated.go:WorkspaceFoldersServerCapabilities` | ✓ |
+| `workspace_folders_change_notifications_string_variant` | `changeNotifications` 字符串臂（registration id） | `"workspace/..."` → `string=Some` | 同上 / `StringOrBoolean` | ✓ |
+| `workspace_folders_change_notifications_bool_variant` | `changeNotifications` 布尔臂 | `true` → `boolean=Some(true)` | 同上 | ✓ |
+| `string_or_boolean_union_dispatch` | union 派发：string/bool 接受、其余拒绝 | `"x"`/`false`/`42` → string/bool/err | `lsp_generated.go:StringOrBoolean.UnmarshalJSONFrom` | ✓ |
+| `workspace_folders_server_capabilities_default_empty` | §8.6：全可选 → `{}` | `default` → `"{}"` | omitzero 不变式 | ✓ |
+| `file_operation_pattern_round_trip` | **tracer（真 RED→GREEN）**：`glob`/`matches`(string enum)/`options` round-trip | 置位 → `{"glob":...,"matches":"file","options":{"ignoreCase":true}}` | `lsp_generated.go:FileOperationPattern` | ✓ |
+| `file_operation_filter_round_trip` | **真 RED→GREEN**：`scheme?` + `pattern`(reqnn) round-trip | 置位 → `{"scheme":"file","pattern":{...}}` | `lsp_generated.go:FileOperationFilter` | ✓ |
+| `file_operation_registration_options_round_trip` | **真 RED→GREEN**：`filters`(reqnn) round-trip | 置位 → `{"filters":[{...}]}` | `lsp_generated.go:FileOperationRegistrationOptions` | ✓ |
+| `file_operation_registration_options_requires_filters` | `filters` 缺失 → `errMissing` | `{}` → `missing required properties: filters` | 同上 | ✓ |
+| `file_operation_options_round_trip` | **真 RED→GREEN**：6 槽（置位 didCreate/willRename）Go 字段序 | 置位 → 同序字面量 | `lsp_generated.go:FileOperationOptions` | ✓ |
+| `file_operation_options_default_empty` | §8.6：全可选 → `{}` | `default` → `"{}"` | omitzero 不变式 | ✓ |
+| `file_operation_pattern_requires_glob` | `glob` 缺失 → `errMissing`（green-on-arrival） | `{"matches":"file"}` → `missing required properties: glob` | `lsp_generated.go:FileOperationPattern` | ✓ |
+| `file_operation_filter_pattern_required_and_rejects_null` | `pattern` 必填 + 拒 null（green-on-arrival） | `{"scheme":...}`→missing；`{"pattern":null}`→err | `lsp_generated.go:FileOperationFilter` | ✓ |
+| `text_document_content_options_round_trip` | **tracer（真 RED→GREEN）**：`schemes`(reqnn) round-trip + 缺失 errMissing | 置位 → `{"schemes":[...]}` | `lsp_generated.go:TextDocumentContentOptions` | ✓ |
+| `text_document_content_registration_options_round_trip` | `schemes` + `id?` Go 字段序 round-trip | 置位 → `{"schemes":[...],"id":"reg-1"}` | `lsp_generated.go:TextDocumentContentRegistrationOptions` | ✓ |
+| `text_document_content_union_prefers_options` | try-order：options 总先匹配（含多余 `id`），registration 显式构造仍序列化（green-on-arrival） | `{schemes,...}` → options 臂 | `lsp_generated.go:TextDocumentContentOptionsOrRegistrationOptions.UnmarshalJSONFrom` | ✓ |
+| `workspace_options_round_trip` | **真 RED→GREEN**：3 成员组装 Go 字段序 round-trip | 置位 → 同序字面量 | `lsp_generated.go:WorkspaceOptions` | ✓ |
+| `server_capabilities_workspace_typed` | **headline（真 RED→GREEN）**：`workspace` 从 raw `Value` 换 typed `WorkspaceOptions`，深层字段可访问 + byte-for-byte round-trip | `{"workspace":{...}}` → typed 字段 + 同字面量 | `lsp_generated.go:ServerCapabilities`(workspace) | ✓ |
+| `workspace_options_default_empty` | §8.6：全可选 → `{}` | `default` → `"{}"` | omitzero 不变式 | ✓ |
+| `workspace_folder_round_trip` | **tracer（真 RED→GREEN）**：`uri`/`name`(req) round-trip + 缺失 errMissing | 置位 → `{"uri":...,"name":...}` | `lsp_generated.go:WorkspaceFolder` | ✓ |
+| `workspace_folder_or_uri_dispatch` | union 派发：`{`→folder、`"`→URI、数字拒绝 | 三 input → 对应臂/err | `lsp_generated.go:WorkspaceFolderOrURI.UnmarshalJSONFrom` | ✓ |
+| `relative_pattern_round_trip_both_base_uri_arms` | `RelativePattern` 两种 `baseUri` 臂（URI string / WorkspaceFolder 对象）round-trip | 两 input → 同字面量 | `lsp_generated.go:RelativePattern` | ✓ |
+| `pattern_or_relative_pattern_relative_variant_typed` | **headline（真 RED→GREEN）**：`relative_pattern` 从 raw `Value` 换 typed `RelativePattern`，`base_uri`/`pattern` 可访问 + byte-for-byte round-trip | `{"baseUri":...,"pattern":...}` → typed 字段 + 同字面量 | `lsp_generated.go:PatternOrRelativePattern.UnmarshalJSONFrom`(object) | ✓ |
+
+> 既有 `pattern_or_relative_pattern_relative_variant_raw`（断言 `.relative_pattern.is_some()` + round-trip）在 `relative_pattern` 字段类型从 `Option<serde_json::Value>` 升级为 typed `Option<RelativePattern>` 后**仍绿**（`.is_some()` 与 byte-for-byte round-trip 不变）；公共 API 仅字段**内层类型**收紧，既有测试字面量无需改动。`every_simple_server_option_default_serializes_empty` 扩展加入 `WorkspaceOptions`/`WorkspaceFoldersServerCapabilities`/`FileOperationOptions`/`FileOperationPatternOptions`（全可选 → `{}`）。
+
 ## 推迟到后续 phase 的测试
 
 | 测试 / 行为 | 原因 | 目标 phase |
@@ -172,8 +205,9 @@
 | ~~`ServerCapabilities` typed serde~~ | ✅ 已落地（11 组高价值 provider red→green） | 完成 |
 | ~~`ServerCapabilities` 深/稀有 provider 的 typed option 树（triple-union/executeCommand/onTypeFormatting/diagnostic/onAutoInsert 等）~~ | ✅ 已落地（21/22 provider typed；`boolean_or_options_or_registration!` 宏） | 完成 |
 | ~~triple-union / `*OrRegistrationOptions` 的 **registration 变体** typed serde（`*RegistrationOptions`）~~ | ✅ 本轮已落地（registration-options base tree + 14 个 typed `*RegistrationOptions`，red→green） | 完成 |
-| `ServerCapabilities.workspace`（`WorkspaceOptions`）typed serde | 深依赖未移植（workspaceFolders/fileOperations/textDocumentContent）；保留 raw JSON | — blocked-by 生成器 pass |
-| `PatternOrRelativePattern` 的 **`RelativePattern` 对象变体** typed serde | 深依赖 `WorkspaceFolderOrURI`/`WorkspaceFolder` 未移植；本轮保留 raw JSON（string 变体已 typed） | — blocked-by 生成器 pass |
+| ~~`ServerCapabilities.workspace`（`WorkspaceOptions`）typed serde~~ | ✅ 本轮已落地（`WorkspaceOptions` 子树 red→green，清空 ServerCapabilities 最后一个 raw 槽） | 完成 |
+| ~~`PatternOrRelativePattern` 的 **`RelativePattern` 对象变体** typed serde~~ | ✅ 本轮已落地（`WorkspaceFolder`/`WorkspaceFolderOrURI`/`RelativePattern` red→green；两变体全 typed） | 完成 |
+| `CodeActionKindDocumentation`（`CodeActionOptions.documentation`）typed serde | proposed/稀有嵌套类型，`ServerCapabilities` provider 树里唯一剩余 raw-JSON DEFER | — blocked-by 生成器 pass |
 | 新枚举 `String()` stringer（`TextDocumentSyncKind` 已含；其余） | resolved/server 树不全用；生成器 pass 落地完整枚举集时补 | P8 |
 | resolved / 请求类型显式 `null` 字段的 Go `errNull` 精度 | 非线上收报关键路径，低优先 | — blocked-by 生成器 pass |
 | Go 非指针字段（`support`/`tokenTypes` 等）的精确反序列化严格度 | 本轮统一建成 `Option<T>`；对 `resolve()` 等价 | — blocked-by 生成器 pass |
