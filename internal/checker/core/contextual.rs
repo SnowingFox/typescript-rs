@@ -60,16 +60,17 @@ impl Checker {
     /// 4bk adds the inverse-direction arms — type flowing *into* a literal:
     /// an object-literal property/shorthand value (`getContextualTypeForObjectLiteralElement`)
     /// and an array-literal element (`getContextualTypeForElementExpression`).
+    /// 4bl adds the call/`new` argument arm (`getContextualTypeForArgument`): a
+    /// callback argument's parameters get typed from the resolved call
+    /// signature's parameter at that position.
     ///
-    /// DEFER(phase-4-checker-4bl+): the `NodeFlagsInWithStatement` early-out, the
+    /// DEFER(phase-4-checker-4bm+): the `NodeFlagsInWithStatement` early-out, the
     /// cached-contextual-node lookup (`findContextualNode`/`contextualInfos`),
-    /// and the remaining parent arms — call/`new` arguments
-    /// (`getContextualTypeForArgument`, blocked-by: call resolution's contextual
-    /// pass), return/arrow-body (`getContextualTypeForReturnExpression`),
-    /// yield/await operands, decorators, `as`/`satisfies`/parenthesized/non-null
-    /// pass-through, the `SpreadAssignment` grandparent walk, conditional/template
-    /// operands, and JSX. blocked-by: call-resolution contextual pass +
-    /// return-position inference + spread typing + JSX.
+    /// and the remaining parent arms — return/arrow-body
+    /// (`getContextualTypeForReturnExpression`), yield/await operands, decorators,
+    /// `as`/`satisfies`/parenthesized/non-null pass-through, the
+    /// `SpreadAssignment` grandparent walk, conditional/template operands, and
+    /// JSX. blocked-by: return-position inference + spread typing + JSX.
     ///
     /// Side effects: may allocate types/signatures while resolving the
     /// contextual annotation.
@@ -88,6 +89,9 @@ impl Checker {
             | Kind::PropertySignature
             | Kind::BindingElement => {
                 self.get_contextual_type_for_initializer_expression(program, node, context_flags)
+            }
+            Kind::CallExpression | Kind::NewExpression => {
+                self.get_contextual_type_for_argument(program, parent, node)
             }
             Kind::BinaryExpression => {
                 self.get_contextual_type_for_binary_operand(program, node, context_flags)
@@ -229,6 +233,120 @@ impl Checker {
         let globals = program.globals();
         let symbol = resolve_name(program, left, &name, SymbolFlags::VALUE, false, globals)?;
         Some(get_type_of_symbol(self, program, symbol, globals))
+    }
+
+    /// The contextual type of `arg`, an argument of the call/`new` expression
+    /// `call_target`: the type of the resolved signature's parameter at that
+    /// argument's position. This is what types a callback argument's
+    /// parameters from the called signature (e.g. `f((x) => ...)` gives `x` the
+    /// element type the parameter of `f` expects).
+    ///
+    /// Returns `None` when `arg` is not one of the call's arguments (e.g. it is
+    /// the callee expression, whose parent is also the call node — Go's
+    /// `slices.Index(args, arg) == -1`).
+    ///
+    /// DEFER(phase-4-checker-4bm+): `getEffectiveCallArguments`' synthetic
+    /// arguments — spread elements expanded from tuple types, the tagged-template
+    /// strings-array + substitution arguments, decorator arguments, and the JSX
+    /// attributes argument. blocked-by: spread/tuple typing + tagged-template
+    /// typing + decorators + JSX.
+    // Go: internal/checker/checker.go:Checker.getContextualTypeForArgument
+    fn get_contextual_type_for_argument(
+        &mut self,
+        program: &dyn BoundProgram,
+        call_target: NodeId,
+        arg: NodeId,
+    ) -> Option<TypeId> {
+        let args = call_arguments(program, call_target);
+        let arg_index = args.iter().position(|&a| a == arg)?;
+        self.get_contextual_type_for_argument_at_index(program, call_target, arg_index)
+    }
+
+    /// The contextual type of the argument at `arg_index` of `call_target`: the
+    /// type at that position of the signature applicable to the call (Go's
+    /// `getTypeAtPosition`, which falls back to `any` past the parameter list).
+    ///
+    /// Recursion safety: the applicable signature is resolved by typing only the
+    /// callee expression (never the arguments) and selecting the single call
+    /// signature, so this contextual lookup can never re-enter argument
+    /// checking. See [`Checker::get_resolved_signature_for_contextual_argument`].
+    ///
+    /// DEFER(phase-4-checker-4bm+): the `import(...)` call argument types
+    /// (`string`/`ImportCallOptions`/`any`), the JSX first-argument signature,
+    /// and the rest-parameter indexed access (`getIndexedAccessTypeEx` over the
+    /// rest tuple). blocked-by: import-call typing + JSX signatures + rest/tuple
+    /// types.
+    // Go: internal/checker/checker.go:Checker.getContextualTypeForArgumentAtIndex
+    fn get_contextual_type_for_argument_at_index(
+        &mut self,
+        program: &dyn BoundProgram,
+        call_target: NodeId,
+        arg_index: usize,
+    ) -> Option<TypeId> {
+        let signature =
+            self.get_resolved_signature_for_contextual_argument(program, call_target)?;
+        // Go's `getTypeAtPosition` returns `anyType` for an out-of-range
+        // (non-rest) position; mirror that here so an extra argument still has a
+        // contextual type.
+        Some(
+            self.try_get_type_at_position(program, signature, arg_index)
+                .unwrap_or(self.any_type),
+        )
+    }
+
+    /// Resolves the signature applicable to `call_target` for the purpose of
+    /// contextually typing its arguments, *without* re-checking the arguments —
+    /// the reachable, recursion-safe subset of Go's `getResolvedSignature`.
+    ///
+    /// The callee is typed (cheap and idempotent — for an identifier it is just
+    /// a symbol-type lookup), then its single call signature is the resolved
+    /// one. Because selecting it never consults the arguments, the contextual
+    /// pass cannot recurse back into argument checking (Go guards the same
+    /// cycle with the `resolvingSignature` sentinel on `signatureLinks`). An
+    /// overloaded callee (more than one signature, which Go would disambiguate
+    /// from the argument types) and a non-callable one (no signatures) are
+    /// deferred and yield `None`.
+    ///
+    /// Any diagnostics produced while typing the callee here are discarded: the
+    /// call-checking pass reports them once on its own, so the contextual lookup
+    /// must not duplicate them (Go's `getResolvedSignature` is memoized on
+    /// `signatureLinks`, so the second, contextual resolution is a cache hit
+    /// that re-emits nothing).
+    ///
+    /// DEFER(phase-4-checker-4bm+): the overloaded-target case — Go resolves the
+    /// chosen overload via `getResolvedSignature` and (during inference) unions
+    /// the candidate parameter types; the `import(...)`/JSX/decorator/
+    /// tagged-template call targets; and construct signatures for `new`
+    /// (`get_signatures_of_type` returns only call signatures). blocked-by:
+    /// overload resolution during inference + construct signatures + those call
+    /// targets.
+    ///
+    /// Side effects: may allocate types while resolving the callee; any
+    /// diagnostics it would emit are rolled back.
+    // Go: internal/checker/checker.go:Checker.getResolvedSignature (reachable subset)
+    fn get_resolved_signature_for_contextual_argument(
+        &mut self,
+        program: &dyn BoundProgram,
+        call_target: NodeId,
+    ) -> Option<SignatureId> {
+        let callee = match program.arena().data(call_target) {
+            NodeData::CallExpression(d) => d.expression,
+            NodeData::NewExpression(d) => d.expression,
+            _ => return None,
+        };
+        // Roll back any callee diagnostics emitted during this contextual-only
+        // resolution (see the doc comment): snapshot the current file's
+        // diagnostic count, then truncate back to it.
+        let handle = program.file_handle();
+        let before = self.diagnostics_by_file.get(&handle).map_or(0, Vec::len);
+        let func_type = self.check_expression(program, callee);
+        if let Some(diagnostics) = self.diagnostics_by_file.get_mut(&handle) {
+            diagnostics.truncate(before);
+        }
+        match self.get_signatures_of_type(func_type).as_slice() {
+            [signature] => Some(*signature),
+            _ => None,
+        }
     }
 
     /// In an object literal contextually typed by a type `T`, the contextual
@@ -668,6 +786,22 @@ fn object_literal_element_static_name(
             Some(program.arena().text(name_node).to_string())
         }
         _ => None,
+    }
+}
+
+/// Returns the argument nodes of a call/`new` expression (the reachable subset
+/// of Go's `getEffectiveCallArguments`: the raw argument list, with no spread
+/// expansion or synthetic tagged-template/decorator/JSX arguments). A `new`
+/// expression with no argument list yields an empty slice.
+fn call_arguments(program: &dyn BoundProgram, call_target: NodeId) -> Vec<NodeId> {
+    match program.arena().data(call_target) {
+        NodeData::CallExpression(d) => d.arguments.nodes.clone(),
+        NodeData::NewExpression(d) => d
+            .arguments
+            .as_ref()
+            .map(|a| a.nodes.clone())
+            .unwrap_or_default(),
+        _ => Vec::new(),
     }
 }
 

@@ -425,6 +425,256 @@ fn is_literal_of_contextual_type_matches_same_kind_only() {
     assert!(!c.is_literal_of_contextual_type(str_x, None));
 }
 
+// Returns the call expression of the `idx`-th top-level expression statement.
+fn call_expression_of_statement(p: &StubProgram, idx: usize) -> NodeId {
+    match p.arena().data(source_statements(p)[idx]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expression statement"),
+    }
+}
+
+// Returns the `idx`-th argument node of a call expression.
+fn call_argument(p: &StubProgram, call: NodeId, idx: usize) -> NodeId {
+    match p.arena().data(call) {
+        NodeData::CallExpression(d) => d.arguments.nodes[idx],
+        _ => panic!("call expression"),
+    }
+}
+
+// 4bl slice 1 tracer (genuine RED): a callback argument's un-annotated
+// parameter is contextually typed by the resolved call signature's parameter at
+// that position. `function f(cb: (x: number) => void) {} f((x) => { x; });`
+// types the arrow's `x` (read inside the body) as `number`. Before this round
+// the call-argument parent arm of `get_contextual_type` was absent, so the
+// arrow had no contextual signature and `x` fell through to `any`. Exercises
+// the *lazy* channel (`check_expression(x)` directly, without checking the
+// call first).
+// Go: internal/checker/checker.go:Checker.getContextualTypeForArgument
+#[test]
+fn callback_argument_parameter_is_contextually_typed_by_call_signature() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(cb: (x: number) => void) {}\nf((x) => { x; });",
+    );
+    let call = call_expression_of_statement(&p, 1);
+    let arrow = call_argument(&p, call, 0);
+    let x_ref = arrow_block_first_expr(&p, arrow);
+    let mut c = Checker::new();
+    let number = c.number_type();
+    assert_eq!(c.check_expression(&p, x_ref), number);
+}
+
+// 4bl slice 2 (genuine RED before the call-argument arm): the contextual
+// parameter type really flows into the callback body, so a body statement that
+// misuses it surfaces a diagnostic. `function f(cb: (x: number) => void) {}
+// f((x) => { const s: string = x; });` assigns the contextually-`number` `x`
+// to a `string`, reporting `2322`. Exercises the *eager* channel
+// (`check_source_file` -> `check_arrow_function` ->
+// `contextually_check_function_expression`, then the body check). Before this
+// round `x` was `any` (assignable to `string`), so no diagnostic appeared.
+// Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration (2322)
+#[test]
+fn callback_argument_parameter_type_flows_into_body_and_surfaces_mismatch() {
+    let p = Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(cb: (x: number) => void) {}\nf((x) => { const s: string = x; });",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// 4bl slice 2 (positive control / green-on-arrival): assigning the
+// contextually-`number` callback parameter to a `number` produces no
+// diagnostic — the contextual type is correct, not merely present.
+// Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration
+#[test]
+fn callback_argument_parameter_type_flows_into_body_assignable_ok() {
+    let p = Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(cb: (x: number) => void) {}\nf((x) => { const n: number = x; });",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(c.get_diagnostics(root).is_empty());
+}
+
+// 4bl slice 3 (guard, no regression): a plain call with no callback argument
+// still checks cleanly. `function g(n: number) {} g(1);` reports nothing — the
+// call-argument contextual arm only engages for function/arrow arguments and
+// does not perturb ordinary argument checking.
+// Go: internal/checker/checker.go:Checker.checkCallExpression
+#[test]
+fn plain_call_without_callback_still_checks_clean() {
+    let p = Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function g(n: number) {}\ng(1);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(c.get_diagnostics(root).is_empty());
+}
+
+// 4bl slice 3 (guard, no crash): a non-function argument to a callback
+// parameter does not crash and does not spuriously diagnose. `function f(cb:
+// (x: number) => void) {} f(1 as any);` passes `any` to the callback
+// parameter, which is assignable, so the call reports nothing — and the
+// contextual arm (which only resolves a signature for the lookup) is unaffected
+// by the argument not being a function.
+// Go: internal/checker/checker.go:Checker.checkCallExpression
+#[test]
+fn call_with_non_function_argument_does_not_crash() {
+    let p = Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(cb: (x: number) => void) {}\nf(1 as any);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(c.get_diagnostics(root).is_empty());
+}
+
+// 4bl slice 3 (guard, recursion): a callback whose body contains another call
+// to the same function (with its own callback) terminates — the contextual
+// lookup resolves each call's signature by typing only its callee, never its
+// arguments, so it never re-enters argument checking. `function f(cb: (x:
+// number) => void) {} f((x) => { f((y) => { y; }); });` types both `x` and `y`
+// as `number` and reports nothing (would stack-overflow if the contextual
+// lookup re-checked arguments).
+// Go: internal/checker/checker.go:Checker.getResolvedSignature (resolvingSignature guard)
+#[test]
+fn nested_callback_call_does_not_recurse_infinitely() {
+    let p = Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(cb: (x: number) => void) {}\nf((x) => { f((y) => { y; }); });",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(c.get_diagnostics(root).is_empty());
+}
+
+// 4bl unit: the call-argument arm of `get_contextual_type`. For `function f(cb:
+// (x: number) => void) {} f((x) => {});` the arrow argument's contextual type
+// is the resolved signature's first parameter type — the function type `(x:
+// number) => void`, which carries a single call signature whose parameter is
+// `number` and whose return type is `void`.
+// Go: internal/checker/checker.go:Checker.getContextualTypeForArgumentAtIndex
+#[test]
+fn get_contextual_type_of_call_argument_is_signature_parameter_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(cb: (x: number) => void) {}\nf((x) => {});",
+    );
+    let call = call_expression_of_statement(&p, 1);
+    let arrow = call_argument(&p, call, 0);
+    let mut c = Checker::new();
+    let ctx = c
+        .get_contextual_type(&p, arrow, ContextFlags::NONE)
+        .expect("call argument has a contextual type");
+    // The contextual type is the parameter function type `(x: number) => void`.
+    let sigs = c.get_signatures_of_type(ctx);
+    assert_eq!(sigs.len(), 1, "the contextual type is a function type");
+    let number = c.number_type();
+    let void = c.void_type();
+    assert_eq!(c.try_get_type_at_position(&p, sigs[0], 0), Some(number));
+    assert_eq!(c.signature(sigs[0]).resolved_return_type, Some(void));
+}
+
+// 4bl unit: the callee expression of a call shares the call node as its parent,
+// but it is not one of the arguments, so it has no call-argument contextual
+// type (Go's `slices.Index(args, arg) == -1` early-out). For `function f(cb: (x:
+// number) => void) {} f((x) => {});` the callee `f` has contextual type `None`.
+// Go: internal/checker/checker.go:Checker.getContextualTypeForArgument (argIndex == -1)
+#[test]
+fn get_contextual_type_of_callee_is_none() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(cb: (x: number) => void) {}\nf((x) => {});",
+    );
+    let call = call_expression_of_statement(&p, 1);
+    let callee = match p.arena().data(call) {
+        NodeData::CallExpression(d) => d.expression,
+        _ => panic!("call expression"),
+    };
+    let mut c = Checker::new();
+    assert_eq!(c.get_contextual_type(&p, callee, ContextFlags::NONE), None);
+}
+
+// 4bl unit (DEFER guard): an overloaded callee (more than one call signature)
+// is deferred — disambiguating the overload would need the argument types, so
+// the reachable subset returns no contextual type. For `declare function f(a:
+// number): void; declare function f(a: string): void; f((x) => {});` the arrow
+// argument's contextual type is `None`.
+// Go: internal/checker/checker.go:Checker.getResolvedSignature (overload resolution, deferred)
+#[test]
+fn get_contextual_type_of_overloaded_call_argument_is_none() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(a: number): void;\ndeclare function f(a: string): void;\nf((x) => {});",
+    );
+    let call = call_expression_of_statement(&p, 2);
+    let arrow = call_argument(&p, call, 0);
+    let mut c = Checker::new();
+    assert_eq!(c.get_contextual_type(&p, arrow, ContextFlags::NONE), None);
+}
+
+// 4bl unit: an argument past the (non-rest) parameter list has contextual type
+// `any` (Go's `getTypeAtPosition` fallback). For `function f() {} f((x) => {});`
+// the extra arrow argument's contextual type is `any`.
+// Go: internal/checker/relater.go:Checker.getTypeAtPosition (any fallback)
+#[test]
+fn get_contextual_type_of_extra_call_argument_is_any() {
+    let p = StubProgram::parse_and_bind("/a.ts", "function f() {}\nf((x) => {});");
+    let call = call_expression_of_statement(&p, 1);
+    let arrow = call_argument(&p, call, 0);
+    let mut c = Checker::new();
+    let any = c.any_type();
+    assert_eq!(
+        c.get_contextual_type(&p, arrow, ContextFlags::NONE),
+        Some(any)
+    );
+}
+
+// 4bl unit (DEFER guard): a `new` expression's argument has no contextual type
+// when the constructor has no call signature — construct signatures are not yet
+// collected, so `get_signatures_of_type` (which returns only call signatures)
+// yields none. For `declare const C: any;\nnew C((x) => {});` the arrow
+// argument's contextual type is `None` (exercises the `NewExpression` argument
+// arm).
+// Go: internal/checker/checker.go:Checker.getContextualTypeForArgument (NewExpression)
+#[test]
+fn get_contextual_type_of_new_expression_argument_without_construct_signature_is_none() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const C: any;\nnew C((x) => {});");
+    let new_expr = call_expression_of_statement(&p, 1);
+    let arrow = match p.arena().data(new_expr) {
+        NodeData::NewExpression(d) => d.arguments.as_ref().expect("arguments").nodes[0],
+        _ => panic!("new expression"),
+    };
+    let mut c = Checker::new();
+    assert_eq!(c.get_contextual_type(&p, arrow, ContextFlags::NONE), None);
+}
+
+// 4bl slice 3 (guard, no double-report): an unresolved callee with an arrow
+// argument reports its "Cannot find name" error exactly once. The contextual
+// lookup re-resolves the callee's signature, so it must not re-emit the callee
+// diagnostic. `g((x) => { x; });` (no `g` in scope) reports a single `2304`.
+// Go: internal/checker/checker.go:Checker.resolveCallExpression (checkExpressionCached callee)
+#[test]
+fn unresolved_callee_with_callback_reports_2304_once() {
+    let p = Rc::new(StubProgram::parse_and_bind("/a.ts", "g((x) => { x; });"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "the callee error is reported exactly once");
+    assert_eq!(diags[0].code, 2304);
+    assert_eq!(diags[0].message, "Cannot find name 'g'.");
+}
+
 // 4bk unit: `get_widened_literal_like_type_for_contextual_type` preserves a
 // literal in a matching literal context (returning the regular literal), but
 // widens a fresh literal when there is no contextual type or the context's kind
