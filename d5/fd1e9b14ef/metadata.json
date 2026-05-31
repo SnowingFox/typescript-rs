@@ -1,0 +1,21 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "d5fd1e9b14ef",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "docs/rust-rewrite/phase-7-language-service/lsproto/impl.md",
+    "docs/rust-rewrite/phase-7-language-service/lsproto/tests.md",
+    "internal/lsp/lsproto/generated.rs",
+    "internal/lsp/lsproto/generated_test.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d5/fd1e9b14ef/0/metadata.json",
+      "transcript": "/d5/fd1e9b14ef/0/full.jsonl",
+      "content_hash": "/d5/fd1e9b14ef/0/content_hash.txt",
+      "prompt": "/d5/fd1e9b14ef/0/prompt.txt"
+    }
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "d5fd1e9b14ef",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-31T15:53:47.715482Z",
+  "branch": "main",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "docs/rust-rewrite/phase-7-language-service/lsproto/impl.md",
+    "docs/rust-rewrite/phase-7-language-service/lsproto/tests.md",
+    "internal/lsp/lsproto/generated.rs",
+    "internal/lsp/lsproto/generated_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-opus-4-8-thinking-xhigh",
+  "turn_id": "f4ca7586d18d",
+  "session_metrics": {
+    "turn_count": 91,
+    "context_tokens": 453664,
+    "context_window_size": 272000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-31T15:53:47.674884Z",
+    "agent_lines": 247,
+    "agent_removed": 0,
+    "human_added": 1073,
+    "human_modified": 29,
+    "human_removed": 0,
+    "total_committed": 1349,
+    "total_lines_changed": 1349,
+    "agent_percentage": 18.30985915492958,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 1085,
+      "user_lines_removed": 12,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "internal/lsp/lsproto/generated.rs": 649,
+        "internal/lsp/lsproto/generated_test.rs": 436
+      },
+      "user_removed_per_file": {
+        "internal/lsp/lsproto/generated.rs": 11,
+        "internal/lsp/lsproto/generated_test.rs": 1
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 17,
+      "user_lines_removed": 17,
+      "agent_lines_added": 1080,
+      "agent_lines_removed": 7,
+      "user_added_per_file": {
+        "internal/lsp/lsproto/generated.rs": 6,
+        "internal/lsp/lsproto/generated_test.rs": 11
+      },
+      "user_removed_per_file": {
+        "internal/lsp/lsproto/generated.rs": 4,
+        "internal/lsp/lsproto/generated_test.rs": 13
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 1080,
+      "agent_lines_removed": 7
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 164,
+      "user_lines_removed": 17,
+      "agent_lines_added": 1260,
+      "agent_lines_removed": 41,
+      "user_added_per_file": {
+        "internal/transformers/tstransforms/legacydecorators.rs": 81,
+        "internal/transformers/tstransforms/legacydecorators_test.rs": 83
+      },
+      "user_removed_per_file": {
+        "internal/transformers/tstransforms/legacydecorators.rs": 17
+      }
+    }
+  ]
+}
