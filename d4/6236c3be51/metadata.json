@@ -1,0 +1,21 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "d46236c3be51",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/rust-rewrite/phase-5-emit/transformers/impl.md",
+    "docs/rust-rewrite/phase-5-emit/transformers/tests.md",
+    "internal/transformers/tstransforms/legacydecorators.rs",
+    "internal/transformers/tstransforms/legacydecorators_test.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d4/6236c3be51/0/metadata.json",
+      "transcript": "/d4/6236c3be51/0/full.jsonl",
+      "content_hash": "/d4/6236c3be51/0/content_hash.txt",
+      "prompt": "/d4/6236c3be51/0/prompt.txt"
+    }
+  ]
+}
