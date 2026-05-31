@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "8fc8aa2d6eaa",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "internal/parser/lib.rs",
+    "internal/parser/lib_test.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/8f/c8aa2d6eaa/0/metadata.json",
+      "transcript": "/8f/c8aa2d6eaa/0/full.jsonl",
+      "content_hash": "/8f/c8aa2d6eaa/0/content_hash.txt",
+      "prompt": "/8f/c8aa2d6eaa/0/prompt.txt"
+    }
+  ]
+}
