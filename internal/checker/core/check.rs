@@ -228,20 +228,36 @@ impl Checker {
     // the object type (Go's `hasComputed*Property` flags feeding
     // `getObjectLiteralIndexInfo`).
     //
-    // DEFER(phase-4-checker-4bh+): spread members (`{...o}`), get/set/method
+    // In a const context (`{ a: 1 } as const`) every property symbol carries the
+    // `Readonly` check flag and its value type is kept as a literal (Go's
+    // `checkFlags = CheckFlagsReadonly` + the const-context
+    // `checkExpressionForMutableLocation` path); the index signatures are
+    // readonly too.
+    //
+    // DEFER(phase-4-checker-4bi+): spread members (`{...o}`), get/set/method
     // members, contextual typing (the type flowing INTO the literal), the
-    // `as const` readonly freeze (`getRegularTypeOfObjectLiteral`), the
     // late-bound *named* member for a string/number-literal or unique-symbol
     // computed name (`isTypeUsableAsPropertyName` -> `getPropertyNameFromType`),
     // and the destructuring-pattern member optionality. blocked-by: spread-type
     // merge (`getSpreadType`), accessor/method signature collection, contextual
-    // type propagation, const-context freeze, late binding, and
-    // destructuring-assignment typing.
+    // type propagation, late binding, and destructuring-assignment typing.
     // Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076)
     fn check_object_literal(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let members_nodes = match program.arena().data(node) {
             NodeData::ObjectLiteralExpression(d) => d.list.nodes.clone(),
             _ => return self.error_type,
+        };
+        // In a const context (`{ a: 1 } as const`) every property is readonly:
+        // Go sets `checkFlags = CheckFlagsReadonly` when `isConstContext(node)`
+        // and passes it to `newSymbolEx` for each member, and makes the index
+        // signatures readonly too. The property *value* types are kept as
+        // literals through the same const-context path in
+        // `checkExpressionForMutableLocation`.
+        let in_const_context = is_const_context(program, node);
+        let member_check_flags = if in_const_context {
+            tsgo_ast::CheckFlags::READONLY
+        } else {
+            tsgo_ast::CheckFlags::empty()
         };
         let mut members = SymbolTable::default();
         let mut properties: Vec<tsgo_ast::SymbolId> = Vec::new();
@@ -310,6 +326,7 @@ impl Checker {
                         let prop = self.new_object_literal_property(
                             INTERNAL_SYMBOL_NAME_COMPUTED,
                             SymbolFlags::PROPERTY,
+                            member_check_flags,
                             member_type,
                         );
                         all_members.push(ObjectLiteralMember {
@@ -327,8 +344,14 @@ impl Checker {
             };
             // Go: `newSymbolEx(SymbolFlagsProperty | member.Flags, member.Name, checkFlags)`
             // then `links.resolvedType = t`. Object-literal properties are never
-            // optional in the reachable subset, so only `Property` is carried.
-            let prop = self.new_object_literal_property(&name, SymbolFlags::PROPERTY, member_type);
+            // optional in the reachable subset, so only `Property` is carried;
+            // `member_check_flags` carries `Readonly` in a const context.
+            let prop = self.new_object_literal_property(
+                &name,
+                SymbolFlags::PROPERTY,
+                member_check_flags,
+                member_type,
+            );
             members.insert(name, prop);
             properties.push(prop);
             all_members.push(ObjectLiteralMember {
@@ -338,23 +361,30 @@ impl Checker {
         }
         // Go's `createObjectLiteralType` synthesizes one index signature per
         // present computed-name kind, unioning the value types of all members
-        // whose names match that key kind (`getObjectLiteralIndexInfo`).
-        // DEFER(phase-4-checker-4bh+): the `isConstContext` readonly flag (an
-        // `as const` object literal is not yet typed); index infos are mutable.
+        // whose names match that key kind (`getObjectLiteralIndexInfo`). The
+        // index signatures are readonly in a const context (Go's `isReadonly :=
+        // c.isConstContext(node)`).
         let mut index_infos: Vec<IndexInfoId> = Vec::new();
         if has_computed_string_property {
             let string = self.string_type;
-            let info = self.get_object_literal_index_info(program, &all_members, string);
+            let info =
+                self.get_object_literal_index_info(program, &all_members, string, in_const_context);
             index_infos.push(info);
         }
         if has_computed_number_property {
             let number = self.number_type;
-            let info = self.get_object_literal_index_info(program, &all_members, number);
+            let info =
+                self.get_object_literal_index_info(program, &all_members, number, in_const_context);
             index_infos.push(info);
         }
         if has_computed_symbol_property {
             let es_symbol = self.es_symbol_type;
-            let info = self.get_object_literal_index_info(program, &all_members, es_symbol);
+            let info = self.get_object_literal_index_info(
+                program,
+                &all_members,
+                es_symbol,
+                in_const_context,
+            );
             index_infos.push(info);
         }
         let object = ObjectType {
@@ -391,6 +421,9 @@ impl Checker {
     // `getUnionType` (Go's `UnionReductionSubtype` is observably equivalent for
     // the widened primitive value types built here).
     //
+    // The synthesized index signature is `readonly` when `is_readonly` is set
+    // (an `as const` object literal, Go's `isReadonly := c.isConstContext(node)`).
+    //
     // DEFER(phase-4-checker-4bh+): the `components` slice (conflicting
     // computed-name declarations) and known-symbol membership. blocked-by:
     // declaration-carrying synthesized symbols + well-known symbols.
@@ -400,6 +433,7 @@ impl Checker {
         program: &dyn BoundProgram,
         members: &[ObjectLiteralMember],
         key_type: TypeId,
+        is_readonly: bool,
     ) -> IndexInfoId {
         let string = self.string_type;
         let number = self.number_type;
@@ -422,7 +456,7 @@ impl Checker {
         } else {
             self.get_union_type(&prop_types)
         };
-        self.new_index_info(IndexInfo::new(key_type, value_type, false))
+        self.new_index_info(IndexInfo::new(key_type, value_type, is_readonly))
     }
 
     // Reports whether an object-literal member's name is symbol-typed (Go's
@@ -562,11 +596,16 @@ impl Checker {
     // whose default branch is `getWidenedLiteralLikeTypeForContextualType` with
     // no contextual type, i.e. `getWidenedLiteralType`).
     //
-    // DEFER(phase-4-checker-4bg+): the `isConstContext` branch (an `as const`
-    // member/element keeps its regular literal via `getRegularTypeOfLiteralType`)
-    // and the contextual-type branch (a literal preserved by a literal-typed
-    // context). blocked-by: object/array-literal const-context recursion +
-    // contextual type propagation.
+    // In a const context (an `as const` member/element, recursively) the literal
+    // is kept via `getRegularTypeOfLiteralType` (freshness stripped, value
+    // preserved) instead of being widened, so `{ a: 1 } as const`'s `a` stays the
+    // literal `1`.
+    //
+    // DEFER(phase-4-checker-4bi+): the type-assertion branch (`x as T` member
+    // value returns `T` unchanged) and the contextual-type branch (a literal
+    // preserved by a literal-typed context via
+    // `getWidenedLiteralLikeTypeForContextualType`). blocked-by: contextual type
+    // propagation.
     // Go: internal/checker/checker.go:Checker.checkExpressionForMutableLocation(13784)
     fn check_expression_for_mutable_location(
         &mut self,
@@ -574,6 +613,9 @@ impl Checker {
         node: NodeId,
     ) -> TypeId {
         let t = self.check_expression(program, node);
+        if is_const_context(program, node) {
+            return self.regular_type_of_literal_type(t);
+        }
         self.get_widened_literal_type(t)
     }
 
@@ -739,13 +781,18 @@ impl Checker {
     // takes `never` under strictNullChecks, else `undefined` (Go's
     // `implicitNeverType` / `undefinedWideningType`).
     //
-    // DEFER(phase-4-checker-4bg+): spread (`[...a]`) and omitted elements, the
-    // tuple/const contexts (`createTupleType`, `as const` readonly), contextual
-    // typing, and the `ObjectFlagsArrayLiteral` clone of `createArrayLiteralType`
-    // (the reachable subset returns the plain `Array<T>` reference, which is
-    // sufficient for element access + assignability). blocked-by: spread/iterator
-    // typing, tuple inference, contextual type propagation, and the
-    // array-literal widening flag's consumers.
+    // In a const context (`[1, 2] as const`) the literal is instead a readonly
+    // fixed-arity tuple whose element types are the preserved literals (Go's
+    // `inConstContext` -> `createTupleTypeEx(elementTypes, _, readonly=true)`).
+    //
+    // DEFER(phase-4-checker-4bi+): spread (`[...a]`) and omitted elements, the
+    // non-const tuple contexts (`forceTuple` / a tuple-like contextual type),
+    // contextual typing, and the `ObjectFlagsArrayLiteral` clone of
+    // `createArrayLiteralType` (the reachable subset returns the plain `Array<T>`
+    // reference / fixed-arity tuple, which is sufficient for element access +
+    // assignability + printing). blocked-by: spread/iterator typing, `forceTuple`
+    // check mode, contextual type propagation, and the array-literal widening
+    // flag's consumers.
     // Go: internal/checker/checker.go:Checker.checkArrayLiteral(7989)
     fn check_array_literal(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let elements = match program.arena().data(node) {
@@ -760,6 +807,23 @@ impl Checker {
             .iter()
             .map(|&element| self.check_expression_for_mutable_location(program, element))
             .collect();
+        // In a const context (`[1, 2] as const`) the literal is a readonly tuple
+        // whose element types are the preserved literals (the elements above were
+        // typed in the same const context, so they are already regular literals,
+        // not widened). Go: `createArrayLiteralType(createTupleTypeEx(elementTypes,
+        // elementInfos, inConstContext && !mutableArrayLikeContext))`; the
+        // reachable subset always has `readonly = inConstContext` (no contextual
+        // mutable-array-like type to clear it).
+        //
+        // DEFER(phase-4-checker-4bi+): the non-const tuple contexts (`forceTuple`
+        // / a tuple-like contextual type), the `createArrayLiteralType`
+        // `ObjectFlagsArrayLiteral`/`ContainsObjectOrArrayLiteral` clone, and a
+        // mutable-array-like contextual type clearing the readonly flag.
+        // blocked-by: contextual typing + `forceTuple` check mode + array-literal
+        // widening flags.
+        if is_const_context(program, node) {
+            return self.create_tuple_type_ex(element_types, true);
+        }
         let element_type = if element_types.is_empty() {
             // Go: `core.IfElse(c.strictNullChecks, c.implicitNeverType,
             // c.undefinedWideningType)`. The widening distinction is not modeled.
@@ -3683,6 +3747,56 @@ fn is_entity_name_expression(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool 
     }
     // DEFER(phase-4-checker-4az+): the `allowJS` forms (`this`, element-access
     // entity names). blocked-by: JS-file entity-name parity.
+}
+
+// Reports whether `node` is a `const` assertion (`expr as const` or
+// `<const>expr`): an `AsExpression`/`TypeAssertionExpression` whose type node is
+// the `const` type reference (Go's `ast.IsConstAssertion`).
+// Go: internal/ast/utilities.go:IsConstAssertion(2431)
+fn is_const_assertion(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    match arena.data(node) {
+        NodeData::AsExpression(d) => is_const_type_reference(arena, d.type_node),
+        NodeData::TypeAssertionExpression(d) => is_const_type_reference(arena, d.type_node),
+        _ => false,
+    }
+}
+
+// Reports whether `node` occurs in a const context (Go's `isConstContext`): the
+// operand of an `as const` / `<const>` assertion, or — recursively — an
+// element/property nested within one. The reachable subset implements the
+// syntactic propagation: a parenthesized expression, array-literal element, or
+// spread element inherits its parent's const context; a property assignment,
+// shorthand property, or template span inherits its grandparent's (the
+// containing object literal / template). This is what makes
+// `{ a: [1] } as const` mark both the inner array element and the outer object
+// property as const.
+//
+// DEFER(phase-4-checker-4bi+): the contextual-type branch
+// (`isValidConstAssertionArgument(node) && isConstTypeVariable(getContextualType(node))`),
+// which marks a literal const when it is contextually typed by a `const` type
+// parameter. blocked-by: contextual type propagation + `isConstTypeVariable`
+// (const type parameters).
+// Go: internal/checker/checker.go:Checker.isConstContext(13529)
+fn is_const_context(program: &dyn BoundProgram, node: NodeId) -> bool {
+    let arena = program.arena();
+    let Some(parent) = arena.parent(node) else {
+        return false;
+    };
+    if is_const_assertion(arena, parent) {
+        return true;
+    }
+    match arena.kind(parent) {
+        Kind::ParenthesizedExpression | Kind::ArrayLiteralExpression | Kind::SpreadElement => {
+            is_const_context(program, parent)
+        }
+        Kind::PropertyAssignment | Kind::ShorthandPropertyAssignment | Kind::TemplateSpan => {
+            match arena.parent(parent) {
+                Some(grandparent) => is_const_context(program, grandparent),
+                None => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 // Reports whether `type_node` is the `const` type reference of an `as const`

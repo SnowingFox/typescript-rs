@@ -471,6 +471,36 @@ fn get_strict_option_value_follows_strict_and_explicit() {
     assert!(Checker::new().get_strict_option_value(Tristate::Unknown));
 }
 
+// 4bi: `create_tuple_type_ex` carries the element types positionally and sets
+// the `readonly` flag, while `create_tuple_type` builds a non-readonly tuple.
+// This is the const-context (`[...] as const`) readonly tuple distinction.
+// Go: internal/checker/checker.go:Checker.createTupleTypeEx (readonly)
+#[test]
+fn create_tuple_type_ex_sets_readonly_flag() {
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let n = c.number_type();
+    let readonly_tuple = c.create_tuple_type_ex(vec![s, n], true);
+    let mutable_tuple = c.create_tuple_type(vec![s, n]);
+    let ro = c.get_type(readonly_tuple).as_object().expect("object");
+    assert_eq!(ro.resolved_type_arguments, vec![s, n]);
+    assert!(
+        ro.readonly,
+        "create_tuple_type_ex(_, true) must be readonly"
+    );
+    assert!(c
+        .get_type(readonly_tuple)
+        .object_flags()
+        .contains(ObjectFlags::TUPLE));
+    assert!(
+        !c.get_type(mutable_tuple)
+            .as_object()
+            .expect("object")
+            .readonly,
+        "create_tuple_type must be mutable (non-readonly)"
+    );
+}
+
 // 4al S2: `strict_null_checks` reads `strictNullChecks` through
 // `GetStrictOptionValue` (Go's `c.strictNullChecks`): an explicit value wins,
 // otherwise it follows `strict` (`!= TSFalse`).

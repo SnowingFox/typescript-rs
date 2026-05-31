@@ -2738,6 +2738,76 @@ impl EmitResolver {
 
 **推荐下一轮（4bi）**：(a) **字面量/unique 计算名 → 晚绑定命名成员**（`{ ["a"]: 1 }` 成命名属性 `a`，`getPropertyNameFromType` + late binding，承接本轮 DEFER）；(b) **`2561`「Did you mean to write」建议变体**（`getSuggestionForNonexistentProperty` 拼写建议，承接 4bg）；(c) **get/set/方法成员**（`checkObjectLiteralMethod` 收集签名）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
 
+## 4bi 落地记录（worklog 摘要）—— `as const` const-context 的对象/数组字面量类型化（readonly 元组 + readonly 字面量属性）
+
+**目标**：承接 4be（`as const` 对单体字面量的 freshness-stripping）/ 4bf（对象/数组字面量表达式类型化）。4be 显式 DEFER 了「数组/对象 as const」（彼时 `check_expression` 无 array/object 臂）。本轮落地 Go 的 const-context 透传：`[1, 2] as const` → **readonly 元组** `readonly [1, 2]`（元素是**保留的字面量** `1`/`2`，非 widen 到 `number`；元组 readonly）；`{ a: 1 } as const` → **readonly 字面量属性对象** `{ readonly a: 1; }`（属性符号带 `Readonly` check flag，属性类型是字面量 `1`）。逐行为红→绿，一次一个。单 lane（无其它 lane）。cargo 仅 `-p tsgo_checker`（未 `--workspace`）。未 `git commit`。
+
+**Go 真值（ground truth，已逐一核对）**：
+- `internal/checker/checker.go:Checker.isConstContext(13529)`：`parent := node.Parent`；`IsConstAssertion(parent)` || 上下文-const 分支（DEFER）|| `(IsParenthesizedExpression(parent)||IsArrayLiteralExpression(parent)||IsSpreadElement(parent)) && isConstContext(parent)` || `(IsPropertyAssignment(parent)||IsShorthandPropertyAssignment(parent)||IsTemplateSpan(parent)) && isConstContext(parent.Parent)`——**纯语法递归**，任意嵌套深度透传。
+- `internal/ast/utilities.go:IsConstAssertion(2431)`：`AsExpression`/`TypeAssertionExpression` 且 `IsConstTypeReference(node.Type())`。
+- `internal/checker/checker.go:checkExpressionForMutableLocation(13784)`：`isConstContext(node)` → `getRegularTypeOfLiteralType(t)`（保字面量，不 widen）；`isTypeAssertion(node)` → `t`（DEFER）；else → `getWidenedLiteralLikeTypeForContextualType(...)`（widen）。
+- `internal/checker/checker.go:checkArrayLiteral(7989)`：`inConstContext := isConstContext(node)`；`checkMode&ForceTuple || inConstContext || inTupleContext` → `createArrayLiteralType(createTupleTypeEx(elementTypes, elementInfos, inConstContext && !mutableArrayLikeContextual /*readonly*/))`；否则 `Array<unionElement>`。
+- `internal/checker/checker.go:checkObjectLiteral(13076,13104,13124)`：`inConstContext := isConstContext(node)`；`if inConstContext { checkFlags = ast.CheckFlagsReadonly }`；`prop = newSymbolEx(SymbolFlagsProperty|member.Flags, member.Name, checkFlags)`；`isReadonly := isConstContext(node)` 喂 `getObjectLiteralIndexInfo`。
+- `internal/checker/checker.go:getRegularTypeOfLiteralType(25132)`：freshable→regularType；union→mapType（DEFER）；**否则（object/tuple）恒等返回**——故 `[…] as const`/`{…} as const` 经 `checkAssertion` 的 `getRegularTypeOfLiteralType` 恒等返回已 readonly 化的元组/对象（readonly 来自 `checkArrayLiteral`/`checkObjectLiteral` 而非 `getRegularTypeOfLiteralType`）。
+
+**可达裁剪（faithful-but-reachable）**：
+- 新私有自由 fn `is_const_context(program, node)`（递归镜像 Go，**任意嵌套深度**）+ `is_const_assertion(arena, node)`（`AsExpression`/`TypeAssertionExpression` + `is_const_type_reference`，复用 4be 既有 free fn）。
+- `check_expression_for_mutable_location` 加 const 臂（`is_const_context` → `regular_type_of_literal_type`），数组元素/对象属性值共用此臂——这是字面量保留的共享机制。
+- `check_array_literal` const 臂：`is_const_context(node)` → `create_tuple_type_ex(element_types, readonly=true)`（元素已在共享臂保为 regular 字面量）。空 `[] as const` → `readonly []`。
+- `check_object_literal` const 臂：`member_check_flags = CheckFlags::READONLY`，喂每个 `new_object_literal_property`；`get_object_literal_index_info(_, _, _, is_readonly=in_const_context)`。
+- 印刷：nodebuilder `type_to_string` 新增 `TUPLE` 旗标分流到新私有 `serialize_tuple`（`[e0, e1]` / `readonly [e0, e1]`）；`serialize_members` 对带 `Readonly` check flag 的合成属性印 `readonly ` 前缀（Go `isReadonlySymbol`）。
+- **嵌套深度**：因 `is_const_context` 全递归（同 Go），支持**任意层** array/object 嵌套——`{ a: [1, 2] } as const` → `{ readonly a: readonly [1, 2]; }`、`[[1]] as const` → `readonly [readonly [1]]`（均有单测见证）。
+
+**严格 TDD（逐行为 red→green，一次一个；每片单独 `cargo test -p tsgo_checker <name>` 看红/绿）**：
+
+| # | 切片 | 最小 input → observable（实测红/绿） | 实现触点 |
+|---|---|---|---|
+| 1 tracer（genuine RED）| `const_assertion_on_array_literal_keeps_literal_element_types` | `interface Array<T>{...}\nconst t = [1, 2] as const;\nt[0];` → `check_expression(t[0])==字面量 1`（红：旧无 const 臂 → `Array<number>`，`t[0]`=`number`，实测 `TypeId(8)≠TypeId(22)`）| `check.rs` 新 free fn `is_const_context`/`is_const_assertion`；`check_expression_for_mutable_location` const 臂；`check_array_literal` const 臂；`mod.rs` 新 `pub(crate) create_tuple_type_ex`；`types.rs` `ObjectType` 加 `readonly: bool` |
+| 1b tracer（genuine RED）| `const_assertion_on_array_literal_prints_readonly_tuple` | `const t = [1, 2] as const;\nt;` → `type_to_string==readonly [1, 2]`（红：元组旧落 `serialize_members` 印 `{}`）| `nodebuilder.rs` `type_to_string` TUPLE 分流 + 新私有 `serialize_tuple` |
+| 2a（green-on-arrival）| `const_assertion_on_object_literal_keeps_literal_property_type` | `const o = { a: 1 } as const;\no.a;` → `字面量 1`（slice 1 的共享 mutable-location const 臂落地即覆盖对象属性值）| 无 |
+| 2b tracer（genuine RED）| `const_assertion_on_object_literal_marks_property_readonly` | `const o = { a: 1 } as const;\no;` → 属性 `a` 符号带 `CheckFlags::READONLY`（红：旧对象字面量属性 check flags 恒空）| `mod.rs` 新 `pub(crate) synthesized_symbol_check_flags`；`new_object_literal_property` 加 `check_flags` 入参；`check_object_literal` const 臂 |
+| 2c tracer（genuine RED）| `const_assertion_on_object_literal_prints_readonly_member` | `const o = { a: 1 } as const;\no;` → `type_to_string=={ readonly a: 1; }`（红：旧印 `{ a: 1; }` 无 readonly）| `nodebuilder.rs` `serialize_members` readonly 前缀 |
+| 3 NC（green-on-arrival）| `non_const_object_literal_property_is_widened_and_mutable` | `const o = { a: 1 };\no;` → `{ a: number; }` 且属性无 `Readonly`（4bf 不变，无 const 泄漏）| 无 |
+| 3 NC（green-on-arrival）| `non_const_array_literal_is_array_not_tuple` | `const t = [1, 2];\nt;` → `Array<number>`（非元组、非 readonly，4bf 不变）| 无 |
+| 附加 | `const_assertion_on_array_literal_second_element_keeps_literal` | `t[1]` → 字面量 `2`（位置存储见证）| 无 |
+| 附加（嵌套深度）| `const_assertion_propagates_into_nested_array_literal` | `const o = { a: [1, 2] } as const;\no;` → `{ readonly a: readonly [1, 2]; }`（对象→数组 1 层嵌套透传）| 无 |
+| 附加（嵌套深度）| `const_assertion_propagates_into_nested_inner_array_literal` | `const t = [[1]] as const;\nt;` → `readonly [readonly [1]]`（数组→数组嵌套透传）| 无 |
+| 单测 | `create_tuple_type_ex_sets_readonly_flag`（mod_test）| `create_tuple_type_ex(_, true)` readonly=true、`create_tuple_type` readonly=false | `create_tuple_type_ex` |
+| 单测 | `type_to_string_tuple_elements` / `type_to_string_readonly_tuple_elements`（nodebuilder_test）| `[string, number]` / `readonly [string, number]` | `serialize_tuple` 两分支 |
+
+> 红→绿证据：slice 1 / 1b / 2b / 2c **均 genuine RED**（1：`t[0]`=`number`(`TypeId(8)`)≠字面量 `1`(`TypeId(22)`)；1b：元组印 `{}`；2b：属性 check flags 空、不含 `READONLY`；2c：印 `{ a: 1; }` 无 readonly）→ 最小触点转绿。slice 2a（对象属性字面量保留）为 **green-on-arrival**：与数组元素共用 `check_expression_for_mutable_location` const 臂，slice 1 落地即覆盖。NC + 嵌套 + 单测为守卫（**如实记录非伪造红**，同 4bc–4bh 口径）。
+
+**本轮交付**：
+- `core/types.rs`：`ObjectType` 加 `pub readonly: bool` 字段（默认 false，仅 TUPLE 有意义；所有 `ObjectType { .. }` 构造经 `..Default::default()`，加字段 additive-safe）。
+- `core/mod.rs`：新 `pub(crate) create_tuple_type_ex(element_types, readonly)`（`create_tuple_type` 委托其 readonly=false）；新 `pub(crate) synthesized_symbol_check_flags`；`new_object_literal_property` 加 `check_flags: CheckFlags` 入参（`pub(crate)` 签名变更，仅 2 处 check.rs 调用）；`SynthesizedSymbol.check_flags` 去 `#[allow(dead_code)]`。
+- `core/check.rs`：新私有 free fn `is_const_context`/`is_const_assertion`；`check_expression_for_mutable_location` const 臂；`check_array_literal` const-元组臂；`check_object_literal` const-readonly check flag + index readonly；`get_object_literal_index_info` 加 `is_readonly` 入参。
+- `core/nodebuilder.rs`：`type_to_string` TUPLE 分流 + 新私有 `serialize_tuple`；`serialize_members` readonly 前缀（synthesized `CheckFlags::READONLY`）。
+- 测试：`check_test.rs` +10（slice1/1b/2a/2b/2c + 2 NC + 3 附加）、`nodebuilder_test.rs` +2（tuple 印刷两分支）、`mod_test.rs` +1（`create_tuple_type_ex` readonly）。
+- **未改任何既有 `pub fn` 签名、无新 `pub` 项、无 `lib.rs` 改动、无新依赖。** 仅：`ObjectType` 加 `pub` 字段（additive，所有构造经 `..Default::default()`）；新 `pub(crate)` 方法（`create_tuple_type_ex`/`synthesized_symbol_check_flags`）；既有 `pub(crate) new_object_literal_property` 加入参（非 `pub` API，task 显式许可）。
+
+**新公开 API 形状**：无新 `pub` 项；`ObjectType` 新增 `pub readonly: bool`（默认 false，对既有读者 additive）。`cargo build -p tsgo_compiler` 绿（实测）。
+
+**测试增量**：**463 单测**（+13，相对 4bh 基线 450）+ **134 doctest**（**±0**：新方法均 `pub(crate)`/私有，不挂 doctest）。
+
+**支持的 const-context 嵌套深度**：**任意层**（`is_const_context` 全递归镜像 Go 的 `isConstContext`，覆盖 paren/array/spread/property-assignment/shorthand/template-span 链）。见证：`{ a: [1, 2] } as const` → `{ readonly a: readonly [1, 2]; }`、`[[1]] as const` → `readonly [readonly [1]]`。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker`（`--lib` 463 单测 + `--doc` 134 doctest）绿；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。未 `--workspace`（无其它 lane）。未 `git commit`。
+
+**本轮 DEFER（带 blocked-by）**：
+- **`isConstContext` 的上下文-const 分支**（`isValidConstAssertionArgument(node) && isConstTypeVariable(getContextualType(node), 0)`）：未做（可达子集仅语法 `as const`）。blocked-by: 上下文类型传递 + `isConstTypeVariable`（const 类型参数）。
+- **`<const>expr` 前缀断言形（`TypeAssertionExpression`）的类型化**：`is_const_assertion` 已认 `TypeAssertionExpression`（故其内嵌 paren/array 的 const 透传可达），但 `check_expression` 仍无 `TypeAssertionExpression` 臂（直接 `<const>[1,2]` 的顶层断言未类型化）。blocked-by: `TypeAssertionExpression` 表达式臂（4be 既有 DEFER）。
+- **`forceTuple` / tuple-like 上下文 / mutableArrayLike 上下文清 readonly**：本轮元组仅 const 路径，readonly 恒 `inConstContext`；Go 的 `checkMode&ForceTuple`、tuple-like contextual、`isMutableArrayLikeType` 清 readonly 未做。blocked-by: `forceTuple` check mode + contextual typing。
+- **`createArrayLiteralType` 的 `ObjectFlagsArrayLiteral|ContainsObjectOrArrayLiteral` 克隆 + cachedTypes**：本港 const 元组直接 `create_tuple_type_ex`，未套 `createArrayLiteralType` 旗标克隆/缓存（可达子集元素访问+赋值性+印刷已足）。blocked-by: array-literal widening 旗标消费者 + 类型缓存键。
+- **嵌套字面量的 per-property re-widening 在非-const `getWidenedType`**：const 元组/对象 readonly 字面量经 `get_widened_type`（4bg）恒等（元组无 `CONTAINS_OBJECT_OR_ARRAY_LITERAL` 旗标，对象成员已是 regular 字面量），与 Go 可观察等价；但 Go 的 `getWidenedTypeWithContext` 对元组类型参数递归 re-widen 未建。blocked-by: union/array widening + widening contexts。
+- **元组 spread（`[...a] as const`）/ optional/variadic/labeled 元组元素 / `length` 与 `[number]` 成员的 const-readonly 形态**：本轮 fixed-arity 元组（承 4ae 子集），spread/变长元素 DEFER。blocked-by: `createNormalizedTupleType` + `TupleElementInfo` + iterator/spread typing。
+- **readonly-tuple → `ReadonlyArray<T>` 赋值性 / mutable-array 赋 readonly-tuple 报错 / 2540（readonly 属性赋值）**：未做（任务 DEFER）。`o.a = 2` 的 2540 写诊断 blocked-by: 赋值目标 readonly 检查（`isReadonlySymbol` 消费端 + `checkReferenceExpression`）。
+- **program（非合成）成员符号的 readonly 修饰印刷**：`serialize_members` 仅认合成符号 `CheckFlags::READONLY`；interface/class `readonly` 字段印刷 DEFER。blocked-by: bound 符号声明修饰 readonly。
+- **`getRegularTypeOfObjectLiteral`（JSX/regular 对象配对）+ union `regularType` 链**：本轮 const 对象 readonly 来自 `checkObjectLiteral` 的 check flag（非 `getRegularTypeOfObjectLiteral`），Go 的 `getRegularTypeOfObjectLiteral`（fresh↔regular 对象配对、`regularTypeOfObjectLiteral` 缓存）未建。blocked-by: fresh/regular 对象配对 + union mapType。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/types/literal/constAssertions*`（`as const` readonly 元组/对象）+ `tests/cases/conformance/expressions/asOperator/`（`as const` 数组/对象字面量）+ `tests/cases/conformance/types/tuple/`（readonly 元组印刷/元素访问）最基础形态——无 spread/forceTuple/contextual/ReadonlyArray-赋值性/2540。
+
+**推荐下一轮（4bj）**：(a) **2540 readonly 属性赋值诊断**（`o.a = 2` where `o` is `as const` → `Cannot assign to 'a' because it is a read-only property`，消费 `Readonly` check flag）；(b) **字面量/unique 计算名 → 晚绑定命名成员**（承接 4bh DEFER）；(c) **`<T>expr` / `<const>expr` 类型断言臂**（`TypeAssertionExpression`，承接 4be DEFER）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

@@ -89,6 +89,36 @@ fn type_to_string_intersection_of_named() {
     assert_eq!(type_to_string(&mut c, &p, inter), "A & B");
 }
 
+// 4bi: a fixed-arity tuple prints as `[e0, e1]` with the positional element
+// types (Go's tuple type-node serialization). A non-readonly tuple has no
+// `readonly` prefix.
+// Go: internal/checker/checker.go:Checker.typeToString (tuple)
+#[test]
+fn type_to_string_tuple_elements() {
+    let p = StubProgram::parse_and_bind("/a.ts", "");
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let n = c.number_type();
+    let tuple = c.create_tuple_type(vec![s, n]);
+    assert_eq!(type_to_string(&mut c, &p, tuple), "[string, number]");
+}
+
+// 4bi: a readonly tuple (an `[...] as const` array literal) prints with a
+// leading `readonly ` adornment.
+// Go: internal/checker/checker.go:Checker.typeToString (readonly tuple)
+#[test]
+fn type_to_string_readonly_tuple_elements() {
+    let p = StubProgram::parse_and_bind("/a.ts", "");
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let n = c.number_type();
+    let tuple = c.create_tuple_type_ex(vec![s, n], true);
+    assert_eq!(
+        type_to_string(&mut c, &p, tuple),
+        "readonly [string, number]"
+    );
+}
+
 // Go: internal/checker/printer.go:typeToString (intrinsics/literals delegate)
 #[test]
 fn type_to_string_intrinsics_and_literals_delegate() {

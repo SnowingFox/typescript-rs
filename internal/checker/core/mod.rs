@@ -95,8 +95,8 @@ pub(crate) fn is_synthesized_symbol(id: symbols::SymbolId) -> bool {
 struct SynthesizedSymbol {
     /// Symbol meaning flags (always carries `SymbolFlags::TRANSIENT`).
     flags: symbols::SymbolFlags,
-    /// Checker-time flags (e.g. `CheckFlags::SYNTHETIC_PROPERTY`).
-    #[allow(dead_code)]
+    /// Checker-time flags (e.g. `CheckFlags::SYNTHETIC_PROPERTY` /
+    /// `CheckFlags::READONLY`).
     check_flags: CheckFlags,
     /// The property name.
     name: String,
@@ -785,8 +785,12 @@ impl Checker {
     }
 
     /// Mints a synthesized (transient) property symbol for an object-literal
-    /// member named `name`, carrying `flags` and the already-computed member
-    /// `member_type` as its resolved type.
+    /// member named `name`, carrying `flags`, `check_flags`, and the
+    /// already-computed member `member_type` as its resolved type.
+    ///
+    /// `check_flags` carries the checker-time adornments Go's `newSymbolEx`
+    /// receives — notably `CheckFlags::READONLY` for an `as const` (const
+    /// context) object-literal property.
     ///
     /// Unlike [`new_synthesized_property`](Checker::new_synthesized_property)
     /// (whose type is lazily combined from a union/intersection
@@ -804,9 +808,10 @@ impl Checker {
         &mut self,
         name: &str,
         flags: symbols::SymbolFlags,
+        check_flags: CheckFlags,
         member_type: TypeId,
     ) -> symbols::SymbolId {
-        let prop = self.new_synthesized_property(name, flags, CheckFlags::empty(), member_type);
+        let prop = self.new_synthesized_property(name, flags, check_flags, member_type);
         self.set_synthesized_symbol_resolved_type(prop, member_type);
         prop
     }
@@ -848,6 +853,14 @@ impl Checker {
     // Go: internal/ast/symbol.go:Symbol.Flags
     pub(crate) fn synthesized_symbol_flags(&self, id: symbols::SymbolId) -> symbols::SymbolFlags {
         self.synthesized_symbols.borrow()[Self::synthesized_index(id)].flags
+    }
+
+    /// Returns a synthesized symbol's checker-time flags (e.g.
+    /// `CheckFlags::READONLY` on an `as const` object-literal property). This is
+    /// the synthesized-symbol analog of `getCheckFlags`.
+    // Go: internal/checker/checker.go:Checker.getCheckFlags
+    pub(crate) fn synthesized_symbol_check_flags(&self, id: symbols::SymbolId) -> CheckFlags {
+        self.synthesized_symbols.borrow()[Self::synthesized_index(id)].check_flags
     }
 
     /// Returns a synthesized property's name.
@@ -953,8 +966,26 @@ impl Checker {
     /// Side effects: mutates the checker's type arena.
     // Go: internal/checker/checker.go:Checker.createTupleType / createNormalizedTupleType
     pub fn create_tuple_type(&mut self, element_types: Vec<TypeId>) -> TypeId {
+        self.create_tuple_type_ex(element_types, false)
+    }
+
+    // Creates a fixed-arity tuple type carrying its element types by position,
+    // marking it `readonly` when `readonly` is set. This is the const-context
+    // form of [`create_tuple_type`](Checker::create_tuple_type): an
+    // `[...] as const` array literal produces a readonly tuple
+    // (Go's `createTupleTypeEx(elementTypes, elementInfos, readonly)` with
+    // `readonly = inConstContext`).
+    //
+    // Side effects: mutates the checker's type arena.
+    // Go: internal/checker/checker.go:Checker.createTupleTypeEx / createNormalizedTupleType (readonly)
+    pub(crate) fn create_tuple_type_ex(
+        &mut self,
+        element_types: Vec<TypeId>,
+        readonly: bool,
+    ) -> TypeId {
         let object = ObjectType {
             resolved_type_arguments: element_types,
+            readonly,
             ..Default::default()
         };
         self.new_object_type(ObjectFlags::TUPLE, None, object)

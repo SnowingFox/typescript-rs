@@ -4400,3 +4400,203 @@ fn is_numeric_literal_name_matches_round_trip() {
     assert!(!super::is_numeric_literal_name(""));
     assert!(!super::is_numeric_literal_name("\u{FE}computed"));
 }
+
+// 4bi slice 1 tracer (genuine RED): `[1, 2] as const` types the array literal as
+// a readonly tuple whose element types are the *preserved* literal types `1` and
+// `2` (NOT widened to `number`). Reading `t[0]` resolves positionally to the
+// literal `1`. Before this round `check_array_literal` ignored the const context
+// and built `Array<number>` (each element widened, unioned), so `t[0]` resolved
+// to `number` (≠ the literal `1`). A synthetic top-level `interface Array<T>`
+// stands in for the lib type so the pre-change `Array<number>` path is well
+// defined.
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral(7989) (inConstContext)
+#[test]
+fn const_assertion_on_array_literal_keeps_literal_element_types() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst t = [1, 2] as const;\nt[0];",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let one = c.get_number_literal_type(tsgo_jsnum::Number::from(1.0));
+    assert_eq!(c.check_expression(&p, access), one);
+}
+
+// 4bi slice 1b tracer (genuine RED): an `[1, 2] as const` readonly tuple prints
+// as `readonly [1, 2]` — the element types are the preserved literals `1` and
+// `2`, and the `readonly` modifier reflects the const tuple. Before tuple
+// printing was wired the node builder fell through to the anonymous-object
+// member serializer and printed `{}` (a tuple carries no named properties).
+// Go: internal/checker/checker.go:Checker.typeToString (tuple) / nodebuilderimpl.go
+#[test]
+fn const_assertion_on_array_literal_prints_readonly_tuple() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const t = [1, 2] as const;\nt;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "readonly [1, 2]"
+    );
+}
+
+// 4bi slice 2a (green-on-arrival, shared with slice 1's mutable-location const
+// branch): `{ a: 1 } as const`'s property `a` keeps the *literal* type `1` (not
+// widened to `number`), because the property value `1` is in the object
+// literal's const context. The const branch added for the array literal element
+// (`checkExpressionForMutableLocation` -> `getRegularTypeOfLiteralType`) is the
+// same path object-literal property values flow through, so reading `o.a`
+// resolves to the literal `1`.
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) / checkExpressionForMutableLocation(13784)
+#[test]
+fn const_assertion_on_object_literal_keeps_literal_property_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1 } as const;\no.a;");
+    let access = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let one = c.get_number_literal_type(tsgo_jsnum::Number::from(1.0));
+    assert_eq!(c.check_expression(&p, access), one);
+}
+
+// 4bi slice 2b tracer (genuine RED): in a const context an object-literal
+// property symbol carries the `Readonly` check flag (Go's `checkObjectLiteral`
+// sets `checkFlags = CheckFlagsReadonly` when `isConstContext(node)`, then
+// `newSymbolEx(..., checkFlags)`). Before this round object-literal property
+// symbols were always minted with empty check flags, so the `Readonly` flag was
+// absent even under `as const`.
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13104) (CheckFlagsReadonly)
+#[test]
+fn const_assertion_on_object_literal_marks_property_readonly() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1 } as const;\no;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    let prop = crate::core::declared_types::get_property_of_type(&c, t, "a")
+        .expect("object literal has property `a`");
+    assert!(
+        crate::core::is_synthesized_symbol(prop),
+        "an object-literal property is a checker-synthesized symbol"
+    );
+    assert!(
+        c.synthesized_symbol_check_flags(prop)
+            .contains(tsgo_ast::CheckFlags::READONLY),
+        "a const-context object-literal property must carry the Readonly check flag"
+    );
+}
+
+// 4bi slice 2c tracer (genuine RED): a const-context object literal prints its
+// properties with the `readonly` adornment and the preserved literal type, so
+// `{ a: 1 } as const` is `{ readonly a: 1; }`. Before the node builder honored
+// the property `Readonly` check flag it printed `{ a: 1; }` (no `readonly`).
+// Go: internal/checker/checker.go:Checker.typeToString / nodebuilderimpl.go (isReadonlySymbol)
+#[test]
+fn const_assertion_on_object_literal_prints_readonly_member() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1 } as const;\no;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ readonly a: 1; }"
+    );
+}
+
+// 4bi slice 3 negative control (green-on-arrival): WITHOUT `as const`, an object
+// literal property is NOT readonly and its type is WIDENED. `{ a: 1 }` (no const
+// context) prints `{ a: number; }` — the member value `1` widens to `number`
+// through the default (non-const) `checkExpressionForMutableLocation` branch and
+// no `readonly` adornment appears. This guards against the const-context typing
+// leaking into ordinary object literals (4bf behavior unchanged).
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) (no const context)
+#[test]
+fn non_const_object_literal_property_is_widened_and_mutable() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1 };\no;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ a: number; }"
+    );
+    // The property carries no `Readonly` check flag.
+    let prop = crate::core::declared_types::get_property_of_type(&c, t, "a")
+        .expect("object literal has property `a`");
+    assert!(
+        !c.synthesized_symbol_check_flags(prop)
+            .contains(tsgo_ast::CheckFlags::READONLY),
+        "a non-const object-literal property must not be readonly"
+    );
+}
+
+// 4bi slice 3 negative control (green-on-arrival): WITHOUT `as const`, an array
+// literal stays the `Array<T>` reference (NOT a readonly tuple) with the widened
+// element type. `[1, 2]` (no const context) prints `Array<number>` and `t[0]`
+// resolves to `number`. This guards against the const-context tuple typing
+// leaking into ordinary array literals (4bf behavior unchanged).
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral(7989) (no const context)
+#[test]
+fn non_const_array_literal_is_array_not_tuple() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst t = [1, 2];\nt;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "Array<number>"
+    );
+}
+
+// 4bi extra: positional tuple access reads the SECOND preserved literal too —
+// `[1, 2] as const`'s `t[1]` is the literal `2` (not `number`), confirming the
+// tuple stores each element type by position, not a single unioned element.
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral(7989) + tuple element access
+#[test]
+fn const_assertion_on_array_literal_second_element_keeps_literal() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst t = [1, 2] as const;\nt[1];",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let two = c.get_number_literal_type(tsgo_jsnum::Number::from(2.0));
+    assert_eq!(c.check_expression(&p, access), two);
+}
+
+// 4bi extra (nesting depth): `isConstContext` recursion is faithful to Go and
+// propagates through ANY depth of nested array/object literals. An array nested
+// in an `as const` object literal becomes a readonly tuple with preserved
+// literal elements, and the outer property is readonly:
+// `{ a: [1, 2] } as const` => `{ readonly a: readonly [1, 2]; }`. This exercises
+// the property-assignment -> grandparent (object literal) -> const-assertion
+// chain feeding the array literal's element/spread const-context.
+// Go: internal/checker/checker.go:Checker.isConstContext(13529)
+#[test]
+fn const_assertion_propagates_into_nested_array_literal() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: [1, 2] } as const;\no;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ readonly a: readonly [1, 2]; }"
+    );
+}
+
+// 4bi extra (nesting depth): the recursion also propagates through nested ARRAY
+// literals, so `[[1]] as const` is a readonly tuple whose single element is
+// itself a readonly tuple: `readonly [readonly [1]]`. This confirms the
+// array-literal -> array-literal const-context chain.
+// Go: internal/checker/checker.go:Checker.isConstContext(13529)
+#[test]
+fn const_assertion_propagates_into_nested_inner_array_literal() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const t = [[1]] as const;\nt;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "readonly [readonly [1]]"
+    );
+}

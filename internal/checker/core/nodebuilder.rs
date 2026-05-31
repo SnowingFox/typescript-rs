@@ -11,16 +11,17 @@
 //! (Go's `typeToString` triggers resolution), so it takes `&mut Checker`.
 //!
 //! DEFER(phase-4-checker-4k): function/construct signatures (`(x: T) => U`),
-//! array/tuple types, mapped/conditional types, alias names, and
-//! optional/readonly member adornments — those need type kinds not yet
-//! constructed and the full node-builder scope machinery. (4v adds intersection
-//! printing: `A & B`.)
+//! array types, mapped/conditional types, alias names, and optional member
+//! adornments — those need type kinds not yet constructed and the full
+//! node-builder scope machinery. (4v adds intersection printing: `A & B`; 4bi
+//! adds fixed-arity tuple printing `[A, B]` / `readonly [A, B]` and the
+//! `readonly` adornment on a const object-literal property.)
 
 use tsgo_ast::SymbolId;
 
 use super::declared_types::get_type_of_symbol;
 use super::program::BoundProgram;
-use super::types::{TypeData, TypeId};
+use super::types::{ObjectFlags, TypeData, TypeId};
 use super::Checker;
 
 /// Returns the printed name of `symbol` (Go's `symbolToString` for the simple
@@ -79,6 +80,17 @@ pub fn type_to_string(checker: &mut Checker, program: &dyn BoundProgram, ty: Typ
             .collect();
         return parts.join(" & ");
     }
+    // A fixed-arity tuple prints as `[e0, e1]` (or `readonly [e0, e1]` for an
+    // `as const` readonly tuple), with the positional element types printed in
+    // order. Checked before the type-reference/anonymous paths because a tuple
+    // carries its elements in `resolved_type_arguments` with no `target`.
+    if checker
+        .get_type(ty)
+        .object_flags()
+        .contains(ObjectFlags::TUPLE)
+    {
+        return serialize_tuple(checker, program, ty);
+    }
     let symbol = checker.get_type(ty).symbol;
     let object_info = match &checker.get_type(ty).data {
         TypeData::Object(o) => Some((o.target, o.resolved_type_arguments.clone())),
@@ -134,17 +146,51 @@ fn serialize_members(checker: &mut Checker, program: &dyn BoundProgram, ty: Type
     for property in properties {
         // An object-literal property is a checker-synthesized (transient)
         // symbol whose name lives in the checker's transient arena, not the
-        // program (which would panic on the tagged id).
-        let name = if super::is_synthesized_symbol(property) {
-            checker.synthesized_symbol_name(property)
+        // program (which would panic on the tagged id). A synthesized property
+        // carries the `Readonly` check flag in a const context (`as const`), so
+        // it prints with a leading `readonly ` (Go's `isReadonlySymbol`).
+        //
+        // DEFER(phase-4-checker-4bi+): the readonly modifier on a program (non
+        // synthesized) member symbol (interface/class `readonly` field).
+        // blocked-by: declaration-modifier readonly on bound symbols.
+        let (name, readonly) = if super::is_synthesized_symbol(property) {
+            (
+                checker.synthesized_symbol_name(property),
+                checker
+                    .synthesized_symbol_check_flags(property)
+                    .contains(tsgo_ast::CheckFlags::READONLY),
+            )
         } else {
-            program.symbol(property).name.clone()
+            (program.symbol(property).name.clone(), false)
         };
         let property_type = get_type_of_symbol(checker, program, property, None);
         let printed = type_to_string(checker, program, property_type);
-        parts.push(format!("{name}: {printed}"));
+        let prefix = if readonly { "readonly " } else { "" };
+        parts.push(format!("{prefix}{name}: {printed}"));
     }
     format!("{{ {}; }}", parts.join("; "))
+}
+
+// Prints a fixed-arity tuple type as `[e0, e1]`, prefixed with `readonly ` when
+// the tuple is readonly (an `[...] as const` tuple). The positional element
+// types come from `resolved_type_arguments`, printed in order (Go's tuple type
+// node serialization).
+// Go: internal/checker/nodebuilderimpl.go (tuple type node) / typeToString
+fn serialize_tuple(checker: &mut Checker, program: &dyn BoundProgram, ty: TypeId) -> String {
+    let (elements, readonly) = match &checker.get_type(ty).data {
+        TypeData::Object(o) => (o.resolved_type_arguments.clone(), o.readonly),
+        _ => return checker.type_to_string(ty),
+    };
+    let parts: Vec<String> = elements
+        .iter()
+        .map(|&e| type_to_string(checker, program, e))
+        .collect();
+    let body = format!("[{}]", parts.join(", "));
+    if readonly {
+        format!("readonly {body}")
+    } else {
+        body
+    }
 }
 
 #[cfg(test)]
