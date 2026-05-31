@@ -366,3 +366,7 @@ Date:   Sun May 31 22:56:33 2026 +0800
       Function -> Function ident arms.
 
 为什么这些都没 entire 的？你看看 entire.log 咋回事这是，以及你是不是又运行 --no-verify 了？还是说 subagent invoke 的形式 entire 没法追踪🤔，你可以看看 ~/dev/story/submodule 里面的，起个 subagent 研究一下这个问题
+
+---
+
+后面原因出来了你不用管，我自己看，你继续推进主线程任务，不要停，遵循 /tdd 和 docs/rust-rewrite/README.md
