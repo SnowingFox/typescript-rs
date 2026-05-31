@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "18edab01d6b6",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "internal/checker/core/emit_resolver.rs",
+    "internal/checker/core/emit_resolver_test.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/18/edab01d6b6/0/metadata.json",
+      "transcript": "/18/edab01d6b6/0/full.jsonl",
+      "content_hash": "/18/edab01d6b6/0/content_hash.txt",
+      "prompt": "/18/edab01d6b6/0/prompt.txt"
+    }
+  ]
+}
