@@ -1104,6 +1104,67 @@ fn nullish_coalesce_non_nullable_left_yields_left_type() {
     assert_eq!(c.check_expression(&p, qq), string);
 }
 
+// 4ba slice 1 (genuine RED): `??` refines its result to the union of the left
+// type's non-nullable part and the right type when the left can be
+// `undefined`/`null` (Go's `KindQuestionQuestionToken` arm ->
+// `getUnionType([GetNonNullableType(left), right])` when
+// `hasTypeFacts(left, EQUndefinedOrNull)`). With `x: string | undefined`,
+// `x ?? "d"` therefore has a type assignable to `string`, so assigning it to a
+// `string` variable reports nothing. Before the refinement the arm returned the
+// raw left type `string | undefined`, which is not assignable to `string` and
+// reported `2322`.
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12462)
+#[test]
+fn nullish_coalesce_removes_undefined_assignable_to_string() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nvar s: string = x ?? \"d\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4ba slice 1 (type witness): the `??` result of `x ?? "d"` (with
+// `x: string | undefined`) carries no `IsUndefined`/`IsNull` facts \u2014 the nullish
+// refinement removed the nullable `undefined` part of the left operand (Go's
+// `GetNonNullableType(left)`). Before the refinement the arm returned the raw
+// `string | undefined`, whose `undefined` member carries `IsUndefined`.
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12462)
+#[test]
+fn nullish_coalesce_result_drops_nullable_facts() {
+    let p =
+        StubProgram::parse_and_bind("/a.ts", "declare const x: string | undefined;\nx ?? \"d\";");
+    let qq = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let result = c.check_expression(&p, qq);
+    assert!(
+        !c.has_type_facts(result, crate::TypeFacts::IS_UNDEFINED_OR_NULL),
+        "expected the `??` result to drop the nullable part"
+    );
+}
+
+// 4ba slice 2 (`??=` shares the refinement, green-on-arrival): the compound
+// nullish assignment `x ??= "d"` produces the same refined result type as `??`
+// (Go's `KindQuestionQuestionEqualsToken` shares the arm), so the value of
+// `(x ??= "d")` with `x: string | undefined` is assignable to `string`. Using
+// it as a `string` initializer reports nothing. Like `??`, the refinement rides
+// the slice-1 arm; the compound form additionally runs `checkAssignmentOperator`
+// (here `"d"` is assignable to the `string | undefined` reference, so no `2322`).
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12462)
+#[test]
+fn nullish_coalesce_assign_removes_undefined_assignable_to_string() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | undefined;\nvar s: string = x ??= \"d\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
 // Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (compound arithmetic operand, 2362)
 #[test]
 fn compound_arithmetic_assignment_checks_operand() {
@@ -1359,6 +1420,114 @@ fn call_well_typed_reports_no_diagnostic() {
     // `f(1)`: correct arity and an assignable argument, so the call reports
     // nothing.
     assert!(c.get_diagnostics(root).is_empty());
+}
+
+// 4ba slice 3 (genuine RED): invoking a possibly-`undefined` value reports
+// `2722` "Cannot invoke an object which is possibly 'undefined'." Go's
+// `resolveCallExpression` types the callee with `checkNonNullTypeWithReporter`
+// using the `reportCannotInvokePossiblyNullOrUndefinedError` reporter (the
+// 2721/2722/2723 family, distinct from the 18047/18048/18049 property-access
+// family). With `f: (() => void) | undefined`, the callee is possibly
+// `undefined`, so the invocation reports `2722` and then resolves the call on
+// the non-null `() => void`. Before the callee non-null check, the union callee
+// had no call signatures, so the call silently yielded `error` (0 diagnostics).
+// Go: internal/checker/checker.go:Checker.resolveCallExpression(8478)/reportCannotInvokePossiblyNullOrUndefinedError(9854)
+#[test]
+fn call_on_possibly_undefined_callee_reports_2722() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const f: (() => void) | undefined;\nf();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2722);
+    assert_eq!(
+        diags[0].message,
+        "Cannot invoke an object which is possibly 'undefined'."
+    );
+}
+
+// 4ba slice 3 guard (green-on-arrival): invoking a possibly-`null` callee
+// reports `2721` "Cannot invoke an object which is possibly 'null'." (the
+// `IsNull`-only fact selects the `_null` message). Same code path as the
+// undefined case.
+// Go: internal/checker/checker.go:Checker.reportCannotInvokePossiblyNullOrUndefinedError(9854)
+#[test]
+fn call_on_possibly_null_callee_reports_2721() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const f: (() => void) | null;\nf();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2721);
+    assert_eq!(
+        diags[0].message,
+        "Cannot invoke an object which is possibly 'null'."
+    );
+}
+
+// 4ba slice 3 guard (green-on-arrival): invoking a possibly-`null`-or-
+// `undefined` callee reports `2723` (both `IsUndefined` and `IsNull` facts).
+// Go: internal/checker/checker.go:Checker.reportCannotInvokePossiblyNullOrUndefinedError(9854)
+#[test]
+fn call_on_possibly_null_or_undefined_callee_reports_2723() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const f: (() => void) | null | undefined;\nf();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2723);
+    assert_eq!(
+        diags[0].message,
+        "Cannot invoke an object which is possibly 'null' or 'undefined'."
+    );
+}
+
+// 4ba slice 3 guard (the property-access path, distinct family): a method call
+// `o.m()` on a possibly-`undefined` `o` reports `18048` "'o' is possibly
+// 'undefined'." \u2014 NOT a `2722`. The diagnostic comes from typing the property
+// access object `o` via `checkNonNullExpression` (the 4az property-access path),
+// which fires before the call's callee non-null check ever sees the (already
+// non-nullable) method type `() => void`. This confirms the task's note that the
+// 4az property-access path already covers `o.m`, and the fresh `2722` surface is
+// invoking a possibly-`undefined` value directly.
+// Go: internal/checker/checker.go:Checker.checkPropertyAccessExpression -> checkNonNullExpression
+#[test]
+fn call_on_property_access_possibly_undefined_reports_18048() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const o: { m(): void } | undefined;\no.m();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 18048);
+    assert_eq!(diags[0].message, "'o' is possibly 'undefined'.");
+}
+
+// 4ba slice 3 guard: a non-nullable callee is invoked without any non-null
+// diagnostic (the `IsUndefinedOrNull` facts are absent, so the callee non-null
+// check is the identity).
+// Go: internal/checker/checker.go:Checker.checkNonNullTypeWithReporter(7381)
+#[test]
+fn call_on_non_nullable_callee_reports_nothing() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const f: () => void;\nf();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
 // Go: internal/checker/checker.go:Checker.resolveCall/reportCallResolutionErrors (No_overload_matches_this_call, 2769)
@@ -2950,6 +3119,47 @@ fn plain_nullable_assigned_to_string_reports_2322() {
     assert_eq!(
         diags[0].message,
         "Type 'undefined | string' is not assignable to type 'string'."
+    );
+}
+
+// 4ba slice 4 (typeof narrowing, end-to-end witness, green-on-arrival): inside
+// `if (typeof x === "string")`, `x: string | number` narrows to `string` (Go's
+// `narrowTypeByTypeof`/`narrowTypeByTypeName`, wired into the flow walk and
+// already covered at the flow level by `flow_typeof_narrows_in_then_branch`).
+// The diagnostic-level witness: assigning the narrowed `x` to a `string`
+// variable inside the guarded block reports nothing.
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeof
+#[test]
+fn typeof_string_guard_narrows_var_assignment_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | number;\nif (typeof x === \"string\") {\n  var s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4ba slice 4 contrast (baseline): WITHOUT the `typeof` guard, `x` keeps its
+// `string | number` union, so the same `var s: string = x` is not assignable
+// and reports `2322` (source the whole union). The 0-vs-1 difference is the
+// observable effect of the typeof narrowing.
+// Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration (2322)
+#[test]
+fn plain_string_or_number_assigned_to_string_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | number;\nvar s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string | number' is not assignable to type 'string'."
     );
 }
 

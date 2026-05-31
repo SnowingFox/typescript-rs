@@ -105,6 +105,18 @@ impl Diagnostic {
     }
 }
 
+// Selects the diagnostic family for a possibly-`null`/`undefined` operand, the
+// port of Go's `reportError` function pointer threaded through
+// `checkNonNullTypeWithReporter`.
+// Go: internal/checker/checker.go:Checker.checkNonNullTypeWithReporter(7381)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NonNullReporter {
+    /// A property/element access object (`reportObjectPossiblyNullOrUndefinedError`).
+    Access,
+    /// A call callee (`reportCannotInvokePossiblyNullOrUndefinedError`).
+    Invocation,
+}
+
 impl Checker {
     /// Computes the type of an expression `node` (Go's `checkExpression`).
     ///
@@ -178,24 +190,40 @@ impl Checker {
         self.check_non_null_type(program, t, node)
     }
 
-    // Reports the possibly-`null`/`undefined` error (`2531`/`2532`/`2533`, or the
-    // entity-name `18047`/`18048`/`18049`) when `t` can be `null`/`undefined`
-    // under strictNullChecks, then narrows to the non-null type. Returns
-    // `error_type` if nothing non-nullable survives (Go's `checkNonNullType` ->
-    // `checkNonNullTypeWithReporter` reachable subset).
-    //
-    // DEFER(phase-4-checker-4az+): the `unknown`-operand branch
-    // (`Object_is_of_type_unknown` / `_0_is_of_type_unknown`, 2571/18046) and
-    // the `checkNonNullNonVoidType` void path. blocked-by: `unknown` entity-name
-    // reporting + void-access diagnostics. Gated on strictNullChecks (Go relies
-    // on non-strict union simplification to suppress the facts; gating gives the
-    // same observable: no report in non-strict).
-    // Go: internal/checker/checker.go:Checker.checkNonNullType(7377)/checkNonNullTypeWithReporter(7381)
+    // Reports the possibly-`null`/`undefined` error for a property/element access
+    // object and narrows to the non-null type (Go's `checkNonNullType`, which
+    // defaults to the `reportObjectPossiblyNullOrUndefinedError` reporter).
+    // Go: internal/checker/checker.go:Checker.checkNonNullType(7377)
     fn check_non_null_type(
         &mut self,
         program: &dyn BoundProgram,
         t: TypeId,
         node: NodeId,
+    ) -> TypeId {
+        self.check_non_null_type_with_reporter(program, t, node, NonNullReporter::Access)
+    }
+
+    // Reports the possibly-`null`/`undefined` error when `t` can be
+    // `null`/`undefined` under strictNullChecks, then narrows to the non-null
+    // type. The `reporter` selects the diagnostic family: property/element
+    // access (`2531`/`2532`/`2533`, or the entity-name `18047`/`18048`/`18049`)
+    // vs invocation (`2721`/`2722`/`2723`). Returns `error_type` if nothing
+    // non-nullable survives (Go's `checkNonNullTypeWithReporter` reachable
+    // subset).
+    //
+    // DEFER(phase-4-checker-4ba+): the `unknown`-operand branch
+    // (`Object_is_of_type_unknown` / `_0_is_of_type_unknown`, 2571/18046) and
+    // the `checkNonNullNonVoidType` void path. blocked-by: `unknown` entity-name
+    // reporting + void-access diagnostics. Gated on strictNullChecks (Go relies
+    // on non-strict union simplification to suppress the facts; gating gives the
+    // same observable: no report in non-strict).
+    // Go: internal/checker/checker.go:Checker.checkNonNullTypeWithReporter(7381)
+    fn check_non_null_type_with_reporter(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        node: NodeId,
+        reporter: NonNullReporter,
     ) -> TypeId {
         if !self.strict_null_checks() {
             return t;
@@ -204,7 +232,14 @@ impl Checker {
         if !facts.intersects(TypeFacts::IS_UNDEFINED_OR_NULL) {
             return t;
         }
-        self.report_object_possibly_null_or_undefined_error(program, node, facts);
+        match reporter {
+            NonNullReporter::Access => {
+                self.report_object_possibly_null_or_undefined_error(program, node, facts)
+            }
+            NonNullReporter::Invocation => {
+                self.report_cannot_invoke_possibly_null_or_undefined_error(program, node, facts)
+            }
+        }
         let non_nullable = self.get_non_null_type(t);
         if self
             .get_type(non_nullable)
@@ -282,6 +317,33 @@ impl Checker {
                 self.error(program, node, message, &[]);
             }
         }
+    }
+
+    // Emits the cannot-invoke possibly-`null`/`undefined` diagnostic for a call
+    // callee given its `IsUndefined`/`IsNull` facts (`2722` for possibly-
+    // `undefined`, `2721` for possibly-`null`, `2723` for both). Unlike the
+    // property-access reporter, this family has no entity-name vs `Object`
+    // split: the message is the same regardless of the callee shape (Go's
+    // `reportCannotInvokePossiblyNullOrUndefinedError`).
+    // Go: internal/checker/checker.go:Checker.reportCannotInvokePossiblyNullOrUndefinedError(9854)
+    fn report_cannot_invoke_possibly_null_or_undefined_error(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        facts: TypeFacts,
+    ) {
+        let has_undefined = facts.intersects(TypeFacts::IS_UNDEFINED);
+        let has_null = facts.intersects(TypeFacts::IS_NULL);
+        let message: &'static Message = if has_undefined {
+            if has_null {
+                &tsgo_diagnostics::CANNOT_INVOKE_AN_OBJECT_WHICH_IS_POSSIBLY_NULL_OR_UNDEFINED
+            } else {
+                &tsgo_diagnostics::CANNOT_INVOKE_AN_OBJECT_WHICH_IS_POSSIBLY_UNDEFINED
+            }
+        } else {
+            &tsgo_diagnostics::CANNOT_INVOKE_AN_OBJECT_WHICH_IS_POSSIBLY_NULL
+        };
+        self.error(program, node, message, &[]);
     }
 
     // Resolves an identifier reference to its (flow-narrowed) value type.
@@ -574,18 +636,25 @@ impl Checker {
             // The `??`/`??=` operator (Go's `KindQuestionQuestionToken` arm): the
             // result is the left type, refined to the union of the left type's
             // non-nullable part and the right type when the left type can be
-            // `undefined`/`null`. For a non-nullable left, the result is exactly
-            // the left type.
+            // `undefined`/`null` (`hasTypeFacts(left, EQUndefinedOrNull)`). For a
+            // non-nullable left, the result is exactly the left type.
             //
-            // DEFER(phase-4-checker-4p+): the nullish refinement of the result
-            // (`hasTypeFacts(EQUndefinedOrNull)` + `GetNonNullableType`) and the
-            // `checkNullishCoalesceOperands` diagnostics. blocked-by: the
-            // `EQUndefinedOrNull` type facts + `strictNullChecks` wiring.
+            // DEFER(phase-4-checker-4ba+): the `checkNullishCoalesceOperands`
+            // grammar diagnostics (`??` mixed with `||`/`&&` without parentheses,
+            // `2025`/etc.) and the `UnionReductionSubtype` reduction of the result
+            // (the port's union keeps literal members; the observable
+            // assignability is unaffected). blocked-by: the grammar mixed-operator
+            // check + 4b union subtype reduction.
             Kind::QuestionQuestionToken | Kind::QuestionQuestionEqualsToken => {
+                let mut result = left_type;
+                if self.has_type_facts(left_type, TypeFacts::EQ_UNDEFINED_OR_NULL) {
+                    let non_null = self.get_non_null_type(left_type);
+                    result = self.get_union_dropping_never(&[non_null, right_type]);
+                }
                 if operator == Kind::QuestionQuestionEqualsToken {
                     self.check_assignment_operator(program, left, left_type, right_type);
                 }
-                left_type
+                result
             }
             // The `+`/`+=` operator (Go's `KindPlusToken`/`KindPlusEqualsToken`
             // arm): the result is `number` when both operands are number-like,
@@ -1101,6 +1170,16 @@ impl Checker {
             _ => return self.error_type,
         };
         let func_type = self.check_expression(program, callee);
+        // Go's `resolveCallExpression` types the callee through
+        // `checkNonNullTypeWithReporter` with the cannot-invoke reporter: a
+        // possibly-`null`/`undefined` callee reports `2721`/`2722`/`2723`, then
+        // the call resolves on the narrowed non-null type.
+        let func_type = self.check_non_null_type_with_reporter(
+            program,
+            func_type,
+            callee,
+            NonNullReporter::Invocation,
+        );
         let signatures = self.get_signatures_of_type(func_type);
         let Some(&signature) = signatures.first() else {
             // No call signatures (e.g. an `any`/error callee or a non-callable
