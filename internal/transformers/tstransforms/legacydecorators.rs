@@ -48,11 +48,17 @@
 //!   __decorate([dec], C);`), including the self-reference class-alias rewrite.
 //!   blocked-by: `getLocalName`/`GetDeclarationName` emit-name forms + the
 //!   `classAliases` substitution and `getReferencedValueDeclaration`.
-//! - **Method / accessor decorators** (`design:type` = `Function`,
-//!   `design:returntype`). blocked-by: the method/accessor decoration shape and
-//!   `getAllAccessorDeclarations`.
-//! - **Parameter decorators** (`__param(i, dec)`) and `design:paramtypes`.
-//!   blocked-by: `getDecoratorsOfParameters` + `serializeParameterTypesOfNode`.
+//! - **Accessor decorators** (get/set merge, `getAccessorTypeNode`). blocked-by:
+//!   the accessor decoration shape and `getAllAccessorDeclarations`. (Method
+//!   decorators landed in 6ao: `design:type` = `Function` + `design:returntype`.)
+//! - **`this`-parameter offset + rest-parameter element type** for the 6ap
+//!   `design:paramtypes` / `__param` paths. blocked-by: `IsThisParameter` skip +
+//!   `GetRestParameterElementType`. (The reachable subset — plain leading
+//!   parameters — emits the `design:paramtypes` array and `__param(i, dec)`
+//!   entries; see `serialize_parameter_types` / `append_param_decorators`.)
+//! - **Constructor parameter decorators** (`__param` on the class constructor,
+//!   a different target than a method). blocked-by: the class-decorator wrapping
+//!   path + `getAllDecoratorsOfClass`.
 //! - **`TypeReference` `design:type`** for lib-globals/qualified-name entities.
 //!   Round 4ax/6an wires the reachable single-file `TypeReference` dispatch
 //!   (consuming checker 4aw's `get_type_reference_serialization_kind`): a
@@ -107,6 +113,22 @@ pub static METADATA_HELPER: EmitHelper = EmitHelper {
     dependencies: &[],
     text: r#"var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};"#,
+};
+
+/// TypeScript `__param` — adapts a parameter decorator into a member decorator
+/// that forwards the parameter index. Emitted for each decorated parameter as
+/// `__param(index, decorator)`. Text and priority (4) verbatim from Go
+/// `internal/printer/helpers.go:paramHelper`.
+// Go: internal/printer/helpers.go:paramHelper
+pub static PARAM_HELPER: EmitHelper = EmitHelper {
+    name: "typescript:param",
+    import_name: "__param",
+    scoped: false,
+    priority: Some(4),
+    dependencies: &[],
+    text: r#"var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
 };"#,
 };
 
@@ -298,10 +320,11 @@ fn visit_class_declaration(ec: &mut EmitContext, node: NodeId, cfg: &Config) -> 
         .nodes
         .iter()
         .copied()
-        .filter(|&m| member_has_decorators(ec.arena(), m))
+        .filter(|&m| member_is_decorated(ec.arena(), m))
         .collect();
     if decorated_members.is_empty() {
-        // No member decorators in the reachable subset; recurse unchanged.
+        // No member or parameter decorators in the reachable subset; recurse
+        // unchanged.
         return visit_each_child_ec(ec, node, cfg);
     }
 
@@ -317,10 +340,10 @@ fn visit_class_declaration(ec: &mut EmitContext, node: NodeId, cfg: &Config) -> 
         .iter()
         .copied()
         .map(|m| match ec.arena().kind(m) {
-            Kind::PropertyDeclaration if member_has_decorators(ec.arena(), m) => {
+            Kind::PropertyDeclaration if member_is_decorated(ec.arena(), m) => {
                 rebuild_property_without_decorators(ec.arena_mut(), m)
             }
-            Kind::MethodDeclaration if member_has_decorators(ec.arena(), m) => {
+            Kind::MethodDeclaration if member_is_decorated(ec.arena(), m) => {
                 rebuild_method_without_decorators(ec.arena_mut(), m)
             }
             _ => m,
@@ -361,6 +384,46 @@ fn member_has_decorators(arena: &NodeArena, member: NodeId) -> bool {
     modifiers.is_some_and(|m| m.modifier_flags.contains(ModifierFlags::DECORATOR))
 }
 
+/// Reports whether `member` carries a decorator itself, or (for a method) has at
+/// least one decorated parameter (the reachable subset of Go's
+/// `NodeOrChildIsDecorated`: `NodeIsDecorated || ChildIsDecorated`).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/ast/utilities.go:NodeOrChildIsDecorated
+fn member_is_decorated(arena: &NodeArena, member: NodeId) -> bool {
+    member_has_decorators(arena, member) || method_has_decorated_parameter(arena, member)
+}
+
+/// Reports whether `member` is a method declaration with at least one decorated
+/// parameter (Go's `ChildIsDecorated` arm for `KindMethodDeclaration`).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/ast/utilities.go:ChildIsDecorated
+fn method_has_decorated_parameter(arena: &NodeArena, member: NodeId) -> bool {
+    let parameters = match arena.data(member) {
+        NodeData::MethodDeclaration(d) => &d.parameters,
+        _ => return false,
+    };
+    parameters
+        .nodes
+        .iter()
+        .copied()
+        .any(|p| parameter_has_decorators(arena, p))
+}
+
+/// Reports whether a parameter declaration carries at least one decorator.
+///
+/// Side effects: none (reads the arena).
+fn parameter_has_decorators(arena: &NodeArena, param: NodeId) -> bool {
+    match arena.data(param) {
+        NodeData::ParameterDeclaration(d) => d
+            .modifiers
+            .as_ref()
+            .is_some_and(|m| m.modifier_flags.contains(ModifierFlags::DECORATOR)),
+        _ => false,
+    }
+}
+
 /// Rebuilds a property declaration with its decorators removed from the modifier
 /// list and its type annotation / postfix token dropped (Go's
 /// `LegacyDecoratorsTransformer.visitPropertyDeclaration`, which passes `nil`
@@ -397,17 +460,44 @@ fn rebuild_method_without_decorators(arena: &mut NodeArena, member: NodeId) -> N
         _ => unreachable!("kind/data mismatch"),
     };
     let modifiers = strip_decorators(arena, modifiers.as_ref());
+    // Go's `visitMethodDeclaration` visits every parameter via
+    // `visitParamerDeclaration`, which elides parameter modifiers (decorators)
+    // and drops the type annotation / `?` token. Rebuild each parameter to keep
+    // the lowered method body free of types and parameter decorators
+    // (`m(@pdec a: number)` -> `m(a)`).
+    let new_parameters: Vec<NodeId> = parameters
+        .nodes
+        .iter()
+        .copied()
+        .map(|p| rebuild_parameter_without_decorators(arena, p))
+        .collect();
     arena.new_method_declaration(
         modifiers,
         asterisk_token,
         name,
         None,
         None,
-        parameters,
+        NodeList::new(new_parameters),
         None,
         None,
         body,
     )
+}
+
+/// Rebuilds a parameter declaration with its modifiers (parameter decorators)
+/// elided and its type annotation / `?` token dropped, keeping the `...` rest
+/// token, name, and initializer (Go's
+/// `LegacyDecoratorsTransformer.visitParamerDeclaration`, which passes `nil` for
+/// the type and `?` token and elides modifiers).
+///
+/// Side effects: pushes the rebuilt parameter node.
+// Go: internal/transformers/tstransforms/legacydecorators.go:visitParamerDeclaration
+fn rebuild_parameter_without_decorators(arena: &mut NodeArena, param: NodeId) -> NodeId {
+    let (dot_dot_dot_token, name, initializer) = match arena.data(param) {
+        NodeData::ParameterDeclaration(d) => (d.dot_dot_dot_token, d.name, d.initializer),
+        _ => return param,
+    };
+    arena.new_parameter_declaration(None, dot_dot_dot_token, name, None, None, initializer)
 }
 
 /// Returns a copy of `modifiers` with decorator entries removed and the flag
@@ -444,15 +534,17 @@ fn strip_decorators(arena: &NodeArena, modifiers: Option<&ModifierList>) -> Opti
 /// - A **property** appends `design:type`, serialized from its type annotation
 ///   (or `Object` when absent — Go's `serializeTypeNode(nil)`).
 /// - A **method** appends `design:type` = `Function` (Go's `serializeTypeOfNode`
-///   hard-codes `Function` for `KindMethodDeclaration`, no checker) and a
-///   `design:returntype` (`shouldAddReturnTypeMetadata` is true for *every*
-///   method); with no return annotation the return type serializes to `void 0`
-///   (Go's `serializeReturnTypeOfNode`).
+///   hard-codes `Function` for `KindMethodDeclaration`, no checker), a
+///   `design:paramtypes` array (6ap; one serialized type per parameter via
+///   `serialize_parameter_types`), and a `design:returntype`
+///   (`shouldAddReturnTypeMetadata` is true for *every* method); with no return
+///   annotation the return type serializes to `void 0` (Go's
+///   `serializeReturnTypeOfNode`). The order is `design:type` ->
+///   `design:paramtypes` -> `design:returntype` (Go's `getOldTypeMetadata`).
 ///
-/// DEFER (blocked-by `serializeParameterTypesOfNode` + `getDecoratorsOfParameters`):
-/// `design:paramtypes`, which Go emits between `design:type` and
-/// `design:returntype`. Also DEFER: the async-method `Promise` return form
-/// (Go's `serializeReturnTypeOfNode` `IsAsyncFunction` arm).
+/// DEFER: the async-method `Promise` return form (Go's
+/// `serializeReturnTypeOfNode` `IsAsyncFunction` arm). blocked-by:
+/// `IsAsyncFunction` modifier detection.
 ///
 /// Side effects: pushes the metadata call/identifier nodes; requests the
 /// `__metadata` helper.
@@ -482,7 +574,12 @@ fn append_type_metadata(
             let function = ec.arena_mut().new_identifier("Function");
             let type_meta = new_metadata_helper(ec, "design:type", function);
             decorator_expressions.push(type_meta);
-            // DEFER: `design:paramtypes` (Go inserts it here).
+            // Go: `shouldAddParamTypesMetadata` is true for a method, so
+            // `design:paramtypes` is appended between `design:type` and
+            // `design:returntype` (the `getOldTypeMetadata` order).
+            let paramtypes = serialize_parameter_types(ec, resolver, member);
+            let paramtypes_meta = new_metadata_helper(ec, "design:paramtypes", paramtypes);
+            decorator_expressions.push(paramtypes_meta);
             // `design:returntype`: Go's `serializeReturnTypeOfNode` serializes the
             // return-type annotation when present (routed through the same checker
             // serialization as a property's `design:type`), else `void 0`.
@@ -501,6 +598,48 @@ fn append_type_metadata(
     }
 }
 
+/// Builds the `design:paramtypes` array expression for a decorated method: one
+/// serialized type per parameter, in order (Go's
+/// `serializeParameterTypesOfNode`). Each parameter's type annotation is
+/// serialized through the same checker path as a property's `design:type`
+/// (`serializeTypeOfNode(parameter)` -> `serializeTypeNode(parameter.Type())`);
+/// a parameter with no annotation serializes to `Object` (Go's
+/// `serializeTypeNode(nil)`). With no parameters the array is empty (`[]`).
+///
+/// DEFER(phase-6): the `this`-parameter offset (Go's
+/// `serializeParameterTypesOfNode` skips a leading `this` parameter) and the
+/// rest-parameter element-type serialization (Go's
+/// `GetRestParameterElementType` over `...args: T[]`); neither is reachable in
+/// the current single-file subset. blocked-by: `IsThisParameter` skip + rest
+/// element-type extraction.
+///
+/// Side effects: pushes the array / serialized-type nodes.
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeParameterTypesOfNode
+fn serialize_parameter_types(
+    ec: &mut EmitContext,
+    resolver: &EmitReferenceResolver,
+    member: NodeId,
+) -> NodeId {
+    let parameters = match ec.arena().data(member) {
+        NodeData::MethodDeclaration(d) => d.parameters.clone(),
+        _ => NodeList::new(Vec::new()),
+    };
+    let mut expressions: Vec<NodeId> = Vec::new();
+    for param in parameters.nodes.iter().copied() {
+        let type_node = match ec.arena().data(param) {
+            NodeData::ParameterDeclaration(d) => d.type_node,
+            _ => None,
+        };
+        let value = match type_node {
+            Some(type_node) => serialize_type_node(ec, resolver, type_node),
+            None => ec.arena_mut().new_identifier("Object"),
+        };
+        expressions.push(value);
+    }
+    ec.arena_mut()
+        .new_array_literal_expression(NodeList::new(expressions))
+}
+
 /// Builds the `__decorate([...], <prefix>, "<name>", <descriptor>);` statement
 /// for a decorated property or method `member` of class `class_name` (Go's
 /// `generateClassElementDecorationExpression` wrapped in an expression
@@ -516,6 +655,11 @@ fn generate_class_element_decoration_statement(
     member: NodeId,
 ) -> Option<NodeId> {
     let mut decorator_expressions = decorator_expressions_of(ec.arena(), member);
+    // Parameter decorators contribute `__param(index, dec)` entries *after* the
+    // member's own decorators and *before* any metadata (Go's
+    // `transformAllDecoratorsOfDeclaration` order: decorators, then `__param`,
+    // then metadata).
+    append_param_decorators(ec, member, &mut decorator_expressions);
     if decorator_expressions.is_empty() {
         return None;
     }
@@ -602,6 +746,57 @@ fn decorator_expressions_of(arena: &NodeArena, member: NodeId) -> Vec<NodeId> {
         .collect()
 }
 
+/// Appends a `__param(index, decorator)` entry for each decorated parameter of a
+/// method `member`, in parameter order (Go's `transformDecoratorsOfParameters`).
+/// These follow the member's own decorators and precede any `design:*` metadata.
+///
+/// DEFER(phase-6): the `this`-parameter offset (Go's `getDecoratorsOfParameters`
+/// skips a leading `this` parameter when computing the index); not reachable in
+/// the current single-file subset. blocked-by: `IsThisParameter` skip.
+///
+/// Side effects: pushes the `__param` call nodes; requests the `__param` helper.
+// Go: internal/transformers/tstransforms/legacydecorators.go:transformDecoratorsOfParameters
+fn append_param_decorators(
+    ec: &mut EmitContext,
+    member: NodeId,
+    decorator_expressions: &mut Vec<NodeId>,
+) {
+    let parameters = match ec.arena().data(member) {
+        NodeData::MethodDeclaration(d) => d.parameters.clone(),
+        _ => return,
+    };
+    for (index, param) in parameters.nodes.iter().copied().enumerate() {
+        for decorator in parameter_decorator_expressions(ec.arena(), param) {
+            let helper = new_param_helper(ec, index, decorator);
+            decorator_expressions.push(helper);
+        }
+    }
+}
+
+/// Collects the decorator expressions of a parameter, in source order.
+///
+/// Side effects: none (reads the arena).
+fn parameter_decorator_expressions(arena: &NodeArena, param: NodeId) -> Vec<NodeId> {
+    let modifiers = match arena.data(param) {
+        NodeData::ParameterDeclaration(d) => d.modifiers.as_ref(),
+        _ => None,
+    };
+    let Some(modifiers) = modifiers else {
+        return Vec::new();
+    };
+    modifiers
+        .list
+        .nodes
+        .iter()
+        .copied()
+        .filter(|&n| arena.kind(n) == Kind::Decorator)
+        .map(|n| match arena.data(n) {
+            NodeData::Decorator(d) => d.expression,
+            _ => unreachable!("kind checked above"),
+        })
+        .collect()
+}
+
 /// Builds the member-name expression for a property or method: an identifier
 /// name becomes a string literal `"name"` (Go's `getExpressionForPropertyName`).
 ///
@@ -666,6 +861,27 @@ fn new_metadata_helper(ec: &mut EmitContext, key: &str, value: NodeId) -> NodeId
         None,
         None,
         NodeList::new(vec![key_literal, value]),
+        NodeFlags::NONE,
+    )
+}
+
+/// Builds `__param(<index>, <decorator>)`, requesting the `__param` helper (Go's
+/// `NodeFactory.NewParamHelper`). The index is a numeric literal, `decorator` is
+/// the parameter decorator's expression.
+///
+/// Side effects: pushes the call/numeric nodes; requests the `__param` helper.
+// Go: internal/printer/factory.go:NodeFactory.NewParamHelper
+fn new_param_helper(ec: &mut EmitContext, index: usize, decorator: NodeId) -> NodeId {
+    ec.request_emit_helper(&PARAM_HELPER);
+    let index_literal = ec
+        .arena_mut()
+        .new_numeric_literal(&index.to_string(), TokenFlags::NONE);
+    let name = ec.factory().new_unscoped_helper_name("__param");
+    ec.arena_mut().new_call_expression(
+        name,
+        None,
+        None,
+        NodeList::new(vec![index_literal, decorator]),
         NodeFlags::NONE,
     )
 }

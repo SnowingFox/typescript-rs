@@ -244,29 +244,27 @@ fn function_typed_property_serializes_to_function_constructor() {
 // `serializeTypeOfNode` KindMethodDeclaration -> `NewIdentifier("Function")`;
 // `shouldAddReturnTypeMetadata` true for *every* method -> `serializeReturnTypeOfNode`
 // with no annotation -> `NewVoidZeroExpression()`).
-// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`
-// (modulo the DEFER'd `design:paramtypes` entry tsc inserts between the two):
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
 //   class C { @dec m() {} }
 //   =>
 //   class C { m() { } }
-//   __decorate([dec, __metadata("design:type", Function), __metadata("design:returntype", void 0)], C.prototype, "m", null);
+//   __decorate([dec, __metadata("design:type", Function), __metadata("design:paramtypes", []), __metadata("design:returntype", void 0)], C.prototype, "m", null);
 //
-// Headline (6ao): with `--emitDecoratorMetadata`, a decorated method appends a
-// `design:type` = `Function` (Go hardcodes `Function` for methods, no checker)
-// *and* a `design:returntype` (always emitted for methods; `void 0` with no
-// return annotation), in that order, after the real decorator. Both `__decorate`
-// (priority 2) and `__metadata` (priority 3) helpers land in the prologue.
-//
-// DEFER (blocked-by `serializeParameterTypesOfNode` + `getDecoratorsOfParameters`):
-// tsc also emits `__metadata("design:paramtypes", [])` between `design:type` and
-// `design:returntype`; this round omits it (the emitted shape is the faithful
-// subset Go would produce minus that entry).
+// Headline (6ao + 6ap): with `--emitDecoratorMetadata`, a decorated method
+// appends a `design:type` = `Function` (Go hardcodes `Function` for methods, no
+// checker), a `design:paramtypes` (6ap; the empty array `[]` for a 0-arg
+// method), *and* a `design:returntype` (always emitted for methods; `void 0`
+// with no return annotation), in that order, after the real decorator. Both
+// `__decorate` (priority 2) and `__metadata` (priority 3) helpers land in the
+// prologue. The `[]` here is the slice-2 (empty-params) coverage: it is
+// green-on-arrival once slice 1 wires `serialize_parameter_types` (which yields
+// `[]` for zero parameters).
 #[test]
 fn method_decorator_emits_design_type_function_and_void_returntype() {
     check_legacy_metadata(
         "class C { @dec m() {} }",
         &format!(
-            "{}\n{}\nclass C {{\n    m() {{ }}\n}}\n__decorate([dec, __metadata(\"design:type\", Function), __metadata(\"design:returntype\", void 0)], C.prototype, \"m\", null);",
+            "{}\n{}\nclass C {{\n    m() {{ }}\n}}\n__decorate([dec, __metadata(\"design:type\", Function), __metadata(\"design:paramtypes\", []), __metadata(\"design:returntype\", void 0)], C.prototype, \"m\", null);",
             DECORATE_HELPER.text, METADATA_HELPER.text
         ),
     );
@@ -276,25 +274,138 @@ fn method_decorator_emits_design_type_function_and_void_returntype() {
 // (`IsFunctionLike(node) && node.Type() != nil` -> `serializeTypeNode(node.Type())`),
 // the return-type annotation routed through the same checker serialization as a
 // property's `design:type` (KindNumberKeyword -> "Number").
-// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`
-// (modulo the DEFER'd `design:paramtypes` entry):
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
 //   class C { @dec m(): number { return 1; } }
 //   =>
 //   class C { m() { return 1; } }
-//   __decorate([dec, __metadata("design:type", Function), __metadata("design:returntype", Number)], C.prototype, "m", null);
+//   __decorate([dec, __metadata("design:type", Function), __metadata("design:paramtypes", []), __metadata("design:returntype", Number)], C.prototype, "m", null);
 //
 // Headline (6ao): a method's `design:returntype` serializes its *return-type
 // annotation* via the checker (`serialize_type_node_for_metadata`), exactly as a
 // property's `design:type` does — `: number` -> `Number` (not the `void 0`
 // fallback used when the annotation is absent). `design:type` stays the
-// hard-coded `Function`.
+// hard-coded `Function`; the `design:paramtypes` is `[]` (no parameters, 6ap).
 #[test]
 fn method_decorator_serializes_return_type_annotation() {
     check_legacy_metadata(
         "class C { @dec m(): number { return 1; } }",
         &format!(
-            "{}\n{}\nclass C {{\n    m() {{ return 1; }}\n}}\n__decorate([dec, __metadata(\"design:type\", Function), __metadata(\"design:returntype\", Number)], C.prototype, \"m\", null);",
+            "{}\n{}\nclass C {{\n    m() {{ return 1; }}\n}}\n__decorate([dec, __metadata(\"design:type\", Function), __metadata(\"design:paramtypes\", []), __metadata(\"design:returntype\", Number)], C.prototype, \"m\", null);",
             DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/metadata.go:getOldTypeMetadata
+// (`shouldAddParamTypesMetadata` true for KindMethodDeclaration ->
+// typeserializer.go:serializeParameterTypesOfNode: one serialized type per
+// parameter, in order, via `serializeTypeOfNode(parameter)` ->
+// `serializeTypeNode(parameter.Type())`). The `design:paramtypes` entry is
+// appended *between* `design:type` and `design:returntype` (the
+// `getOldTypeMetadata` order: type -> paramtypes -> returntype).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
+//   class C { @dec m(a: number, b: string) {} }
+//   =>
+//   class C { m(a, b) { } }
+//   __decorate([dec, __metadata("design:type", Function), __metadata("design:paramtypes", [Number, String]), __metadata("design:returntype", void 0)], C.prototype, "m", null);
+//
+// Headline (6ap): with `--emitDecoratorMetadata`, a decorated method emits a
+// `design:paramtypes` array between `design:type` and `design:returntype`. Each
+// parameter's type annotation is serialized through the same checker path as a
+// property's `design:type` (`: number` -> `Number`, `: string` -> `String`),
+// and the parameter type annotations are stripped from the lowered method body
+// (`m(a: number, b: string)` -> `m(a, b)`).
+#[test]
+fn method_decorator_emits_design_paramtypes_for_typed_params() {
+    check_legacy_metadata(
+        "class C { @dec m(a: number, b: string) {} }",
+        &format!(
+            "{}\n{}\nclass C {{\n    m(a, b) {{ }}\n}}\n__decorate([dec, __metadata(\"design:type\", Function), __metadata(\"design:paramtypes\", [Number, String]), __metadata(\"design:returntype\", void 0)], C.prototype, \"m\", null);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:transformDecoratorsOfParameters
+// (`NewParamHelper(decorator.Expression(), i, ...)` -> `__param(i, dec)`),
+// gathered via `getDecoratorsOfParameters` and placed after the real decorators
+// in `transformAllDecoratorsOfDeclaration`. A method with a decorated parameter
+// is itself a "decorated class element" (`NodeOrChildIsDecorated`), even with no
+// decorator on the method.
+// Verified against `tsc --experimentalDecorators`:
+//   class C { m(@pdec a) {} }
+//   =>
+//   class C { m(a) { } }
+//   __decorate([__param(0, pdec)], C.prototype, "m", null);
+//
+// Headline (6ap): a parameter decorator lowers to a `__param(index, decorator)`
+// entry in the member's `__decorate` array — here `__param(0, pdec)` for the
+// 0th parameter. No `--emitDecoratorMetadata`, so no `design:*` entries. The
+// `__param` helper (priority 4) is emitted in the prologue after `__decorate`
+// (priority 2), and the parameter's decorator is stripped from the lowered
+// method body (`m(@pdec a)` -> `m(a)`).
+#[test]
+fn parameter_decorator_lowers_to_param_helper() {
+    check_legacy(
+        "class C { m(@pdec a) {} }",
+        &format!(
+            "{}\n{}\nclass C {{\n    m(a) {{ }}\n}}\n__decorate([__param(0, pdec)], C.prototype, \"m\", null);",
+            DECORATE_HELPER.text, PARAM_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:transformAllDecoratorsOfDeclaration
+// (`decoratorExpressions = transformDecorators(decorators) ++
+// transformDecoratorsOfParameters(parameters) ++ transformDecorators(metadata)`
+// — the member's own decorators precede the `__param` entries, which precede
+// metadata).
+// Verified against `tsc --experimentalDecorators`:
+//   class C { @dec m(@pdec a) {} }
+//   =>
+//   class C { m(a) { } }
+//   __decorate([dec, __param(0, pdec)], C.prototype, "m", null);
+//
+// Coverage (6ap): a method with *both* a method decorator and a parameter
+// decorator places the method decorator first (`dec`), then the `__param(0,
+// pdec)` entry. Green-on-arrival once slices 1/3 wire the decorator + `__param`
+// ordering; this guards the exact Go ordering (member decorators before
+// `__param`).
+#[test]
+fn method_and_parameter_decorator_order_preserved() {
+    check_legacy(
+        "class C { @dec m(@pdec a) {} }",
+        &format!(
+            "{}\n{}\nclass C {{\n    m(a) {{ }}\n}}\n__decorate([dec, __param(0, pdec)], C.prototype, \"m\", null);",
+            DECORATE_HELPER.text, PARAM_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:transformAllDecoratorsOfDeclaration
+// + metadata.go:getOldTypeMetadata. With `--emitDecoratorMetadata`, a method
+// with a parameter decorator emits the `__param` entry first, then the `design:*`
+// metadata (`getOldTypeMetadata` order: type, paramtypes, returntype). An
+// untyped parameter serializes to `Object` in the `design:paramtypes` array
+// (Go's `serializeTypeNode(nil)`).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
+//   class C { m(@pdec a) {} }
+//   =>
+//   class C { m(a) { } }
+//   __decorate([__param(0, pdec), __metadata("design:type", Function), __metadata("design:paramtypes", [Object]), __metadata("design:returntype", void 0)], C.prototype, "m", null);
+//
+// Coverage (6ap): combines `__param` with the `design:paramtypes` array; the
+// untyped parameter `a` serializes to `Object`. Green-on-arrival after slices
+// 1/3; guards the `__param`-before-metadata ordering and the no-annotation
+// `Object` fallback for a parameter type. All three helpers land in the prologue
+// in priority order (`__decorate` 2, `__metadata` 3, `__param` 4).
+#[test]
+fn parameter_decorator_with_metadata_emits_param_and_object_paramtype() {
+    check_legacy_metadata(
+        "class C { m(@pdec a) {} }",
+        &format!(
+            "{}\n{}\n{}\nclass C {{\n    m(a) {{ }}\n}}\n__decorate([__param(0, pdec), __metadata(\"design:type\", Function), __metadata(\"design:paramtypes\", [Object]), __metadata(\"design:returntype\", void 0)], C.prototype, \"m\", null);",
+            DECORATE_HELPER.text, METADATA_HELPER.text, PARAM_HELPER.text
         ),
     );
 }
