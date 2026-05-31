@@ -164,10 +164,41 @@ impl Checker {
             Kind::FunctionExpression => self.check_function_expression(program, node),
             Kind::ArrowFunction => self.check_arrow_function(program, node),
             Kind::NonNullExpression => self.check_non_null_assertion(program, node),
+            Kind::AsExpression => self.check_assertion(program, node),
             // DEFER(phase-4-checker-4h+): remaining expression kinds are added in
             // later 4g slices / sub-phases.
             _ => self.error_type,
         }
+    }
+
+    // Checks an `expr as T` assertion (Go's `checkAssertion`). For a `const`
+    // type reference (`as const`) the result is `getRegularTypeOfLiteralType` of
+    // the operand's type: stripping freshness yields a regular literal, which
+    // `getWidenedLiteralType` then leaves unchanged in a mutable binding, so the
+    // literal value is preserved (e.g. `"a" as const` stays `"a"` instead of
+    // widening to `string`).
+    //
+    // A non-const assertion takes the asserted type as its result.
+    //
+    // DEFER(phase-4-checker-4be+): the `<T>expr` type-assertion form
+    // (`TypeAssertionExpression`), the `isValidConstAssertionArgument` diagnostic
+    // for an invalid `as const` argument, the deferred `2352` comparability check
+    // (`checkAssertionDeferred` / `checkSourceElement` on the type node), and the
+    // `erasableSyntaxOnly` grammar diagnostic. blocked-by: assertion
+    // comparability (`isTypeComparableTo`) + deferred-node checking +
+    // erasable-syntax option.
+    // Go: internal/checker/checker.go:Checker.checkAssertion(12238)
+    fn check_assertion(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let (expr, type_node) = match program.arena().data(node) {
+            NodeData::AsExpression(d) => (d.expression, d.type_node),
+            _ => return self.error_type,
+        };
+        let expr_type = self.check_expression(program, expr);
+        if is_const_type_reference(program.arena(), type_node) {
+            return self.regular_type_of_literal_type(expr_type);
+        }
+        let globals = program.globals();
+        super::declared_types::get_type_from_type_node(self, program, type_node, globals)
     }
 
     // Checks a non-null assertion `expr!`: the operand's type with `null`/
@@ -3043,6 +3074,23 @@ fn is_entity_name_expression(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool 
     }
     // DEFER(phase-4-checker-4az+): the `allowJS` forms (`this`, element-access
     // entity names). blocked-by: JS-file entity-name parity.
+}
+
+// Reports whether `type_node` is the `const` type reference of an `as const`
+// assertion (Go's `ast.IsConstTypeReference` / `isConstTypeReference`): a type
+// reference with no type arguments whose name is the identifier `const`.
+// Go: internal/ast/utilities.go:IsConstTypeReference(2439) / internal/checker/utilities.go:isConstTypeReference(128)
+fn is_const_type_reference(arena: &tsgo_ast::NodeArena, type_node: NodeId) -> bool {
+    match arena.data(type_node) {
+        NodeData::TypeReference(d) => {
+            d.type_arguments
+                .as_ref()
+                .is_none_or(|list| list.nodes.is_empty())
+                && arena.kind(d.type_name) == Kind::Identifier
+                && arena.text(d.type_name) == "const"
+        }
+        _ => false,
+    }
 }
 
 // Renders an entity-name expression to its source text (Go's

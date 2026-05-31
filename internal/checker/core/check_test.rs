@@ -3719,3 +3719,184 @@ fn const_binding_keeps_boolean_literal_assignable_to_literal_target() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// 4be slice 1 tracer (genuine RED): a `<literal> as const` assertion suppresses
+// widening AND preserves the literal type. Go's `checkAssertion` returns
+// `getRegularTypeOfLiteralType(exprType)` for a const-type-reference assertion,
+// so `"a" as const` is the regular (non-fresh) literal `"a"`. In an un-annotated
+// `let` binding the initializer flows through `getWidenedLiteralType`, which is
+// a no-op on a regular (non-fresh) literal, so `x` keeps the type `"a"`. That
+// `"a"` is NOT assignable to the literal target `"b"`, so `const y: "b" = x`
+// reports `2322`. Before this round `as const` was untyped (`error` type, which
+// is assignable to anything), so nothing was reported.
+// Go: internal/checker/checker.go:Checker.checkAssertion(12238)
+#[test]
+fn const_assertion_on_string_literal_keeps_literal_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x = \"a\" as const;\nconst y: \"b\" = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '\"a\"' is not assignable to type '\"b\"'."
+    );
+}
+
+// 4be slice 1 guard (green-on-arrival): the canonical `as const` behavior. With
+// `let x = "a" as const`, `x` keeps the literal type `"a"` (the const assertion
+// suppresses the mutable-binding widening that `let x = "a"` would apply), so
+// `const y: "a" = x` is assignable: no diagnostics. Contrast the 4bd
+// `let_binding_widens_string_literal_initializer_to_string` (without `as const`
+// the same shape reports `2322`).
+// Go: internal/checker/checker.go:Checker.checkAssertion(12238)
+#[test]
+fn const_assertion_on_string_literal_is_assignable_to_same_literal() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x = \"a\" as const;\nconst y: \"a\" = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4be slice 1 guard (green-on-arrival): a preserved string literal is still
+// assignable to its base primitive, so `let x = "a" as const; var s: string = x;`
+// reports nothing (`"a"` is assignable to `string`).
+// Go: internal/checker/checker.go:Checker.checkAssertion(12238)
+#[test]
+fn const_assertion_on_string_literal_is_assignable_to_string() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x = \"a\" as const;\nvar s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4be slice 2 (green-on-arrival): `as const` keeps a NUMBER literal too. The
+// const branch normalizes any freshable literal via `getRegularTypeOfLiteralType`
+// (value-kind agnostic), so it generalizes from the string slice with no further
+// code. `let n = 1 as const` keeps `n` as the literal `1`, which is NOT
+// assignable to the literal target `2`, so `const m: 2 = n` reports `2322`.
+// Go: internal/checker/checker.go:Checker.checkAssertion(12238)
+#[test]
+fn const_assertion_on_number_literal_keeps_literal_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let n = 1 as const;\nconst m: 2 = n;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(diags[0].message, "Type '1' is not assignable to type '2'.");
+}
+
+// 4be slice 2 guard (green-on-arrival): the canonical number `as const`
+// behavior. `let n = 1 as const` keeps `n` as `1`, assignable to the literal
+// target `1`: no diagnostics (contrast 4bd `let n = 1` which widens to
+// `number` and reports `2322`).
+// Go: internal/checker/checker.go:Checker.checkAssertion(12238)
+#[test]
+fn const_assertion_on_number_literal_is_assignable_to_same_literal() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let n = 1 as const;\nconst m: 1 = n;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4be slice 3 (green-on-arrival): `as const` keeps a BOOLEAN literal. `true`
+// already types as the construction-time fresh `trueType`, and the const branch
+// normalizes it to the regular `true` literal, so `let b = true as const` keeps
+// `b` as `true` (NOT widened to `boolean`), which is NOT assignable to the
+// literal target `false`: `const c: false = b` reports `2322`.
+// Go: internal/checker/checker.go:Checker.checkAssertion(12238)
+#[test]
+fn const_assertion_on_boolean_literal_keeps_literal_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let b = true as const;\nconst c: false = b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'true' is not assignable to type 'false'."
+    );
+}
+
+// 4be slice 3 guard (green-on-arrival): the canonical boolean `as const`
+// behavior. `let b = true as const` keeps `b` as `true`, assignable to the
+// literal target `true`: no diagnostics (contrast 4bd `let b = true` which
+// widens to `boolean` and reports `2322`).
+// Go: internal/checker/checker.go:Checker.checkAssertion(12238)
+#[test]
+fn const_assertion_on_boolean_literal_is_assignable_to_same_literal() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let b = true as const;\nconst c: true = b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4be slice 4 tracer (genuine RED): a non-const `expr as T` assertion takes the
+// asserted type `T` as its result (Go's `checkAssertion` falls through to
+// `getTypeFromTypeNode(typeNode)` when the type node is not a const reference).
+// `"a" as string` is therefore `string`, which is NOT assignable to the literal
+// target `"a"`, so `const y: "a" = x` reports `2322`. Before this arm was wired
+// the non-const branch returned the `error` type (assignable to anything), so
+// nothing was reported. (`"a"` is comparable to `string`, so the deferred `2352`
+// assertion-comparability check does not apply here.)
+// Go: internal/checker/checker.go:Checker.checkAssertion(12238)
+#[test]
+fn non_const_assertion_takes_asserted_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x = \"a\" as string;\nconst y: \"a\" = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type '\"a\"'."
+    );
+}
+
+// 4be slice 4 guard (green-on-arrival): a non-const assertion to the matching
+// type is fine. `"a" as string` is `string`, assignable to the `string` target:
+// no diagnostics.
+// Go: internal/checker/checker.go:Checker.checkAssertion(12238)
+#[test]
+fn non_const_assertion_to_matching_type_is_assignable() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x = \"a\" as string;\nvar s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
