@@ -1,4 +1,4 @@
-use crate::core::emit_resolver::SerializedTypeNode;
+use crate::core::emit_resolver::{SerializedTypeNode, TypeReferenceSerializationKind};
 use crate::core::program::BoundProgram;
 use crate::core::symbols_query::get_symbol_of_declaration;
 use crate::core::test_support::StubProgram;
@@ -714,6 +714,86 @@ fn serialize_type_node_constructor_type_is_function() {
     assert_eq!(
         resolver.serialize_type_node_for_metadata(&p, ty),
         SerializedTypeNode::Function
+    );
+}
+
+// Go: internal/checker/emitresolver.go:EmitResolver.GetTypeReferenceSerializationKind
+// (tracer: a `TypeReference` to a local class resolves both as a value and as a
+// type to the same class symbol — a runtime constructor — so it classifies as
+// `TypeWithConstructSignatureAndValue`, the kind whose `design:type` emit is the
+// class identifier itself)
+#[test]
+fn type_reference_to_local_class_is_construct_signature_and_value() {
+    // `class C {}` then `declare const x: C;`: the `: C` type reference's entity
+    // name resolves to the class `C` (which has both value and type meaning),
+    // so the reference carries a runtime constructor.
+    let p = StubProgram::parse_and_bind("/a.ts", "class C {}\ndeclare const x: C;");
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 1);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::TypeReference);
+    assert_eq!(
+        resolver.get_type_reference_serialization_kind(&mut c, &p, ty),
+        TypeReferenceSerializationKind::TypeWithConstructSignatureAndValue
+    );
+}
+
+// Go: internal/checker/emitresolver.go:EmitResolver.GetTypeReferenceSerializationKind
+// (a `TypeReference` to a type-only interface resolves only as a type, not as a
+// value, so it carries no runtime constructor and classifies as `ObjectType`)
+#[test]
+fn type_reference_to_interface_is_object_type() {
+    // `interface I {}` then `declare const x: I;`: `I` has type meaning only;
+    // the resolved declared type is a plain object type → `ObjectType`.
+    let p = StubProgram::parse_and_bind("/a.ts", "interface I {}\ndeclare const x: I;");
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 1);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::TypeReference);
+    assert_eq!(
+        resolver.get_type_reference_serialization_kind(&mut c, &p, ty),
+        TypeReferenceSerializationKind::ObjectType
+    );
+}
+
+// Go: internal/checker/emitresolver.go:EmitResolver.GetTypeReferenceSerializationKind
+// (a `TypeReference` to an object-literal type alias resolves only as a type;
+// its declared type is a plain object type → `ObjectType`. Green-on-arrival
+// coverage guard: Go classifies an interface and a type-alias-to-object
+// identically through `getDeclaredTypeOfSymbol` → the `else` tail, so the S2
+// arm already covers it — not a fabricated RED.)
+#[test]
+fn type_reference_to_type_alias_is_object_type() {
+    // `type T = {};` then `declare const x: T;`: `T` has type meaning only and
+    // its declared type is the anonymous object `{}` → `ObjectType`.
+    let p = StubProgram::parse_and_bind("/a.ts", "type T = {};\ndeclare const x: T;");
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 1);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::TypeReference);
+    assert_eq!(
+        resolver.get_type_reference_serialization_kind(&mut c, &p, ty),
+        TypeReferenceSerializationKind::ObjectType
+    );
+}
+
+// Go: internal/checker/emitresolver.go:EmitResolver.GetTypeReferenceSerializationKind
+// (a `TypeReference` to a name with no declaration resolves neither as a value
+// nor as a type, so `resolvedTypeSymbol == nil` → `Unknown`. Green-on-arrival
+// coverage guard: the conservative `Unknown` fallback already covers an
+// unresolved name — not a fabricated RED.)
+#[test]
+fn type_reference_to_unresolved_name_is_unknown() {
+    // `declare const x: Missing;`: `Missing` has no declaration in scope (and no
+    // lib globals), so neither the value nor the type resolution finds it.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: Missing;");
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::TypeReference);
+    assert_eq!(
+        resolver.get_type_reference_serialization_kind(&mut c, &p, ty),
+        TypeReferenceSerializationKind::Unknown
     );
 }
 

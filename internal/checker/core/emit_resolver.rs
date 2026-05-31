@@ -15,7 +15,7 @@
 
 use tsgo_ast::{Kind, ModifierFlags, NodeData, NodeId, SymbolFlags, SymbolId};
 
-use super::declared_types::get_type_of_symbol;
+use super::declared_types::{get_declared_type_of_symbol, get_type_of_symbol};
 use super::nodebuilder::type_to_string;
 use super::program::BoundProgram;
 use super::symbols::resolve_name;
@@ -91,6 +91,77 @@ pub enum SerializedTypeNode {
     /// The `void 0` expression (the "undefined" serialization).
     /// Go: `s.f.NewVoidZeroExpression()`.
     VoidZero,
+}
+
+/// How a `TypeReference` type node classifies for legacy-decorator
+/// `design:type` emit (Go's `printer.TypeReferenceSerializationKind`).
+///
+/// The legacy-decorator transform (Phase 5) emits the constructor of a
+/// referenced *value* (`: SomeClass` → the `SomeClass` identifier) when the
+/// reference resolves to something reachable at runtime, and a safe fallback
+/// otherwise. This enum names the classification the checker hands the
+/// transform so it can pick the right emitted expression; the variants and
+/// their order mirror Go's `iota` enum exactly.
+///
+/// 4aw ports the reachable single-file subset
+/// (see [`EmitResolver::get_type_reference_serialization_kind`]): a local class
+/// reference → [`TypeWithConstructSignatureAndValue`](Self::TypeWithConstructSignatureAndValue),
+/// an interface/type-alias reference → [`ObjectType`](Self::ObjectType), and an
+/// unresolved name → [`Unknown`](Self::Unknown). The lib-globals-dependent
+/// kinds (`Promise`/`NumberLikeType`/`ArrayLikeType`/...) are still deferred.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::TypeReferenceSerializationKind;
+/// // A reference whose entity cannot be resolved gets the safe fallback.
+/// assert_ne!(
+///     TypeReferenceSerializationKind::Unknown,
+///     TypeReferenceSerializationKind::ObjectType,
+/// );
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/printer/emitresolver.go:TypeReferenceSerializationKind
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TypeReferenceSerializationKind {
+    /// The reference could not be resolved; the type name should be emitted
+    /// using a safe fallback. Go: `TypeReferenceSerializationKindUnknown`.
+    Unknown,
+    /// The reference resolves to a type with a constructor function reachable at
+    /// runtime (a `class` declaration, or a `var` for the static side of a type
+    /// such as the global `Promise`). Go:
+    /// `TypeReferenceSerializationKindTypeWithConstructSignatureAndValue`.
+    TypeWithConstructSignatureAndValue,
+    /// The reference resolves to a void-like, nullable, or never type. Go:
+    /// `TypeReferenceSerializationKindVoidNullableOrNeverType`.
+    VoidNullableOrNeverType,
+    /// The reference resolves to a number-like type. Go:
+    /// `TypeReferenceSerializationKindNumberLikeType`.
+    NumberLikeType,
+    /// The reference resolves to a bigint-like type. Go:
+    /// `TypeReferenceSerializationKindBigIntLikeType`.
+    BigIntLikeType,
+    /// The reference resolves to a string-like type. Go:
+    /// `TypeReferenceSerializationKindStringLikeType`.
+    StringLikeType,
+    /// The reference resolves to a boolean-like type. Go:
+    /// `TypeReferenceSerializationKindBooleanType`.
+    BooleanType,
+    /// The reference resolves to an array-like type. Go:
+    /// `TypeReferenceSerializationKindArrayLikeType`.
+    ArrayLikeType,
+    /// The reference resolves to the ESSymbol type. Go:
+    /// `TypeReferenceSerializationKindESSymbolType`.
+    ESSymbolType,
+    /// The reference resolves to the global `Promise` constructor symbol. Go:
+    /// `TypeReferenceSerializationKindPromise`.
+    Promise,
+    /// The reference resolves to a function type or a type with call signatures.
+    /// Go: `TypeReferenceSerializationKindTypeWithCallSignature`.
+    TypeWithCallSignature,
+    /// The reference resolves to any other type. Go:
+    /// `TypeReferenceSerializationKindObjectType`.
+    ObjectType,
 }
 
 impl EmitResolver {
@@ -597,6 +668,130 @@ impl EmitResolver {
             // everything not matched by a specific arm.
             _ => SerializedTypeNode::Object,
         }
+    }
+
+    /// Classifies a `TypeReference` type node for legacy-decorator `design:type`
+    /// emit (Go's `GetTypeReferenceSerializationKind`), reporting whether the
+    /// referenced entity is reachable at runtime as a value.
+    ///
+    /// The legacy-decorator transform (Phase 5) emits the referenced entity's
+    /// constructor (`: SomeClass` → the `SomeClass` identifier) when this
+    /// returns [`TypeWithConstructSignatureAndValue`](TypeReferenceSerializationKind::TypeWithConstructSignatureAndValue),
+    /// and a safe fallback otherwise.
+    ///
+    /// 4aw ports the reachable single-file subset, faithful to Go's structure:
+    /// the reference's entity name is resolved both as a *value* and as a *type*
+    /// (Go's two `resolveEntityName` calls); when both resolve to the same
+    /// class symbol — a runtime constructor reachable without lib globals — the
+    /// result is `TypeWithConstructSignatureAndValue`. Otherwise, if the name
+    /// resolves as a type to a non-error declared type (an interface or
+    /// type-alias), the result is [`ObjectType`](TypeReferenceSerializationKind::ObjectType);
+    /// an unresolved name (no value and no type symbol, or an error declared
+    /// type) is [`Unknown`](TypeReferenceSerializationKind::Unknown).
+    ///
+    /// DEFER(phase-6): the lib-globals-dependent kinds — the global `Promise`
+    /// constructor arm (`getGlobalPromiseConstructorSymbol`), and the
+    /// `isTypeAssignableToKind` chain that maps a resolved type to
+    /// `VoidNullableOrNeverType`/`NumberLikeType`/`BigIntLikeType`/
+    /// `StringLikeType`/`BooleanType`/`ESSymbolType`, plus the
+    /// tuple/function/array (`isTupleType`/`isFunctionType`/`isArrayType`,
+    /// `TypeWithCallSignature`/`ArrayLikeType`) arms — all need resolved global
+    /// lib types and full construct/call-signature collection. The general
+    /// `isConstructorType(getTypeOfSymbol(valueSymbol))` is approximated here by
+    /// the resolved value symbol being a `class` (the only single-file source of
+    /// a runtime construct signature); Rust's `get_type_of_symbol` gives a
+    /// class's *instance* type, and construct signatures are not yet collected.
+    /// The cross-module alias resolution (`resolveAlias`), the
+    /// type-only-import split (`isTypeOnly` → `TypeWithCallSignature`/
+    /// `ObjectType`), the separate `serialScope` resolution location, and
+    /// qualified-name (`A.B`) entities are also deferred.
+    /// blocked-by: lib global types plus class construct-signature collection
+    /// (P6), cross-module alias / type-only meaning (`exports.go`,
+    /// `markLinkedReferences`), and qualified-name `resolveEntityName`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker, EmitResolver, TypeReferenceSerializationKind};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, c: &mut Checker, p: &P, type_node: tsgo_ast::NodeId) -> TypeReferenceSerializationKind {
+    /// r.get_type_reference_serialization_kind(c, p, type_node)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may build and cache declared types for the referenced
+    /// symbol.
+    // Go: internal/checker/emitresolver.go:EmitResolver.GetTypeReferenceSerializationKind(1139)
+    pub fn get_type_reference_serialization_kind(
+        &self,
+        checker: &mut Checker,
+        program: &dyn BoundProgram,
+        type_node: NodeId,
+    ) -> TypeReferenceSerializationKind {
+        // Go: `serializeTypeReferenceNode` hands `node.TypeName` (the entity
+        // name) to `GetTypeReferenceSerializationKind`; recover it from the
+        // `TypeReference` node. A node that is not a type reference has no
+        // entity name (Go's `typeName == nil` → `Unknown`).
+        let type_name = match program.arena().data(type_node) {
+            NodeData::TypeReference(d) => d.type_name,
+            _ => return TypeReferenceSerializationKind::Unknown,
+        };
+        // DEFER(phase-6): a qualified-name entity (`A.B`) needs
+        // `resolveEntityName`'s namespace-member walk + `GetFirstIdentifier`
+        // root value-symbol type-only check; the reachable subset is a bare
+        // identifier reference.
+        // blocked-by: qualified-name `resolveEntityName` + namespace resolution.
+        if program.arena().kind(type_name) != Kind::Identifier {
+            return TypeReferenceSerializationKind::Unknown;
+        }
+        let name = program.arena().text(type_name).to_string();
+        // Go: valueSymbol = resolveEntityName(typeName, Value, ...) — resolve as
+        // a value so the type can be reached at runtime during emit.
+        let value_symbol = resolve_name(
+            program,
+            type_name,
+            &name,
+            SymbolFlags::VALUE,
+            false,
+            program.globals(),
+        );
+        // Go: typeSymbol = resolveEntityName(typeName, Type, ...) — resolve as a
+        // type for a more useful serializer hint.
+        let type_symbol = resolve_name(
+            program,
+            type_name,
+            &name,
+            SymbolFlags::TYPE,
+            false,
+            program.globals(),
+        );
+        // Go: if resolvedValueSymbol != nil && resolvedValueSymbol ==
+        // resolvedTypeSymbol { ... isConstructorType(getTypeOfSymbol(value)) ...
+        // return TypeWithConstructSignatureAndValue }. Reachable stand-in for
+        // `isConstructorType`: a `class` value symbol is the only single-file
+        // source of a runtime construct signature (see the method's DEFER note).
+        if let (Some(value), Some(ty)) = (value_symbol, type_symbol) {
+            if value == ty && program.symbol(value).flags.contains(SymbolFlags::CLASS) {
+                return TypeReferenceSerializationKind::TypeWithConstructSignatureAndValue;
+            }
+        }
+        // Go: if resolvedTypeSymbol == nil { ... return Unknown }. With no type
+        // symbol the reference is unresolved (DEFER: the `isTypeOnly` carve-out
+        // that returns `ObjectType` here).
+        let Some(type_symbol) = type_symbol else {
+            return TypeReferenceSerializationKind::Unknown;
+        };
+        // Go: type_ = getDeclaredTypeOfSymbol(resolvedTypeSymbol); if
+        // isErrorType(type_) { ... return Unknown }.
+        let declared = get_declared_type_of_symbol(checker, program, type_symbol, None);
+        if declared == checker.error_type() {
+            return TypeReferenceSerializationKind::Unknown;
+        }
+        // Go: the `isTypeAssignableToKind` kind chain
+        // (Void/Nullable/Never → Boolean → Number → BigInt → String, then
+        // `isTupleType` → ESSymbol → `isFunctionType` → `isArrayType`) all need
+        // resolved global lib types and full call/construct-signature
+        // collection (DEFER, P6); a resolved interface/type-alias type falls to
+        // Go's final `else { return ObjectType }`.
+        TypeReferenceSerializationKind::ObjectType
     }
 }
 
