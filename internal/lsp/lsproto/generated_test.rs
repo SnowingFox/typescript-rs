@@ -2052,3 +2052,508 @@ fn unmarshal_completion_item() {
     };
     assert_eq!(result, expected);
 }
+
+// === registration-options base tree ===
+
+// `StaticRegistrationOptions` carries an optional `id` (used to register /
+// deregister a request). A set `id` round-trips; the default omits it.
+// Go: lsp_generated.go:StaticRegistrationOptions
+#[test]
+fn static_registration_options_round_trips() {
+    let v = StaticRegistrationOptions {
+        id: Some("reg1".to_string()),
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"id":"reg1"}"#);
+    let back: StaticRegistrationOptions = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `id` is optional (`,omitzero`): the default value serializes to `{}` and an
+// empty object decodes back to an absent `id`.
+// Go: lsp_generated.go:StaticRegistrationOptions (id *string `json:"id,omitzero"`)
+#[test]
+fn static_registration_options_default_is_empty() {
+    assert_eq!(
+        serde_json::to_string(&StaticRegistrationOptions::default()).unwrap(),
+        "{}"
+    );
+    let back: StaticRegistrationOptions = serde_json::from_str("{}").unwrap();
+    assert_eq!(back.id, None);
+}
+
+// `PatternOrRelativePattern` dispatches a bare JSON string to the (ported) glob
+// `pattern` variant and round-trips it.
+// Go: lsp_generated.go:PatternOrRelativePattern.UnmarshalJSONFrom (string case)
+#[test]
+fn pattern_or_relative_pattern_string_variant() {
+    let v: PatternOrRelativePattern = serde_json::from_str(r#""**/*.ts""#).unwrap();
+    assert_eq!(v.pattern.as_deref(), Some("**/*.ts"));
+    assert!(v.relative_pattern.is_none());
+    assert_eq!(serde_json::to_string(&v).unwrap(), r#""**/*.ts""#);
+}
+
+// A JSON object dispatches to the deferred raw-JSON `RelativePattern` variant
+// (its `baseUri: WorkspaceFolderOrURI` tree is not yet ported) and round-trips.
+// Go: lsp_generated.go:PatternOrRelativePattern.UnmarshalJSONFrom (object case)
+#[test]
+fn pattern_or_relative_pattern_relative_variant_raw() {
+    let input = r#"{"baseUri":"file:///ws","pattern":"*.ts"}"#;
+    let v: PatternOrRelativePattern = serde_json::from_str(input).unwrap();
+    assert!(v.pattern.is_none());
+    assert!(v.relative_pattern.is_some());
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// `TextDocumentFilterLanguage` (the `language`-required document-filter variant)
+// requires `language` and keeps `scheme`/`pattern` optional; it round-trips.
+// Go: lsp_generated.go:TextDocumentFilterLanguage
+#[test]
+fn text_document_filter_language_round_trips() {
+    let v = TextDocumentFilterLanguage {
+        language: "typescript".to_string(),
+        scheme: Some("file".to_string()),
+        pattern: None,
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"language":"typescript","scheme":"file"}"#);
+    let back: TextDocumentFilterLanguage = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `language` is required: decoding an object without it reports Go `errMissing`.
+// Go: lsp_generated.go:TextDocumentFilterLanguage (missingLanguage)
+#[test]
+fn text_document_filter_language_requires_language() {
+    let err = serde_json::from_str::<TextDocumentFilterLanguage>(r#"{"scheme":"file"}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("missing required properties: language"),
+        "unexpected error: {err}"
+    );
+}
+
+// `TextDocumentFilterScheme` requires `scheme`; `TextDocumentFilterPattern`
+// requires `pattern`. Both keep the other fields optional and round-trip.
+// Go: lsp_generated.go:TextDocumentFilterScheme / TextDocumentFilterPattern
+#[test]
+fn text_document_filter_scheme_and_pattern_variants() {
+    let scheme = TextDocumentFilterScheme {
+        language: None,
+        scheme: "file".to_string(),
+        pattern: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&scheme).unwrap(),
+        r#"{"scheme":"file"}"#
+    );
+
+    let pattern = TextDocumentFilterPattern {
+        language: None,
+        scheme: None,
+        pattern: PatternOrRelativePattern {
+            pattern: Some("**/*.ts".to_string()),
+            relative_pattern: None,
+        },
+    };
+    let json = serde_json::to_string(&pattern).unwrap();
+    assert_eq!(json, r#"{"pattern":"**/*.ts"}"#);
+    let back: TextDocumentFilterPattern = serde_json::from_str(&json).unwrap();
+    assert_eq!(pattern, back);
+}
+
+// The `DocumentFilter` union (`TextDocumentFilterLanguageOrSchemeOrPattern`)
+// dispatches an object to its variant by which discriminator field is present:
+// `language` first, then `scheme`, then `pattern` (mirroring the Go try-order).
+// Go: lsp_generated.go:TextDocumentFilterLanguageOrSchemeOrPattern.UnmarshalJSONFrom
+#[test]
+fn document_filter_union_dispatch() {
+    let lang: TextDocumentFilterLanguageOrSchemeOrPattern =
+        serde_json::from_str(r#"{"language":"typescript"}"#).unwrap();
+    assert!(lang.language.is_some());
+    assert!(lang.scheme.is_none() && lang.pattern.is_none());
+    assert_eq!(
+        serde_json::to_string(&lang).unwrap(),
+        r#"{"language":"typescript"}"#
+    );
+
+    let scheme: TextDocumentFilterLanguageOrSchemeOrPattern =
+        serde_json::from_str(r#"{"scheme":"file"}"#).unwrap();
+    assert!(scheme.scheme.is_some());
+    assert!(scheme.language.is_none() && scheme.pattern.is_none());
+
+    let pat: TextDocumentFilterLanguageOrSchemeOrPattern =
+        serde_json::from_str(r#"{"pattern":"**/*.ts"}"#).unwrap();
+    assert!(pat.pattern.is_some());
+    assert!(pat.language.is_none() && pat.scheme.is_none());
+}
+
+// `DocumentSelectorOrNull` is `[]DocumentFilter | null`: a JSON array decodes to
+// the present selector and round-trips as an array.
+// Go: lsp_generated.go:DocumentSelectorOrNull.UnmarshalJSONFrom (array case)
+#[test]
+fn document_selector_or_null_array_variant() {
+    let input = r#"[{"language":"typescript"},{"scheme":"file"}]"#;
+    let v: DocumentSelectorOrNull = serde_json::from_str(input).unwrap();
+    let sel = v.document_selector.as_ref().unwrap();
+    assert_eq!(sel.len(), 2);
+    assert!(sel[0].language.is_some());
+    assert!(sel[1].scheme.is_some());
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// A JSON `null` decodes to an absent selector, and the default value serializes
+// back to `null` (Go: a nil `*[]...` marshals as `null`).
+// Go: lsp_generated.go:DocumentSelectorOrNull.MarshalJSONTo / UnmarshalJSONFrom (null)
+#[test]
+fn document_selector_or_null_null_variant() {
+    let v: DocumentSelectorOrNull = serde_json::from_str("null").unwrap();
+    assert!(v.document_selector.is_none());
+    assert_eq!(serde_json::to_string(&v).unwrap(), "null");
+    assert_eq!(
+        serde_json::to_string(&DocumentSelectorOrNull::default()).unwrap(),
+        "null"
+    );
+}
+
+// `TextDocumentRegistrationOptions` carries the required `documentSelector`
+// (`DocumentSelectorOrNull`). A populated selector round-trips.
+// Go: lsp_generated.go:TextDocumentRegistrationOptions
+#[test]
+fn text_document_registration_options_round_trips() {
+    let v = TextDocumentRegistrationOptions {
+        document_selector: DocumentSelectorOrNull {
+            document_selector: Some(vec![TextDocumentFilterLanguageOrSchemeOrPattern {
+                language: Some(TextDocumentFilterLanguage {
+                    language: "typescript".to_string(),
+                    scheme: None,
+                    pattern: None,
+                }),
+                scheme: None,
+                pattern: None,
+            }]),
+        },
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"documentSelector":[{"language":"typescript"}]}"#);
+    let back: TextDocumentRegistrationOptions = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `documentSelector` is required but always emitted (no `,omitzero`): a `null`
+// selector decodes to an absent inner selector and the default serializes the
+// key as `null`.
+// Go: lsp_generated.go:TextDocumentRegistrationOptions (documentSelector, missing flag)
+#[test]
+fn text_document_registration_options_null_selector_and_missing() {
+    let v: TextDocumentRegistrationOptions =
+        serde_json::from_str(r#"{"documentSelector":null}"#).unwrap();
+    assert!(v.document_selector.document_selector.is_none());
+    assert_eq!(
+        serde_json::to_string(&TextDocumentRegistrationOptions::default()).unwrap(),
+        r#"{"documentSelector":null}"#
+    );
+
+    let err = serde_json::from_str::<TextDocumentRegistrationOptions>("{}")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("missing required properties: documentSelector"),
+        "unexpected error: {err}"
+    );
+}
+
+// Tracer: the `declarationProvider` registration variant now decodes into the
+// *typed* `DeclarationRegistrationOptions` (flattened workDoneProgress +
+// documentSelector + id) instead of raw JSON, and round-trips byte-for-byte in
+// the Go field-declaration order (workDoneProgress, documentSelector, id).
+// Go: lsp_generated.go:DeclarationRegistrationOptions
+#[test]
+fn declaration_provider_registration_variant_typed() {
+    let input = r#"{"declarationProvider":{"workDoneProgress":true,"documentSelector":[{"language":"typescript"}],"id":"reg1"}}"#;
+    let caps: ServerCapabilities = serde_json::from_str(input).unwrap();
+    let reg = caps
+        .declaration_provider
+        .as_ref()
+        .unwrap()
+        .registration_options
+        .as_ref()
+        .unwrap();
+    assert_eq!(reg.id.as_deref(), Some("reg1"));
+    assert_eq!(reg.work_done_progress, Some(true));
+    assert!(reg.document_selector.document_selector.is_some());
+    assert_eq!(serde_json::to_string(&caps).unwrap(), input);
+}
+
+// The `diagnosticProvider` registration variant now decodes into the typed
+// `DiagnosticRegistrationOptions` (the required non-pointer bools
+// `interFileDependencies`/`workspaceDiagnostics` plus documentSelector/id), and
+// round-trips byte-for-byte in Go field-declaration order.
+// Go: lsp_generated.go:DiagnosticRegistrationOptions
+#[test]
+fn diagnostic_provider_registration_variant_typed() {
+    let input = r#"{"diagnosticProvider":{"documentSelector":[{"language":"typescript"}],"workDoneProgress":true,"identifier":"ts","interFileDependencies":true,"workspaceDiagnostics":false,"id":"reg1"}}"#;
+    let caps: ServerCapabilities = serde_json::from_str(input).unwrap();
+    let reg = caps
+        .diagnostic_provider
+        .as_ref()
+        .unwrap()
+        .registration_options
+        .as_ref()
+        .unwrap();
+    assert_eq!(reg.identifier.as_deref(), Some("ts"));
+    assert!(reg.inter_file_dependencies);
+    assert!(!reg.workspace_diagnostics);
+    assert_eq!(reg.id.as_deref(), Some("reg1"));
+    assert!(reg.document_selector.document_selector.is_some());
+    assert_eq!(serde_json::to_string(&caps).unwrap(), input);
+}
+
+// The `semanticTokensProvider` registration variant now decodes into the typed
+// `SemanticTokensRegistrationOptions` (required `legend` + documentSelector/id),
+// and round-trips byte-for-byte in Go field-declaration order.
+// Go: lsp_generated.go:SemanticTokensRegistrationOptions
+#[test]
+fn semantic_tokens_provider_registration_variant_typed() {
+    let input = r#"{"semanticTokensProvider":{"documentSelector":[{"language":"typescript"}],"legend":{"tokenTypes":["namespace"],"tokenModifiers":[]},"range":true,"id":"reg1"}}"#;
+    let caps: ServerCapabilities = serde_json::from_str(input).unwrap();
+    let reg = caps
+        .semantic_tokens_provider
+        .as_ref()
+        .unwrap()
+        .registration_options
+        .as_ref()
+        .unwrap();
+    assert_eq!(reg.legend.token_types, vec!["namespace".to_string()]);
+    assert_eq!(reg.id.as_deref(), Some("reg1"));
+    assert!(reg.range.is_some());
+    assert!(reg.document_selector.document_selector.is_some());
+    assert_eq!(serde_json::to_string(&caps).unwrap(), input);
+}
+
+// Builds a one-language document selector for the registration round-trip tests.
+fn sample_document_selector() -> DocumentSelectorOrNull {
+    DocumentSelectorOrNull {
+        document_selector: Some(vec![TextDocumentFilterLanguageOrSchemeOrPattern {
+            language: Some(TextDocumentFilterLanguage {
+                language: "typescript".to_string(),
+                scheme: None,
+                pattern: None,
+            }),
+            scheme: None,
+            pattern: None,
+        }]),
+    }
+}
+
+// Every triple-union provider's *typed* registration variant survives a
+// serialize -> deserialize round-trip (the 12 macro-generated unions sharing the
+// upgraded `boolean_or_options_or_registration!` registration arm).
+// Go: lsp_generated.go:ServerCapabilities (triple-union provider groups)
+#[test]
+fn all_triple_union_registration_variants_round_trip() {
+    let v = ServerCapabilities {
+        declaration_provider: Some(
+            BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions {
+                registration_options: Some(DeclarationRegistrationOptions {
+                    work_done_progress: Some(true),
+                    document_selector: sample_document_selector(),
+                    id: Some("d".to_string()),
+                }),
+                ..Default::default()
+            },
+        ),
+        type_definition_provider: Some(
+            BooleanOrTypeDefinitionOptionsOrTypeDefinitionRegistrationOptions {
+                registration_options: Some(TypeDefinitionRegistrationOptions {
+                    document_selector: sample_document_selector(),
+                    work_done_progress: None,
+                    id: Some("td".to_string()),
+                }),
+                ..Default::default()
+            },
+        ),
+        implementation_provider: Some(
+            BooleanOrImplementationOptionsOrImplementationRegistrationOptions {
+                registration_options: Some(ImplementationRegistrationOptions {
+                    document_selector: sample_document_selector(),
+                    work_done_progress: Some(false),
+                    id: None,
+                }),
+                ..Default::default()
+            },
+        ),
+        color_provider: Some(
+            BooleanOrDocumentColorOptionsOrDocumentColorRegistrationOptions {
+                registration_options: Some(DocumentColorRegistrationOptions {
+                    document_selector: sample_document_selector(),
+                    work_done_progress: None,
+                    id: None,
+                }),
+                ..Default::default()
+            },
+        ),
+        folding_range_provider: Some(
+            BooleanOrFoldingRangeOptionsOrFoldingRangeRegistrationOptions {
+                registration_options: Some(FoldingRangeRegistrationOptions {
+                    document_selector: DocumentSelectorOrNull::default(),
+                    work_done_progress: None,
+                    id: Some("fr".to_string()),
+                }),
+                ..Default::default()
+            },
+        ),
+        selection_range_provider: Some(
+            BooleanOrSelectionRangeOptionsOrSelectionRangeRegistrationOptions {
+                registration_options: Some(SelectionRangeRegistrationOptions {
+                    work_done_progress: Some(true),
+                    document_selector: sample_document_selector(),
+                    id: None,
+                }),
+                ..Default::default()
+            },
+        ),
+        call_hierarchy_provider: Some(
+            BooleanOrCallHierarchyOptionsOrCallHierarchyRegistrationOptions {
+                registration_options: Some(CallHierarchyRegistrationOptions {
+                    document_selector: sample_document_selector(),
+                    work_done_progress: None,
+                    id: None,
+                }),
+                ..Default::default()
+            },
+        ),
+        linked_editing_range_provider: Some(
+            BooleanOrLinkedEditingRangeOptionsOrLinkedEditingRangeRegistrationOptions {
+                registration_options: Some(LinkedEditingRangeRegistrationOptions {
+                    document_selector: sample_document_selector(),
+                    work_done_progress: None,
+                    id: None,
+                }),
+                ..Default::default()
+            },
+        ),
+        moniker_provider: Some(BooleanOrMonikerOptionsOrMonikerRegistrationOptions {
+            registration_options: Some(MonikerRegistrationOptions {
+                document_selector: sample_document_selector(),
+                work_done_progress: Some(true),
+            }),
+            ..Default::default()
+        }),
+        type_hierarchy_provider: Some(
+            BooleanOrTypeHierarchyOptionsOrTypeHierarchyRegistrationOptions {
+                registration_options: Some(TypeHierarchyRegistrationOptions {
+                    document_selector: sample_document_selector(),
+                    work_done_progress: None,
+                    id: None,
+                }),
+                ..Default::default()
+            },
+        ),
+        inline_value_provider: Some(
+            BooleanOrInlineValueOptionsOrInlineValueRegistrationOptions {
+                registration_options: Some(InlineValueRegistrationOptions {
+                    work_done_progress: None,
+                    document_selector: sample_document_selector(),
+                    id: None,
+                }),
+                ..Default::default()
+            },
+        ),
+        inlay_hint_provider: Some(BooleanOrInlayHintOptionsOrInlayHintRegistrationOptions {
+            registration_options: Some(InlayHintRegistrationOptions {
+                work_done_progress: None,
+                resolve_provider: Some(true),
+                document_selector: sample_document_selector(),
+                id: Some("ih".to_string()),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `inlayHintProvider`'s registration variant carries `resolveProvider` and
+// serializes in Go field order (workDoneProgress, resolveProvider,
+// documentSelector, id). A `documentSelector:null` still dispatches to the
+// registration variant (the `documentSelector` key is present).
+// Go: lsp_generated.go:InlayHintRegistrationOptions
+#[test]
+fn inlay_hint_registration_variant_field_order() {
+    let input = r#"{"inlayHintProvider":{"workDoneProgress":true,"resolveProvider":true,"documentSelector":null,"id":"x"}}"#;
+    let caps: ServerCapabilities = serde_json::from_str(input).unwrap();
+    let reg = caps
+        .inlay_hint_provider
+        .as_ref()
+        .unwrap()
+        .registration_options
+        .as_ref()
+        .unwrap();
+    assert_eq!(reg.resolve_provider, Some(true));
+    assert!(reg.document_selector.document_selector.is_none());
+    assert_eq!(serde_json::to_string(&caps).unwrap(), input);
+}
+
+// `MonikerRegistrationOptions` has no `id` field in the Go model: an incoming
+// `id` key is ignored (unknown field) and never re-emitted.
+// Go: lsp_generated.go:MonikerRegistrationOptions (no Id field)
+#[test]
+fn moniker_registration_variant_has_no_id() {
+    let input = r#"{"monikerProvider":{"documentSelector":[{"language":"typescript"}],"workDoneProgress":true,"id":"ignored"}}"#;
+    let caps: ServerCapabilities = serde_json::from_str(input).unwrap();
+    let reg = caps
+        .moniker_provider
+        .as_ref()
+        .unwrap()
+        .registration_options
+        .as_ref()
+        .unwrap();
+    assert_eq!(reg.work_done_progress, Some(true));
+    // Re-serialization drops the unknown `id` key.
+    assert_eq!(
+        serde_json::to_string(&caps).unwrap(),
+        r#"{"monikerProvider":{"documentSelector":[{"language":"typescript"}],"workDoneProgress":true}}"#
+    );
+}
+
+// Per-type coverage (PORTING §8.6): the required `documentSelector` is always
+// emitted, so each registration-options struct's default serializes the
+// `documentSelector` key as `null` (plus any required non-pointer fields).
+// Go: lsp_generated.go (the `*RegistrationOptions` structs)
+#[test]
+fn every_registration_options_default_serializes_document_selector() {
+    fn assert_doc_sel_null<T: Default + Serialize>() {
+        assert_eq!(
+            serde_json::to_string(&T::default()).unwrap(),
+            r#"{"documentSelector":null}"#
+        );
+    }
+    assert_doc_sel_null::<TextDocumentRegistrationOptions>();
+    assert_doc_sel_null::<DeclarationRegistrationOptions>();
+    assert_doc_sel_null::<TypeDefinitionRegistrationOptions>();
+    assert_doc_sel_null::<ImplementationRegistrationOptions>();
+    assert_doc_sel_null::<DocumentColorRegistrationOptions>();
+    assert_doc_sel_null::<FoldingRangeRegistrationOptions>();
+    assert_doc_sel_null::<SelectionRangeRegistrationOptions>();
+    assert_doc_sel_null::<CallHierarchyRegistrationOptions>();
+    assert_doc_sel_null::<LinkedEditingRangeRegistrationOptions>();
+    assert_doc_sel_null::<MonikerRegistrationOptions>();
+    assert_doc_sel_null::<TypeHierarchyRegistrationOptions>();
+    assert_doc_sel_null::<InlineValueRegistrationOptions>();
+    assert_doc_sel_null::<InlayHintRegistrationOptions>();
+
+    // `DiagnosticRegistrationOptions` also always emits its required non-pointer
+    // bools; `SemanticTokensRegistrationOptions` always emits its required legend.
+    assert_eq!(
+        serde_json::to_string(&DiagnosticRegistrationOptions::default()).unwrap(),
+        r#"{"documentSelector":null,"interFileDependencies":false,"workspaceDiagnostics":false}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SemanticTokensRegistrationOptions::default()).unwrap(),
+        r#"{"documentSelector":null,"legend":{"tokenTypes":[],"tokenModifiers":[]}}"#
+    );
+}

@@ -197,14 +197,60 @@
 - [x] 12 个 triple-union（declaration 首个真 RED→GREEN，其余宏生成 green-on-arrival；各自 `*Options` 全 typed）
 - [x] `workspace`(`WorkspaceOptions`) 维持 raw JSON DEFER（深依赖未移植，见下）
 
+## 续轮：registration-options base tree（本轮落地）
+
+> 上一轮把 12 个 triple-union + `DiagnosticOptionsOrRegistrationOptions` + `SemanticTokensOptionsOrRegistrationOptions` 的 **registration 变体**留作 `registration_options: serde_json::Value` raw-JSON 占位（其嵌入 `DocumentSelectorOrNull` 未移植）。**本轮**移植 registration-options 的**基底类型树**，并把全部 **14 个 raw-JSON registration 槽**升级为真实 typed `*RegistrationOptions`。全部编辑在 `generated.rs`(+`generated_test.rs`)，无新模块、无新第三方 crate。
+
+**落地的基底类型（slice 1–3）**：
+- `StaticRegistrationOptions { id?: String }`（`lsp_object!` 的 `opt id`；`default → {}`）。
+- `PatternOrRelativePattern`（`Pattern | RelativePattern` union）：string 变体 typed（`pattern: Option<String>`），`RelativePattern` 对象变体 **DEFER raw JSON**（其 `baseUri: WorkspaceFolderOrURI/WorkspaceFolder` 树未移植）。
+- `DocumentFilter`（= Go `TextDocumentFilterLanguageOrSchemeOrPattern`）：三变体 union（`TextDocumentFilterLanguage`/`Scheme`/`Pattern`，各 `language`/`scheme`/`pattern` 字段，必填判别字段不同），手写 serde 复刻 Go「按声明序逐个 try-decode，第一个成功者胜」。
+- `DocumentSelectorOrNull`（`[]DocumentFilter | null`）：`document_selector: Option<Vec<DocumentFilter>>`，手写 serde（`null`→`None`、数组→`Some`、其余 err）；`default → null`（对齐 Go nil pointer 序列化为 `null`）。
+- `TextDocumentRegistrationOptions { documentSelector: DocumentSelectorOrNull }`（`req documentSelector`，缺→`missing required properties`、始终序列化、`null` 由 union 自身接收）。
+
+**升级的 14 个 registration 槽（slice 4–5）**：
+- **新宏签名**：`boolean_or_options_or_registration!` 增加 `registration: $reg:ty` 参数，`registration_options` 字段由 `Option<serde_json::Value>` 改为 `Option<$reg>`；反序列化的 registration 臂由「`Some(value)` 原值」改为 `serde_json::from_value::<$reg>(value)`，序列化臂不变（typed `r.serialize()`）。12 个 triple-union 调用点各传入其 `*RegistrationOptions`。
+- **2 个手写 union**（`DiagnosticOptionsOrRegistrationOptions` / `SemanticTokensOptionsOrRegistrationOptions`）：`registration_options` 字段同样升级为 typed（`DiagnosticRegistrationOptions` / `SemanticTokensRegistrationOptions`），派发逻辑（按 `documentSelector` 键）不变。
+- 共 14 个 `*RegistrationOptions` 用 `lsp_object!` 落地（Go 把 embedding 展平，故 Rust 也是扁平 struct）。**字段声明序逐 struct 1:1 对齐 Go**（关键：Go 各 struct 的字段序不同——`Declaration`/`SelectionRange`/`InlineValue`/`InlayHint` 把 `workDoneProgress` 放在 `documentSelector` 前，其余把 `documentSelector` 放最前；`Moniker` **无 `id` 字段**；`Diagnostic` 含 `req` 非指针 bool `interFileDependencies`/`workspaceDiagnostics`；`SemanticTokens` 含 `reqnn legend`），保证序列化 byte-for-byte 与 Go 一致。
+
+**类型/所有权映射（本子树关键决策）**：
+
+| Go 构造 | Rust 表示 | 说明 |
+|---|---|---|
+| `*RegistrationOptions`（展平的 embedding：`<Feature>Options` + `TextDocumentRegistrationOptions` + `StaticRegistrationOptions`） | `lsp_object!` 扁平 struct，字段序 1:1 对齐 Go 声明 | 与 Go 生成器一致（Go 也把 embedding 展平进每个 struct）；非 `req`/`reqnn`/`opt` 行为同既有约定。 |
+| `documentSelector DocumentSelectorOrNull json:"documentSelector"`（必填、无 omitzero、无 null 守卫） | `req document_selector: DocumentSelectorOrNull` | 缺→`missing required properties: documentSelector`、始终序列化、`null` 交由 union 自身接收（不拒）；`default → {"documentSelector":null}`（故**不**纳入 `default → {}` 覆盖集）。 |
+| `DocumentSelector = []TextDocumentFilterLanguageOrSchemeOrPattern` | `Vec<TextDocumentFilterLanguageOrSchemeOrPattern>` | — |
+| `DocumentSelectorOrNull{ *[]... }`（nil→null） | `{ document_selector: Option<Vec<...>> }` + 手写 serde | `None`↔`null`；`default → null`。 |
+| `TextDocumentFilterLanguageOrSchemeOrPattern`（按 try-decode 顺序判别的 union） | 三 `Option<变体>` + 手写 serde（依序 `from_value` try） | 复刻 Go「Language→Scheme→Pattern 依序尝试、首个成功者胜」。 |
+| `PatternOrRelativePattern`（`string | RelativePattern`） | `{ pattern: Option<String>, relative_pattern: Option<serde_json::Value> }` | string typed；`RelativePattern` 对象 **DEFER raw JSON**（深依赖 `WorkspaceFolderOrURI`）。与既有 raw-JSON DEFER 变体先例一致。 |
+| `Boolean|Options|RegistrationOptions` triple-union | `boolean_or_options_or_registration!`（新增 `registration: $reg` 参数） | registration 臂现为 typed。 |
+
+**红→绿推进序（slice）**：
+1. `StaticRegistrationOptions`（tracer，真 RED→GREEN：类型不存在→`lsp_object!`）。
+2. `PatternOrRelativePattern` → 3 个 filter 变体 struct → `TextDocumentFilterLanguageOrSchemeOrPattern` union → `DocumentSelectorOrNull`（各真 RED→GREEN）。
+3. `TextDocumentRegistrationOptions`（真 RED→GREEN）。
+4. 升级 triple-union 宏 + `DeclarationRegistrationOptions`（**tracer，真 RED→GREEN**：测试访问 `registration_options.unwrap().id`/`.document_selector` 在 raw-JSON 态编译失败 → 加 14 个 struct + 改宏 + 改 12 调用点 → GREEN）。同宏的其余 11 个 triple-union registration 为 **green-on-arrival**（诚实标注）。
+5. 升级 2 个手写 union（`Diagnostic` / `SemanticTokens` registration 变体，各真 RED→GREEN）+ 补 11 个 green-on-arrival 的覆盖测试（综合 round-trip + 每类型 default + inlayHint/moniker 边角）。
+
+**实现 TODO（本轮，可勾选）**：
+
+- [x] `StaticRegistrationOptions`（`opt id`）　`// Go: lsp_generated.go:StaticRegistrationOptions`
+- [x] `PatternOrRelativePattern`（string typed + RelativePattern raw-JSON DEFER）　`// Go: lsp_generated.go:PatternOrRelativePattern`
+- [x] 3 个 filter 变体 + `TextDocumentFilterLanguageOrSchemeOrPattern` union（DocumentFilter）　`// Go: lsp_generated.go:TextDocumentFilterLanguage/Scheme/Pattern`
+- [x] `DocumentSelectorOrNull`（`[]DocumentFilter | null`，default→null）　`// Go: lsp_generated.go:DocumentSelectorOrNull`
+- [x] `TextDocumentRegistrationOptions`（`req documentSelector`）　`// Go: lsp_generated.go:TextDocumentRegistrationOptions`
+- [x] 升级 `boolean_or_options_or_registration!` 宏（`registration: $reg` typed）+ 12 个 triple-union `*RegistrationOptions`（declaration tracer）　`// Go: lsp_generated.go:*RegistrationOptions`
+- [x] 升级 `DiagnosticOptionsOrRegistrationOptions` → typed `DiagnosticRegistrationOptions`（含 `req` 非指针 bool）
+- [x] 升级 `SemanticTokensOptionsOrRegistrationOptions` → typed `SemanticTokensRegistrationOptions`（含 `reqnn legend`）
+
 ## 转交 / 推迟（DEFER）
 
 - ✅ 上一轮的 `(*ClientCapabilities).Resolve()` DEFER **已解除**（落地于 `capabilities.rs`，4 组全树）。
 - ✅ 上一轮维持的 `ServerCapabilities` open-object **已退役**，落地 typed 树（高价值 11 组 provider 全 typed）。
-- ✅ 本轮把 `ServerCapabilities` 22 个 raw-JSON DEFER provider 中的 **21 个**落成 typed option/registration 树（见上）。
+- ✅ 上一轮把 `ServerCapabilities` 22 个 raw-JSON DEFER provider 中的 **21 个**落成 typed option/registration 树。
+- ✅ **本轮**移植 registration-options base tree（`StaticRegistrationOptions`/`DocumentSelectorOrNull`/`DocumentFilter` union/`TextDocumentRegistrationOptions`），并把全部 **14 个** raw-JSON registration 槽（12 triple-union + diagnostic + semanticTokens）升级为 typed `*RegistrationOptions`。triple-union / `*OrRegistrationOptions` 的 registration 变体 **DEFER 已全部解除**。
 - `// DEFER`：`ServerCapabilities.workspace`（`WorkspaceOptions`）保持 `serde_json::Value`（保留 Go 字段名 + optionality）。`blocked-by:` 其字段 `workspaceFolders`(`WorkspaceFoldersServerCapabilities`) / `fileOperations`(`FileOperationOptions`→`FileOperationRegistrationOptions`→`FileOperationFilter`/`FileOperationPattern`) / `textDocumentContent`(`TextDocumentContentOptionsOrRegistrationOptions`) 均为未移植深类型，留待生成器 pass。
-- `// DEFER`：全部 triple-union / `DiagnosticOptionsOrRegistrationOptions` 的 **registration 变体**（`*RegistrationOptions`）保持 raw JSON——其嵌入 `DocumentSelectorOrNull`（`[]DocumentFilter` 深 union）尚未移植。`blocked-by:` 生成器 pass 落地 registration-options 树（含 `DocumentSelectorOrNull`/`TextDocumentRegistrationOptions`/`StaticRegistrationOptions`）。typed options 变体 + boolean 变体本轮已全 typed。
-- `// DEFER`：`SemanticTokensRegistrationOptions`（`semanticTokensProvider` 的 registration 变体，深 registration 类型）保持 raw JSON。`blocked-by:` 生成器 pass。
+- `// DEFER`：`PatternOrRelativePattern` 的 **`RelativePattern` 对象变体**（`baseUri: WorkspaceFolderOrURI`→`WorkspaceFolder`/`URI`，`pattern: string`）保持 raw JSON——`WorkspaceFolderOrURI`/`WorkspaceFolder` 深类型尚未移植。`blocked-by:` 生成器 pass。string 变体本轮已 typed，`DocumentFilter` 的 language/scheme/pattern 三变体本轮已全 typed。
 - `// DEFER`：`CodeActionKindDocumentation`（`CodeActionOptions.documentation` 的 `[]*` 元素，proposed/稀有）保持 raw JSON。`blocked-by:` 生成器 pass。
 - `// DEFER`：新枚举 `String()` stringer（同生成器 pass；本轮 `TextDocumentSyncKind` 已含 `Display` 复刻 stringer）。
 - `// DEFER`：请求/resolved 树字段的 Go `errNull` 精确文案（低优先偏差；`null` 仍被拒绝，仅文案不同）。

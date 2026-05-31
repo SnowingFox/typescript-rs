@@ -254,18 +254,15 @@ macro_rules! boolean_or_options {
 /// linkedEditing / moniker / typeHierarchy / inlineValue / inlayHint).
 ///
 /// Serialization writes the single set variant (a bare JSON boolean, the typed
-/// options object, or the deferred raw-JSON registration object).
+/// options object, or the typed registration-options object).
 /// Deserialization mirrors the Go `PeekKind`/`jsonObjectHasKey` dispatch: a
 /// JSON boolean fills `boolean`; a JSON object carrying a `documentSelector`
-/// key is the registration variant (kept as raw [`serde_json::Value`] because
-/// `*RegistrationOptions` embeds the not-yet-ported `DocumentSelectorOrNull`),
-/// and any other object is decoded as the typed options.
-// DEFER: the `*RegistrationOptions` variant stays raw JSON. blocked-by:
-// generator pass landing the registration-options tree (DocumentSelectorOrNull).
+/// key is decoded into the typed `<RegistrationOptions>`; any other object is
+/// decoded as the typed `<Options>`.
 macro_rules! boolean_or_options_or_registration {
     (
         $(#[$smeta:meta])*
-        $name:ident, $field:ident : $ty:ty, $expecting:literal
+        $name:ident, $field:ident : $ty:ty, registration: $reg:ty, $expecting:literal
     ) => {
         $(#[$smeta])*
         #[derive(Debug, Clone, Default, PartialEq)]
@@ -274,8 +271,8 @@ macro_rules! boolean_or_options_or_registration {
             pub boolean: Option<bool>,
             /// The typed options-object variant.
             pub $field: Option<$ty>,
-            /// The registration-options variant (deferred: raw JSON).
-            pub registration_options: Option<serde_json::Value>,
+            /// The typed registration-options variant (object with `documentSelector`).
+            pub registration_options: Option<$reg>,
         }
 
         impl Serialize for $name {
@@ -301,7 +298,8 @@ macro_rules! boolean_or_options_or_registration {
                     out.boolean = Some(b);
                 } else if value.is_object() {
                     if value.get("documentSelector").is_some() {
-                        out.registration_options = Some(value);
+                        out.registration_options =
+                            Some(serde_json::from_value(value).map_err(de::Error::custom)?);
                     } else {
                         out.$field =
                             Some(serde_json::from_value(value).map_err(de::Error::custom)?);
@@ -1796,20 +1794,19 @@ lsp_object! {
     }
 }
 
-/// A union of [`SemanticTokensOptions`] or registration options
+/// A union of [`SemanticTokensOptions`] or [`SemanticTokensRegistrationOptions`]
 /// (LSP `SemanticTokensOptions | SemanticTokensRegistrationOptions`).
 ///
 /// The registration-options variant (an object carrying a `documentSelector`)
-/// is deferred to raw JSON; the server produces the plain options variant.
-// DEFER: SemanticTokensRegistrationOptions is a deep registration type; kept as
-// raw JSON. blocked-by: generator pass landing the registration-options tree.
+/// decodes into the typed [`SemanticTokensRegistrationOptions`]; the plain
+/// options variant decodes into [`SemanticTokensOptions`].
 // Go: internal/lsp/lsproto/lsp_generated.go:SemanticTokensOptionsOrRegistrationOptions
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SemanticTokensOptionsOrRegistrationOptions {
     /// The plain options variant.
     pub options: Option<SemanticTokensOptions>,
-    /// The registration-options variant (deferred: raw JSON).
-    pub registration_options: Option<serde_json::Value>,
+    /// The typed registration-options variant.
+    pub registration_options: Option<SemanticTokensRegistrationOptions>,
 }
 
 impl Serialize for SemanticTokensOptionsOrRegistrationOptions {
@@ -1833,7 +1830,8 @@ impl<'de> Deserialize<'de> for SemanticTokensOptionsOrRegistrationOptions {
         let value = serde_json::Value::deserialize(deserializer)?;
         let mut out = SemanticTokensOptionsOrRegistrationOptions::default();
         if value.get("documentSelector").is_some() {
-            out.registration_options = Some(value);
+            out.registration_options =
+                Some(serde_json::from_value(value).map_err(de::Error::custom)?);
         } else {
             out.options = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
         }
@@ -1962,6 +1960,429 @@ lsp_object! {
     }
 }
 
+// === registration-options base tree ===
+//
+// The shared building blocks every `*RegistrationOptions` is composed from:
+// `StaticRegistrationOptions` (the `id` field), `DocumentSelectorOrNull` (the
+// `documentSelector` field, a `[]DocumentFilter | null`), and
+// `TextDocumentRegistrationOptions`. The Go meta-model flattens the embedded
+// `StaticRegistrationOptions` / `TextDocumentRegistrationOptions` /
+// `<Feature>Options` into each concrete `*RegistrationOptions`, so the ported
+// structs are flat too (field order mirrors the Go declaration order).
+
+/// A union of a plain glob `pattern` string or a `RelativePattern`
+/// (LSP `Pattern | RelativePattern`).
+///
+/// The string variant is ported; the object (`RelativePattern`) variant is kept
+/// as raw JSON because its `baseUri: WorkspaceFolderOrURI` tree is not yet
+/// ported. Exactly one variant is set.
+// DEFER: RelativePattern (baseUri: WorkspaceFolderOrURI / WorkspaceFolder).
+// blocked-by: generator pass landing the workspace-folder/URI tree.
+// Go: internal/lsp/lsproto/lsp_generated.go:PatternOrRelativePattern
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PatternOrRelativePattern {
+    /// The plain glob-pattern string variant.
+    pub pattern: Option<String>,
+    /// The `RelativePattern` object variant (deferred: raw JSON).
+    pub relative_pattern: Option<serde_json::Value>,
+}
+
+impl Serialize for PatternOrRelativePattern {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.pattern, &self.relative_pattern) {
+            (Some(p), None) => serializer.serialize_str(p),
+            (None, Some(r)) => r.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of PatternOrRelativePattern should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PatternOrRelativePattern {
+    // Go: lsp_generated.go:PatternOrRelativePattern.UnmarshalJSONFrom
+    //
+    // Go peeks the JSON kind: a `"` string is the glob pattern, a `{` object is
+    // a RelativePattern.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut out = PatternOrRelativePattern::default();
+        if let Some(s) = value.as_str() {
+            out.pattern = Some(s.to_string());
+        } else if value.is_object() {
+            out.relative_pattern = Some(value);
+        } else {
+            return Err(de::Error::custom(
+                "PatternOrRelativePattern: expected a string or an object",
+            ));
+        }
+        Ok(out)
+    }
+}
+
+lsp_object! {
+    /// Static registration options, mixed into a `*RegistrationOptions` to carry
+    /// the registration `id` (used to later deregister the request).
+    // Go: internal/lsp/lsproto/lsp_generated.go:StaticRegistrationOptions
+    StaticRegistrationOptions {
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// A document filter where `language` is the required field (one variant of
+    /// the `DocumentFilter` union).
+    // Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentFilterLanguage
+    TextDocumentFilterLanguage {
+        ["A language id, like `typescript`."]
+        req language: String => "language",
+        ["A Uri scheme, like `file` or `untitled`."]
+        opt scheme: String => "scheme",
+        ["A glob pattern, like `**/*.{ts,js}`."]
+        opt pattern: PatternOrRelativePattern => "pattern",
+    }
+}
+
+lsp_object! {
+    /// A document filter where `scheme` is the required field (one variant of
+    /// the `DocumentFilter` union).
+    // Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentFilterScheme
+    TextDocumentFilterScheme {
+        ["A language id, like `typescript`."]
+        opt language: String => "language",
+        ["A Uri scheme, like `file` or `untitled`."]
+        req scheme: String => "scheme",
+        ["A glob pattern, like `**/*.{ts,js}`."]
+        opt pattern: PatternOrRelativePattern => "pattern",
+    }
+}
+
+lsp_object! {
+    /// A document filter where `pattern` is the required field (one variant of
+    /// the `DocumentFilter` union).
+    // Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentFilterPattern
+    TextDocumentFilterPattern {
+        ["A language id, like `typescript`."]
+        opt language: String => "language",
+        ["A Uri scheme, like `file` or `untitled`."]
+        opt scheme: String => "scheme",
+        ["A glob pattern, like `**/*.{ts,js}`."]
+        req pattern: PatternOrRelativePattern => "pattern",
+    }
+}
+
+/// A `DocumentFilter`: the element type of a `DocumentSelector`, a union of the
+/// three `TextDocumentFilter*` variants (LSP `TextDocumentFilter`).
+///
+/// On decode, the variants are tried in declaration order (language, scheme,
+/// pattern) and the first whose required discriminator field is present wins,
+/// mirroring the Go `json.Unmarshal`-and-fall-through logic. Exactly one variant
+/// is set.
+// Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentFilterLanguageOrSchemeOrPattern
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TextDocumentFilterLanguageOrSchemeOrPattern {
+    /// The `language`-required variant.
+    pub language: Option<TextDocumentFilterLanguage>,
+    /// The `scheme`-required variant.
+    pub scheme: Option<TextDocumentFilterScheme>,
+    /// The `pattern`-required variant.
+    pub pattern: Option<TextDocumentFilterPattern>,
+}
+
+impl Serialize for TextDocumentFilterLanguageOrSchemeOrPattern {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.language, &self.scheme, &self.pattern) {
+            (Some(l), None, None) => l.serialize(serializer),
+            (None, Some(s), None) => s.serialize(serializer),
+            (None, None, Some(p)) => p.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of TextDocumentFilterLanguageOrSchemeOrPattern should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TextDocumentFilterLanguageOrSchemeOrPattern {
+    // Go: lsp_generated.go:TextDocumentFilterLanguageOrSchemeOrPattern.UnmarshalJSONFrom
+    //
+    // Go reads the raw value once and tries to decode it as each variant in
+    // order, keeping the first that succeeds.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut out = TextDocumentFilterLanguageOrSchemeOrPattern::default();
+        if let Ok(v) = serde_json::from_value::<TextDocumentFilterLanguage>(value.clone()) {
+            out.language = Some(v);
+        } else if let Ok(v) = serde_json::from_value::<TextDocumentFilterScheme>(value.clone()) {
+            out.scheme = Some(v);
+        } else if let Ok(v) = serde_json::from_value::<TextDocumentFilterPattern>(value) {
+            out.pattern = Some(v);
+        } else {
+            return Err(de::Error::custom(
+                "TextDocumentFilterLanguageOrSchemeOrPattern: no variant matched",
+            ));
+        }
+        Ok(out)
+    }
+}
+
+/// A `DocumentSelector` or `null` (LSP `DocumentSelector | null`).
+///
+/// `document_selector` is the present `[]DocumentFilter`; `None` serializes as
+/// JSON `null` (the `*RegistrationOptions` convention meaning "use the
+/// client-provided selector"). A nil selector in Go marshals to `null`, so the
+/// default value serializes to `null` (not `[]`).
+// Go: internal/lsp/lsproto/lsp_generated.go:DocumentSelectorOrNull
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DocumentSelectorOrNull {
+    /// The present selector (`Some`) or `null` (`None`).
+    pub document_selector: Option<Vec<TextDocumentFilterLanguageOrSchemeOrPattern>>,
+}
+
+impl Serialize for DocumentSelectorOrNull {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match &self.document_selector {
+            Some(sel) => sel.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DocumentSelectorOrNull {
+    // Go: lsp_generated.go:DocumentSelectorOrNull.UnmarshalJSONFrom
+    //
+    // Go peeks the JSON kind: `null` leaves the pointer nil, `[` decodes the
+    // selector array, anything else is an error.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut out = DocumentSelectorOrNull::default();
+        if value.is_null() {
+            // Leave `document_selector` as `None`.
+        } else if value.is_array() {
+            out.document_selector = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+        } else {
+            return Err(de::Error::custom(
+                "DocumentSelectorOrNull: expected an array or null",
+            ));
+        }
+        Ok(out)
+    }
+}
+
+lsp_object! {
+    /// General text-document registration options: the `documentSelector` that
+    /// scopes a dynamic registration. Mixed (flattened) into every concrete
+    /// `*RegistrationOptions`.
+    // Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentRegistrationOptions
+    TextDocumentRegistrationOptions {
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+    }
+}
+
+// The concrete `*RegistrationOptions` for the `boolean | <Options> |
+// <RegistrationOptions>` providers. Each flattens its feature `<Options>`
+// (`workDoneProgress`), `TextDocumentRegistrationOptions` (`documentSelector`)
+// and `StaticRegistrationOptions` (`id`); the field declaration order mirrors
+// the Go struct exactly (it differs across these types, so serialization stays
+// byte-for-byte identical to Go).
+
+lsp_object! {
+    /// Registration options for goto-declaration.
+    // Go: internal/lsp/lsproto/lsp_generated.go:DeclarationRegistrationOptions
+    DeclarationRegistrationOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for goto-type-definition.
+    // Go: internal/lsp/lsproto/lsp_generated.go:TypeDefinitionRegistrationOptions
+    TypeDefinitionRegistrationOptions {
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for goto-implementation.
+    // Go: internal/lsp/lsproto/lsp_generated.go:ImplementationRegistrationOptions
+    ImplementationRegistrationOptions {
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for document color.
+    // Go: internal/lsp/lsproto/lsp_generated.go:DocumentColorRegistrationOptions
+    DocumentColorRegistrationOptions {
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for folding range.
+    // Go: internal/lsp/lsproto/lsp_generated.go:FoldingRangeRegistrationOptions
+    FoldingRangeRegistrationOptions {
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for selection range.
+    // Go: internal/lsp/lsproto/lsp_generated.go:SelectionRangeRegistrationOptions
+    SelectionRangeRegistrationOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for call hierarchy.
+    // Go: internal/lsp/lsproto/lsp_generated.go:CallHierarchyRegistrationOptions
+    CallHierarchyRegistrationOptions {
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for linked editing range.
+    // Go: internal/lsp/lsproto/lsp_generated.go:LinkedEditingRangeRegistrationOptions
+    LinkedEditingRangeRegistrationOptions {
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for moniker (note: no `id` field in the Go model).
+    // Go: internal/lsp/lsproto/lsp_generated.go:MonikerRegistrationOptions
+    MonikerRegistrationOptions {
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+lsp_object! {
+    /// Registration options for type hierarchy.
+    // Go: internal/lsp/lsproto/lsp_generated.go:TypeHierarchyRegistrationOptions
+    TypeHierarchyRegistrationOptions {
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for inline value.
+    // Go: internal/lsp/lsproto/lsp_generated.go:InlineValueRegistrationOptions
+    InlineValueRegistrationOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for inlay hint (adds `resolveProvider`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:InlayHintRegistrationOptions
+    InlayHintRegistrationOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["Whether the server resolves additional inlay-hint information."]
+        opt resolve_provider: bool => "resolveProvider",
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for pull-model diagnostics (flattens `DiagnosticOptions`
+    /// whose required non-pointer bools are always serialized).
+    // Go: internal/lsp/lsproto/lsp_generated.go:DiagnosticRegistrationOptions
+    DiagnosticRegistrationOptions {
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["An optional identifier under which diagnostics are managed by the client."]
+        opt identifier: String => "identifier",
+        ["Whether the language has inter-file dependencies."]
+        req inter_file_dependencies: bool => "interFileDependencies",
+        ["Whether the server provides support for workspace diagnostics as well."]
+        req workspace_diagnostics: bool => "workspaceDiagnostics",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
+lsp_object! {
+    /// Registration options for semantic tokens (flattens `SemanticTokensOptions`
+    /// including the required `legend`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:SemanticTokensRegistrationOptions
+    SemanticTokensRegistrationOptions {
+        ["A document selector to scope the registration (null = use the client's)."]
+        req document_selector: DocumentSelectorOrNull => "documentSelector",
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["The legend used by the server."]
+        reqnn legend: SemanticTokensLegend => "legend",
+        ["Whether the server provides range semantic tokens."]
+        opt range: BooleanOrEmptyObject => "range",
+        ["Whether the server provides full-document semantic tokens."]
+        opt full: BooleanOrSemanticTokensFullDelta => "full",
+        ["The id used to register the request (see `Registration#id`)."]
+        opt id: String => "id",
+    }
+}
+
 lsp_object! {
     /// Goto-declaration request options.
     // Go: internal/lsp/lsproto/lsp_generated.go:DeclarationOptions
@@ -1976,6 +2397,7 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions
     BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions,
     declaration_options: DeclarationOptions,
+    registration: DeclarationRegistrationOptions,
     "a boolean, declaration options, or declaration registration options"
 }
 
@@ -1993,6 +2415,7 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrTypeDefinitionOptionsOrTypeDefinitionRegistrationOptions
     BooleanOrTypeDefinitionOptionsOrTypeDefinitionRegistrationOptions,
     type_definition_options: TypeDefinitionOptions,
+    registration: TypeDefinitionRegistrationOptions,
     "a boolean, type-definition options, or type-definition registration options"
 }
 
@@ -2010,6 +2433,7 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrImplementationOptionsOrImplementationRegistrationOptions
     BooleanOrImplementationOptionsOrImplementationRegistrationOptions,
     implementation_options: ImplementationOptions,
+    registration: ImplementationRegistrationOptions,
     "a boolean, implementation options, or implementation registration options"
 }
 
@@ -2027,6 +2451,7 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrDocumentColorOptionsOrDocumentColorRegistrationOptions
     BooleanOrDocumentColorOptionsOrDocumentColorRegistrationOptions,
     document_color_options: DocumentColorOptions,
+    registration: DocumentColorRegistrationOptions,
     "a boolean, document-color options, or document-color registration options"
 }
 
@@ -2044,6 +2469,7 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrFoldingRangeOptionsOrFoldingRangeRegistrationOptions
     BooleanOrFoldingRangeOptionsOrFoldingRangeRegistrationOptions,
     folding_range_options: FoldingRangeOptions,
+    registration: FoldingRangeRegistrationOptions,
     "a boolean, folding-range options, or folding-range registration options"
 }
 
@@ -2061,6 +2487,7 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrSelectionRangeOptionsOrSelectionRangeRegistrationOptions
     BooleanOrSelectionRangeOptionsOrSelectionRangeRegistrationOptions,
     selection_range_options: SelectionRangeOptions,
+    registration: SelectionRangeRegistrationOptions,
     "a boolean, selection-range options, or selection-range registration options"
 }
 
@@ -2078,6 +2505,7 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrCallHierarchyOptionsOrCallHierarchyRegistrationOptions
     BooleanOrCallHierarchyOptionsOrCallHierarchyRegistrationOptions,
     call_hierarchy_options: CallHierarchyOptions,
+    registration: CallHierarchyRegistrationOptions,
     "a boolean, call-hierarchy options, or call-hierarchy registration options"
 }
 
@@ -2095,6 +2523,7 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrLinkedEditingRangeOptionsOrLinkedEditingRangeRegistrationOptions
     BooleanOrLinkedEditingRangeOptionsOrLinkedEditingRangeRegistrationOptions,
     linked_editing_range_options: LinkedEditingRangeOptions,
+    registration: LinkedEditingRangeRegistrationOptions,
     "a boolean, linked-editing-range options, or linked-editing-range registration options"
 }
 
@@ -2112,6 +2541,7 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrMonikerOptionsOrMonikerRegistrationOptions
     BooleanOrMonikerOptionsOrMonikerRegistrationOptions,
     moniker_options: MonikerOptions,
+    registration: MonikerRegistrationOptions,
     "a boolean, moniker options, or moniker registration options"
 }
 
@@ -2129,6 +2559,7 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrTypeHierarchyOptionsOrTypeHierarchyRegistrationOptions
     BooleanOrTypeHierarchyOptionsOrTypeHierarchyRegistrationOptions,
     type_hierarchy_options: TypeHierarchyOptions,
+    registration: TypeHierarchyRegistrationOptions,
     "a boolean, type-hierarchy options, or type-hierarchy registration options"
 }
 
@@ -2146,6 +2577,7 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrInlineValueOptionsOrInlineValueRegistrationOptions
     BooleanOrInlineValueOptionsOrInlineValueRegistrationOptions,
     inline_value_options: InlineValueOptions,
+    registration: InlineValueRegistrationOptions,
     "a boolean, inline-value options, or inline-value registration options"
 }
 
@@ -2165,24 +2597,23 @@ boolean_or_options_or_registration! {
     // Go: lsp_generated.go:BooleanOrInlayHintOptionsOrInlayHintRegistrationOptions
     BooleanOrInlayHintOptionsOrInlayHintRegistrationOptions,
     inlay_hint_options: InlayHintOptions,
+    registration: InlayHintRegistrationOptions,
     "a boolean, inlay-hint options, or inlay-hint registration options"
 }
 
-/// A union of [`DiagnosticOptions`] or registration options
+/// A union of [`DiagnosticOptions`] or [`DiagnosticRegistrationOptions`]
 /// (LSP `DiagnosticOptions | DiagnosticRegistrationOptions`).
 ///
 /// The registration-options variant (an object carrying a `documentSelector`)
-/// is deferred to raw JSON; the server produces the plain options variant.
-// DEFER: DiagnosticRegistrationOptions is a deep registration type (embeds
-// `documentSelector: DocumentSelectorOrNull`); kept as raw JSON. blocked-by:
-// generator pass landing the registration-options tree.
+/// decodes into the typed [`DiagnosticRegistrationOptions`]; the plain options
+/// variant decodes into [`DiagnosticOptions`].
 // Go: internal/lsp/lsproto/lsp_generated.go:DiagnosticOptionsOrRegistrationOptions
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DiagnosticOptionsOrRegistrationOptions {
     /// The plain options variant.
     pub options: Option<DiagnosticOptions>,
-    /// The registration-options variant (deferred: raw JSON).
-    pub registration_options: Option<serde_json::Value>,
+    /// The typed registration-options variant.
+    pub registration_options: Option<DiagnosticRegistrationOptions>,
 }
 
 impl Serialize for DiagnosticOptionsOrRegistrationOptions {
@@ -2206,7 +2637,8 @@ impl<'de> Deserialize<'de> for DiagnosticOptionsOrRegistrationOptions {
         let value = serde_json::Value::deserialize(deserializer)?;
         let mut out = DiagnosticOptionsOrRegistrationOptions::default();
         if value.get("documentSelector").is_some() {
-            out.registration_options = Some(value);
+            out.registration_options =
+                Some(serde_json::from_value(value).map_err(de::Error::custom)?);
         } else {
             out.options = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
         }

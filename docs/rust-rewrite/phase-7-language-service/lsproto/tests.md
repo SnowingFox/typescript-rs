@@ -135,15 +135,45 @@
 
 > 既有 `server_capabilities_deferred_and_bool_fields_round_trip` 的 `execute_command_provider` 字面量本轮从 raw `json!({...})` 改为 typed `ExecuteCommandOptions{...}`（同一期望 JSON，仍绿）。`req`/`reqnn` 字段的 option struct（`ExecuteCommandOptions`/`DocumentOnTypeFormattingOptions`/`VsOnAutoInsertOptions`/`DiagnosticOptions`）因 `default ≠ {}` 不纳入 `every_simple_server_option_default_serializes_empty`；`BooleanOr*` union `default` 序列化为 err（恰一变体置位），同样不纳入。
 
+## 续轮：registration-options base tree（`generated_test.rs`）
+
+> 本轮移植 registration-options 基底类型树并把全部 14 个 raw-JSON registration 槽升级为 typed `*RegistrationOptions`。Go 侧 `lsp_json_test.go` 对这些 registration 类型**无 populated serde 测试**（服务端产出值），按 PORTING §8.6 自写行为级 serde 测试，expected 取 Go `json` 标签语义 + LSP spec 字面量，测试加在既有 `generated_test.rs`。
+> red→green：每个基底类型与两个手写 union 的升级、以及 triple-union 宏升级的首例（declaration）均为**真 RED→GREEN**（先引用不存在的 typed 类型/字段 → 编译失败 RED → 加类型/改宏 → GREEN）；同宏后续 11 个 triple-union registration 为 **green-on-arrival**（诚实标注），由综合 round-trip + 每类型 default 覆盖。
+
+| Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
+|---|---|---|---|---|
+| `static_registration_options_round_trips` | **tracer（真 RED→GREEN）**：`id` 置位 round-trip | `{id:"reg1"}` → `{"id":"reg1"}` | `lsp_generated.go:StaticRegistrationOptions` | ✓ |
+| `static_registration_options_default_is_empty` | omitzero：`id` 缺→`{}`、`{}`→`id=None` | `default` → `"{}"` | 同上 | ✓ |
+| `pattern_or_relative_pattern_string_variant` | string 变体 typed round-trip | `"**/*.ts"` → `pattern=Some` | `lsp_generated.go:PatternOrRelativePattern` | ✓ |
+| `pattern_or_relative_pattern_relative_variant_raw` | 对象→ raw `RelativePattern`（DEFER）round-trip | `{baseUri,pattern}` → `relative_pattern=Some` | 同上（对象臂） | ✓ |
+| `text_document_filter_language_round_trips` | `language` 必填变体 round-trip（scheme opt） | `{language,scheme}` → 同字面量 | `lsp_generated.go:TextDocumentFilterLanguage` | ✓ |
+| `text_document_filter_language_requires_language` | `language` 缺→`errMissing` | `{scheme:"file"}` → `missing required properties: language` | 同上 | ✓ |
+| `text_document_filter_scheme_and_pattern_variants` | scheme/pattern 必填变体 round-trip | 置位 → `{"scheme":...}` / `{"pattern":...}` | `TextDocumentFilterScheme/Pattern` | ✓ |
+| `document_filter_union_dispatch` | union 按判别字段依序派发（language→scheme→pattern） | 三对象 → 对应变体 | `TextDocumentFilterLanguageOrSchemeOrPattern.UnmarshalJSONFrom` | ✓ |
+| `document_selector_or_null_array_variant` | 数组变体 round-trip（多 filter） | `[{language},{scheme}]` → `Some(vec 2)` | `lsp_generated.go:DocumentSelectorOrNull` (array) | ✓ |
+| `document_selector_or_null_null_variant` | `null` → `None`；`default → null` | `null` → `None`；`default` → `"null"` | `DocumentSelectorOrNull.MarshalJSONTo` (nil→null) | ✓ |
+| `text_document_registration_options_round_trips` | `req documentSelector` round-trip | `{documentSelector:[{language}]}` → 同字面量 | `lsp_generated.go:TextDocumentRegistrationOptions` | ✓ |
+| `text_document_registration_options_null_selector_and_missing` | `null` 选择器 + 缺键→`errMissing` + `default→{"documentSelector":null}` | `{}` → `missing required properties: documentSelector` | 同上 | ✓ |
+| `declaration_provider_registration_variant_typed` | **tracer（真 RED→GREEN）**：triple-union 宏 registration 臂 typed（`id`/`documentSelector`/`workDoneProgress` 可访问）+ byte-for-byte round-trip（Go 字段序 workDoneProgress,documentSelector,id） | 注册 JSON → typed 字段 + 同字面量 | `lsp_generated.go:DeclarationRegistrationOptions` | ✓ |
+| `diagnostic_provider_registration_variant_typed` | **真 RED→GREEN**：手写 union → typed `DiagnosticRegistrationOptions`（`req` 非指针 bool）+ byte-for-byte round-trip | 注册 JSON → typed 字段 + 同字面量 | `lsp_generated.go:DiagnosticRegistrationOptions` | ✓ |
+| `semantic_tokens_provider_registration_variant_typed` | **真 RED→GREEN**：手写 union → typed `SemanticTokensRegistrationOptions`（`reqnn legend`）+ byte-for-byte round-trip | 注册 JSON → `legend.token_types`/`id` + 同字面量 | `lsp_generated.go:SemanticTokensRegistrationOptions` | ✓ |
+| `all_triple_union_registration_variants_round_trip` | 12 个 triple-union registration 变体全置位 deep round-trip（green-on-arrival 覆盖） | 12 provider → `to_string`→`from_str` 等值 | `lsp_generated.go:ServerCapabilities`（triple-union 组） | ✓ |
+| `inlay_hint_registration_variant_field_order` | inlayHint registration 含 `resolveProvider` + Go 字段序 + `documentSelector:null` 仍派发 registration | `{workDoneProgress,resolveProvider,documentSelector:null,id}` → 同字面量 | `lsp_generated.go:InlayHintRegistrationOptions` | ✓ |
+| `moniker_registration_variant_has_no_id` | moniker registration **无 `id` 字段**（Go quirk）：输入 `id` 被忽略、不回写 | `{...,id:"ignored"}` → 重序列化丢弃 `id` | `lsp_generated.go:MonikerRegistrationOptions` (no Id) | ✓ |
+| `every_registration_options_default_serializes_document_selector` | §8.6 每类型覆盖：13 个 registration `default → {"documentSelector":null}` + Diagnostic/SemanticTokens 各含其 `req`/`reqnn` 字段 | `T::default()` → 含 `documentSelector` 键 | 必填 `documentSelector` 不变式 | ✓ |
+
+> 既有 `declaration_provider_registration_variant` / `type_definition_provider_registration_variant` / `diagnostic_provider_registration_variant` / `semantic_tokens_provider_registration_variant`（断言 `.registration_options.is_some()`）在字段类型从 `Option<serde_json::Value>` 升级为 typed `Option<*RegistrationOptions>` 后**仍绿**（`.is_some()` 与构造 `registration_options: None` 对任意 `Option<T>` 不变）；公共 API 仅字段**内层类型**收紧，既有测试字面量无需改动。
+
 ## 推迟到后续 phase 的测试
 
 | 测试 / 行为 | 原因 | 目标 phase |
 |---|---|---|
 | ~~`(*ClientCapabilities).Resolve()` 转换正确性~~ | ✅ 已落地（4 组全树 red→green） | 完成 |
 | ~~`ServerCapabilities` typed serde~~ | ✅ 已落地（11 组高价值 provider red→green） | 完成 |
-| ~~`ServerCapabilities` 深/稀有 provider 的 typed option 树（triple-union/executeCommand/onTypeFormatting/diagnostic/onAutoInsert 等）~~ | ✅ 本轮已落地（见上表，21/22 provider typed；新 `boolean_or_options_or_registration!` 宏） | 完成 |
+| ~~`ServerCapabilities` 深/稀有 provider 的 typed option 树（triple-union/executeCommand/onTypeFormatting/diagnostic/onAutoInsert 等）~~ | ✅ 已落地（21/22 provider typed；`boolean_or_options_or_registration!` 宏） | 完成 |
+| ~~triple-union / `*OrRegistrationOptions` 的 **registration 变体** typed serde（`*RegistrationOptions`）~~ | ✅ 本轮已落地（registration-options base tree + 14 个 typed `*RegistrationOptions`，red→green） | 完成 |
 | `ServerCapabilities.workspace`（`WorkspaceOptions`）typed serde | 深依赖未移植（workspaceFolders/fileOperations/textDocumentContent）；保留 raw JSON | — blocked-by 生成器 pass |
-| triple-union / `*OrRegistrationOptions` 的 **registration 变体** typed serde（`*RegistrationOptions`） | 嵌入未移植 `DocumentSelectorOrNull`；本轮保留 raw JSON（typed options+boolean 变体已全 typed） | — blocked-by 生成器 pass |
+| `PatternOrRelativePattern` 的 **`RelativePattern` 对象变体** typed serde | 深依赖 `WorkspaceFolderOrURI`/`WorkspaceFolder` 未移植；本轮保留 raw JSON（string 变体已 typed） | — blocked-by 生成器 pass |
 | 新枚举 `String()` stringer（`TextDocumentSyncKind` 已含；其余） | resolved/server 树不全用；生成器 pass 落地完整枚举集时补 | P8 |
 | resolved / 请求类型显式 `null` 字段的 Go `errNull` 精度 | 非线上收报关键路径，低优先 | — blocked-by 生成器 pass |
 | Go 非指针字段（`support`/`tokenTypes` 等）的精确反序列化严格度 | 本轮统一建成 `Option<T>`；对 `resolve()` 等价 | — blocked-by 生成器 pass |
