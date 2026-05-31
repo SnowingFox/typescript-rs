@@ -43,7 +43,24 @@ use utilities::{get_language_variant, token_is_identifier_or_keyword};
 /// Options describing the file being parsed.
 ///
 /// This is a minimal port of Go `ast.SourceFileParseOptions`; only the fields
-/// the current parser slice needs are present.
+/// the current parser slice needs are present. The [`file_name`](Self::file_name)
+/// drives declaration-file detection (`.d.ts` suffix) and is stored on the
+/// resulting [`SourceFile`](tsgo_ast::NodeData::SourceFile) node.
+///
+/// # Examples
+/// ```
+/// use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+/// use tsgo_core::scriptkind::ScriptKind;
+/// let result = parse_source_file(
+///     SourceFileParseOptions { file_name: "lib.d.ts".into() },
+///     "declare const x: number;",
+///     ScriptKind::Ts,
+/// );
+/// match result.arena.data(result.source_file) {
+///     tsgo_ast::NodeData::SourceFile(d) => assert!(d.is_declaration_file),
+///     _ => panic!("expected SourceFile"),
+/// }
+/// ```
 ///
 /// Side effects: none (pure value type).
 // Go: internal/ast/parseoptions.go:SourceFileParseOptions
@@ -58,7 +75,21 @@ pub struct SourceFileParseOptions {
 /// A minimal stand-in for Go `ast.Diagnostic`; it carries the source range, the
 /// (static) message, and the already-stringified format arguments. The full
 /// `ast.Diagnostic` (message chains, related info, file back-pointer) is ported
-/// in a later phase.
+/// in a later phase. Diagnostics at the same start offset are de-duplicated, matching
+/// Go `parseErrorAtRange`.
+///
+/// # Examples
+/// ```
+/// use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+/// use tsgo_core::scriptkind::ScriptKind;
+/// let result = parse_source_file(
+///     SourceFileParseOptions::default(),
+///     "{ 'a': 1 }",
+///     ScriptKind::Json,
+/// );
+/// assert_eq!(result.diagnostics.len(), 1);
+/// assert_eq!(result.diagnostics[0].pos(), 2);
+/// ```
 ///
 /// Side effects: none (pure value type).
 // Go: internal/ast/diagnostic.go:Diagnostic
@@ -73,9 +104,22 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// Returns the diagnostic's start offset.
+    /// Returns the diagnostic's start offset (mirrors Go `Diagnostic.Pos()`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// use tsgo_core::scriptkind::ScriptKind;
+    /// let result = parse_source_file(
+    ///     SourceFileParseOptions::default(),
+    ///     "{ 'a': 1 }",
+    ///     ScriptKind::Json,
+    /// );
+    /// assert_eq!(result.diagnostics[0].pos(), 2);
+    /// ```
     ///
     /// Side effects: none (pure).
+    // Go: internal/ast/diagnostic.go:Diagnostic.Pos
     pub fn pos(&self) -> i32 {
         self.loc.pos()
     }
@@ -84,7 +128,22 @@ impl Diagnostic {
 /// The result of parsing: the owning arena, the `SourceFile` node id, and the
 /// collected diagnostics.
 ///
+/// Because Rust's arena owns every node (unlike Go's GC graph), callers receive
+/// the [`NodeArena`](tsgo_ast::NodeArena) alongside the root [`source_file`](Self::source_file)
+/// id. Syntactic diagnostics are returned in source order.
+///
+/// # Examples
+/// ```
+/// use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+/// use tsgo_core::scriptkind::ScriptKind;
+/// use tsgo_ast::Kind;
+/// let result = parse_source_file(SourceFileParseOptions::default(), "", ScriptKind::Ts);
+/// assert!(result.diagnostics.is_empty());
+/// assert_eq!(result.arena.kind(result.source_file), Kind::SourceFile);
+/// ```
+///
 /// Side effects: none (pure value type).
+// Go: internal/parser/parser.go:ParseSourceFile (return bundle)
 #[derive(Debug)]
 pub struct ParseResult {
     /// The arena owning every parsed node.

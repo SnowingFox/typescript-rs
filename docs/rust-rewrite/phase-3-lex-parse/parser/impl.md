@@ -291,3 +291,10 @@ arrow function（`mark`/`rewind`/`look_ahead` 投机随之落地）、JSON（`pa
 - **`BenchmarkParse` / `FuzzParser`**：性能基准 + 模糊测试，`// DEFER(phase-10)`（需 testdata/TypeScript submodule）。
 - **完整产生式覆盖的正确性 gate**：靠 P10 conformance/fourslash baseline（4250 fourslash + 294MB testdata 对拍）。本轮 tests.md 只收口可移植的 `TestJSDocImportTypeParentChain` + 少量行为级。
 - **诊断消息逐条文本对齐**：依赖 `tsgo_diagnostics`（已在 P1/P2），但完整诊断 parity 在 P10。
+
+## Round 7 — `lib.rs` 公开 API 注释 + §8.6 覆盖（2026-05-31）
+
+- [x] §8.6 审计 crate 根公开面：`parse_source_file`、`parse_isolated_entity_name`、`SourceFileParseOptions`、`Diagnostic`（含 `pos()`）、`ParseResult`、`pub use ParseFlags`、`pub mod types|utilities`。
+- [x] 新增 5 条行为级单测（`declaration_file_name_*`、`diagnostic_pos_*`、`diagnostic_deduplication_*`、`parse_source_file_unknown_script_kind_panics`）——全部为 **characterization/coverage**，无 Go 分歧 RED。
+- [x] Rustdoc 增强：`SourceFileParseOptions` / `Diagnostic` / `Diagnostic::pos()` / `ParseResult` 补 `# Examples`；`Diagnostic::pos()` 补 `// Go:` 锚；`ParseResult` 补 `// Go:` 锚。doctest 3→7。
+- [ ] 完整 `ast.Diagnostic` 替换 parser 本地 `Diagnostic` — DEFER(blocked-by: ast diagnostic 子系统)。

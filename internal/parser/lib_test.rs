@@ -2110,6 +2110,90 @@ fn jsdoc_comments_are_skipped_as_trivia() {
     );
 }
 
+// Go: parser.go:parseSourceFileWorker (isDeclarationFileName + setIsDeclarationFile)
+#[test]
+fn declaration_file_name_sets_source_file_metadata() {
+    let result = parse_source_file(
+        SourceFileParseOptions {
+            file_name: "lib.d.ts".to_string(),
+        },
+        "declare const x: number;",
+        ScriptKind::Ts,
+    );
+    match result.arena.data(result.source_file) {
+        NodeData::SourceFile(d) => {
+            assert!(
+                d.is_declaration_file,
+                ".d.ts file name must set is_declaration_file"
+            );
+            assert_eq!(d.file_name, "lib.d.ts");
+        }
+        other => panic!("expected SourceFile, got {other:?}"),
+    }
+    assert!(result.diagnostics.is_empty());
+}
+
+// Go: parser.go:parseSourceFileWorker (non-.d.ts file name)
+#[test]
+fn non_declaration_file_name_clears_declaration_flag() {
+    let result = parse_source_file(
+        SourceFileParseOptions {
+            file_name: "app.ts".to_string(),
+        },
+        "const x = 1;",
+        ScriptKind::Ts,
+    );
+    match result.arena.data(result.source_file) {
+        NodeData::SourceFile(d) => {
+            assert!(
+                !d.is_declaration_file,
+                ".ts file name must not set is_declaration_file"
+            );
+            assert_eq!(d.file_name, "app.ts");
+        }
+        other => panic!("expected SourceFile, got {other:?}"),
+    }
+    assert!(result.diagnostics.is_empty());
+}
+
+// Go: internal/ast/diagnostic.go:Diagnostic.Pos / parser.go:parseErrorAtRange
+#[test]
+fn diagnostic_pos_matches_error_location() {
+    // Single-quoted JSON key triggers STRING_LITERAL_WITH_DOUBLE_QUOTES_EXPECTED at `'`.
+    let result = parse_json("{ 'a': 1 }");
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_eq!(
+        result.diagnostics[0].pos(),
+        2,
+        "diagnostic start must match the offending token position"
+    );
+}
+
+// Go: parser.go:parseErrorAtRange (same-position de-duplication)
+#[test]
+fn diagnostic_deduplication_at_same_position() {
+    // Two JSON validation passes can both flag the same unquoted key span; only one
+    // diagnostic at that start offset should survive Go's de-duplication rule.
+    let result = parse_json("{ a: 1 }");
+    let positions: Vec<i32> = result.diagnostics.iter().map(|d| d.pos()).collect();
+    assert!(
+        !positions.is_empty(),
+        "unquoted JSON key must produce at least one diagnostic"
+    );
+    assert_eq!(
+        positions.iter().filter(|&&p| p == positions[0]).count(),
+        1,
+        "duplicate diagnostics at the same pos must be suppressed: {positions:?}"
+    );
+}
+
+// Go: parser.go:initializeState (ScriptKind guard)
+#[test]
+#[should_panic(expected = "ScriptKind must be specified")]
+fn parse_source_file_unknown_script_kind_panics() {
+    parse_source_file(SourceFileParseOptions::default(), "", ScriptKind::Unknown);
+}
+
 // Go: parser.go:parseExpressionOrLabeledStatement (labeled)
 #[test]
 fn parse_labeled_statement() {

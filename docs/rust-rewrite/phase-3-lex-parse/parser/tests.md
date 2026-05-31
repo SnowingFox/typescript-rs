@@ -118,6 +118,32 @@
 | `parse_import_keyword_statement_vs_call` | 守卫：import 语句路径不受动态 import lookahead 影响 | `import x from "m";` → `ImportDeclaration`(import_clause Some)；`import("m");` → `CallExpression` | `parser.go:scanStartOfDeclaration` / `parseLeftHandSideExpressionOrHigher` | ✓ |
 | `parse_meta_properties`（既有，沿用为守卫） | `import.meta` 仍为 MetaProperty | `import.meta;` → `MetaProperty{ ImportKeyword, "meta" }` | `parser.go:parseLeftHandSideExpressionOrHigher`（meta 分支） | ✓ |
 
+## Round 7 行为级测试（`lib.rs` 公开 API 覆盖审计，全绿）
+
+> §8.6 per-pub-fn 审计：`lib.rs` crate 根公开面（`parse_source_file` / `parse_isolated_entity_name` / `SourceFileParseOptions` / `Diagnostic` / `ParseResult` / re-export `ParseFlags` + `pub mod types|utilities`）。当前 `cargo test -p tsgo_parser` = **111 单测 + 7 doctests** 全绿。每条带 `// Go:` 锚；**全部为 characterization/coverage（无 RED 暴露 Go 分歧）**。
+
+| Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
+|---|---|---|---|---|
+| `declaration_file_name_sets_source_file_metadata` | `SourceFileParseOptions.file_name` 驱动 `.d.ts` 检测 | `lib.d.ts` + `declare const x` → `is_declaration_file==true`、`file_name` 保留 | `parser.go:parseSourceFileWorker` / `tspath.IsDeclarationFileName` | ✓ |
+| `non_declaration_file_name_clears_declaration_flag` | 非声明文件名 | `app.ts` + `const x=1` → `is_declaration_file==false` | 同上 | ✓ |
+| `diagnostic_pos_matches_error_location` | 公开 `Diagnostic::pos()` | JSON `{ 'a': 1 }` → 1 条诊断、`pos()==2`（单引号位置） | `diagnostic.go:Diagnostic.Pos` / `parseErrorAtRange` | ✓ |
+| `diagnostic_deduplication_at_same_position` | 同 offset 诊断去重 | JSON `{ a: 1 }` → 同一 `pos` 至多一条 | `parser.go:parseErrorAtRange` | ✓ |
+| `parse_source_file_unknown_script_kind_panics` | `ScriptKind::Unknown` 守卫 | `""` + `Unknown` → panic（`should_panic`） | `parser.go:initializeState` | ✓ |
+
+**§8.6 覆盖图（crate 根 `lib.rs` 公开项）**
+
+| 公开项 | 测前 | 本轮 | 备注 |
+|---|---|---|---|
+| `parse_source_file` | ✓（Round 1–6 大量行为测 + doctest） | — | |
+| `parse_isolated_entity_name` | ✓（chain/invalid + doctest） | — | |
+| `SourceFileParseOptions` | 间接（`.default()`） | ✓（`.file_name` 行为） | |
+| `Diagnostic` / `Diagnostic::pos()` | 间接（`.is_empty()`） | ✓（pos + 去重） | +2 doctests |
+| `ParseResult` | ✓（全测共用） | — | +1 doctest |
+| `pub use ParseFlags` | ✓（`types::tests`） | — | |
+| `pub mod types` / `utilities` | ✓（子模块 `*_test.rs`） | — | |
+
+**有意跳过**：`Diagnostic.args`/`message` 逐条文本 parity（P10）；完整 `ast.Diagnostic` 字段（blocked-by P2 diagnostic 子系统）。
+
 ## 与 impl.md 的对齐核对
 
 - [ ] 每个 Go `func Test*` 都已映射：唯一 `TestJSDocImportTypeParentChain` 已拆为 2 条 Rust 测试（去重 + parent 链）
