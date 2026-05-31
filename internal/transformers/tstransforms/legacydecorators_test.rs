@@ -676,15 +676,207 @@ fn without_experimental_decorators_class_is_unchanged() {
     );
 }
 
-// Go: internal/transformers/tstransforms/legacydecorators.go:visitClassDeclaration
-// (the `decorated` -> `transformClassDeclarationWithClassDecorators` branch).
-// DEFER guard: a class *decorator* (`@dec class C {}`) is not yet lowered to the
-// `let C = class C {}; C = __decorate([dec], C);` wrapping; the class passes
-// through unchanged. blocked-by: the `let`-binding / class-alias wrapping +
-// emit-name forms.
+// Go: internal/transformers/tstransforms/legacydecorators.go:transformClassDeclarationWithClassDecorators
+// (Example 1: the simplest decorated-class case — `let C = class C {}` +
+// trailing `C = __decorate([dec], C);`, via `getConstructorDecorationStatement`
+// -> `generateConstructorDecorationExpression` -> `NewDecorateHelper(localName)`
+// + `NewAssignmentExpression(localName, decorate)`).
+// Verified against Go / `tsc --experimentalDecorators` (Go source comment
+// Example 1):
+//   @dec class C {}
+//   =>
+//   let C = class C {
+//   };
+//   C = __decorate([dec], C);
+//
+// Headline (6ar tracer bullet): a *class* decorator lowers the class declaration
+// into a `let`-bound class expression (keeping the `class C` name) followed by a
+// trailing `C = __decorate([dec], C);` assignment statement. The class
+// decorator is stripped from the class expression, and the `__decorate` helper
+// is emitted once in the module prologue. No self-reference, so no class alias.
 #[test]
-fn class_decorator_is_left_unchanged() {
-    check_legacy("@dec class C {}", "@dec\nclass C {\n}");
+fn class_decorator_lowers_to_let_wrap_and_decorate() {
+    check_legacy(
+        "@dec class C {}",
+        &format!(
+            "{}\nlet C = class C {{\n}};\nC = __decorate([dec], C);",
+            DECORATE_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:getAllDecoratorsOfClass
+// + transformAllDecoratorsOfDeclaration -> transformDecorators (each decorator
+// maps to `decorator.Expression()`, in source order). `node.Decorators()`
+// returns the class decorators in declaration order.
+// Verified against Go / `tsc --experimentalDecorators`:
+//   @a @b class C {}
+//   =>
+//   let C = class C {
+//   };
+//   C = __decorate([a, b], C);
+//
+// Coverage (6ar): multiple class decorators are collected into the class
+// `__decorate` array in source order (`a` before `b`). Green-on-arrival once
+// behavior 1 wires `class_decorator_expressions` (which preserves the modifier
+// list order); guards against a reversed / single-decorator-only regression.
+#[test]
+fn multiple_class_decorators_preserve_source_order() {
+    check_legacy(
+        "@a @b class C {}",
+        &format!(
+            "{}\nlet C = class C {{\n}};\nC = __decorate([a, b], C);",
+            DECORATE_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:visitClassDeclaration
+// (`ClassOrConstructorParameterIsDecorated` is true when a constructor parameter
+// is decorated, even with no class decorator -> the class still takes the
+// `transformClassDeclarationWithClassDecorators` path) + `getAllDecoratorsOfClass`
+// (`getDecoratorsOfParameters(GetFirstConstructorWithBody(node))`) +
+// `transformDecoratorsOfParameters` (`__param(i, dec)` into the CLASS decorator
+// array, not a member one).
+// Verified against Go / `tsc --experimentalDecorators`:
+//   class C { constructor(@pdec a: number) {} }
+//   =>
+//   let C = class C {
+//       constructor(a) { }
+//   };
+//   C = __decorate([__param(0, pdec)], C);
+//
+// Headline (6ar slice 3): a decorated *constructor parameter* makes the class
+// itself "decorated", so it takes the `let C = class C {…}` wrapping even with
+// no class decorator. The parameter decorator becomes a `__param(0, pdec)` entry
+// in the CLASS `__decorate` array (targeting the constructor `C`), and the
+// constructor's parameter decorator + type annotation are stripped from the
+// lowered body (`constructor(a) { }`). The `__param` helper (priority 4) follows
+// `__decorate` (priority 2) in the prologue.
+#[test]
+fn constructor_parameter_decorator_decorates_class_constructor() {
+    check_legacy(
+        "class C { constructor(@pdec a: number) {} }",
+        &format!(
+            "{}\n{}\nlet C = class C {{\n    constructor(a) {{ }}\n}};\nC = __decorate([__param(0, pdec)], C);",
+            DECORATE_HELPER.text, PARAM_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:transformClassDeclarationWithClassDecorators
+// (`statements = [varStatement] ++ decorationStatements ++ getConstructorDecorationStatement` —
+// the member `__decorate`s precede the class-level one).
+// Verified against Go / `tsc --experimentalDecorators`:
+//   @dec class C { @mdec m() {} }
+//   =>
+//   let C = class C {
+//       m() { }
+//   };
+//   __decorate([mdec], C.prototype, "m", null);
+//   C = __decorate([dec], C);
+//
+// Coverage (6ar): a class decorator combined with a decorated *member* emits the
+// member `__decorate` (instance member -> `C.prototype`) BEFORE the class-level
+// `C = __decorate([dec], C)`. Green-on-arrival once behavior 1 wires the
+// member-decoration loop inside the class-decorator path; guards the
+// statement order (members first, class last) and that both decorations are
+// emitted.
+#[test]
+fn class_decorator_with_decorated_method_emits_member_then_class_decorate() {
+    check_legacy(
+        "@dec class C { @mdec m() {} }",
+        &format!(
+            "{}\nlet C = class C {{\n    m() {{ }}\n}};\n__decorate([mdec], C.prototype, \"m\", null);\nC = __decorate([dec], C);",
+            DECORATE_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/metadata.go:shouldAddParamTypesMetadata
+// (`KindClassDeclaration` -> `GetFirstConstructorWithBody(node) != nil`) +
+// getOldTypeMetadata (class emits ONLY `design:paramtypes`, no `design:type` /
+// `design:returntype`) + serializeParameterTypesOfNode (the constructor's
+// parameter types). The injected `@__metadata` lands last in the class
+// `__decorate` array (`transformAllDecoratorsOfDeclaration`: decorators, then
+// `__param`, then metadata).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
+//   @dec class C { constructor(a: number) {} }
+//   =>
+//   let C = class C {
+//       constructor(a) { }
+//   };
+//   C = __decorate([dec, __metadata("design:paramtypes", [Number])], C);
+//
+// Headline (6ar slice 4): with `--emitDecoratorMetadata`, a decorated class with
+// a constructor body appends a `design:paramtypes` metadata to the CLASS
+// `__decorate` array — the constructor's parameter types serialized through the
+// checker (`: number` -> `Number`). A class emits NO `design:type` /
+// `design:returntype` (those are member-only). The constructor parameter type is
+// stripped from the lowered body (`constructor(a) { }`).
+#[test]
+fn class_constructor_paramtypes_metadata_under_emit_decorator_metadata() {
+    check_legacy_metadata(
+        "@dec class C { constructor(a: number) {} }",
+        &format!(
+            "{}\n{}\nlet C = class C {{\n    constructor(a) {{ }}\n}};\nC = __decorate([dec, __metadata(\"design:paramtypes\", [Number])], C);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: metadata.go:shouldAddParamTypesMetadata (no constructor with body ->
+// false, so no `design:paramtypes`).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
+//   @dec class C {}
+//   =>
+//   let C = class C {
+//   };
+//   C = __decorate([dec], C);
+//
+// Coverage (6ar): a decorated class with NO constructor emits no
+// `design:paramtypes` metadata even under `--emitDecoratorMetadata` (the
+// `GetFirstConstructorWithBody == nil` gate). Guards that the metadata is
+// constructor-conditioned, not unconditional.
+#[test]
+fn class_decorator_without_constructor_emits_no_paramtypes_metadata() {
+    check_legacy_metadata(
+        "@dec class C {}",
+        &format!(
+            "{}\nlet C = class C {{\n}};\nC = __decorate([dec], C);",
+            DECORATE_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:transformAllDecoratorsOfDeclaration
+// (class decorators, then `__param`, then metadata) + metadata.go (class
+// `design:paramtypes` from the constructor parameters).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
+//   class C { constructor(@pdec a: number) {} }
+//   =>
+//   let C = class C {
+//       constructor(a) { }
+//   };
+//   C = __decorate([__param(0, pdec), __metadata("design:paramtypes", [Number])], C);
+//
+// Coverage (6ar): a decorated constructor *parameter* under
+// `--emitDecoratorMetadata` places the `__param(0, pdec)` entry BEFORE the
+// `design:paramtypes` metadata in the class `__decorate` array, and the
+// constructor's parameter type feeds the `design:paramtypes` (`[Number]`).
+// Green-on-arrival once slices 3/4 wire `__param` + class metadata; guards the
+// `__param`-before-metadata ordering for the class target. All three helpers
+// land in the prologue in priority order (`__decorate` 2, `__metadata` 3,
+// `__param` 4).
+#[test]
+fn constructor_parameter_decorator_with_metadata_orders_param_before_paramtypes() {
+    check_legacy_metadata(
+        "class C { constructor(@pdec a: number) {} }",
+        &format!(
+            "{}\n{}\n{}\nlet C = class C {{\n    constructor(a) {{ }}\n}};\nC = __decorate([__param(0, pdec), __metadata(\"design:paramtypes\", [Number])], C);",
+            DECORATE_HELPER.text, METADATA_HELPER.text, PARAM_HELPER.text
+        ),
+    );
 }
 
 // Go: typeserializer.go:serializeTypeReferenceNode

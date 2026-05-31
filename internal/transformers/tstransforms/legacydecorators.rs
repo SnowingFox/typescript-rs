@@ -39,15 +39,51 @@
 //! (metadata last, exactly as Go's `transformAllDecoratorsOfDeclaration` orders
 //! them). The emitted text is identical.
 //!
+//! # Class declarations with class decorators (round 6ar)
+//!
+//! A class that is itself decorated (a class decorator, or a decorated
+//! constructor parameter — Go's `ClassOrConstructorParameterIsDecorated`) is
+//! lowered into a `let`-bound class expression followed by a trailing
+//! `__decorate` assignment (Go's `transformClassDeclarationWithClassDecorators`):
+//!
+//! ```text
+//! @dec class C {}
+//! =>
+//! let C = class C {
+//! };
+//! C = __decorate([dec], C);
+//! ```
+//!
+//! Constructor parameter decorators contribute `__param(i, dec)` entries to the
+//! CLASS `__decorate` array (Go's `getConstructorDecorationStatement` ->
+//! `getAllDecoratorsOfClass` -> `getDecoratorsOfParameters(constructor)`), and
+//! with `--emitDecoratorMetadata` a `design:paramtypes` metadata for the
+//! constructor parameters is appended last (Go's `shouldAddParamTypesMetadata`
+//! is true for a class with a constructor body; `design:type` /
+//! `design:returntype` are member-only):
+//!
+//! ```text
+//! class C { constructor(@pdec a: number) {} }
+//! =>
+//! let C = class C {
+//!     constructor(a) { }
+//! };
+//! C = __decorate([__param(0, pdec)], C);
+//! ```
+//!
 //! # Deferred (DEFER(P5))
 //!
-//! This first slice covers only property decorators. Deferred, each with its
-//! blocker:
+//! Deferred, each with its blocker:
 //!
-//! - **Class decorators** (`@dec class C {}` → `let C = class C {}; C =
-//!   __decorate([dec], C);`), including the self-reference class-alias rewrite.
-//!   blocked-by: `getLocalName`/`GetDeclarationName` emit-name forms + the
-//!   `classAliases` substitution and `getReferencedValueDeclaration`.
+//! - **The self-reference class-alias rewrite** (`let C = C_1 = class C {…}`,
+//!   rewriting `C` references inside the class body to `C_1`). The reachable
+//!   subset has no self-reference. blocked-by: `getReferencedValueDeclaration` +
+//!   `NewUniqueName` / the `classAliases` substitution + per-node
+//!   `ConstructorReference` flags.
+//! - **`export` / `export default` decorated classes** (the trailing
+//!   `export { C };` / `export default C;` statement and the `default_1` rename
+//!   for an anonymous default export). blocked-by: the export/default modifier
+//!   handling + `GetLocalName`/generated-name emit-name forms.
 //! - **Accessor decorators** landed in 6aq: a decorated get/set accessor lowers
 //!   to `__decorate([...], C.prototype, "x", null)` (4th arg `null`, like a
 //!   method); a get/set pair merges into a single `__decorate` owned by the
@@ -71,9 +107,9 @@
 //!   `GetRestParameterElementType`. (The reachable subset — plain leading
 //!   parameters — emits the `design:paramtypes` array and `__param(i, dec)`
 //!   entries; see `serialize_parameter_types` / `append_param_decorators`.)
-//! - **Constructor parameter decorators** (`__param` on the class constructor,
-//!   a different target than a method). blocked-by: the class-decorator wrapping
-//!   path + `getAllDecoratorsOfClass`.
+//!   (Constructor parameter decorators landed in 6ar: `__param(i, dec)` in the
+//!   CLASS `__decorate` array via `getConstructorDecorationStatement` /
+//!   `getAllDecoratorsOfClass`.)
 //! - **`TypeReference` `design:type`** for lib-globals/qualified-name entities.
 //!   Round 4ax/6an wires the reachable single-file `TypeReference` dispatch
 //!   (consuming checker 4aw's `get_type_reference_serialization_kind`): a
@@ -321,14 +357,25 @@ fn visit_class_declaration(ec: &mut EmitContext, node: NodeId, cfg: &Config) -> 
         ),
         _ => unreachable!("kind/data mismatch"),
     };
-    // DEFER: a decorator on the class itself (`@dec class C {}`) needs the
-    // `let C = class C {}; C = __decorate([dec], C);` wrapping; leave it for a
-    // later slice (the class passes through unchanged here).
-    let has_class_decorator = modifiers
-        .as_ref()
-        .is_some_and(|m| m.modifier_flags.contains(ModifierFlags::DECORATOR));
-    if has_class_decorator {
-        return visit_each_child_ec(ec, node, cfg);
+
+    // Go's `visitClassDeclaration`: a class that is itself decorated (a class
+    // decorator on the class node, or a decorated constructor parameter —
+    // `ClassOrConstructorParameterIsDecorated`) is lowered through
+    // `transformClassDeclarationWithClassDecorators` — the
+    // `let C = class C {…}; C = __decorate([…], C);` wrapping. A class with only
+    // decorated *members* takes the trailing-`__decorate` member path
+    // (`transformClassDeclarationWithoutClassDecorators`); an undecorated class
+    // recurses unchanged.
+    if class_or_constructor_parameter_is_decorated(ec.arena(), node) {
+        return transform_class_declaration_with_class_decorators(
+            ec,
+            cfg,
+            node,
+            modifiers,
+            name,
+            heritage_clauses,
+            members,
+        );
     }
 
     let decorated_members: Vec<NodeId> = members
@@ -348,30 +395,12 @@ fn visit_class_declaration(ec: &mut EmitContext, node: NodeId, cfg: &Config) -> 
         .unwrap_or_default();
 
     // Rebuild members, stripping decorators (and the type annotation) from each
-    // decorated property/method (Go's `visitPropertyDeclaration` /
-    // `visitMethodDeclaration`).
+    // decorated member (Go's per-kind `visit*Declaration`).
     let new_members: Vec<NodeId> = members
         .nodes
         .iter()
         .copied()
-        .map(|m| match ec.arena().kind(m) {
-            Kind::PropertyDeclaration if member_is_decorated(ec.arena(), m) => {
-                rebuild_property_without_decorators(ec.arena_mut(), m)
-            }
-            Kind::MethodDeclaration if member_is_decorated(ec.arena(), m) => {
-                rebuild_method_without_decorators(ec.arena_mut(), m)
-            }
-            // Go's `transformClassDeclarationWithoutClassDecorators` visits *every*
-            // member, so both the decorated accessor and its undecorated partner
-            // are rebuilt — stripping decorators and (for the setter's value
-            // parameter / the getter's return type) the type annotations. Rebuild
-            // accessors unconditionally so a `set x(value: number)` partner lowers
-            // to `set x(value)` to match Go's isolated output.
-            Kind::GetAccessor | Kind::SetAccessor => {
-                rebuild_accessor_without_decorators(ec.arena_mut(), m)
-            }
-            _ => m,
-        })
+        .map(|m| rebuild_class_member(ec, m))
         .collect();
     let updated_class = ec.arena_mut().new_class_like(
         Kind::ClassDeclaration,
@@ -397,6 +426,415 @@ fn visit_class_declaration(ec: &mut EmitContext, node: NodeId, cfg: &Config) -> 
     }
 
     ec.arena_mut().new_syntax_list(NodeList::new(statements))
+}
+
+/// Lowers a class declaration that is itself decorated (a class decorator, or —
+/// after round 6ar slice 3 — a decorated constructor parameter) into the
+/// `let <name> = class <name> {…};` binding followed by the member-decoration
+/// statements and the trailing `<name> = __decorate([…], <name>);` assignment,
+/// returned as a `SyntaxList` (Go's
+/// `transformClassDeclarationWithClassDecorators`).
+///
+/// Reachable subset: a named, non-`export`/`default` class. DEFER (each with its
+/// blocker, see module docs): the self-reference class-alias rewrite
+/// (`let C = C_1 = class C {…}`) and the `export` / `export default` trailing
+/// statements.
+///
+/// Side effects: pushes the rebuilt class expression / `let` statement /
+/// `__decorate` assignment nodes; requests the `__decorate` (and, with metadata,
+/// `__metadata`/`__param`) helpers.
+// Go: internal/transformers/tstransforms/legacydecorators.go:transformClassDeclarationWithClassDecorators
+fn transform_class_declaration_with_class_decorators(
+    ec: &mut EmitContext,
+    cfg: &Config,
+    node: NodeId,
+    modifiers: Option<ModifierList>,
+    name: Option<NodeId>,
+    heritage_clauses: Option<NodeList>,
+    members: NodeList,
+) -> NodeId {
+    // DEFER: the `export` / `export default` trailing statements and the
+    // self-reference class-alias rewrite. The reachable subset has no
+    // `export`/`default`, so stripping the class decorator is all that is needed
+    // (Go filters out export/default/decorator via `isNotExportOrDefaultOrDecorator`).
+    let class_modifiers = strip_decorators(ec.arena(), modifiers.as_ref());
+
+    let name_text = name
+        .map(|n| ec.arena().text(n).to_string())
+        .unwrap_or_default();
+
+    // Rebuild every member (Go's `VisitNodes(members)`), stripping member
+    // decorators / type annotations (and, for a constructor, its parameters'
+    // decorators / type annotations).
+    let member_ids: Vec<NodeId> = members.nodes.clone();
+    let new_members: Vec<NodeId> = members
+        .nodes
+        .iter()
+        .copied()
+        .map(|m| rebuild_class_member(ec, m))
+        .collect();
+
+    // `... = class C { <members> }` — the class expression keeps the class name
+    // (Go's `exprName = name` for a non-generated name).
+    let class_expression = ec.arena_mut().new_class_like(
+        Kind::ClassExpression,
+        class_modifiers,
+        name,
+        None,
+        heritage_clauses,
+        NodeList::new(new_members),
+    );
+
+    // `let C = class C { … };` — Go's `declName = GetLocalName(node)` binding,
+    // emitted with the `let` block-scope flag.
+    let decl_name = ec.arena_mut().new_identifier(&name_text);
+    let var_declaration =
+        ec.arena_mut()
+            .new_variable_declaration(decl_name, None, None, Some(class_expression));
+    let var_declaration_list = ec
+        .arena_mut()
+        .new_variable_declaration_list(NodeList::new(vec![var_declaration]));
+    ec.arena_mut()
+        .add_flags(var_declaration_list, NodeFlags::LET);
+    let var_statement = ec
+        .arena_mut()
+        .new_variable_statement(None, var_declaration_list);
+
+    let mut statements = vec![var_statement];
+
+    // Member decoration statements, in declaration order (Go runs instance then
+    // static; single-member tests are insensitive to that ordering).
+    for member in members.nodes.iter().copied() {
+        if member_is_decorated(ec.arena(), member) {
+            if let Some(stmt) = generate_class_element_decoration_statement(
+                ec,
+                cfg,
+                &name_text,
+                member,
+                &member_ids,
+            ) {
+                statements.push(stmt);
+            }
+        }
+    }
+
+    // Trailing class-level `C = __decorate([…], C);` (Go's
+    // `getConstructorDecorationStatement`).
+    if let Some(stmt) = get_constructor_decoration_statement(ec, cfg, &name_text, node) {
+        statements.push(stmt);
+    }
+
+    if statements.len() == 1 {
+        return statements[0];
+    }
+    ec.arena_mut().new_syntax_list(NodeList::new(statements))
+}
+
+/// Rebuilds a class member with its decorators (and type annotations) stripped,
+/// dispatching per kind (Go's per-kind `visit*Declaration` reached via
+/// `VisitNodes(members)`). Undecorated property/method members pass through
+/// unchanged in this reachable subset; accessors are always rebuilt so an
+/// undecorated `set x(value: number)` partner lowers to `set x(value)`.
+///
+/// Side effects: may push the rebuilt member node.
+fn rebuild_class_member(ec: &mut EmitContext, member: NodeId) -> NodeId {
+    match ec.arena().kind(member) {
+        Kind::PropertyDeclaration if member_is_decorated(ec.arena(), member) => {
+            rebuild_property_without_decorators(ec.arena_mut(), member)
+        }
+        Kind::MethodDeclaration if member_is_decorated(ec.arena(), member) => {
+            rebuild_method_without_decorators(ec.arena_mut(), member)
+        }
+        Kind::GetAccessor | Kind::SetAccessor => {
+            rebuild_accessor_without_decorators(ec.arena_mut(), member)
+        }
+        // Go's `visitConstructorDeclaration` strips the constructor's parameter
+        // decorators / type annotations (its parameters are visited via
+        // `visitParamerDeclaration`); the constructor itself can carry no
+        // decorator. Reached when the class is lowered through the class-decorator
+        // path (a class decorator or a decorated constructor parameter).
+        Kind::Constructor => rebuild_constructor_without_decorators(ec.arena_mut(), member),
+        _ => member,
+    }
+}
+
+/// Rebuilds a constructor declaration with its type parameters / return type /
+/// full signature dropped and each parameter rebuilt (stripping parameter
+/// decorators and type annotations), keeping the modifiers and body (Go's
+/// `LegacyDecoratorsTransformer.visitConstructorDeclaration`).
+///
+/// Side effects: pushes the rebuilt constructor node.
+// Go: internal/transformers/tstransforms/legacydecorators.go:visitConstructorDeclaration
+fn rebuild_constructor_without_decorators(arena: &mut NodeArena, member: NodeId) -> NodeId {
+    let (modifiers, parameters, body) = match arena.data(member) {
+        NodeData::ConstructorDeclaration(d) => (d.modifiers.clone(), d.parameters.clone(), d.body),
+        _ => return member,
+    };
+    let new_parameters: Vec<NodeId> = parameters
+        .nodes
+        .iter()
+        .copied()
+        .map(|p| rebuild_parameter_without_decorators(arena, p))
+        .collect();
+    arena.new_constructor_declaration(
+        modifiers,
+        None,
+        NodeList::new(new_parameters),
+        None,
+        None,
+        body,
+    )
+}
+
+/// Reports whether the class node itself carries a decorator (Go's
+/// `HasDecorators` on the class — the `decorated` arm of `visitClassDeclaration`
+/// in its reachable subset).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/ast/utilities.go:HasDecorators
+fn class_has_decorator(arena: &NodeArena, node: NodeId) -> bool {
+    match arena.data(node) {
+        NodeData::ClassDeclaration(d) => d
+            .modifiers
+            .as_ref()
+            .is_some_and(|m| m.modifier_flags.contains(ModifierFlags::DECORATOR)),
+        _ => false,
+    }
+}
+
+/// Reports whether the class is itself decorated: it carries a class decorator,
+/// or its first constructor with a body has at least one decorated parameter
+/// (Go's `ClassOrConstructorParameterIsDecorated`, reachable subset). A class
+/// matching this takes the `let C = class C {…}; C = __decorate([…], C);` path.
+///
+/// Side effects: none (reads the arena).
+// Go: internal/ast/utilities.go:ClassOrConstructorParameterIsDecorated
+fn class_or_constructor_parameter_is_decorated(arena: &NodeArena, node: NodeId) -> bool {
+    class_has_decorator(arena, node) || constructor_has_decorated_parameter(arena, node)
+}
+
+/// Returns the first constructor member of the class that has a body (Go's
+/// `GetFirstConstructorWithBody`).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/ast/utilities.go:GetFirstConstructorWithBody
+fn first_constructor_with_body(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
+    let members = match arena.data(node) {
+        NodeData::ClassDeclaration(d) => &d.members,
+        _ => return None,
+    };
+    members.nodes.iter().copied().find(|&m| {
+        arena.kind(m) == Kind::Constructor
+            && matches!(arena.data(m), NodeData::ConstructorDeclaration(d) if d.body.is_some())
+    })
+}
+
+/// Reports whether the class's first constructor with a body has at least one
+/// decorated parameter (Go's `ChildIsDecorated` constructor arm reached from
+/// `ClassOrConstructorParameterIsDecorated`).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/ast/utilities.go:ChildIsDecorated (KindConstructor arm)
+fn constructor_has_decorated_parameter(arena: &NodeArena, node: NodeId) -> bool {
+    let Some(ctor) = first_constructor_with_body(arena, node) else {
+        return false;
+    };
+    let parameters = match arena.data(ctor) {
+        NodeData::ConstructorDeclaration(d) => &d.parameters,
+        _ => return false,
+    };
+    parameters
+        .nodes
+        .iter()
+        .copied()
+        .any(|p| parameter_has_decorators(arena, p))
+}
+
+/// Collects the (real) class decorator expressions, in source order (the
+/// `decorators` half of Go's `getAllDecoratorsOfClass`).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/transformers/tstransforms/legacydecorators.go:getAllDecoratorsOfClass
+fn class_decorator_expressions(arena: &NodeArena, node: NodeId) -> Vec<NodeId> {
+    let modifiers = match arena.data(node) {
+        NodeData::ClassDeclaration(d) => d.modifiers.as_ref(),
+        _ => None,
+    };
+    let Some(modifiers) = modifiers else {
+        return Vec::new();
+    };
+    modifiers
+        .list
+        .nodes
+        .iter()
+        .copied()
+        .filter(|&n| arena.kind(n) == Kind::Decorator)
+        .map(|n| match arena.data(n) {
+            NodeData::Decorator(d) => d.expression,
+            _ => unreachable!("kind checked above"),
+        })
+        .collect()
+}
+
+/// Wraps [`generate_constructor_decoration_expression`] in an expression
+/// statement (Go's `getConstructorDecorationStatement`). Returns `None` when the
+/// class has no class decorators or decorated constructor parameters.
+///
+/// Side effects: pushes the statement / assignment nodes; requests helpers.
+// Go: internal/transformers/tstransforms/legacydecorators.go:getConstructorDecorationStatement
+fn get_constructor_decoration_statement(
+    ec: &mut EmitContext,
+    cfg: &Config,
+    class_name: &str,
+    node: NodeId,
+) -> Option<NodeId> {
+    let expression = generate_constructor_decoration_expression(ec, cfg, class_name, node)?;
+    Some(ec.arena_mut().new_expression_statement(expression))
+}
+
+/// Builds the `C = __decorate([<class decorators>], C)` assignment for the class
+/// constructor (Go's `generateConstructorDecorationExpression`). Returns `None`
+/// when there are no class decorators (and — slice 3 — no decorated constructor
+/// parameters) to apply.
+///
+/// Side effects: pushes the `__decorate` / assignment nodes; requests the
+/// `__decorate` helper.
+// Go: internal/transformers/tstransforms/legacydecorators.go:generateConstructorDecorationExpression
+fn generate_constructor_decoration_expression(
+    ec: &mut EmitContext,
+    cfg: &Config,
+    class_name: &str,
+    node: NodeId,
+) -> Option<NodeId> {
+    let mut decorator_expressions = class_decorator_expressions(ec.arena(), node);
+    // Constructor parameter decorators contribute `__param(index, dec)` entries
+    // *after* the class decorators (Go's `transformAllDecoratorsOfDeclaration`
+    // order: class decorators, then `__param`, then metadata).
+    append_constructor_param_decorators(ec, node, &mut decorator_expressions);
+    if decorator_expressions.is_empty() {
+        return None;
+    }
+
+    // With `--emitDecoratorMetadata`, append the class `design:paramtypes`
+    // metadata *after* the real decorators / `__param` entries (Go folds the
+    // `MetadataTransformer` injection here; metadata is ordered last).
+    if cfg.emit_decorator_metadata {
+        if let Some(resolver) = &cfg.resolver {
+            append_class_type_metadata(ec, resolver, node, &mut decorator_expressions);
+        }
+    }
+
+    // `__decorate([…], C)` — the class constructor is the target, with no member
+    // name / descriptor (Go's `NewDecorateHelper(decoratorExpressions, localName,
+    // nil, nil)`).
+    let local_name = ec.arena_mut().new_identifier(class_name);
+    let decorate = new_decorate_helper(ec, decorator_expressions, local_name, None, None);
+
+    // `C = __decorate([…], C)` — Go's `NewAssignmentExpression(localName, decorate)`.
+    let target = ec.arena_mut().new_identifier(class_name);
+    let equals = ec.arena_mut().new_token(Kind::EqualsToken);
+    Some(
+        ec.arena_mut()
+            .new_binary_expression(target, equals, decorate),
+    )
+}
+
+/// Appends a `__param(index, decorator)` entry for each decorated parameter of
+/// the class's first constructor with a body, in parameter order (Go's
+/// `getDecoratorsOfParameters(GetFirstConstructorWithBody(node))` fed through
+/// `transformDecoratorsOfParameters`). These follow the class's own decorators
+/// in the constructor `__decorate` array.
+///
+/// DEFER(phase-6): the `this`-parameter offset (Go's `getDecoratorsOfParameters`
+/// skips a leading `this` parameter when computing the index); not reachable in
+/// the current single-file subset. blocked-by: `IsThisParameter` skip.
+///
+/// Side effects: pushes the `__param` call nodes; requests the `__param` helper.
+// Go: internal/transformers/tstransforms/legacydecorators.go:transformDecoratorsOfParameters (constructor)
+fn append_constructor_param_decorators(
+    ec: &mut EmitContext,
+    node: NodeId,
+    decorator_expressions: &mut Vec<NodeId>,
+) {
+    let Some(ctor) = first_constructor_with_body(ec.arena(), node) else {
+        return;
+    };
+    let parameters = match ec.arena().data(ctor) {
+        NodeData::ConstructorDeclaration(d) => d.parameters.clone(),
+        _ => return,
+    };
+    for (index, param) in parameters.nodes.iter().copied().enumerate() {
+        for decorator in parameter_decorator_expressions(ec.arena(), param) {
+            let helper = new_param_helper(ec, index, decorator);
+            decorator_expressions.push(helper);
+        }
+    }
+}
+
+/// Appends the class's `design:*` reflection metadata to `decorator_expressions`
+/// (Go's `MetadataTransformer.getOldTypeMetadata` for a class, folded in). A
+/// class emits ONLY `design:paramtypes` (no `design:type` / `design:returntype`,
+/// which are member-only), and only when it has a constructor with a body (Go's
+/// `shouldAddParamTypesMetadata`: `GetFirstConstructorWithBody(node) != nil`).
+///
+/// Side effects: pushes the metadata call / array nodes; requests the
+/// `__metadata` helper.
+// Go: internal/transformers/tstransforms/metadata.go:getOldTypeMetadata (class)
+fn append_class_type_metadata(
+    ec: &mut EmitContext,
+    resolver: &EmitReferenceResolver,
+    node: NodeId,
+    decorator_expressions: &mut Vec<NodeId>,
+) {
+    if first_constructor_with_body(ec.arena(), node).is_none() {
+        return;
+    }
+    let paramtypes = serialize_constructor_parameter_types(ec, resolver, node);
+    let metadata = new_metadata_helper(ec, "design:paramtypes", paramtypes);
+    decorator_expressions.push(metadata);
+}
+
+/// Builds the `design:paramtypes` array for a decorated class: one serialized
+/// type per parameter of the first constructor with a body, in order (Go's
+/// `serializeParameterTypesOfNode` over the class's constructor). Each
+/// parameter's annotation is serialized through the same checker path as a
+/// property's `design:type`; an unannotated parameter serializes to `Object`.
+///
+/// DEFER(phase-6): the rest-parameter element type (Go's
+/// `GetRestParameterElementType`); not reachable in the current subset. The
+/// leading-`this` parameter is skipped here.
+///
+/// Side effects: pushes the array / serialized-type nodes.
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeParameterTypesOfNode (class)
+fn serialize_constructor_parameter_types(
+    ec: &mut EmitContext,
+    resolver: &EmitReferenceResolver,
+    node: NodeId,
+) -> NodeId {
+    let parameters = match first_constructor_with_body(ec.arena(), node) {
+        Some(ctor) => match ec.arena().data(ctor) {
+            NodeData::ConstructorDeclaration(d) => d.parameters.clone(),
+            _ => NodeList::new(Vec::new()),
+        },
+        None => NodeList::new(Vec::new()),
+    };
+    let mut expressions: Vec<NodeId> = Vec::new();
+    for (index, param) in parameters.nodes.iter().copied().enumerate() {
+        if index == 0 && is_this_parameter(ec.arena(), param) {
+            continue;
+        }
+        let type_node = match ec.arena().data(param) {
+            NodeData::ParameterDeclaration(d) => d.type_node,
+            _ => None,
+        };
+        let value = match type_node {
+            Some(type_node) => serialize_type_node(ec, resolver, type_node),
+            None => ec.arena_mut().new_identifier("Object"),
+        };
+        expressions.push(value);
+    }
+    ec.arena_mut()
+        .new_array_literal_expression(NodeList::new(expressions))
 }
 
 /// Reports whether `member` is a property or method declaration carrying at
