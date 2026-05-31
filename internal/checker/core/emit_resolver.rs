@@ -209,7 +209,11 @@ impl EmitResolver {
         )?;
         // Go: if symbol.Flags & ExportValue != 0 { symbol = getMergedSymbol(symbol.ExportSymbol) }
         // (getMergedSymbol is identity in the single-file subset).
-        if program.symbol(symbol).flags.contains(SymbolFlags::EXPORT_VALUE) {
+        if program
+            .symbol(symbol)
+            .flags
+            .contains(SymbolFlags::EXPORT_VALUE)
+        {
             let export_symbol = program.symbol(symbol).export_symbol?;
             // Go: if !prefixLocals && exportSymbol.Flags&ExportHasLocal != 0 &&
             // exportSymbol.Flags&Variable == 0 { return nil }. `ExportHasLocal`
