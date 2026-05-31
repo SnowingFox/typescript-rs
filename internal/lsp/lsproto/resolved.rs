@@ -13,10 +13,10 @@
 //!   hand-written `serde` impl (the [`resolved_object!`] macro) rather than a
 //!   derive, since `serde` has no built-in "omit zero value" for non-`Option`
 //!   fields.
-//! - The `(*ClientCapabilities).Resolve()` conversion is NOT ported here: it
-//!   reads the pointer-based `ClientCapabilities` tree, which this crate still
-//!   models as an open object ([`crate::ClientCapabilities`]). See the worklog
-//!   `DEFER` note. The resolved value structs are self-contained.
+//! - The `(*ClientCapabilities).Resolve()` conversion is not defined here; it
+//!   lives next to the pointer-based request tree in `capabilities.rs`
+//!   ([`crate::ClientCapabilities::resolve`]). The resolved value structs below
+//!   are self-contained.
 //! - The new `*Kind`/`*Tag` enums and the two `Boolean*` unions live here
 //!   (next to their only current consumers) rather than in `generated.rs`; the
 //!   generator pass will own the full enum set later.
@@ -32,11 +32,10 @@ use crate::{
     CompletionItemKind, DiagnosticTag, FoldingRangeKind, PositionEncodingKind, SymbolKind,
 };
 
-// DEFER(phase-8): the `(*ClientCapabilities).Resolve()` conversion and the
-// per-type `resolve()` methods are not ported here.
-// blocked-by: the pointer-based `ClientCapabilities` tree (still an open
-// object, `crate::ClientCapabilities`). The resolved value structs below are
-// self-contained; the conversion lands with the generator pass.
+// The `(*ClientCapabilities).Resolve()` conversion and the per-type `resolve()`
+// methods now live in `capabilities.rs` (the pointer-based request tree), which
+// produces the value structs defined below. The resolved value structs here are
+// self-contained.
 
 /// Generates a "resolved capability" object type with hand-written `serde`
 /// impls that reproduce Go's `json:",omitzero"` value-struct behavior:

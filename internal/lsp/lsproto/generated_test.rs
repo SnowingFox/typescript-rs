@@ -1118,7 +1118,7 @@ fn roundtrip_initialize_params_null_process_id() {
         root_uri: DocumentUriOrNull {
             document_uri: Some(DocumentUri("file:///workspace".to_string())),
         },
-        capabilities: ClientCapabilities,
+        capabilities: ClientCapabilities::default(),
         ..Default::default()
     };
     let data = serde_json::to_vec(&v).unwrap();

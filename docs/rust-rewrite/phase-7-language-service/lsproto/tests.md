@@ -11,6 +11,7 @@
 | Go 测试文件 | Rust 测试文件 | 顶层测试函数数 |
 |---|---|---|
 | （无 resolved 对应 Go 测试） | `internal/lsp/lsproto/resolved_test.rs`（兄弟文件，`use super::*;`，由 `resolved.rs` 末尾 `#[cfg(test)] #[path="resolved_test.rs"] mod tests;` 挂载） | 23 |
+| （无 `Resolve()` 对应 Go 测试） | `internal/lsp/lsproto/capabilities_test.rs`（兄弟文件，`use super::*;`，由 `capabilities.rs` 末尾挂载） | 10 |
 
 ## resolved 行为级测试（`resolved_test.rs`）
 
@@ -54,10 +55,31 @@
 - [x] 每条带 `// Go:` 锚（依据列指向 `lsp_generated.go`）
 - [x] 与 impl.md 双向对齐（impl.md 每个实现组在此有对应行为测试）
 
+## 续轮：指针版 `ClientCapabilities` 请求树 + `Resolve()`（`capabilities_test.rs`）
+
+> Go 侧对 `Resolve()` 无 `*_test.go`（内部产物、极少 (de)serialize），按 PORTING §8.6 自写行为级测试：反序列化代表性客户端能力 JSON → `resolve()` → 断言 resolved 字段 = Go resolve/default 语义（`derefOr`→present；缺→零值）。
+> red→green：每组核心映射均为**真 RED→GREEN**（在接线该组前，对应字段被忽略 → resolved 默认值，断言失败；接线后变绿）。absent→default 与 serde round-trip 类多为 **green-on-arrival**（诚实标注）。
+
+| Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
+|---|---|---|---|---|
+| `resolve_maps_vs_supported_snippet_version_scalar` | tracer：顶层 `_vs_*` 标量映射（**真 RED→GREEN**：stub `resolve` 返回 default，0≠3） | `{"_vs_supportedSnippetVersion":3}` → `vs_supported_snippet_version==3` | `lsp_generated.go:(*ClientCapabilities).Resolve` | ✓ |
+| `resolve_window_present_reflects_capabilities` | Window 组 present→reflected（**真 RED→GREEN**） | `{"window":{"workDoneProgress":true,"showDocument":{"support":true}}}` → 两字段 true | `(*WindowClientCapabilities).resolve` | ✓ |
+| `resolve_window_absent_is_default` | Window 缺→默认（green-on-arrival） | `{}` → `window==default` | 同上（nil receiver） | ✓ |
+| `resolve_general_present_reflects_capabilities` | General 组 present→reflected（**真 RED→GREEN**），含 markdown 嵌套 + `Vec<PositionEncodingKind>` | `{"general":{"markdown":{"parser":"marked","version":"1.0"},"positionEncodings":["utf-8"]}}` → parser/version/encodings | `(*GeneralClientCapabilities).resolve` | ✓ |
+| `resolve_workspace_present_reflects_capabilities` | Workspace 组 present→reflected（**真 RED→GREEN**），含字符串枚举/`Vec<enum>`/深层 symbolKind.valueSet | `{"workspace":{"applyEdit":true,"workspaceEdit":{...},"symbol":{"symbolKind":{"valueSet":[1,12]}},"fileOperations":{"didCreate":true}}}` → applyEdit/failureHandling/resourceOps/symbolKind/didCreate | `(*WorkspaceClientCapabilities).resolve` | ✓ |
+| `resolve_text_document_present_reflects_capabilities` | TextDocument 组 present→reflected（**真 RED→GREEN**），含深层 completionItem/int 枚举/`Vec<MarkupKind>`/int-enum/semanticTokens union/`u32` | `{"textDocument":{"completion":{"completionItem":{"snippetSupport":true},"insertTextMode":2},"hover":{"contentFormat":["markdown","plaintext"]},"rename":{"prepareSupportDefaultBehavior":1},"semanticTokens":{"requests":{"full":{"delta":true}}},"foldingRange":{"rangeLimit":5000}}}` → 6 处深层断言 | `(*TextDocumentClientCapabilities).resolve` | ✓ |
+| `resolve_absent_groups_are_default` | workspace/general/textDocument 缺→默认（green-on-arrival） | `{}` → 三组 == default | 各组 nil receiver | ✓ |
+| `resolve_empty_is_all_default` | 顶层端到端：空 → 全默认 resolved | `{}` → `ResolvedClientCapabilities::default()` | `(*ClientCapabilities).Resolve`（nil/empty） | ✓ |
+| `resolve_real_client_capabilities_subset` | 端到端：真实 4 组 + `_vs_` 子集一次解析 | 多组 JSON → 跨 4 组 + vs 标量断言 | `(*ClientCapabilities).Resolve` | ✓ |
+| `client_capabilities_serde_round_trip` | 请求树 serde round-trip（公共 API 可用性；green-on-arrival） | 置位树 → `to_string`→`from_str` 等值 + resolve 一致 | 宏 serde（`Option` skip-none） | ✓ |
+
+> 既有 `generated_test.rs` 的 `empty_client_capabilities`（`from_str("{}")`）/`roundtrip_initialize_params_null_process_id` 在 open-object 退役后仍绿（后者字面量改 `ClientCapabilities::default()`）。
+
 ## 推迟到后续 phase 的测试
 
 | 测试 / 行为 | 原因 | 目标 phase |
 |---|---|---|
-| `(*ClientCapabilities).Resolve()` 转换正确性（指针树 → resolved） | blocked-by 指针版 `ClientCapabilities` 树未移植（`ClientCapabilities` 仍 open-object） | P8（生成器 pass） |
+| ~~`(*ClientCapabilities).Resolve()` 转换正确性~~ | ✅ 本轮已落地（见上表，4 组全树 red→green） | 完成 |
 | 新枚举 `String()` stringer | resolved 树不使用；生成器 pass 落地完整枚举集时补 | P8 |
-| resolved 类型显式 `null` 字段的 Go `errNull` 精度 | resolved 非线上收报类型，低优先 | — blocked-by 生成器 pass |
+| resolved / 请求类型显式 `null` 字段的 Go `errNull` 精度 | 非线上收报关键路径，低优先 | — blocked-by 生成器 pass |
+| Go 非指针字段（`support`/`tokenTypes` 等）的精确反序列化严格度 | 本轮统一建成 `Option<T>`；对 `resolve()` 等价 | — blocked-by 生成器 pass |

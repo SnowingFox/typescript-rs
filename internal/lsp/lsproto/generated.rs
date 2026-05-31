@@ -8,6 +8,10 @@ use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+// `ClientCapabilities` is the pointer-based request tree defined in
+// `capabilities.rs`; `InitializeParams` embeds it.
+use crate::ClientCapabilities;
+
 /// Builds the Go `errMissing` error: `missing required properties: a, b`.
 // Go: internal/lsp/lsproto/lsp.go:errMissing
 fn err_missing<E: de::Error>(props: &[&str]) -> E {
@@ -1243,19 +1247,15 @@ impl<'de> Deserialize<'de> for TextDocumentEditOrCreateFileOrRenameFileOrDeleteF
     }
 }
 
-lsp_open_object! {
-    /// The capabilities the client supports.
-    ///
-    /// Deferred: the full LSP field tree is large and generated later; this
-    /// port accepts any object and re-serializes to `{}`.
-    // Go: internal/lsp/lsproto/lsp_generated.go:ClientCapabilities
-    ClientCapabilities
-}
+// `ClientCapabilities` (the pointer-based request tree) and its `resolve()` now
+// live in `capabilities.rs`; `InitializeParams` references it via `crate::`.
+// Go: internal/lsp/lsproto/lsp_generated.go:ClientCapabilities
 
 lsp_open_object! {
     /// The capabilities the server provides.
     ///
-    /// Deferred: see [`ClientCapabilities`].
+    /// Deferred: the full LSP server-capability field tree is large and
+    /// generated later; this port accepts any object and re-serializes to `{}`.
     // Go: internal/lsp/lsproto/lsp_generated.go:ServerCapabilities
     ServerCapabilities
 }

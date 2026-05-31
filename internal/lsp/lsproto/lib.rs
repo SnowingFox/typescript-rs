@@ -19,12 +19,14 @@
 //!   to a generator pass (see `_generate/generate.mts`).
 
 mod baseproto;
+mod capabilities;
 mod generated;
 mod lsp;
 mod resolved;
 mod util;
 
 pub use baseproto::{BaseReader, BaseWriter};
+pub use capabilities::*;
 pub use generated::*;
 pub use lsp::*;
 pub use resolved::*;

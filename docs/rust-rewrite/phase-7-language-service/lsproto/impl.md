@@ -77,8 +77,48 @@
 2. resolved 类型在 Go 里几乎只被 `Resolve()` 生产、极少反序列化；本轮 `delta:null` 等显式 null 不复刻 Go 自定义 decoder 的 `errNull`（serde 对 `Option`/标量按其默认 null 行为）。这是低优先、已知的精度偏差（resolved 非线上收报类型）。
 3. 新枚举的 Go `String()` stringer **未移植**（resolved 树不使用；生成器 pass 落地完整枚举时补）。
 
+## 续轮：指针版 `ClientCapabilities` 请求树 + `Resolve()`（已落地）
+
+> 上一轮 DEFER 的 `(*ClientCapabilities).Resolve()` 在本轮补齐。新增文件 `capabilities.rs`（+ `capabilities_test.rs`），`lib.rs` 追加 `mod capabilities; pub use capabilities::*;`。
+
+**做了什么**：把 Go `lsp_generated.go` 里指针版 `ClientCapabilities` 请求树**整棵**移植为 Rust（4 组全部：Workspace / TextDocument / Window / General + 顶层 `_vs_*` 标量），并接上 `ClientCapabilities::resolve()` → `ResolvedClientCapabilities`（Go `Resolve()`）。每个嵌套请求子结构都带 `resolve()`（Go 私有 `resolve()`），逐层映射进对应 `Resolved*` 值结构。
+
+**open-object 处置（retired）**：原 `ClientCapabilities` open-object（unit struct，吃任意对象、重序列化成 `{}`）**退役**，替换为指针版 typed 树（与 Go 一致）。`InitializeParams.capabilities` 现引用 typed `ClientCapabilities`（`generated.rs` 用 `use crate::ClientCapabilities`）。公共 API 影响：crate 外无任何 Rust 使用者（P8 `lsp`/`project`/`api` 未移植）；crate 内仅 1 处测试字面量 `capabilities: ClientCapabilities` → `ClientCapabilities::default()`。其余既有公共类型签名未改，`empty_client_capabilities`（`from_str("{}")`）等既有测试不变即过。`ServerCapabilities` 仍维持 open-object（Go 的 `ServerCapabilities` 不在本轮 `Resolve()` 闭包内）。
+
+**类型/所有权映射（本子树关键决策）**：
+
+| Go 构造 | Rust 表示 | 说明 |
+|---|---|---|
+| `*T` 可选指针字段（`json:",omitzero"` + errNull 守卫） | `Option<T>`（经 `request_object!`） | 序列化 `Some` 才写、缺键→`None`、未知键忽略；`null` 经内层类型解码自然报错（不复刻 Go `errNull` 文案）。 |
+| Go 个别**非指针**必填/切片字段（如 `ShowDocument.Support bool`、`SemanticTokens.TokenTypes []string`） | 同样建成 `Option<T>` | 统一化偏离；对 `resolve()`（缺→零值）完全等价，仅反序列化严格度/显式空数组 round-trip 略异（这些请求类型不依赖）。 |
+| 标量/`Vec`/枚举/union 字段的 `resolve()`（Go `derefOr(v.X)` 或 `v.X`） | `self.x.clone().unwrap_or_default()`（`request_object!` 的 `val` 类） | 缺→`Default`，对齐 Go 零值。 |
+| 嵌套子结构 `resolve()`（Go `v.X.resolve()`，nil→零值结构） | `self.x.as_ref().map(\|x\| x.resolve()).unwrap_or_default()`（`sub` 类） | 与 Go nil-receiver→默认结构一致。 |
+| 顶层 `func (v *ClientCapabilities) Resolve()` | `ClientCapabilities::resolve()`（手写，`pub`） | 4 组 + 5 个 `_vs_*`。Go 私有 `resolve()` → Rust `pub fn resolve`（仅**新增**可见性，无害）。 |
+
+**新增宏**：`request_object!`（`capabilities.rs`）——生成请求结构（`Option<T>` 字段）+ 手写 `serde`（skip-none / 忽略未知键）+ `resolve()`（`val`/`sub` 两类字段）。镜像 `resolved.rs` 的 `resolved_object!` 风格。
+
+**文件清单（本轮新增）**：
+
+| Go 源 | Rust 文件 | 说明 |
+|---|---|---|
+| `lsp_generated.go`（指针版 `ClientCapabilities` 族 + `resolve()`/`Resolve()`） | `internal/lsp/lsproto/capabilities.rs`（新增） | `request_object!` 宏 + 77 个请求子结构（各带 `resolve()`）+ 顶层手写 `ClientCapabilities`/`resolve()`（共 78 个请求类型，1:1 对应 78 个 `Resolved*` 值结构） |
+| 同上（Go 无 resolve 对应 `*_test.go`） | `internal/lsp/lsproto/capabilities_test.rs`（新增） | 行为级 resolve/serde 测试 |
+| `lib.rs` | `lib.rs` | 追加 `mod capabilities; pub use capabilities::*;` |
+| `generated.rs` | `generated.rs` | 退役 `ClientCapabilities` open-object；`use crate::ClientCapabilities` |
+
+**实现 TODO（本轮，可勾选）**：
+
+- [x] `request_object!` 宏（`Option<T>` 字段 serde + `resolve()` 的 `val`/`sub` 映射）　`// Go: lsp_generated.go:(*T).resolve`
+- [x] 顶层 typed `ClientCapabilities` + `resolve()`（4 组 + 5 个 `_vs_*` 标量；退役 open-object）　`// Go: lsp_generated.go:(*ClientCapabilities).Resolve`
+- [x] Window 组（`WindowClientCapabilities`/`ShowMessageRequestClientCapabilities`/`ClientShowMessageActionItemOptions`/`ShowDocumentClientCapabilities`）
+- [x] General 组（`GeneralClientCapabilities`/`StaleRequestSupportOptions`/`RegularExpressionsClientCapabilities`/`MarkdownClientCapabilities`）
+- [x] Workspace 组（`WorkspaceClientCapabilities` + 17 叶子/嵌套结构）
+- [x] TextDocument 组（`TextDocumentClientCapabilities` + 31 子能力，含 completion/signatureHelp/codeAction/foldingRange/semanticTokens(union 字段) 家族）
+
 ## 转交 / 推迟（DEFER）
 
-- `// DEFER(phase-8): (*ClientCapabilities).Resolve() / 各 resolve() 方法` — **blocked-by**：指针版 `ClientCapabilities` 树（含 `WorkspaceClientCapabilities`/`TextDocumentClientCapabilities`/… 全部指针字段）尚未移植，当前 `ClientCapabilities` 仍是 open-object。resolved **值结构树自包含**，转换函数待指针树落地（生成器 pass）后回填。
+- ✅ 上一轮的 `(*ClientCapabilities).Resolve()` DEFER **已解除**（本轮落地于 `capabilities.rs`，4 组全树）。
 - `// DEFER`：新枚举 `String()` stringer（同生成器 pass）。
-- 维持 `ClientCapabilities`/`ServerCapabilities` open-object 现状（公共 API 仅**新增**，未改既有签名）。
+- `// DEFER`：请求树字段的 Go `errNull` 精确文案（与 resolved 树一致的低优先偏差；`null` 仍被拒绝，仅文案不同）。
+- `// DEFER`：Go 个别非指针字段（`support`/`tokenTypes` 等）建成 `Option<T>` 的统一化偏离——若后续生成器 pass 要求精确反序列化严格度，再区分 `Option<T>` vs 直接 `T`/`Vec<T>`。
+- 维持 `ServerCapabilities`/`InitializationOptions` open-object 现状（不在本轮 `Resolve()` 闭包内；公共 API 仅**新增**）。
