@@ -21,9 +21,11 @@
 mod baseproto;
 mod generated;
 mod lsp;
+mod resolved;
 mod util;
 
 pub use baseproto::{BaseReader, BaseWriter};
 pub use generated::*;
 pub use lsp::*;
+pub use resolved::*;
 pub use util::{compare_positions, compare_ranges};
