@@ -256,6 +256,20 @@ arrow function（`mark`/`rewind`/`look_ahead` 投机随之落地）、JSON（`pa
 - `NodeArena::data_mut`（in-place 改 SourceFile flag）。
 - `utilities.rs` 新增纯谓词：`node_is_missing`/`node_is_present`/`is_keyword`/`is_keyword_kind`/`is_punctuation_kind`/`is_token_kind`/`is_modifier_kind`/`is_assignment_operator`/`is_left_hand_side_expression_kind`。
 
+## 实现进度（Round 6ad-fix — 动态 `import(...)` 表达式：消除挂死）
+
+修复了一个 **parser 无限循环（挂死）** bug：动态 `import("m")`（及 `const p = import("m");`）在**表达式位置**的 `import` 关键字无法被消费，导致 token 不前进、`SourceElements` 列表循环永不终止。
+
+**根因**：`parse_left_hand_side_expression_or_higher` 仅处理 `import.meta`（`import` + lookahead `.`），其余 `import` 落到 `parse_member_expression_or_higher` → `parse_primary_expression`。后者对 `ImportKeyword` 命中 `_ => parse_identifier_with_diagnostic(...)` 分支，在非标识符 token 上构造**缺失标识符**且**不 `next_token`**，故 token 停在 `ImportKeyword` → 无限循环。确认完全位于 `internal/parser/lib.rs`。
+
+**修复（additive，红→绿）**：在 `parse_left_hand_side_expression_or_higher` 内、`import.meta` 分支**之前**，按 Go `parseLeftHandSideExpressionOrHigher` 加入动态 import 分支——`import` + `look_ahead(next_token_is_open_paren_or_less_than)`（`(`/`<`）→ `parse_keyword_expression()`（构造 `KeywordExpression{ kind: ImportKeyword }` 并前进），随后 `parse_call_expression_rest` 消费实参表，得到 `CallExpression{ expression: ImportKeyword, arguments }`——正是 6ad transformer 期望的节点形状。`import.meta` 分支保持不变（`MetaProperty{ ImportKeyword, "meta" }`，已在 Round 3 落地，本轮加守卫测试）。未改动任何公开签名（`parse_source_file`/`ParseResult` 不变），`tsgo_ast` 未触碰（`new_keyword_expression` 已支持 `ImportKeyword`，见 `IsKeywordExpressionKind`）。
+
+红→绿切片：
+1. **RED**：`parse_dynamic_import_call`（`import("m");`）—— 实测**编译通过但运行挂死**（`test ... parse_dynamic_import_call ...` 启动后永不返回，perl alarm 看门狗确认）。**GREEN**：加动态 import 分支 → `CallExpression{ ImportKeyword, [StringLiteral] }`，0 诊断，测试 0.00s 通过。
+2. **守卫**：`parse_import_keyword_statement_vs_call` —— `import x from "m";` 仍为 `ImportDeclaration`（import 语句路径不受 lookahead 影响，因其下一 token 是标识符而非 `(`/`<`/`.`）；`import("m");` 为 `CallExpression`。`import.meta` 守卫沿用既有 `parse_meta_properties`。
+
+**仍 DEFER**（已 `// DEFER` + `// blocked-by:`）：动态 import 的 import attributes/`with {}`（`import("m", { with: ... })` 调用形态）、`sourceFlags |= PossiblyContainsDynamicImport`（blocked-by: finishSourceFile / source-flags 跟踪）、`import.defer(...)` 阶段修饰符的 dynamic-import 标志。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`testdata` 不是子包**：用户清单提到"parser 有 3 个子目录"。实测 `internal/parser/` 下唯一目录是 `testdata/`，其内嵌套 `testdata/fuzz/FuzzParser/<10 个语料文件>`（被 `find -type d` 数成 3 个层级目录）。它们是 **Go fuzz 语料**，**无 `.go` 源**，故 parser **没有源码子包**，不产生子 crate/子 module。fuzz 语料整体推迟到 P10。

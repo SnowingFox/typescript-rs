@@ -456,6 +456,12 @@ pub enum NodeData {
     /// declaration plus its hoisted static-field assignments). When emitted in a
     /// statement position its children are emitted in sequence.
     SyntaxList(ListData),
+    /// A transform-only node bundling an expression with a captured `this`
+    /// argument, used by the optional-chain transform to thread the receiver of
+    /// a parenthesized optional call `(a?.b)()` into the emitted
+    /// `.call(thisArg, ...)`. It is consumed/replaced by the transform before
+    /// emit and so carries no printer arm.
+    SyntheticReferenceExpression(SyntheticReferenceData),
 }
 
 /// Payload of an [`NodeData::Identifier`].
@@ -550,6 +556,19 @@ pub struct NewExpressionData {
 pub struct UnaryChildData {
     /// The single child expression.
     pub expression: NodeId,
+}
+
+/// Payload of an [`NodeData::SyntheticReferenceExpression`]: a transform-only
+/// node bundling an `expression` with the `this_arg` captured for a later call,
+/// so a parenthesized optional call `(a?.b)()` can be emitted as
+/// `<expression>.call(<this_arg>, ...)`.
+// Go: internal/ast/ast_generated.go:SyntheticReferenceExpression
+#[derive(Clone, Debug)]
+pub struct SyntheticReferenceData {
+    /// The wrapped expression (the access whose result is being called).
+    pub expression: NodeId,
+    /// The receiver to thread as the call's `this` argument.
+    pub this_arg: NodeId,
 }
 
 /// Payload of a node with a single optional child expression.
@@ -2025,6 +2044,36 @@ impl NodeArena {
         self.new_node(
             Kind::PartiallyEmittedExpression,
             NodeData::PartiallyEmittedExpression(UnaryChildData { expression }),
+        )
+    }
+
+    /// Creates a synthetic reference expression bundling `expression` with the
+    /// `this_arg` captured for a later call (`(a?.b)()` this-capture). This is a
+    /// transform-only node consumed before emit.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_ast::{Kind, NodeArena};
+    /// let mut arena = NodeArena::new();
+    /// let expr = arena.new_identifier("x");
+    /// let this_arg = arena.new_identifier("a");
+    /// let s = arena.new_synthetic_reference_expression(expr, this_arg);
+    /// assert_eq!(arena.kind(s), Kind::SyntheticReferenceExpression);
+    /// ```
+    ///
+    /// Side effects: pushes a node.
+    // Go: internal/ast/ast_generated.go:NodeFactory.NewSyntheticReferenceExpression
+    pub fn new_synthetic_reference_expression(
+        &mut self,
+        expression: NodeId,
+        this_arg: NodeId,
+    ) -> NodeId {
+        self.new_node(
+            Kind::SyntheticReferenceExpression,
+            NodeData::SyntheticReferenceExpression(SyntheticReferenceData {
+                expression,
+                this_arg,
+            }),
         )
     }
 
@@ -4368,6 +4417,7 @@ impl NodeArena {
             | NodeData::OmittedExpression
             | NodeData::NotEmittedStatement => false,
             NodeData::PartiallyEmittedExpression(d) => f(d.expression),
+            NodeData::SyntheticReferenceExpression(d) => f(d.expression) || f(d.this_arg),
             NodeData::SyntaxList(d) => list(f, &d.list),
             NodeData::VariableStatement(d) => mods(f, &d.modifiers) || f(d.declaration_list),
             NodeData::VariableDeclarationList(d) => list(f, &d.declarations),

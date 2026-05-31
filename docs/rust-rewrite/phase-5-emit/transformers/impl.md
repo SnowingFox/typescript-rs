@@ -33,6 +33,8 @@
 | 6f-2 / inliners | `inliners`：const enum 内联 | `const enum E{A=1} E.A`→`1` | checker 求值（const enum 值）|
 | 6g | `declarations`：`.d.ts` transform 框架 + tracker + diagnostics | 基础 `.d.ts` 形状 | nodebuilder/modulespecifiers + checker resolver；正确性靠 P10 |
 | 6h | 根 `destructuring` + `utilities` 其余（绑定↔赋值转换/super 定位/范围移动）+ `tstransforms/importelision`（checker 就绪后） | 数组解构展开；import elision | factory 构造器 + checker `EmitResolver` |
+| **6af** ✅ 子集 | `tstransforms/importelision`：**作用域正确**的未引用 *value* import 省略，消费 checker 4an `EmitResolver::is_referenced`（经新增 additive `EmitReferenceResolver` 句柄）。整声明丢弃（全 binding 未引用）/ 逐 specifier 丢弃（部分引用），镜像 Go `ImportElisionTransformer` 形态 | `import { x } from "m";`（x 未用）→ ∅；`import { x } from "m"; x;` → 原样保留；`import { x } from "m"; function f(){ var x=1; x; }` → import 被省略（内层 `x` 不续命，证明真作用域解析 vs 按名匹配）| 新增 `EmitReferenceResolver`（包 `Rc<dyn BoundProgram>`+`EmitResolver`）作为 `new_import_elision_transformer(opt, resolver)` 的 **additive 入参**（**非** `TransformOptions` 字段——compiler crate 用穷举字面量构造 `TransformOptions`，加字段会破坏其编译且 compiler crate 不在编辑范围）。**无 ast/printer 增长**。DEFER：export 侧 / `import =`（需 `IsValueAliasDeclaration` / `IsTopLevelValueImportEqualsWithEntityName`）、type-only 位置 use 续命 value import、`verbatimModuleSyntax`/`isolatedModules`/`importsNotUsedAsValues` 策略变体、跨文件 alias |
+| **6aj** ✅ 子集 | `moduletransforms/commonjsmodule`：**作用域正确的 default & namespace import use-site 重写行为级覆盖**（消费 4an `resolve_reference`，复用 6ai resolver 接线）。6ai 已把 resolver 臂写成对 `ImportBinding.decl` 泛化匹配（named/default/namespace 三类同路径），但仅 named 有行为级测试；本轮补 default/namespace 的行为级覆盖 + scope guard。**无 impl 变更**（6ai 泛化臂已覆盖；观察到 GREEN 而非 RED——见 worklog 诚实记录），仅新增测试。| `import d from "m";\nd;` → `…__importDefault…\nconst m_1 = __importDefault(require("m"));\nm_1.default;`；`import * as ns from "m";\nns;` → `const m_1 = __importStar(require("m"));\nm_1;`；shadow guard：`import d from "m";\nfunction f(){ var d=1; d; }` → 内层 `d` 保持裸（resolve 到局部）| **ZERO** ast/printer/checker 增长，复用 6ai `new_common_js_module_transformer_with_resolver` + `ImportBinding.decl` + `register_import_use_substitutions` resolver 臂；既有公共 API 全未变。DEFER：export 引用重写（`GetReferencedExportContainer`）、shorthand-property 展开、ESM/System 重写、combined default+named interop 边角 |
 
 ## 这个包是什么（业务说明）
 
@@ -56,7 +58,7 @@ stage 分组（= Go 子包）：
 | `func (tx *Transformer) NewTransformer(visit, emitContext)` | 构造函数返回 `Transformer`；`visit` 是 `Fn(&Node)->&Node` | Go 的"自初始化"模式 → Rust 构造器 |
 | `TransformerFactory = func(opt) *Transformer` | `pub type TransformerFactory = fn(&TransformOptions) -> Option<Transformer>` | `Chain` 组合；返回 `Option`（nil → 跳过该 stage） |
 | `chainedTransformer{ Transformer; components []*Transformer }` | `struct ChainedTransformer { base: Transformer, components: Vec<Transformer> }` | 嵌入 → 组合 |
-| `TransformOptions{ Context, CompilerOptions, Resolver, EmitResolver, GetEmitModuleFormatOfFile }` | `pub struct TransformOptions<'a> { context, compiler_options, resolver, emit_resolver, get_emit_module_format_of_file }` | 共享配置；`*EmitContext` 跨 stage 复用 |
+| `TransformOptions{ Context, CompilerOptions, Resolver, EmitResolver, GetEmitModuleFormatOfFile }` | `pub struct TransformOptions { context, compiler_options }`（6e-2）；`EmitResolver` 经 **additive `EmitReferenceResolver` 入参**（6af，**非** struct 字段）| 共享配置；`*EmitContext` 跨 stage 复用。⚠️ **不能给 `TransformOptions` 加字段**：`internal/compiler/emitter.rs` 用穷举字面量 `TransformOptions { context, compiler_options }` 构造它，加字段会破坏 `tsgo_compiler` 编译，而 compiler crate 不在本 lane 编辑范围。故 resolver 走新 factory `new_import_elision_transformer(opt, resolver)` 的额外入参（additive，不改既有签名）|
 | `*ast.NodeVisitor` + `VisitEachChild`/`VisitSourceFile` | `tsgo_ast::NodeVisitor`（P2/P3 落地） | 访问器走 NodeId/arena |
 | 各 stage `struct{ transformers.Transformer; ...state }` | 组合 `Transformer` + stage 私有状态 | 1:1 |
 | `FlattenLevel int` / `CreateAssignmentCallback func(...)`（destructuring） | `#[repr(i32)] enum FlattenLevel` / `Box<dyn Fn(...)>` | 解构展开回调 |
@@ -89,7 +91,7 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 |---|---|---|---|
 | `internal/transformers/transformer.go` | `internal/transformers/transformer.rs`（`mod transformer`） | ✅ 6a | `Transformer`/`new_transformer`/`emit_context`/`transform_source_file`（+`run_visit` crate 私有，供 chain 复用借用） |
 | `internal/transformers/chain.go` | `internal/transformers/chain.rs` | ✅ 6a | `TransformOptions`/`TransformerFactory`/`chain`（含 `chainedTransformer` 合成 visit） |
-| `internal/transformers/destructuring.go` | `internal/transformers/destructuring.rs` | 6g | `FlattenDestructuringAssignment/Binding` + 绑定/赋值元素工具 |
+| `internal/transformers/destructuring.go` | `internal/transformers/destructuring.rs` | ✅ 6j+6k 子集 | (6j) `flatten_destructuring_binding`（绑定模式，`FlattenLevelAll`：数组/对象/嵌套/默认值/数组 rest/计算键）+ `new_destructuring_transformer` 驱动（镜像 es2015 变量声明降级）+ `FlattenLevel` + 绑定元素谓词。**(6k) `flatten_destructuring_assignment`（赋值模式，复用同一 `Flattener`，`FlattenMode` 判别）**：数组/对象字面量赋值目标 `[a,b]=arr`/`({a,b}=o)`、默认值、嵌套、数组 rest @ `FlattenLevelAll`（经驱动 `ExpressionStatement` 接入，`needs_value=false`，temp `hoistTempVariables=true` 落 var-env）；对象 rest @ `FlattenLevelObjectRest`（经 objectrestspread `visitBinaryExpression` 接入，复用 objectrestspread 的 `__rest` helper builder）。DEFER：`needs_value=true`（值位）+ `InlineExpressions` 逗号折叠的值返回路径、`CreateAssignmentCallback`（CJS export/namespace）、参数/`for-of`/`catch` 位置、exported（`hoistTempVariables=true`）var-env 路径、对象 rest 的非简单 value temp-hoist/重命名/默认/嵌套/计算键 |
 | `internal/transformers/modifiervisitor.go` | `internal/transformers/modifiervisitor.rs` | ✅ 6a | `extract_modifiers` |
 | `internal/transformers/utilities.go` | `internal/transformers/utilities.rs` | 6a 子集 / 6g 余下 | 6a：generated/helper/local/export-name 谓词 + `get_non_assignment_operator_for_compound_assignment`；余下（绑定模式转换/super 定位/范围移动）DEFER 6g |
 
@@ -101,8 +103,8 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 |---|---|---|---|
 | `tstransforms/typeeraser.go` | `tstransforms/typeeraser.rs` | ✅ 6b+6c-prep | `new_type_eraser_transformer` + 移除式 `type_eraser_visit`（返回 `Option<NodeId>`，`None`=从列表省略）。6b 剥类型纯重建簇；**6c-prep 完成省略**：`interface`/`type`/ambient(`declare`)/`namespace export`/重载 → `NotEmittedStatement`；类型只读修饰符(public/private/…)、`implements`、`this` 参、`declare`/`abstract` 字段 → 移除；`as`/`satisfies`/`<T>x`/`x!` → `PartiallyEmittedExpression`；`import type`/`import type =` → `NotEmittedStatement`。DEFER：每-specifier `import { type x }`、命名空间实例化分析(`IsInstantiatedModule`)、method/ctor/accessor 重载、`compilerOptions` 分支、用法式 import elision（checker）—— 见 mod.rs |
 | `tstransforms/utilities.go` | `tstransforms/utilities.rs` | ✅ 6b | `constant_expression`（+`ConstantValue`）：string/number/NaN/±Infinity/负数 → 工厂节点 |
-| `tstransforms/importelision.go` | `tstransforms/importelision.rs` | — DEFER(P5) | `ImportElisionTransformer`；blocked-by：checker `EmitResolver.MarkLinkedReferencesRecursively` 未移植 |
-| `tstransforms/runtimesyntax.go` | `tstransforms/runtimesyntax.rs` | — DEFER(P5) | enum/namespace/参数属性/`import=` 运行时降级；blocked-by：移除式 visitor + IIFE/赋值/块工厂构造器面 |
+| `tstransforms/importelision.go` | `tstransforms/importelision.rs` | ✅ 6af+6ag+6ah 子集 | `new_import_elision_transformer(opt, resolver)` + 移除式 `import_elision_visit`（返回 `Option<NodeId>`，`None`=省略）。消费 checker `EmitResolver`（经 additive `EmitReferenceResolver`）做**作用域正确**的未引用 value import / type-only export 省略：(import 侧/6af) `ImportSpecifier`/`NamespaceImport` 未引用→丢；`NamedImports` 全丢→`None`（rebuild 用 `NodeList::new` 避免源跨度推断尾逗号）；`ImportClause` 既无 default 名又无 namedBindings→`None`→整 `ImportDeclaration` 省略；side-effect-only `import "m";`（无 clause）不省略。(export specifier 侧/6ag) `ExportSpecifier`/`NamedExports`/`ExportDeclaration` 按 `is_value_alias_declaration` 丢 type-only。(`import =`/`export =` 侧/6ah，消费 4ap) external-module `import x = require("m")` 未引用→丢（`is_referenced_alias_declaration`）；`export = <value>` 留、type-only `export = I` 丢（`is_value_alias_declaration`）。`should_emit_alias_declaration` = `is_referenced`（`IsInJSFile` 短路 DEFER）。DEFER：entity-name `import x = a.b`（需 `IsTopLevelValueImportEqualsWithEntityName`）、跨模块 re-export（需 `resolveExternalModuleSymbol`）、type-only 位置 use 续命、`verbatimModuleSyntax`/`isolatedModules` 策略 —— 见 mod.rs |
+| `tstransforms/runtimesyntax.go` | `tstransforms/runtimesyntax.rs` | ✅ 6n 子集 | `new_runtime_syntax_transformer`：**enum → IIFE**（`var E; (function(E){ E[E["A"]=0]="A"; … })(E\|\|(E={}))`：自动编号 + 显式数字初值 auto-续接 + 字符串成员无反向映射 + const enum 省略）+ **instantiated namespace → IIFE**（`export const x=1` → `N.x = 1`；未实例化 type-only namespace 省略，句法 `is_instantiated_module`）。**句法求值替代 checker `GetEnumMemberValue`**；IIFE 容器名用声明名文本（替代 `NewGeneratedNameForNode`）；body 多行经 `MULTI_LINE` emit flag（printer additive）。DEFER：const enum 成员引用 inlining（checker 常量求值）、非字面量初值常量折叠、`E.A`/`N.x` 成员引用重写（binder resolver）、exported/merged enum & namespace、嵌套/点名 namespace、`export =`、参数属性、`import=` 降级 |
 | `tstransforms/legacydecorators.go` | `tstransforms/legacydecorators.rs` | — DEFER(P5) | 实验性装饰器降级；blocked-by：checker 类型序列化 + 装饰器 helper 工厂 |
 | `tstransforms/metadata.go` | `tstransforms/metadata.rs` | — DEFER(P5) | `emitDecoratorMetadata`；blocked-by：同上（typeserializer） |
 | `tstransforms/typeserializer.go` | `tstransforms/typeserializer.rs` | — DEFER(P5) | 类型 → 元数据表达式；blocked-by：checker 类型→节点序列化 |
@@ -113,22 +115,23 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 
 | Go 文件 | Rust 文件 | 状态 | 说明 |
 |---|---|---|---|
-| `estransforms/exponentiation.go` | `exponentiation.rs` | ✅ 6c-1+6c-3 | `new_exponentiation_transformer`：`a ** b`→`Math.pow(a, b)`、`a **= b`（标识符）→`a = Math.pow(a, b)`、**`a.x **= b` / `a[x] **= b`（temp hoist）**→`(_a=a).x=Math.pow(_a.x,b)` / `(_a=a)[_b=x]=Math.pow(_a[_b],b)`（顶层语句路径 ec-threaded + `var` hoist）。DEFER：非顶层作用域内的 temp-hoist `**=`（需作用域级 var-env 嵌套）|
-| `estransforms/classfields.go` | `classfields.rs` | ✅ 6c-1/2/3/4 子集 | `new_class_fields_transformer`：实例字段 → 构造器 `this.x = init`（完整构造器插入族）；**static 字段** → 类后 `C.x = init`（`SyntaxList[class, assignment...]`）；**私有实例字段** `#x`（直接 WeakMap 形态）→ 类前 `var _C_x = new WeakMap();` + 构造器 `_C_x.set(this, init)` + 成员体内私有访问重写（`obj.#x`→`_C_x.get(obj)`、`obj.#x = e`→`_C_x.set(obj, e)`）；**计算实例字段名** `[k] = init` → 类前 `var _a = k;` + 构造器 `this[_a] = init`。DEFER：named-helper 私有形态（`__classPrivateFieldGet/Set`）、私有 static 字段、私有方法/accessor（WeakSet）、`accessor` 字段、ClassExpression、参数属性、prologue、匿名类成员、name-generator 唯一命名、`--target`/`useDefineForClassFields` 门控 |
+| `estransforms/exponentiation.go` | `exponentiation.rs` | ✅ 6c-1+6c-3+6i | `new_exponentiation_transformer`：`a ** b`→`Math.pow(a, b)`、`a **= b`（标识符）→`a = Math.pow(a, b)`、**`a.x **= b` / `a[x] **= b`（temp hoist）**→`(_a=a).x=Math.pow(_a.x,b)` / `(_a=a)[_b=x]=Math.pow(_a[_b],b)`（ec-threaded + `var` hoist）。**6i** 函数声明体也开各自的变量环境：`function f() { a.x **= b; }` → 体内 `var _a;`（per-scope）。DEFER：`**=` temp-hoist 嵌套在仍未线程化的位置（控制流语句体、本 stage 的方法/函数表达式/箭头、嵌套类）|
+| `estransforms/classfields.go` | `classfields.rs` | ✅ 6c-1/2/3/4 + 6o + 6q + 6r 子集 | `new_class_fields_transformer`：实例字段 → 构造器 `this.x = init`（完整构造器插入族）；**static 字段** → 类后 `C.x = init`（`SyntaxList[class, assignment...]`）；**私有实例字段** `#x`（直接 WeakMap 形态）→ 类前 `var _C_x = new WeakMap();` + 构造器 `_C_x.set(this, init)` + 成员体内私有访问重写（`obj.#x`→`_C_x.get(obj)`、`obj.#x = e`→`_C_x.set(obj, e)`）；**计算实例字段名** `[k] = init` → 类前 `var _a = k;` + 构造器 `this[_a] = init`；**(6o) ClassExpression 实例字段** `const C = class { x = 1 }` → `const C = class { constructor() { this.x = 1; } }`（同一降级在表达式位运行，仅当结果为单节点）；**(6r) ClassExpression static 字段语句 hoist** `const C = class { static x = 1 }` → `var _a;\nconst C = (_a = class {}, _a.x = 1, _a)`（逗号序列 + temp 包裹：temp 经 6p `new_temp_variable` 三处复用同名、`add_variable_declaration` hoist `var _a;` 进 SourceFile 变量环境；实例字段进合成构造器、static 进 `_a.x` 表达式协同；core 抽 `lower_class_parts` 受体无关）；**(6q) `accessor` 自动访问器**（实例 + static，类声明 + 类表达式）`accessor x = 1` → backing 私有字段 `#x_accessor_storage = 1` + `get x()`/`set x(value)` 重定向器（**ES2022-native 形态**：backing 字段保留为类成员，不走 WeakMap），backing 名经 **6p** node-based generated private name（`new_generated_private_name_for_node_ex` + `_accessor_storage` 后缀，三处引用同一节点→ emit 时同名）；经 ec-threaded `class_fields_visit_ec`/`visit_each_child_ec` 穿到类节点取得 `EmitContext::factory()`。DEFER：named-helper 私有形态（`__classPrivateFieldGet/Set`）、私有 static 字段、私有方法/accessor（WeakSet）、accessor 的 **WeakMap/下级 target 形态**（二遍 `accessorFieldResultVisitor` 把 backing 私有字段再降级）+ 计算/装饰/混入其他需降级成员的 accessor 类、**ClassExpression 计算名/私有字段语句 hoist**（需 Go `pendingExpressions` 内联，未移植）、嵌套作用域 class-expr static hoist（仅 SourceFile 开变量环境）、参数属性、prologue、匿名类成员、（非 accessor 的）name-generator 唯一命名、`--target`/`useDefineForClassFields` 门控 |
 | `estransforms/definitions.go` | `estransforms/lib.rs` | — DEFER(P5) | `GetESTransformer` + 各版本链 `NewES20xxTransformer`（crate 根聚合）；blocked-by：依赖各 es stage 就绪 |
-| `estransforms/async.go` | `async.rs` | ✅ 6d-3 子集 | `new_async_transformer`：顶层 **async 函数声明** → `function f() { return __awaiter(this, void 0, void 0, function* () { … }); }`，body 内 `await X`→`yield X`，请求 `__awaiter` helper（prologue 注入）。DEFER：async 方法/accessor/箭头、async 生成器（`__asyncGenerator`，已加守卫不误转）、super/lexical-`this`/`arguments` 捕获、默认/rest 参数、top-level `await` |
+| `estransforms/async.go` | `async.rs` | ✅ 6d-3+6m 子集 | `new_async_transformer`：**async 函数声明**（6d-3）+ **async 函数表达式 / async 方法 / async 箭头**（6m）→ `__awaiter` 包装，body 内 `await X`→`yield X`，请求 `__awaiter` helper（prologue 注入）。6m 经 ec-threaded `visit_each_child_ec`（泛型 `VisitEachChild`，map-based 子节点替换）穿过容器节点（变量声明/类体）到达嵌套函数；非箭头（声明/表达式/方法）有 lexical `this` → 首参 `this` + `{ return __awaiter(...); }` 块包装；箭头 `this` 是 lexical，顶层无 lexical `this` → 首参 `void 0` + 直接以 `__awaiter(...)` 调用作简明体（不包块）。DEFER：async accessor、async 生成器（`__asyncGenerator`，已加守卫不误转）、async 方法内 `super`（需 `_super` 绑定）、`asyncContextHasLexicalThis` 跨嵌套作用域线程化（async 方法内的箭头应线程 `this`）、lexical-`arguments`/`_this` 捕获、默认/rest 参数、`for await`、top-level `await` |
 | `estransforms/classthis.go` | `classthis.rs` | — DEFER(P5) | class `this`/`#brand` 辅助 |
 | `estransforms/esdecorator.go` | `esdecorator.rs` | — DEFER(P5) | `newESDecoratorTransformer`（标准装饰器）；blocked-by：checker 元数据 + helper emit |
-| `estransforms/forawait.go` | `forawait.rs` | — DEFER(6d-3 范围) | `for await (x of y)` 降级；`__asyncValues`/`__await` helper 已就绪，但无最小 tracer——忠实降级总要发出完整 async-iteration 脚手架（`__asyncValues` 迭代器 + downlevel-`await(.next())` + generated-name 迭代器/result/value temps + `iterator.return` 清理嵌套 try/finally），本轮发不出忠实子集（部分实现会产出错误代码）。blocked-by：async-iteration 降级脚手架 |
+| `estransforms/forawait.go` | `forawait.rs` | ✅ 6y+6z 子集 | `new_for_await_transformer`：**async 生成器函数声明**（6y，ES2018 stage，先于 ES2017 async）`async function* g() {...}` → `function g() { return __asyncGenerator(this, arguments, function* g_1() {...}); }`，body 内 `await x`→`yield __await(x)`、`yield e`→`yield yield __await(e)`、`yield* e`→`yield __await(yield* __asyncDelegator(__asyncValues(e)))`、`return e`→`return yield __await(e)`、bare `yield`→`yield yield __await(void 0)`；inner 生成器名经 `new_generated_name_for_node`（`g`→`g_1`）。**6z** 落地 **`for await (x of y)` downlevel**（async 非生成器函数内）：`transformForAwaitOfStatement` + `convertForOfStatementHead` 完整 async-iteration 脚手架——`__asyncValues(<expr>)` 迭代器 temp + `result` temp + C-style `for`（条件 `result = await iterator.next(), done = result.done, !done`）+ 从 `result.value` 绑定循环变量 + `try/catch/finally` 的 `iterator.return` 清理（非生成器 → downlevel `await`），`done`/`errorRecord`/`returnMethod`/`value` temps 经 plain-function-body 变量环境 hoist 进函数体（新增 `visit_function_declaration` 镜像 optionalchain 6i 函数体处理）。**helper 定义**（`__await`/`__asyncGenerator`/`__asyncDelegator`/`__asyncValues`）因 `tsgo_printer` 出编辑范围而**定义在本 crate**（`forawait.rs` 内 `pub static`，verbatim Go 文本）。**Go/tsc 校正**：(1) 6y briefing 称「`yield x` 保留」是错的——Go/tsc 都是 `yield yield __await(y)`；(2) 6z catch 变量 Go/tsc 为 `e_1_1`（`NewGeneratedNameForNode(errorRecord "e_1")`），但 Rust printer `generate_name_for_node` 读 raw `arena().text()`（"e"）而非 resolving `getTextOfNode`（"e_1"）→ 落 `e_2`（fresh binding，纯 cosmetic 偏离）。DEFER：identifier 源 `for await (const x of y)`（iterator/result 名 derive 自 identifier，需 resolving `getTextOfNode` 解析嵌套 generated-name；非 identifier `gen()` 源用干净 `NewTempVariable`）、async 生成器内 `for await`（需 `createDownlevelAwait` 的 `yield __await` 形 = enclosing-function-flags 线程化）、destructuring 循环变量、top-level `for await`、label/`continue`/`break`、nested-loop `errorRecord` reset；async 生成器**方法/函数表达式/箭头**（需 `_super` + `hasLexicalThis`）、非简单参数列表、变量环境 merge、top-level await。blocked-by：printer resolving 名生成 + enclosing-function-flags 线程化 + destructuring flattener + `EmitContext` super-capture/参数机器 |
 | `estransforms/logicalassignment.go` | `logicalassignment.rs` | — DEFER(P5) | `newLogicalAssignmentTransformer`（`&&=`/`\|\|=`/`??=`） |
 | `estransforms/namedevaluation.go` | `namedevaluation.rs` | ✅ 6d-2 子集 | `new_named_evaluation_transformer`：`var f = <匿名函数>` → `var f = __setFunctionName(<fn>, "f")` + prologue 注入 helper 定义（6d-2 emit-helper 基建的端到端验证）。DEFER：完整 `isNamedEvaluation` 面（property/shorthand/参数/binding/属性声明/export=、计算名 `__propKey` 缓存、匿名类 `static { __setFunctionName(this,…) }`）+ `EmitContext.AssignedName` 跟踪 + target/useDefine 门控 |
 | `estransforms/nullishcoalescing.go` | `nullishcoalescing.rs` | — DEFER(P5) | `newNullishCoalescingTransformer`（`??`） |
-| `estransforms/objectrestspread.go` | `objectrestspread.rs` | ✅ 6d + 6g 子集 | `new_object_rest_spread_transformer`：(6d) 对象 spread `{ ...x, y }` → `Object.assign(Object.assign({}, x), { y })`（chunk + pairwise 折叠，`NewAssignHelper` = `Object.assign` 直出，无需 helper import）；**(6g) 对象 rest 绑定**（变量声明）`var { a, ...rest } = o;` → `var { a } = o, rest = __rest(o, ["a"]);`（ec-threaded：`__rest` helper request + 源文件边界 attach + prologue emit；leading 简单标识符/重命名绑定保留为对象绑定模式 decl，rest key 排除，简单 init 复用）。DEFER：泛型 `FlattenDestructuringBinding`（嵌套/数组模式、默认值、计算键需 temp 缓存、非简单 init 需 var-hoist temp）= 6h `destructuring.go`；参数/`for-of`/`catch`/赋值模式（需参数/赋值 flattener + `FlattenDestructuringAssignment`）|
+| `estransforms/objectrestspread.go` | `objectrestspread.rs` | ✅ 6d + 6g 子集 | `new_object_rest_spread_transformer`：(6d) 对象 spread `{ ...x, y }` → `Object.assign(Object.assign({}, x), { y })`（chunk + pairwise 折叠，`NewAssignHelper` = `Object.assign` 直出，无需 helper import）；**(6g) 对象 rest 绑定**（变量声明）`var { a, ...rest } = o;` → `var { a } = o, rest = __rest(o, ["a"]);`（ec-threaded：`__rest` helper request + 源文件边界 attach + prologue emit；leading 简单标识符/重命名绑定保留为对象绑定模式 decl，rest key 排除，简单 init 复用）；**(6k) 对象 rest 赋值** `({ a, ...r } = o);` → `({ a } = o, r = __rest(o, ["a"]));`（`ExpressionStatement` 臂 gate `reachable_object_rest_assignment` → 经根包 `flatten_destructuring_assignment` @ `FlattenLevelObjectRest`，**统一走泛型 flattener**，共享本文件 `new_rest_helper`（`pub(crate)`）；保留外层括号避免 `{` 被当块解析）。DEFER：泛型 `FlattenDestructuringBinding`（嵌套/数组模式、默认值、计算键需 temp 缓存、非简单 init temp）= **✅ 6j `destructuring.go`**（绑定模式 `FlattenLevelAll`）；参数/`for-of`/`catch` 位置（需参数/赋值 flattener 接线）；对象 rest 赋值的非简单 value temp-hoist/重命名/默认/嵌套/计算键 |
 | `estransforms/optionalcatch.go` | `optionalcatch.rs` | — DEFER(P5) | `newOptionalCatchTransformer` |
-| `estransforms/optionalchain.go` | `optionalchain.rs` | ✅ 6d+6h 子集 | `new_optional_chain_transformer`：`a?.b` / `a?.[x]` / `a?.()` / `a?.b()` / `a?.b.c` → `a === null \|\| a === void 0 ? void 0 : <访问/调用>`（`flatten_chain` 折叠单 `?.` + 尾随非可选段，简单 receiver）；**6h** ec-threaded 后顶层语句的非简单 receiver hoist temp（`f()?.b` → `var _a; (_a = f()) === null \|\| _a === void 0 ? void 0 : _a.b`）+ 多 `?.`（`a?.b?.c` → 嵌套守卫、每链一 temp）。DEFER：非顶层语句路径/嵌套作用域的 temp-hoist（无 var 环境）、括号可选调用 `this`-capture（`(a?.b)()`，需 `SyntheticReferenceExpression`）、`delete a?.b`、tagged template |
+| `estransforms/optionalchain.go` | `optionalchain.rs` | ✅ 6d+6h+6i+6s+6t 子集 | `new_optional_chain_transformer`：`a?.b` / `a?.[x]` / `a?.()` / `a?.b()` / `a?.b.c` → `a === null \|\| a === void 0 ? void 0 : <访问/调用>`（`flatten_chain` 折叠单 `?.` + 尾随非可选段，简单 receiver）；**6h** ec-threaded 后非简单 receiver hoist temp（`f()?.b` → `var _a; (_a = f()) === null \|\| _a === void 0 ? void 0 : _a.b`）+ 多 `?.`（`a?.b?.c` → 嵌套守卫、每链一 temp）；**6i** per-scope 变量环境：emit-context 线程化穿过函数体（函数声明/表达式、箭头体、类方法），每个开各自 var-env，temp 落在该作用域而非模块顶（箭头简明体 hoist temp 时包成 block）；**6s** 括号可选调用 `this`-capture（`(a?.b)()` → `(… ? void 0 : a.b).call(a)`，新增 `SyntheticReferenceExpression` AST 节点 + `new_function_call_call`）+ `delete a?.b`（→ `a === null \|\| a === void 0 ? true : delete a.b`，含括号变体 `delete (a?.b)`）；**6t** 可选 call 段 `leftThisArg` 线程化：首段为 call 时 receiver 走 `this`-capture（`is_call_chain(chain[0])`），captured `this` 经 `_t.call(thisArg, …)` 线程化——`a?.b?.()` → `var _a; (_a = a === null \|\| a === void 0 ? void 0 : a.b) === null \|\| _a === void 0 ? void 0 : _a.call(a)`、`a.b?.()`（非可选 member receiver）→ `var _a; (_a = a.b) === null \|\| _a === void 0 ? void 0 : _a.call(a)`、嵌套 `a?.b.c?.()` → temp this `_b.call(_a)`（leftThisArg 为 auto-gen temp 不 clone，普通 identifier clone+`NO_COMMENTS`）。DEFER：嵌套在仍未线程化位置（控制流语句体 `if`/`for`/`while`、`switch` case、对象字面量方法简写、构造器/accessor 体）的 temp-hoist；call 段 `super` receiver（`super.b?.()` 需 super→this 改写）、tagged template |
 | `estransforms/taggedtemplate.go` | `taggedtemplate.rs` | — DEFER(P5) | `newTaggedTemplateLiftRestrictionTransformer` |
 | `estransforms/usestrict.go` | `usestrict.rs` | — DEFER(P5) | `NewUseStrictTransformer` |
 | `estransforms/using.go` | `using.rs` | — DEFER(parser) | `using`/`await using` → try/finally + dispose；`__addDisposableResource`/`__disposeResources` helper 已就绪、transform 可移植，但 **`tsgo_parser` 不解析语句级 `using x = expr;`**（报 "';' expected"），无法走 parse→transform→emit；parser 不在本轮编辑范围。blocked-by：parser `using` 声明支持（`await using` 另需 async 处置）|
+| （无 Go 文件，upstream `es2015.ts`）| `spread.rs` | ✅ 6aa 子集 | `new_spread_transformer`：ES2015 **数组字面量 spread** + **调用参 spread** 降级（pre-ES2015 目标，经 `__spreadArray` helper + `.apply`）。**Go 端无 ES2015 spread transform**（`GetESTransformer` 链止于 `NewES2016Transformer`，更老目标 fall through 到它，不降级 spread），ground truth = `tsc --target es5` 对拍。数组：`transform_and_spread_elements`(arg-list=false) 把元素分段（连续非 spread 收成 `[...]` 字面量段、每个 spread 独立段），累加器起于 `[]`（首段为 spread）或首字面量段，逐段 `__spreadArray(acc, seg, pack)`，`pack = is_spread && !arg_list`（数组 spread 段 `true`、字面量段 `false`）：`[...a, b]` → `__spreadArray(__spreadArray([], a, true), [b], false)`、`[...a]` → `__spreadArray([], a, true)`、`[1, ...a, 2]` → `__spreadArray(__spreadArray([1], a, true), [2], false)`。调用：`try_lower_call_with_spread` → `<target>.apply(<this>, <args>)`，`<args>` = `transform_and_spread_elements`(arg-list=true)（arg-list spread 段 `pack=false`；单段捷径直接传 bare 段表达式，无 helper）；标识符 callee `f(...args)` → `f.apply(void 0, args)`、简单成员 callee `o.m(...args)` → `o.m.apply(o, args)`（标识符受体复用为 `this`，无 temp）、`f(a, ...args)` → `f.apply(void 0, __spreadArray([a], args, false))`。emit-helper 复用 6d-2 基建（`request_emit_helper` + 源文件 prologue attach，同 `objectrestspread`/`forawait`）；`SPREAD_ARRAY_HELPER` 定义在 `spread.rs`（`tsgo_printer` 出编辑范围，verbatim tsc 文本）。**briefing 校正**：briefing 称 `f(...args)` → `f.apply(void 0, __spreadArray([], args, false))`，实测 tsc 为 `f.apply(void 0, args)`（arg-list 单 spread 捷径）。DEFER：`new C(...args)`（construct + `C.bind.apply(...)`）、`super(...args)`、非简单成员受体 capture temp（`a.b.m(...args)` → `(_a = a.b).m.apply(_a, args)`）、`--downlevelIteration`（`__read`/`__spread`）、wiring 进 `GetESTransformer`（无 `NewES2015Transformer` 链）。blocked-by：`new`-target bind 形、`super` 受体捕获、`createCallBinding` temp-capture、迭代 helper、`definitions` dispatch 端口 |
 | `estransforms/utilities.go` | `utilities.rs` | 子包共享工具 |
 
 ### `moduletransforms`（5 文件）
@@ -138,9 +141,10 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 | Go 文件 | Rust 文件 | 状态 | 说明 |
 |---|---|---|---|
 | `moduletransforms/externalmoduleinfo.go` | `externalmoduleinfo.rs` | ✅ 6e 子集 | `collect_external_module_info`：扫描顶层语句收集 **external imports**（`import …`/`export … from`）、**exported names**（`export { x }`、`export const`）、**`export *`** 标志、**`export =`**。DEFER：resolver 相关分类（`export {x}` 的 function-vs-binding via `GetReferencedImportDeclaration`）、`exportedBindings`/`exportedFunctions`、external-helpers import 创建（需 `GetExternalHelpersModuleName`）|
-| `moduletransforms/commonjsmodule.go` | `commonjsmodule.rs` | ✅ 6e-2/6e-3 子集 | `new_common_js_module_transformer`（`module: commonjs`）：named/default/namespace import → `require`(+`__importDefault`/`__importStar`) + use 重写（`m_1.x`/`m_1.default`/`m_1`，节点替换）；`export default`/`export const`/`export {x}` → `exports.…`；`export * from` → `__exportStar`；有 value export 时顶部 `__esModule` 标志。DEFER：default+named 组合、re-export `export {x} from`、`export =`、动态 `import()`、`import =`、导出 fn/class（保留本地绑定）、live binding、`"use strict"`/export-name init；**作用域正确** use 重写（按名匹配，需真实 ReferenceResolver）|
-| `moduletransforms/esmodule.go` | `esmodule.rs` | — DEFER | `NewESModuleTransformer`（ESM 目标：import/export 多为保留 + 类型擦除 + interop helper 注入）；blocked-by：可达子集近恒等（value import/export 原样保留），实质工作（type-only elision 集成、`export =` 报错、interop 注入、扩展名重写）需 type-eraser 集成 + 更多基建 |
-| `moduletransforms/impliedmodule.go` | `impliedmodule.rs` | — DEFER(P5) | `NewImpliedModuleTransformer`（按 impliedFormat 分派）；blocked-by：依赖 CJS/ESM 就绪 + compilerOptions |
+| `moduletransforms/commonjsmodule.go` | `commonjsmodule.rs` | ✅ 6e-2/6e-3 子集 | `new_common_js_module_transformer`（`module: commonjs`）：named/default/namespace import → `require`(+`__importDefault`/`__importStar`) + use 重写（`m_1.x`/`m_1.default`/`m_1`，节点替换）；`export default`/`export const`/`export {x}` → `exports.…`；`export * from` → `__exportStar`；有 value export 时顶部 `__esModule` 标志；**动态 `import("m")`/`import()`**（6ad）→ `Promise.resolve().then(() => __importStar(require(...)))`（Go **无条件** importStar 包裹，arrow 回调；inlineable 参数内联，no-arg → `require()`）。DEFER：动态 import 的 `needSyncEval` 模板形（非 inlineable 参数）+ 端到端 parse（解析器 DEFER `import(...)` call head）、`"use strict"`/作用域正确 use 重写（按名匹配，需真实 ReferenceResolver）|
+| `moduletransforms/esmodule.go` | `esmodule.rs` | ✅ 6u+6ab 子集 | `new_es_module_transformer`（`--module es2015/esnext`）：`visitSourceFile` 守卫（`IsDeclarationFile \|\| !(IsExternalModule \|\| isolatedModules)` → 原样返回）+ value import/export **原样保留**（ESM 保留 import/export 语法）；`export = x` 在非 preserve 下 **elide**；`import x = require("m")`（emit module kind `< Node16`）**elide**；`createEmptyImports`（仍是 external module、非 preserve、无 indicator 剩余 → 追加 `export {};`）；**6ab**：`export * as ns from "m"` 命名空间 re-export 在 `Module <= ES2015` 改写为 `import * as ns_1 from "m";` + `export { ns_1 as ns };`（名为 `default` → `export default default_1;`），`esnext` 透传（`new_generated_name_for_node`/6p，tsc 对拍）。复用 6e `collect_external_module_info` 的同源 `IsExternalModuleIndicator` 逻辑。DEFER：**type-only import elision**（blocked-by checker `EmitResolver`）、**作用域正确引用重写**（blocked-by 真实 `ReferenceResolver`）、`--module preserve` 的 `export =`→`module.exports`、`--rewriteRelativeImportExtensions`、动态 `import()` 重写、Node16+ `import =`→同步 require、external-helpers（tslib）注入、`export * as "default"`（string-literal 名）|
+| `moduletransforms/impliedmodule.go` | `impliedmodule.rs` | ✅ 6ac 子集 | `new_implied_module_transformer`：按文件 emit module format 分派——`is_es_module_format(format)`（`format >= ModuleKind::Es2015`）→ `new_es_module_transformer`，否则 → `new_common_js_module_transformer`；`IsDeclarationFile` → 原样返回。分派谓词消费 `compiler_options.module`（per-file `impliedNodeFormat` DEFER，blocked-by `SourceFileMetaData` 未接线，同 compiler P6-2）。委托经子 transformer 的 `run_visit`（复用同一 `EmitContext` 借用）。DEFER：per-file `impliedNodeFormat`/`.cjs`/`.mjs` 探测（需 `SourceFileMetaData`）、AMD/UMD/System 格式。 |
+| `moduletransforms/systemmodule.go` | `systemmodule.rs` | ✅ 6ae 子集 | `new_system_module_transformer`（`module: system`）：把整个模块体包进 `System.register([<deps>], function (exports_1, context_1) { "use strict"; return { setters: [<setters>], execute: function () { <body> } }; })`。**register wrapper**：两个生成参数名 `exports_1`/`context_1`（`new_unique_name`，对拍 tsc `createUniqueName`）；外层 module body block 设 `MULTI_LINE`（Go `multiLine: true`），return 对象 / 空 execute 块走单行（Rust 打印器对 list-bearing 字面量不携带 per-node `MultiLine`，见 `emit_expressions.rs`）。**dependency list**：每个 external import（复用 6e `collect_external_module_info`）的 module specifier → `System.register` 依赖数组 + `setters` 里一个**空体** setter（`function (_1) { }`，binding-less import 的 param Go 用 `createUniqueName("")`=`_1`；Rust name generator 空 base 路径偏离丢前导 `_`，故传 `"_"` 复现 `_1`，TODO(port) 对齐）。**execute body**：顶层 value 语句（非 import/export 语法）按源序移入 `execute` 体。DEFER（均 blocked-by 真实 `ReferenceResolver`，同 CJS 缺口）：export-setter 接线（named export → `exports({...})`、setter 体转发 import binding）、import binding 重写 / hoisting / live bindings、`var __moduleName = context_1 && context_1.id;`、module-name 首参（`System.register("name", …)`）、`export *` star helper、dependency 分组/去重。|
 | `moduletransforms/utilities.go` | `utilities.rs` | — DEFER(P5) | 子包共享工具（`getExternalModuleNameLiteral`/`rewriteModuleSpecifier` 等，多依赖 resolver/compilerOptions）|
 
 ### `jsxtransforms` / `inliners` / `declarations`
@@ -164,7 +168,9 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 
 - [x] `pub struct Transformer` + `new_transformer(visit, context)` + `emit_context()/transform_source_file()`（`run_visit` crate 私有）　`// Go: transformer.go:Transformer`　**[6a]** — 偏离：Go `Visitor()/Factory()` 折叠进 `emit_context()`（Rust `EmitContext` 自持 arena/factory）；`visit` 签名 `FnMut(&mut EmitContext, NodeId) -> NodeId`
 - [x] `pub struct TransformOptions` + `pub type TransformerFactory` + `pub fn chain(transforms) -> TransformerFactory`（含 `chainedTransformer` 合成 visit）　`// Go: chain.go:TransformOptions/TransformerFactory/Chain`　**[6a]** — `TransformOptions` 仅含 `context: Option<SharedEmitContext>`；其余字段 DEFER 6b+
-- [ ] destructuring：`pub enum FlattenLevel`、`pub type CreateAssignmentCallback`、`FlattenDestructuringAssignment`、`FlattenDestructuringBinding`、`BindingOrAssignmentElementAssignsToName`、`BindingOrAssignmentElementContainsNonLiteralComputedName`、`GetInitializerOfBindingOrAssignmentElement`　`// Go: destructuring.go:*`　**[6g]**
+- [x] destructuring（6j 子集）：`pub enum FlattenLevel`、`pub fn flatten_destructuring_binding`（绑定模式）、`new_destructuring_transformer` 驱动、绑定元素读取器/谓词（target / initializer / rest-indicator / elements / property-name / assigns-to-name / non-literal-computed-name）　`// Go: destructuring.go:FlattenDestructuringBinding/flattenDestructuringBinding`　**[6j]**
+- [x] destructuring（6k 子集）：`flatten_destructuring_assignment`（赋值模式，复用 6j `Flattener` + `FlattenMode` 判别 + `emit_assignment`/`inline_expressions` 逗号折叠）、数组/对象/嵌套/默认/数组-rest @ `FlattenLevelAll`（驱动 `ExpressionStatement` 接入）、**对象 rest @ `FlattenLevelObjectRest` 经泛型 flattener**（objectrestspread `visitBinaryExpression` 接入，共享 `__rest` helper builder）　`// Go: destructuring.go:FlattenDestructuringAssignment`　**[6k]**
+- [ ] destructuring（余下）：`pub type CreateAssignmentCallback`（CJS export/namespace 回调）、`needs_value=true` 值返回路径（`InlineExpressions` 尾随值折叠）、参数/`for-of`/`catch` 解构位置、exported var-env 路径、对象 rest 赋值的非简单 value temp-hoist/重命名/默认/嵌套/计算键（`computedTempVariables`）　`// Go: destructuring.go:FlattenDestructuringAssignment`　**DEFER** blocked-by：参数/for-of 接线 + checker-free 计算键 temp 缓存 + 值位 needs_value 接线
 - [x] `extract_modifiers`　`// Go: modifiervisitor.go:ExtractModifiers`　**[6a]** — 直接过滤实现（visitor 暂无 node 删除语义），不经泛型 visitor
 - [x] utilities（6a 子集）：`is_generated_identifier/is_helper_name/is_local_name/is_export_name`、`get_non_assignment_operator_for_compound_assignment`　`// Go: utilities.go:*`　**[6a]**
 - [ ] utilities（余下）：`IsIdentifierReference`、`ConvertBindingPatternToAssignmentPattern`、`ConvertVariableDeclarationToAssignmentExpression`、`SingleOrMany`、`IsSimpleCopiableExpression`、`IsOriginalNodeSingleLine`、`IsSimpleInlineableExpression`、`FindSuperStatementIndexPath`、`GetSuperCallFromStatement`、`MoveRangePastModifiers`、`MoveRangePastDecorators`　`// Go: utilities.go:*`　**[6g]** blocked-by：factory 节点构造器 / `ast::is_string_literal_like`·`is_numeric_literal`·`skip_parentheses`·`is_super_call`·`can_have_modifiers` 等谓词未移植
@@ -172,8 +178,9 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 ### `tstransforms`（重点：被测 2 stage 先行）
 
 - [ ] `pub struct TypeEraserTransformer` + `pub fn new_type_eraser_transformer(opt) -> Transformer`　`// Go: typeeraser.go:NewTypeEraserTransformer`（**先做：过 TestTypeEraser**）
-- [ ] `pub struct ImportElisionTransformer` + `pub fn new_import_elision_transformer(opt) -> Transformer`　`// Go: importelision.go:NewImportElisionTransformer`（**过 TestImportElision**，依赖 EmitResolver `MarkLinkedReferencesRecursively`）
-- [ ] `new_runtime_syntax_transformer` / `new_legacy_decorators_transformer` / `new_metadata_transformer`　`// Go: runtimesyntax.go / legacydecorators.go / metadata.go`
+- [x] `pub fn new_import_elision_transformer(opt, resolver) -> Transformer`（6af+6ag+6ah 子集）+ 移除式 `import_elision_visit`　`// Go: importelision.go:NewImportElisionTransformer`。消费 checker `EmitResolver`（经 additive `EmitReferenceResolver`）：6af 作用域正确未引用 value import 省略；6ag export specifier 侧（`is_value_alias_declaration`）；6ah external-module `import x = require("m")`（`is_referenced_alias_declaration`）+ `export =`（`is_value_alias_declaration`）。DEFER：entity-name `import x = a.b`（需 `IsTopLevelValueImportEqualsWithEntityName`）、跨模块 re-export（需 `resolveExternalModuleSymbol`）、type-only 位置续命、策略变体、`TestImportElision` 全表（~20 子用例）
+- [x] `new_runtime_syntax_transformer`（6n 子集：enum → IIFE + instantiated namespace → IIFE；见 6n worklog）　`// Go: runtimesyntax.go:NewRuntimeSyntaxTransformer`
+- [ ] `new_legacy_decorators_transformer` / `new_metadata_transformer`　`// Go: legacydecorators.go / metadata.go`
 - [ ] `get_set_accessor_value_parameter` + typeSerializer 内部　`// Go: typeserializer.go:GetSetAccessorValueParameter`
 
 ### `estransforms`
@@ -340,12 +347,14 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 - static 字段 → 类后 `C.x = init`（`SyntaxList`，6c-3）。
 - 私有实例字段 `#x`（直接 WeakMap `.get`/`.set` 形态）：类前 `var _C_x = new WeakMap();` + 构造器 `.set` + 成员体内私有读/写重写（6c-4）。
 - 计算实例字段名：key 缓存进类前 temp + 构造器 `this[_temp] = init`（6c-4）。
+- **ClassExpression 实例字段**（6o）：`const C = class { x = 1 }` → `const C = class { constructor() { this.x = 1; } }`。纯实例字段降级结果为单节点（无 hoist），在表达式位安全。
+- **ClassExpression static 字段语句 hoist**（6r）：`const C = class { static x = 1 }` → `var _a;\nconst C = (_a = class {}, _a.x = 1, _a)`。受体无关的 `lower_class_parts` + ec 线程化 `try_lower_class_expression`：temp 经 6p `new_temp_variable`（三处复用同名）、`add_variable_declaration` hoist `var _a;` 进 SourceFile 变量环境；逗号序列在 `const` 初值位由 printer `DISALLOW_COMMA` 优先级自动加括号。实例+static 混合亦可达（实例字段进合成构造器，static 进 `_a.x`）。计算名/私有字段在表达式位仍延后（需 `pendingExpressions`）。
 
 **DEFER（→ P10 / checker / name-generator / helper-emit）**：
 - named-helper 私有形态 `__classPrivateFieldGet/Set(this, _C_x, …, "f")`（需 helper-library import emit）。
 - 私有 **static** 字段、私有 **方法/accessor**（`WeakSet` brand check）。
 - `accessor` 自动访问器（→ 合成私有 backing 字段 + get/set 重定向器；需 emit-context name generator 生成 backing 私有名 + 二遍 result visitor）。
-- **ClassExpression**（语句 hoist 需 IIFE / 逗号序列包裹，不能简单前置语句）。
+- **ClassExpression 语句 hoist**（6o 纯实例字段 + 6r static 字段已落地）：**剩余** 计算名/私有实例（WeakMap）/私有 static 字段在表达式位需 Go `visitClassExpression` 的 `pendingExpressions` 内联进逗号序列；本端口计算名/私有走确定性命名 + `SyntaxList` 语句，机制不兼容，未移植。嵌套作用域（函数体/块）的 class-expr static hoist 亦待按 6i 模式逐作用域线程化变量环境。
 - **参数属性** `constructor(public x)`（属 `tstransforms` 的 TS-only 降级，非 estransforms）。
 - 构造器 **prologue 指令** 顺序、**匿名类** static/私有成员（需生成类名）。
 - name-generator 支撑的 **temp/brand 唯一命名**（当前 `_C_x` / `_a` 为确定性命名，存在理论碰撞）。
@@ -407,6 +416,8 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 | `__rest` | ✅ | `objectrestspread.rs`（rest 绑定）| **已消费**（6g：变量声明对象 rest 绑定）|
 | `__addDisposableResource`/`__disposeResources` | ✅ | `using.rs` | 已定义未消费（6d-3）|
 | `__importDefault`/`__exportStar` | ✅ | `moduletransforms` | 已定义未消费（6e）|
+| `__await`/`__asyncGenerator`/`__asyncDelegator`/`__asyncValues` | ✅（定义在 `forawait.rs`）| `forawait.rs` | **已消费**（6y/6z）；`tsgo_printer` 出编辑范围故就地定义 |
+| `__spreadArray` | ✅（定义在 `spread.rs`）| `spread.rs`（数组/调用参 spread）| **已消费**（6aa）；`tsgo_printer` 出编辑范围故就地定义（同 `forawait.rs`），文本 verbatim `tsc --target es5` |
 | `__generator` | — | — | Go 本 port 无此 helper（async 用 `__awaiter` + 原生 `function*`）|
 
 ## 6d-3 worklog（red→green 推进记录）
@@ -431,19 +442,19 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 ## estransforms 移植状态（6c..6d-3 收口）
 
 **已移植（行为正确的 down-level 子集）**：
-- `exponentiation`（`**`/`**=` + temp-hoist 顶层目标）— 6c-1/6c-3。
+- `exponentiation`（`**`/`**=` + temp-hoist 目标）— 6c-1/6c-3；**6i** 函数声明体 per-scope var-env（`function f() { a.x **= b; }` → 体内 `var _a;`）。
 - `classfields`（实例/static/私有 WeakMap/计算名字段 + 构造器插入族）— 6c-1..6c-4。
-- `optionalchain`（`a?.b`/`?.[]`/`?.()`/链尾随段，简单 receiver）— 6d；**顶层语句的 temp-hoist receiver（`f()?.b`）+ 多 `?.`（`a?.b?.c`）** — 6h。
+- `optionalchain`（`a?.b`/`?.[]`/`?.()`/链尾随段，简单 receiver）— 6d；**temp-hoist receiver（`f()?.b`）+ 多 `?.`（`a?.b?.c`）** — 6h；**6i** per-scope var-env：函数声明/表达式、箭头体、类方法各自作用域 hoist temp。
 - `objectrestspread`（对象字面量 spread → `Object.assign`）— 6d；**对象 rest 绑定（变量声明）→ `__rest`** — 6g。
 - `namedevaluation`（`var f = 匿名函数` → `__setFunctionName`）— 6d-2。
-- `async`（顶层 async 函数声明 → `__awaiter` 包装 + `await`→`yield`）— 6d-3。
+- `async`（async 函数声明 → `__awaiter` 包装 + `await`→`yield`）— 6d-3；**async 函数表达式 / 方法 / 箭头**（ec-threaded `VisitEachChild` 穿容器节点；非箭头首参 `this` + 块包装、箭头首参 `void 0` + 简明体）— 6m。
 - **printer emit-helper 基建**（`EmitHelper` + request/read + prologue emit）— 6d-2。
 
 **DEFER（→ parser / 深度脚手架 / checker / name-generator）**：
 - `forawait`：async-iteration 脚手架（无最小 tracer）。
 - `using`/`await using`：**parser 不解析语句级 `using`**（硬阻塞，需 parser 轮）。
-- `async` 余下：方法/accessor/箭头、async 生成器（`__asyncGenerator`）、super/lexical-`this`/`arguments` 捕获、默认/rest 参数、top-level `await`。
-- `objectrestspread` 余下（6g 已落地变量声明对象 rest 绑定子集）：泛型 `FlattenDestructuringBinding`（嵌套/数组绑定模式、默认值、计算键 temp 缓存、非简单 init 需 var-hoist temp）= 6h `destructuring.go`；rest 在**参数**/`for-of`/`catch`/赋值-解构模式（需参数/赋值 flattener + `FlattenDestructuringAssignment`）。
+- `async` 余下（6m 已落地函数表达式/方法/箭头）：async accessor、async 生成器（`__asyncGenerator`）、async 方法内 `super`（需 `_super` 绑定）、`asyncContextHasLexicalThis` 跨嵌套作用域线程化、lexical-`arguments`/`_this` 捕获、默认/rest 参数、`for await`、top-level `await`。
+- `objectrestspread` 余下（6g 已落地变量声明对象 rest 绑定子集）：泛型 `FlattenDestructuringBinding`（嵌套/数组绑定模式、默认值、计算键 temp 缓存、非简单 init temp）= **✅ 6j `destructuring.go`**（绑定模式 `FlattenLevelAll` 已移植，见 6j worklog）；**对象 rest 赋值** `({ a, ...r } = o)` = **✅ 6k**（经泛型 `FlattenDestructuringAssignment` @ `FlattenLevelObjectRest`，共享 `__rest`，见 6k worklog）；rest 在**参数**/`for-of`/`catch` 位置 + 对象-rest 赋值的非简单 value/重命名/默认/嵌套/计算键 = DEFER（需参数/for-of 接线 + 值位 needs_value + computedTempVariables）。
 - `esdecorator`：checker 元数据。
 - `nullishcoalescing`/`logicalassignment`/`optionalcatch`/`taggedtemplate`/`usestrict`/`classthis`：未排期（多数 factory 即可，部分需 helper）。
 - `definitions`（`GetESTransformer` target 派发链）：依赖各 stage 就绪。
@@ -585,6 +596,869 @@ CJS/ESM/implied 变换需要一轮 **emit-substitution + 真实 ReferenceResolve
 ### upstream（ast/printer）增长（6h）
 
 - **无**（6g 报告预期的 ZERO upstream growth 达成）。temp-hoist + 多 `?.` 全走 arena 既有构造器（`new_binary_expression`/`new_conditional_expression`/`new_property_access_expression`/`new_element_access_expression`/`new_call_expression`/`new_token`/`new_keyword_expression`/`new_void_expression`/`new_numeric_literal`/`new_expression_statement`/`new_source_file`）+ 6c-3 的 `EmitContext` 变量环境（`start/end_variable_environment`/`add_variable_declaration`）+ `factory().new_temp_variable()`（均 6c-3 既有）。未触碰 `internal/ast/*` 或 `internal/printer/*`。括号可选调用 this-capture 的 `SyntheticReferenceExpression` 是唯一需 AST 增长的剩余子集 → 单独 DEFER。
+
+## 6i worklog（per-scope 变量环境接线 — red→green 推进记录）
+
+> 本轮把 6c-3 已落地的 `EmitContext` 变量环境从「仅 SourceFile 顶层」扩到「每个函数式作用域」：emit-context 线程化现在也穿过函数体（函数声明/表达式、箭头体、类方法），每个体在 visit 时 `start_variable_environment` → 访问体语句 → `end_variable_environment` 把收集到的 hoisted `var` 合并进该体语句表（镜像 Go `EmitContext.VisitFunctionBody`）。temp-hoisting 路径（6c-3 指数 `**=` + 6h optionalchain 非简单 receiver）本就用 `add_variable_declaration` 写入**当前（最近）**作用域栈顶，故只需在遍历中**打开/关闭**这些作用域，温度就自然落到最近的函数体。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 91 unit + 19 doctest）。逐行为红→绿：
+
+**optionalchain**
+1. **`non_simple_receiver_inside_function_body_hoists_into_body`（tracer）**：`function f() { return g()?.b; }` → 恒等红（旧 DEFER：函数体内无 var-env，链原样留存）→ 在 ec-threaded `optional_chain_visit` 加 `FunctionDeclaration` + `ReturnStatement` 臂；`visit_function_declaration` 经 `visit_function_body`（`start_variable_environment` → 逐语句 `optional_chain_visit` → `end_variable_environment` 前置 hoisted `var` → 重建 block）重建函数 → `function f() { var _a; return (_a = g()) === null || _a === void 0 ? void 0 : _a.b; }`（body 单行：合成 `Block` 不携带 `Block.MultiLine`，沿用 6c-1 注记；**关键行为**：`var _a;` 落在 `f` 体内而非模块顶）→ 绿。
+2. **`temp_in_arrow_concise_body_wraps_into_block`（箭头简明体）**：`function f() { return () => g()?.b; }` → 恒等红 → 加 `ArrowFunction` 臂；`visit_function_body` 扩展非 block（简明表达式）分支：在 var-env 内降级表达式，若有 hoisted decl 则包成 `{ <decls>; return <expr>; }`（镜像 Go `VisitFunctionBody` 非 block 分支），否则保持简明 → `function f() { return () => { var _a; return (_a = g()) === null || _a === void 0 ? void 0 : _a.b; }; }`（外层 `f` 环境空，无泄漏）→ 绿。
+3. **`nested_function_bodies_hoist_into_their_own_scopes`（嵌套函数，直接绿/泛化）**：`function outer() { g()?.b; function inner() { return h()?.c; } }` → `visit_function_body` 逐语句递归 `optional_chain_visit` 已天然处理嵌套函数声明 → 直接绿；外/内各自 `_a`（printer 函数级 name-generation scope 重置 temp 计数），证明每 temp 落在**最近**作用域。
+4. **`temp_inside_function_expression_body_hoists_into_body`（函数表达式）**：`function f() { return function () { return g()?.b; }; }` → 恒等红 → 加 `FunctionExpression` 臂（`visit_function_expression` 复用 `visit_function_body`）→ 绿。
+5. **`temp_inside_method_body_hoists_into_method`（方法体）**：`class C { m() { return g()?.b; } }` → 恒等红（类体 arena-only，链未降级）→ 加 `ClassDeclaration` 臂（`visit_class_declaration` 线程化穿过 members）+ `MethodDeclaration` 臂（`visit_method_declaration` 复用 `visit_function_body`）→ `class C {\n    m() { var _a; return (_a = g()) === null || _a === void 0 ? void 0 : _a.b; }\n}` → 绿。
+
+**exponentiation（可达，同样接线）**
+6. **`property_assignment_inside_function_body_hoists_into_body`**：`function f() { a.x **= b; }` → 恒等红（arena-only 仅处理 `**`/标识符 `**=`，property `**=` 原样）→ 在 ec-threaded `exponentiation_visit` 加 `FunctionDeclaration` 臂 + `visit_function_body`（block-only，逐语句 `exponentiation_visit` → ExpressionStatement → `visit_binary_expression` property `**=` temp-hoist 落入 `f` 的 var-env）→ `function f() { var _a; (_a = a).x = Math.pow(_a.x, b); }` → 绿。
+
+**移除的 DEFER 守卫**：optionalchain/exponentiation 的「非顶层作用域 temp-hoist DEFER（无 var-env）」对**函数体直属语句**已解除——函数声明/表达式、箭头体、类方法现各自开 var-env。仍 DEFER 的更窄子集：链/`**=` 嵌套在**仍未线程化的位置**（控制流语句体 `if`/`for`/`while`、`switch` case、对象字面量方法简写、构造器/accessor 体；exponentiation 本 stage 仅线程化了函数声明，方法/函数表达式/箭头待后续）。
+
+**测试计数（6i 新增）**：`tsgo_transformers` +6 `#[test]`（optionalchain 5 + exponentiation 1），本轮无新 doctest。crate 合计 **97 unit + 19 doctest**（6h 基线 91+19）。
+
+### upstream（ast/printer）增长（6i）
+
+- **无**。per-scope 变量环境接线全部复用 6c-3 既有的 `EmitContext` 变量环境（`start_variable_environment`/`add_variable_declaration`/`end_variable_environment`，本就用作用域栈、写入栈顶）+ arena 既有节点构造器（`new_block`/`new_return_statement`/`new_function_declaration`/`new_function_expression`/`new_arrow_function`/`new_method_declaration`/`new_class_like`）+ printer 既有函数级 name-generation scope（temp 计数按作用域重置）。未触碰 `internal/ast/*` 或 `internal/printer/*`。
+
+## 6j worklog（destructuring 绑定展平器 `FlattenDestructuringBinding`，red→green 推进记录）
+
+> 本轮把根包 `destructuring.go` 的 **`FlattenDestructuringBinding`**（绑定模式展平器，`FlattenLevelAll`）逐行为移植到 `destructuring.rs`，复用 6c-3/6i 的 `EmitContext` 变量环境基建与既有 arena 构造器。无 checker/resolver 依赖（纯 AST 变换）。
+>
+> **驱动选型（divergence）**：Go 的 `FlattenDestructuringBinding` 由 ES2015 transformer 的变量声明降级调用；该 es2015 stage 在本仓未单独成文件移植。本轮新增 `new_destructuring_transformer`（root 包 `destructuring.rs`）作为**薄驱动**镜像 es2015 的变量声明降级（`var [a,b]=arr` → `var a=arr[0], b=arr[1]`），既给展平器一个可测的公开入口（与全部 estransforms 测试一致经 parse→transform→emit），又是 Go 调用 `FlattenDestructuringBinding` 的等价接线点。`flatten_destructuring_binding` 本身是 `pub fn`（对应 Go 导出的 `FlattenDestructuringBinding`），递归子节点访问硬编码为本模块的 `destructuring_visit`（Go 的 `tx.Visitor()` 等价物，可达子集内恒等）。
+>
+> **hoist 选型**：Go es2015 传 `hoistTempVariables = (变量语句是否 exported)`。驱动取**非 exported**路径（`hoist=false`，常见情形），与 tsc ES5 输出一致——非简单 initializer 的 temp 落为**同语句声明**（`var _a = f(), …`）而非经 var-env hoist 的 `var _a;`。var-env 仍在源文件边界 start/end（复用 6i 基建），承接 `hoist=true`（exported，DEFER）与尾随表达式路径（DEFER）的 temp；可达子集（hoist=false）下其收集为空。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 97 unit + 19 doctest）。逐行为红→绿：
+
+1. **tracer（`array_binding_decomposes_to_element_accesses`）**：`var [a, b] = arr;` → 恒等红（驱动初版对绑定模式声明不展平，verbatim `var [a, b] = arr;`）→ 接 `VariableStatement` 臂 + `try_lower_variable_statement`（重建声明列表，展平绑定模式声明 + 展开 `SyntaxList`）+ `flatten_destructuring_binding` + `Flattener`（`flatten_binding_or_assignment_element` / `flatten_array_binding_or_assignment_pattern` 非 rest 路径 / `ensure_identifier` / `emit_binding` / decl 构建）→ `var a = arr[0], b = arr[1];` → 绿。**证明绑定展平器经薄驱动端到端运行。**
+2. **`object_binding_decomposes_to_property_accesses`**：`var { a, b } = o;` → 红（`unimplemented!("object binding pattern")` panic）→ 实现 `flatten_object_binding_or_assignment_pattern`（`level < ObjectRest` 路径）+ `create_destructuring_property_access`（标识符键 → 属性访问）+ `try_get_property_name`（shorthand → target / rename → property_name）→ `var a = o.a, b = o.b;` → 绿。
+3. **defaults（`array_default_guards_with_void_zero` / `object_default_guards_with_void_zero`）**：`var [a = 1] = arr;` → 红（`unimplemented!("default values")`）→ 实现 `flatten_binding_or_assignment_element` 的 `(Some init, Some value)` 臂 + `create_default_value_check`（`ensure_identifier(value)` → `value === void 0 ? default : value`）→ `var _a = arr[0], a = _a === void 0 ? 1 : _a;`；`var { a = 1 } = o;` → `var _a = o.a, a = _a === void 0 ? 1 : _a;` → 绿。
+4. **nested（`nested_array_pattern_composes_element_accesses` / `nested_object_pattern_composes_property_accesses`，直接绿/泛化）**：`var [[a]] = x;` → `var a = x[0][0];`；`var { a: { b } } = o;` → `var b = o.a.b;`。嵌套绑定模式经 `flatten_binding_or_assignment_element` 递归到 `flatten_array/object` 已天然处理（target 取内层 pattern），无新代码 → 直接绿（验证递归泛化）。
+5. **array rest（`array_rest_lowers_to_slice`）**：`var [a, ...r] = arr;` → 红（`unimplemented!("array rest")`）→ 实现数组 rest 臂（`i == num-1` + rest indicator）+ `new_array_slice_call`（`array.slice(i)`）→ `var a = arr[0], r = arr.slice(1);` → 绿。对象 rest **不在本轮**：driver `declaration_has_object_rest` 跳过含对象 rest 的声明，留给 6g `objectrestspread` 的 `__rest` 路径（"集成/共享，不重复"）。
+6. **computed key（`computed_key_captures_object_then_key_into_temps`）**：`var { [k]: a } = o;` → 红（`unimplemented!("computed property keys")`）→ 实现 (a) `create_destructuring_property_access` 计算键臂（`ensure_identifier(visit(k))` → `value[_temp]`）+ (b) `flatten_destructuring_binding` 顶部**非字面量计算名特例**（`contains_non_literal_computed_name` → 先把 initializer 经 `ensure_identifier(_, reuse=false)` 捕获进 temp）+ `binding_assigns_to_name` / `update_variable_declaration_initializer` / `is_literal_expression`。语义关键：保 `o`→`k` 求值序 → `var _a = o, _b = k, a = _a[_b];` → 绿。
+7. **非简单 initializer（`non_simple_initializer_is_captured_in_a_temp_declaration`，直接绿/泛化）**：`var [a, b] = f();` → `var _a = f(), a = _a[0], b = _a[1];`。`ensure_identifier`（hoist=false，非标识符）的 `emit_binding` 路径（slice 3 已建）对顶层 receiver 复用 → 直接绿（验证 temp 落为同语句声明，与 tsc ES5 一致）。
+
+> 设计/divergence：(1) `pendingDecl` 仅承载 name/value（+ pending_expressions 占位）；Loc 不携带（合成节点 emit 不依赖，沿用 6g/6c-1 注记）。(2) `InlineExpressions` 逗号折叠仅 hoist=true / 尾随表达式路径需要，可达 hoist=false 子集不触发 → 本轮以 `debug_assert!(expressions.is_empty())` 守卫，折叠实现 DEFER。(3) AST 绑定谓词（`GetTargetOf…`/`GetElementsOf…`/`TryGetPropertyNameOf…`/`GetRestIndicatorOf…`/`IsDeclarationBindingElement`/`IsPropertyName`/`IsLiteralExpression`/`IsSimpleCopiableExpression`）作 `destructuring.rs` 私有 arena 读取器实现（镜像 6g），**未碰 `internal/ast/*`**。(4) `FlattenLevelObjectRest` 专属分支（数组 rest-containing element 的 per-temp、对象 kept-binding）以 `unreachable!` 占位（本轮 driver 仅 `FlattenLevelAll`，永不触达）。
+
+**测试计数（6j 新增）**：`tsgo_transformers` +9 `#[test]`（array binding 1 + object binding 1 + defaults 2 + nested 2 + array rest 1 + computed 1 + 非简单 init 1）+3 doctest（`FlattenLevel`、`new_destructuring_transformer`、`flatten_destructuring_binding`）。crate 合计 **106 unit + 22 doctest**（6i 基线 97+19）。
+
+### upstream（ast/printer）增长（6j）
+
+- **无**（6g/6h/6i 的 ZERO upstream growth 连续达成）。绑定展平全走 arena 既有构造器（`new_variable_declaration(_list)`/`new_variable_statement`/`new_syntax_list`/`new_element_access_expression`/`new_property_access_expression`/`new_call_expression`/`new_numeric_literal`/`new_identifier`/`new_binary_expression`/`new_conditional_expression`/`new_void_expression`/`new_token`/`add_flags`/`new_source_file`）+ 6c-3 的 `EmitContext` 变量环境（`start/add/end_variable_environment`）+ `factory().new_temp_variable()` + 6d-2 的 `read_emit_helpers`/`add_emit_helper`（源文件边界，本轮无 helper 请求）。未触碰 `internal/ast/*` 或 `internal/printer/*`。
+
+### 与 6g objectrestspread 的关系（对象 rest 共享，不重复）
+
+- 6g `objectrestspread.rs` 已在 **`VariableStatement` 级**直接落地对象 rest 绑定（`var { a, ...rest } = o` → `var { a } = o, rest = __rest(o, ["a"])`，复用 6d-2 `REST_HELPER`）。本轮 6j 的泛型 `flatten_destructuring_binding` driver **跳过**含对象 rest 的声明（`declaration_has_object_rest`），不重复实现；两 transform 在真实 emit 链中各司其职（objectrestspread 处理对象 rest @ `FlattenLevelObjectRest`，destructuring 处理数组/对象/嵌套/默认/数组-rest/计算键 @ `FlattenLevelAll`）。把对象 rest 也纳入泛型 flattener（共享 `objectrestspread::new_rest_helper`）= 6k。
+
+## 6k worklog（destructuring 赋值展平器 `FlattenDestructuringAssignment`，red→green 推进记录）
+
+> 本轮把根包 `destructuring.go` 的 **`FlattenDestructuringAssignment`**（赋值目标模式）逐行为移植到 `destructuring.rs`，**复用 6j 的同一 `Flattener`**——新增 `FlattenMode { Binding, Assignment }` 判别（Go 用一组函数指针回调 `emitBindingOrAssignment`/`createArray|ObjectBindingOrAssignmentPattern`，Rust 改为单判别 + 各回调点分支），并把元素读取器（target/initializer/property-name/rest-indicator/elements）从绑定子集扩到「绑定 ∪ 赋值」全集（对象/数组字面量、property/shorthand/spread assignment、`[a=1]` 赋值元素）。无 checker/resolver 依赖（纯 AST 变换）。
+>
+> **驱动选型 / 接线点（divergence）**：Go 的 `FlattenDestructuringAssignment` 由 es2015（数组/对象通用降级）与 objectrestspread（对象 rest @ `FlattenLevelObjectRest`）从二元 `=` visitor 调用。Rust 侧：
+> - **`FlattenLevelAll`（数组/对象/嵌套/默认/数组-rest）经根包 driver** `new_destructuring_transformer` 的新增 `ExpressionStatement` 臂接入（`try_lower_expression_statement`：skip-parens → `is_destructuring_assignment` → flatten，`needs_value=false`）——与 6j 绑定驱动同源（es2015 通用降级在本仓未单独成文件）。
+> - **`FlattenLevelObjectRest`（对象 rest）经 objectrestspread `visitBinaryExpression` 接入**（新增 `ExpressionStatement` 臂 + `reachable_object_rest_assignment` gate → 根包 `flatten_destructuring_assignment` @ `ObjectRest`），**统一走泛型 flattener**，对象 rest 臂复用 objectrestspread 的 `new_rest_helper`（提为 `pub(crate)`）请求/构造 `__rest`——兑现 6j「把对象 rest 纳入泛型 flattener、共享 `__rest`」的建议，不再走 6g 的对象-rest 专路（6g 的变量声明对象 rest 路径保持不变）。
+>
+> **hoist 选型**：赋值模式恒 `hoistTempVariables = true`（Go 同），temp 经 var-env 落为前置 `var _a;`（数组非简单 value / 默认值的 temp）。可达对象-rest 子集 gate 要求 value 为 simple-copiable（无 temp，statement 路径无 var-env 承接），与 6g 的「非简单 init 留 verbatim」同纪律。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 106 unit + 22 doctest）。逐行为红→绿（slices 2–5 在 slice 1 的赋值-mode 接线 + 6j 既有对象/默认/嵌套/rest 机器上**直接绿/泛化**，与 6j 的 nested 同纪律）：
+
+1. **tracer（`array_assignment_decomposes_to_element_access_assignments`）**：`[a, b] = arr;` → 恒等红（driver 对 `ExpressionStatement` 不展平，verbatim）→ 接 `ExpressionStatement` 臂 + `try_lower_expression_statement` + `flatten_destructuring_assignment`（`FlattenMode::Assignment`）+ `flatten_destructuring_assignment` 方法（empty-literal 剥壳循环 + value visit + assigns-to-name/computed 守卫 + `flatten_binding_or_assignment_element(skip_initializer=true)`）+ `emit_binding_or_assignment`→`emit_assignment`（`visit(target) = value`）+ `inline_expressions`（reduceLeft comma 折叠）+ `build_assignment_result`（空 → `NewOmittedExpression`）+ 元素读取器赋值-全集扩展（`get_target/initializer/rest_indicator/elements_of_pattern`、`try_get_property_name` 加 PropertyAssignment）+ `is_object/array_binding_pattern` 纳入字面量 + 模块级 `is_destructuring_assignment`/`is_assignment_expression_equals`/`is_empty_array|object_literal`/`skip_parentheses` → `a = arr[0], b = arr[1];` → 绿。**证明赋值展平器经驱动端到端运行，且复用 6j `Flattener`。**
+   - 紧接 `array_assignment_non_simple_value_hoists_temp`：`[a, b] = f();` → `var _a;\n_a = f(), a = _a[0], b = _a[1];`（`ensureIdentifier` hoist=true 把 capture 折进 comma + var-env 前置 `var _a;`）→ 红→绿（hoist 路径）。
+2. **object（`object_assignment_decomposes_to_property_access_assignments`）**：`({ a, b } = o);` → `a = o.a, b = o.b;`。对象路径 `level<ObjectRest` + property-access 已由 6j 实现，shorthand 经 `get_target`/`try_get_property_name` 赋值扩展支撑 → 直接绿；statement 前导 `(` 括号在降级后丢弃（不再需要）。
+3. **default（`array_assignment_default_guards_with_void_zero`）**：`[a = 1] = arr;` → `var _a;\n_a = arr[0], a = _a === void 0 ? 1 : _a;`。`get_initializer_of_element` 赋值-元素臂（`[a=1]` 二元 `=` → right）+ `create_default_value_check`（hoist=true）→ 直接绿。
+4. **nested（`nested_array_assignment_composes_element_accesses` / `nested_object_assignment_composes_property_accesses`）**：`[[a]] = x;` → `a = x[0][0];`；`({ a: { b } } = o);` → `b = o.a.b;`。递归经 `flatten_binding_or_assignment_element`（target 取内层字面量模式）→ 直接绿（泛化）。
+5. **array rest（`array_assignment_rest_lowers_to_slice`）**：`[a, ...r] = arr;` → `a = arr[0], r = arr.slice(1);`。`get_rest_indicator` 的 `SpreadElement` 臂 + 既有 `new_array_slice_call` → 直接绿。
+6. **object rest（`object_rest_assignment_keeps_bindings_and_lowers_rest` / `..._lists_all_kept_keys`）**：`({ a, ...r } = o);` → 恒等红（旧路径误把 LHS `{a,...r}` 当对象 spread 降为 `(Object.assign({ a }, r) = o)`，暴露潜在 bug）→ 在 objectrestspread 加 `ExpressionStatement` 臂 + `reachable_object_rest_assignment` gate（左 = 对象字面量、末 = `...<标识符>`、leading = 简单 shorthand 无默认、value simple-copiable）→ 根包 `flatten_destructuring_assignment` @ `FlattenLevelObjectRest`；在 `flatten_object_binding_or_assignment_pattern` 落地 `level >= ObjectRest` 路径（kept-binding 累积 + `flush_kept_object_elements` 经 `create_object_pattern`（assignment → `ObjectLiteralExpression`）emit `{ a } = o` + `new_rest_helper_call` 复用 `objectrestspread::new_rest_helper` 排除 leading 键）→ `({ a } = o, r = __rest(o, ["a"]));`（prologue `var __rest = …;`，外层括号保留）→ 绿。**对象 rest 经泛型 flattener 统一、共享 `__rest`。**
+
+> 设计/divergence：(1) Go 的 `f.tx.Visitor().VisitNode`（当前 transformer visitor）在 Rust flattener 中恒为 `destructuring_visit`（根 destructuring 的 visit）；可达子集内（简单 value/kept 元素/rest target）这些 visit 皆恒等，故无影响（非简单 value 的对象 spread 降级被 gate 排除 → verbatim）。(2) `needs_value=true` 值返回路径（尾随 value 折进 comma）已按 Go 写入入口但**本轮接线只传 `false`**（statement 上下文），值位接线 DEFER。(3) `CreateAssignmentCallback`（CJS export/namespace 成员赋值）DEFER（`emit_assignment` 走无回调分支）。(4) `IsLeftHandSideExpression` 守卫在 `is_destructuring_assignment`/`is_assignment_expression_equals` 中被「对象/数组字面量左 + `=` 算子」的种类检查 subsumed（`=` 的左操作数恒为合法赋值目标）。(5) `level >= ObjectRest` 对象路径的「decompose 非 kept 元素 + `computedTempVariables`」分支以 `unreachable!` 占位（gate 保证只有 kept 简单元素到达；计算键/嵌套 rest DEFER）。
+
+**测试计数（6k 新增）**：`tsgo_transformers` +9 `#[test]`（destructuring 赋值 7：array 1 + 非简单 value 1 + object 1 + default 1 + nested 2 + array-rest 1；objectrestspread 对象 rest 赋值 2）+1 doctest（`flatten_destructuring_assignment`）。crate 合计 **115 unit + 23 doctest**（6j 基线 106+22）。
+
+### upstream（ast/printer）增长（6k）
+
+- **无**（6g/6h/6i/6j 的 ZERO upstream growth 连续达成）。赋值展平 + 对象-rest 接线全走 arena 既有构造器（`new_binary_expression`(comma/`=`)/`new_omitted_expression`/`new_object_literal_expression`/`new_array_literal_expression`/`new_parenthesized_expression`/`new_expression_statement`/`new_string_literal`/`new_element_access_expression`/`new_property_access_expression`/`new_call_expression`/`new_conditional_expression`/`new_void_expression`/`new_token`/`new_binding_pattern`/`add_flags`）+ 6c-3 的 `EmitContext` 变量环境 + `factory().new_temp_variable()` + 6d-2 的 `request_emit_helper`/`read_emit_helpers`/`add_emit_helper`（`REST_HELPER` 早在 6d-2 定义）。未触碰 `internal/ast/*` 或 `internal/printer/*`。
+
+## 6m worklog（async 深化 — async 函数表达式 / 方法 / 箭头，red→green 推进记录）
+
+> 本轮把 6d-3 的 `__awaiter` 降级从**顶层 async 函数声明**扩到 **async 函数表达式 / async 方法 / async 箭头**。关键基建：把 6d-3 仅「SourceFile 顶层 + 顶层函数声明」的 visit 改为经 **ec-threaded 泛型 `VisitEachChild`**（`visit_each_child_ec`）递归穿过容器节点——镜像 Go `asyncTransformer.visit` 的 `default: tx.Visitor().VisitEachChild(node)` 默认臂。由于 arena 的 `visit_each_child` 闭包签名是 `FnMut(&mut NodeArena, NodeId)`（拿不到 `&mut EmitContext`，而 helper 请求在 ec 上），实现采用 **map-based 子节点替换**：先 `for_each_child` 收集直接子节点 → drop arena 借用 → 逐子节点 `async_visit(ec, child)`（可请求 `__awaiter`）建替换表 → `visit_each_child` 用表查（无变更子节点回退原节点，map 空时整节点原样返回保 source 位置）。`for_each_child` 是 `visit_each_child` 子节点集的超集，故查表恒成功；漏命中只会少降级（DEFER），不会出错。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 115 unit + 23 doctest）。逐行为红→绿：
+
+1. **tracer（`async_function_expression_lowers_to_awaiter_wrapper`）**：`const f = async function () { await x; };` → 恒等红（函数表达式藏在 `const f = …` 的变量声明里，旧 `_` 臂用 `|_, c| c` 不递归，原样留存）→ 把 `_` 臂改为 `visit_each_child_ec`（穿过 VariableStatement→DeclList→Decl 到达函数表达式）+ 加 `FunctionExpression if is_async_function_expression` 臂 + `visit_async_function_expression`（剥 async modifier，复用既有 `build_awaiter_wrapper_body` 块包装，首参 `this`）→ `const f = function () { return __awaiter(this, void 0, void 0, function* () { yield x; }); };`（prologue `__awaiter` 定义）→ 绿。**证明 ec-threaded `VisitEachChild` 经容器节点到达嵌套 async 函数并端到端降级。**
+2. **`async_method_lowers_to_awaiter_wrapper`（async 方法）**：`class C { async m() { await x; } }` → 恒等红（类体经 `visit_each_child_ec` 递归，但无 MethodDeclaration async 臂）→ 加 `MethodDeclaration if is_async_method` 臂 + `visit_async_method_declaration`（剥 async modifier，复用 `build_awaiter_wrapper_body` 块包装，首参 `this`；ClassDeclaration 由泛型 `visit_each_child_ec` 自然穿过到达方法）→ `class C {\n    m() { return __awaiter(this, void 0, void 0, function* () { yield x; }); }\n}` → 绿。
+3. **`async_arrow_lowers_to_awaiter_wrapper_with_lexical_this`（async 箭头）**：`const f = async () => { await x; };` → 恒等红 → 把 `build_awaiter_wrapper_body` 抽出 `build_awaiter_call(ec, body, has_lexical_this)`（参数化首参：`true`→`this`、`false`→`void 0`，对标 Go `NewAwaiterHelper`），`build_awaiter_wrapper_body` 调 `build_awaiter_call(_, _, true)` 再包 `{ return … }`（声明/表达式/方法保持绿）+ 加 `ArrowFunction if is_async_arrow` 臂 + `visit_async_arrow_function`（剥 async modifier，**body 直接为 `build_awaiter_call(_, _, false)` 的简明体，不包块**）→ `const f = () => __awaiter(void 0, void 0, void 0, function* () { yield x; });` → 绿。
+
+> **lexical-this 处理（对 Go 确认）**：Go `transformAsyncFunctionBody` 用 `hasLexicalThis := tx.inHasLexicalThisContext()` 决定 `NewAwaiterHelper` 首参（`true`→`this`、`false`→`void 0`）。非箭头函数（声明/表达式/方法/accessor/constructor）经 `doWithContext(…|asyncContextHasLexicalThis, …)` **置位** lexical-this → 首参 `this`；箭头经 `doWithContext(asyncContextNonTopLevel, …)` **不置位**，继承外层（顶层 SourceFile 初始化为 `false`）→ 首参 `void 0`。本轮可达子集（顶层箭头）首参恒 `void 0`，与 tsc `--target ES2016-` 输出一致。`_this` 捕获是 ES2015 箭头 `this`-capture 关注点（非本 async stage），可达子集不触发；`asyncContextHasLexicalThis` 跨嵌套作用域线程化（async 方法内的箭头应继承 `this`）DEFER。
+>
+> 设计/divergence：(1) Go 在每个 function-like 臂存/恢复 `lexicalArguments`/super 状态 + 经 `transformAsyncFunctionParameterList`/`transformAsyncFunctionBodyWorker` 处理 super/`arguments`/参数；本轮可达子集（无 super、简单参数列表、无 lexical-`arguments` 使用）下这些均为恒等，故省略，留 DEFER。(2) async 生成器守卫沿用 6d-3（`is_async_*` 查 `asterisk_token.is_none()`，箭头无 asterisk 字段故仅查 async modifier）。(3) 方法重建传 `postfix_token` 透传、asterisk `None`（async 方法非生成器），对标 Go `UpdateMethodDeclaration` 的 `nil postfixToken`——本轮 reachable `m()` 的 postfix 恒 `None`。
+
+**测试计数（6m 新增）**：`tsgo_transformers` +3 `#[test]`（async 函数表达式 1 + 方法 1 + 箭头 1），本轮无新 doctest（`new_async_transformer` 已有 doctest）。crate 合计 **118 unit + 23 doctest**（6k 基线 115+23）。
+
+### upstream（ast/printer）增长（6m）
+
+- **无**（6g/6h/6i/6j/6k 的 ZERO upstream growth 连续达成）。async 函数表达式/方法/箭头降级全走 arena 既有构造器（`new_function_expression`/`new_method_declaration`/`new_arrow_function`/`new_function_declaration`/`new_block`/`new_return_statement`/`new_yield_expression`/`new_call_expression`/`new_keyword_expression`/`new_numeric_literal`/`new_void_expression`/`new_token`）+ `for_each_child`/`visit_each_child`（既有）+ 6d-2 的 `request_emit_helper`/`read_emit_helpers`/`add_emit_helper`/`new_unscoped_helper_name`（`AWAITER_HELPER` 早在 6d-2 定义）。未触碰 `internal/ast/*` 或 `internal/printer/*`。
+
+## 6n worklog（runtimesyntax — enum → IIFE / namespace → IIFE，red→green 推进记录）
+
+> 本轮移植 `tstransforms/runtimesyntax.go` 的两条**互相独立**的运行时降级（各自 tracer + 增量切片），全程 checker-free（可达子集）。结构镜像 `async.rs` 的 ec-threaded visit（`SourceFile`/容器节点经 `visit_each_child_ec` 下钻，enum/module 在 ec 层降级，body 多行经 `MULTI_LINE` emit flag）。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 118 unit + 23 doctest）。
+
+**Item 1 — enum → IIFE（4 切片）**
+1. **tracer（`auto_numbered_enum_lowers_to_iife`）**：`enum E { A, B }` → 恒等 stub 红（verbatim `enum E {\n    A,\n    B\n}`）→ 实现 `visit_enum_declaration` 全 IIFE 骨架（`var E;` + `(function (E) { … })(E || (E = {}))` 经 `wrap_in_iife`）+ `transform_enum_member`（自动编号 + 数字反向映射 `E[E["A"] = 0] = "A";`）+ `enum_qualified_element`/`expression_for_property_name`/`make_var_statement`/`make_parameter`/`make_iife_argument`/`assignment` → `var E;\n(function (E) {\n    E[E["A"] = 0] = "A";\n    E[E["B"] = 1] = "B";\n})(E || (E = {}));` → 绿。**证明 enum 运行时降级经 6a 驱动端到端运行，且 `(E = {})` 括号与 IIFE body 多行均由 printer 正确产出。**
+2. **`explicit_numeric_initializer_sets_value_and_continues_autonumber`**：`enum E { A = 5, B }` → 红（slice-1 忽略初值，A 仍为 0）→ `transform_enum_member` 读 `NumericLiteral` 初值（句法 parse 设 `auto_value = n+1`）→ `E[E["A"] = 5] = "A";\n    E[E["B"] = 6] = "B";` → 绿。
+3. **`string_initialized_member_omits_reverse_mapping`**：`enum E { X = "v" }` → 红（slice-2 对字符串初值仍走自动编号 + 反向映射）→ 加 `StringLiteral` 臂（值 = 字符串字面量，`use_explicit_reverse_mapping=false`）+ 反向映射条件化 → `E["X"] = "v";` → 绿。
+4. **`const_enum_is_omitted`**：`const enum E { A }` → 红（被降级为运行时 IIFE）→ 加 `shouldEmitEnumDeclaration` 守卫（const 修饰符 + `!preserve_const_enums` → `NotEmittedStatement`）→ `（空）` → 绿。const enum 成员引用 inlining 仍 DEFER（inliners stage，blocked-by checker 常量求值）。
+
+**Item 2 — namespace → IIFE（2 切片）**
+5. **tracer（`instantiated_namespace_lowers_to_iife`）**：`namespace N { export const x = 1; }` → 红（verbatim namespace）→ 加 `ModuleDeclaration` 臂 + `visit_module_declaration`（复用 `wrap_in_iife`）+ `transform_module_body`（ModuleBlock 语句逐条；exported `VariableStatement` → `lower_exported_variable_statement`）→ exported `const x = 1` 直建 `N.x = init` 赋值语句（`PropertyAccess(N, x) = init`，**checker-free，替代 Go 经 resolver 重写标识符 `x`→`N.x` 的路径**）→ `var N;\n(function (N) {\n    N.x = 1;\n})(N || (N = {}));` → 绿。
+6. **`uninstantiated_namespace_is_omitted`**：先观察 RED（临时移除 slice-5 误前置的 `is_instantiated_module` 守卫；按 tdd.md「回到上一个绿点重来」纠正）：`namespace N { interface I {} }` → 红（type-only namespace 被误降级，body 含 `interface I`）→ 恢复 `shouldEmitModuleDeclaration` 守卫（句法 `is_instantiated_module`：ModuleBlock 任一非 `interface`/`type` 语句 → 实例化）→ `（空）` → 绿。
+
+**测试计数（6n 新增）**：`tsgo_transformers` +6 `#[test]`（enum 4 + namespace 2）+1 doctest（`new_runtime_syntax_transformer`）。crate 合计 **124 unit + 24 doctest**（6m 基线 118 + 23）。
+
+### upstream（ast/printer）增长（6n）
+
+- **printer（additive，唯一一处增长）**：`internal/printer/printer.rs` 两处把 Go `Block.MultiLine` 字段（Rust AST 未携带，原为 `if false` TODO 占位）改读 `MULTI_LINE` emit flag——`emit_block`（多行格式选择）与 `should_emit_block_function_body_on_single_line`（函数体多行守卫）。空表/未置 flag 时行为不变（既有 175 printer unit 测试无回归）；transformer 经 `set_emit_flags(body, EmitFlags::MULTI_LINE)` 触发 IIFE body 多行。`should_emit_on_multiple_lines` 既已存在，仅新增两处调用点。
+- **ast**：**无**。enum/namespace 降级全走 arena 既有构造器（`new_variable_statement`/`new_variable_declaration(_list)`/`new_function_expression`/`new_parameter_declaration`/`new_parenthesized_expression`/`new_call_expression`/`new_expression_statement`/`new_binary_expression`/`new_element_access_expression`/`new_property_access_expression`/`new_object_literal_expression`/`new_numeric_literal`/`new_string_literal`/`new_identifier`/`new_token`/`new_syntax_list`/`new_not_emitted_statement`/`new_block`）+ `for_each_child`/`visit_each_child`。
+- **divergences（checker-free 可达子集）**：(1) enum 成员值句法求值（自动编号 + 数字/字符串字面量初值）替代 checker `GetEnumMemberValue`；非字面量初值常量折叠 DEFER。(2) IIFE 容器/参数名用声明名文本替代 `NewGeneratedNameForNode`（顶层、非 merged、非 exported 子集等价）。(3) namespace exported 成员直建 `N.x = init` 替代 Go 经 binder `ReferenceResolver` 重写标识符的路径（reachable 子集输出等价）。(4) `is_instantiated_module` 为 `getModuleInstanceState` 的句法子集（type-only = `interface`/`type`；const-enum-only / import-export alias-target 分析 DEFER）。
+
+## 6o worklog（classfields 深化 — ClassExpression 实例字段，red→green 推进记录）
+
+> 本轮深化 `estransforms/classfields.go` 可达面。逐 stage 评估剩余 classfields 切片（static 边缘、accessor、私有方法、class-expr）后，确认 **ClassExpression 实例字段** 是唯一 checker-free 且无新基建依赖的干净可达切片：static 字段已在 6c-3 完整覆盖（多 static / static+instance / 派生类 static 均已工作，无遗留 RED）；`accessor` 字段需 emit-context name generator 生成 backing 私有名 + 二遍 result visitor，私有方法需 `WeakSet` brand-check 基建——两者均 DEFER（blocked-by 见下）。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 124 unit + 24 doctest）。
+
+**ClassExpression 实例字段（2 切片）**
+1. **tracer（`class_expression_instance_field_moves_to_constructor`）**：`const C = class { x = 1 };` → 恒等红（`class_fields_visit` 仅判 `Kind::ClassDeclaration`，class-expr 字段未降级，verbatim `const C = class {\n    x = 1;\n};`）→ 实现：`class_fields_visit` 命中 `ClassDeclaration | ClassExpression` 均走 `try_lower_simple_class`；后者 `match` 同时接 `NodeData::ClassDeclaration(d) | ClassExpression(d)`、捕获 `kind`、用 `new_class_like(kind, …)` 按种类重建 → `const C = class {\n    constructor() { this.x = 1; }\n};` → 绿。**纯实例字段降级结果为单节点（无 hoist），在表达式位安全。**
+2. **guard（`class_expression_with_static_field_is_left_unchanged`）**：`const C = class D { static x = 1 };`（**具名**类表达式，避免匿名类经 `name?` 提前 bail）→ 红（static 字段产 `SyntaxList[class, D.x = 1]`，printer 在表达式位 panic `emit_expression_node: unhandled kind SyntaxList`）→ 在 `try_lower_simple_class` 收尾分支加守卫：`kind == Kind::ClassExpression` 且需 hoist（`pre_statements`/`static_assignments` 非空 → 本应产 `SyntaxList`）时返回 `None`，整类表达式保持不变 → `const C = class D {\n    static x = 1;\n};` → 绿。**对应 Go `visitClassExpression` 的 `pendingExpressions`/temp-wrapper（IIFE/逗号序列）分支——未移植，故延后。**
+
+**测试计数（6o 新增）**：`tsgo_transformers` +2 `#[test]`（class-expr 实例字段 1 + static guard 1），本轮无新 doctest（`new_class_fields_transformer` 已有 doctest）。crate 合计 **126 unit + 24 doctest**（6n 基线 124 + 24）。
+
+### upstream（ast/printer）增长（6o）
+
+- **无**。ClassExpression 降级复用既有 `new_class_like`（已支持 `Kind::ClassExpression` 分派 `NodeData::ClassExpression`）+ 既有构造器插入逻辑 + `visit_each_child` 默认递归。未触碰 `internal/ast/*` 或 `internal/printer/*`。
+
+### DEFER（本轮确认的 blocked-by）
+
+- **`accessor` 自动访问器**（`accessor x = 1` → 合成 `#x` backing 私有字段 + get/set 重定向器）：blocked-by emit-context **name generator**（`NewTempVariable`/`NewGeneratedNameForNode` 生成 backing 私有名）+ Go 的 `accessorFieldResultVisitor` **二遍 result visitor**（均未移植）。
+- **私有方法/accessor**（`#m() {}` → `WeakSet` brand-check + lowered function）：blocked-by `WeakSet` brand 基建（`_C_instances = new WeakSet()` + 构造器 `.add(this)` + 访问处 brand check）+ name generator；当前 `build_private_env` 见私有方法/accessor 即返回 `None` 整类延后（守卫已就位）。
+- **私有 static 字段**、**named-helper 私有形态** `__classPrivateFieldGet/Set`（需 helper-library import emit）。
+- **ClassExpression 语句 hoist**（6o 已落地纯实例字段子集）：static/私有/计算字段在表达式位需 IIFE / 逗号序列 + temp 包裹（Go `visitClassExpression` 的 `pendingExpressions` 分支），需 emit-context name generator + 变量声明 hoist 接线。
+- **`--target` / `useDefineForClassFields` 门控**：需 compilerOptions + checker。
+
+## 6p note（printer name-generator 上游解锁 — 非 transformers 代码改动）
+
+> 本轮（6p）是 **transformers 链上游基建轮**：完成 `tsgo_printer` emit-context 的 **node-based name generator**（`GenerateNameForNode`），**未改动 `internal/transformers/**`**（transformers 测试计数保持 6o 的 126 unit + 24 doctest）。记于此是为说明 classfields DEFER 列表的解锁状态。
+
+**printer 侧 upstream 增长（additive，全部在 `tsgo_printer`）**：
+- `EmitContext`：`get_node_for_generated_name`(+worker)。
+- `NodeFactory`：`new_generated_name_for_node(_ex)` / `new_generated_private_name_for_node(_ex)`。
+- `NameGenerator`：`generate_name` 的 `is_node()` 分派（此前 `todo!()`）+ node-id 缓存 + `generate_name_for_node(_cached)` kind switch（Identifier/Function-Class-decl/ExportAssignment/ClassExpression/Method-Accessor/ComputedPropertyName/default）。详见 `phase-4-checker/printer/impl.md` 的「Round 6p worklog」。
+- printer 既有 `get_text_of_node` → `name_generator.generate_name` 接线早已存在，故 transform 造的 `new_generated_name_for_node`/`new_temp_variable` 标识符在 emit 时自动 materialize 成唯一名。
+
+**对 classfields DEFER 的影响（现已可在后续 transformers 轮消费）**：
+- `accessor` 自动访问器：backing 私有名可经 `new_generated_private_name_for_node`（仍需 Go 的 `accessorFieldResultVisitor` 二遍 result visitor）。→ **✅ 6q 已消费**（ES2022-native 形态，backing 字段保留为成员，不跑二遍 result visitor 的 WeakMap 降级；见下 6q worklog）。
+- 私有方法/accessor（`WeakSet` brand）：brand 名 `_C_instances` 可经 name generator（仍需 `WeakSet` brand-check 基建）。
+- **ClassExpression 语句 hoist**：class-expr 在表达式位的 IIFE/逗号序列包裹所需的 temp 名可经 `new_temp_variable`（仍需 `pendingExpressions`/temp-wrapper 接线）。
+- 当前 classfields 的确定性 `_C_x`/`_a` 命名（理论碰撞）可改走 name generator 获得真正唯一名。
+
+> 即：6p 提供"生成确定性唯一名"的能力；把它**应用到** classfields 各形态的 lowering（accessor backing / 私有方法 brand / class-expr hoist）是**下一个 transformers 轮**的工作（本轮不动 transformers 代码，避免半成品）。
+
+## 6q worklog（classfields 深化 — `accessor` 自动访问器，消费 6p generated private name，red→green 推进记录）
+
+> 本轮把 6p 的 node-based generated private name 生成能力**应用到** classfields 的 `accessor` 自动访问器降级（DEFER 列表里最可达的一项）。Go ground truth：`transformAutoAccessor`（`classfields.go:833`）合成 backing 私有字段 + get/set 重定向器，三者经 `NewGeneratedPrivateNameForNodeEx(node.Name(), {Suffix:"_accessor_storage"})` 取**同一**生成私有名（name generator 按解析后的源节点 id 缓存，故三处 emit 同名）。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 126 unit + 24 doctest）。
+
+**关键可达性裁剪（落地 ES2022-native 形态）**：Go `transformAutoAccessor` 末尾把 `[backingField, getter, setter]` 再过一遍 `accessorFieldResultVisitor`——在下级 target（`shouldTransformPrivateElements` 开）会把 backing 私有字段进一步降级成 WeakMap/`__classPrivateFieldGet`。但本端口的既有私有字段降级是**文本驱动**的直接 WeakMap 形态（`_C_<text>` brand + 文本匹配），而 6p 生成私有名在 transform 时**文本为空/占位**（仅 emit 时由 name generator materialize），二者不兼容。故本轮落地 **`target: ES2022`（私有元素 native、auto-accessor 始终降级）** 这个忠实子集：backing 私有字段保留为类成员，**不**再跑二遍 WeakMap 降级。该形态与 TS `target=ES2022, useDefineForClassFields=true` 输出逐字一致。
+
+**ec 线程化（取 `EmitContext::factory()`）**：既有 `class_fields_visit` 仅持 `&mut NodeArena`，无法调 name generator。新增 ec-threaded 入口 `class_fields_visit_ec` + `visit_each_child_ec`（镜像 `async.rs` 的 map-based 子节点替换），穿过非类节点到达类节点；命中类时若含 `accessor` 成员 → `try_lower_auto_accessor_class(ec, …)`（可取 `ec.factory().new_generated_private_name_for_node_ex`），否则回落既有 arena-only `try_lower_simple_class`。
+
+**红→绿切片（逐行为）**：
+1. **tracer（`instance_auto_accessor_lowers_to_backing_field_and_redirectors`）**：`class C { accessor x = 1; }` → 红（既有代码把 `accessor x` 误当普通实例字段，产 `class C {\n    constructor() { this.x = 1; }\n}`，丢失访问器语义）→ 实现 `class_has_auto_accessor` 检测 + `try_lower_auto_accessor_class`/`expand_auto_accessor`（backing 私有名经 6p `new_generated_private_name_for_node_ex({suffix:"_accessor_storage"})`，三处引用同一 `x` 名节点 → 同名）+ `build_accessor_get_redirector`（`get x() { return this.#x_accessor_storage; }`）/`build_accessor_set_redirector`（`set x(value) { this.#x_accessor_storage = value; }`）→ `class C {\n    #x_accessor_storage = 1;\n    get x() { return this.#x_accessor_storage; }\n    set x(value) { this.#x_accessor_storage = value; }\n}` → 绿。**6p 生成私有名在 emit 时 materialize 成 `#x_accessor_storage`，三处一致。**
+2. **`static_auto_accessor_keeps_static_modifier`（genuine 扩展，需新代码）**：`class C { static accessor x = 1; }` → 红（slice-1 仅接 `modifier_flags == ACCESSOR`，static 整类不变）→ 放宽校验为 `modifier_flags ⊆ {ACCESSOR, STATIC}` + `strip_accessor_modifier`（经 `extract_modifiers(…, ModifierFlags::STATIC)` 保留 `static`、丢 `accessor`，空表归一为 `None`）→ backing 字段/get/set 均带 `static`，receiver 仍用 `this`（static 成员内 `this` 即类对象）→ `class C {\n    static #x_accessor_storage = 1;\n    static get x() { return this.#x_accessor_storage; }\n    static set x(value) { this.#x_accessor_storage = value; }\n}` → 绿。
+3. **coverage（`class_expression_auto_accessor_lowers_in_place`、`auto_accessor_without_initializer`）**：统一的 `try_lower_auto_accessor_class` 同时接 `NodeData::ClassDeclaration | ClassExpression`（`new_class_like(kind, …)` 按种类重建），且 initializer 为 `Option` 直透 → 两形态在 slice-1/2 实现下即绿（非独立 RED，作为可达面表征测试锁定：class-expr `const C = class { accessor x = 1 };`、无初值 `accessor x;`）。
+
+**DEFER 守卫（保证不误降级）**：含 `accessor` 的类若该 accessor 形态不支持（计算/私有/字符串名、装饰器、可见性/readonly 修饰），`expand_auto_accessor` 返回 `None` → `try_lower_auto_accessor_class` 返回 `None` → 整类**保持不变**（不回落 `try_lower_simple_class` 以免按普通字段误降级）；混入需降级的普通/static/私有字段或构造器的 accessor 类同样整类延后（`PropertyDeclaration`/`Constructor` 邻居 → `None`）。
+
+**测试计数（6q 新增）**：`tsgo_transformers` +4 `#[test]`（instance tracer 1 + static 1 + class-expr coverage 1 + no-init coverage 1），本轮无新 doctest。crate 合计 **130 unit + 24 doctest**（6o/6p 基线 126 + 24）。
+
+### upstream（ast/printer）增长（6q）
+
+- **无**。accessor 降级全走 arena 既有构造器（`new_property_declaration`/`new_accessor_declaration`/`new_parameter_declaration`/`new_property_access_expression`/`new_return_statement`/`new_block`/`new_binary_expression`/`new_expression_statement`/`new_keyword_expression`/`new_identifier`/`new_token`/`new_class_like`）+ 既有 `for_each_child`/`visit_each_child` + **6p 既有** printer `EmitContext::factory().new_generated_private_name_for_node_ex` / name generator（无新增 printer API）。未触碰 `internal/ast/*` 或 `internal/printer/*`。
+
+### DEFER（本轮确认的 blocked-by，accessor 维度）
+
+- **accessor 的 WeakMap / 下级 target 形态**：Go 二遍 `accessorFieldResultVisitor` 把 backing 私有字段再降级为 WeakMap/`__classPrivateFieldGet`。blocked-by：本端口的私有字段降级是文本驱动直接 WeakMap，与 6p 生成私有名（transform 时空文本）不兼容；需让 WeakMap brand 命名也走 name generator（或移植 named-helper 形态 + target 门控）。
+- **计算名 / 装饰 / 可见性修饰 / 混入其他需降级成员的 accessor 类**：需计算名 cache（`findComputedPropertyNameCacheAssignment` + temp）/ 装饰器 / 与构造器插入族协同 —— 守卫已就位（不支持形态整类延后）。
+- 其余 classfields DEFER（私有方法/accessor WeakSet、私有 static、class-expr 语句 hoist、参数属性、门控）同 6o 列表不变。
+
+## 6r worklog（classfields 深化 — class-expression 语句 hoist（static 字段），消费变量环境 + 6p temp 生成器，red→green 推进记录）
+
+> 本轮移除 6o 的「class-expression 含 static 字段→保持不变」守卫的**可达子集**，把表达式位含 static 字段的类表达式降级为 **逗号序列 + temp** 包裹（Go `visitClassExpressionInNewClassLexicalEnvironment` 的 `hasTransformableStatics` 分支：`InlineExpressions([temp = class, static assignments..., temp])`）。Go ground truth：`classfields.go:2006`。temp 经 `NewTempVariableEx` 分配并 `AddVariableDeclaration(temp)` hoist 成 `var _a;`。
+>
+> 先确认基线绿（`cargo test -p tsgo_transformers` = 130 unit + 24 doctest）。
+
+**复用基建**：(1) **6c-3/6i 变量环境**：`class_fields_visit_ec` 新增 `SourceFile` 臂 `visit_source_file_ec`（`start_variable_environment` → 逐语句递归 → `end_variable_environment` 把 hoist 的 `var _a;` 前置），与 `exponentiation.rs` 的 `visit_source_file` 同形；(2) **6p temp 生成器**：`ec.factory().new_temp_variable()` 产 `_a`（emit 时 materialize），同一 temp NodeId 在 `_a = class` / `_a.x` / 尾随 `_a` 三处复用 → 同名；(3) `ec.add_variable_declaration(temp)` 登记 `var _a;`。
+
+**重构（绿态下，服务新行为）**：抽 `lower_class_parts(arena, node) -> Option<ClassLoweringParts>`（`{class, pre_statements, static_fields: Vec<(name, init)>}`），把 static 字段保留为**受体无关**的 `(name, init)` 对（不再在成员循环里直接产 `C.x = 1` 语句）。两消费者：`try_lower_simple_class`（声明位/纯实例字段类表达式：建 `C.x = init` 语句 + `SyntaxList`）与新增 ec 线程化 `try_lower_class_expression`（表达式位：建 `_a.x = init` 表达式 + 逗号序列）。重构后全量 130 unit 仍绿（行为保持）。
+
+**红→绿切片（逐行为）**：
+1. **tracer（`class_expression_static_field_hoists_to_comma_sequence_with_temp`）**：`const C = class { static x = 1 };` → 红（6o 守卫令其恒等：`const C = class {\n    static x = 1;\n};`）→ 实现 `try_lower_class_expression`（`pre_statements` 空且 `static_fields` 空 → 纯实例字段，原样返回 class[6o]；`pre_statements` 非空 → DEFER 返回 `None`；否则 static-only → `_a = class`、各 `_a.x = init`、尾随 `_a` 折成逗号 `BinaryExpression`）+ `make_temp_static_assignment`（`_a.x = init` 表达式）→ `var _a;\nconst C = (_a = class {\n}, _a.x = 1, _a);` → 绿。**逗号序列在 `const` 初值位被 printer 的 `DISALLOW_COMMA` 优先级自动加括号；空类体打印为 `class {\n}`（端口既有 printer 行为）。**
+2. **`named_class_expression_static_field_keeps_name_in_comma_sequence`（替换 6o 守卫）**：`const C = class D { static x = 1 };` → 重构后由恒等变红 → 类名 `D` 保留在被包裹的类表达式里，static 受体仍是 temp `_a`（非类名）→ `var _a;\nconst C = (_a = class D {\n}, _a.x = 1, _a);` → 绿。**温故：6o 用具名类是为绕过匿名类 `name?` 早退；temp 包裹后受体改用 `_a`，匿名/具名同形（仅保不保留名之差），故匿名 tracer 亦可达。**
+3. **coverage（`class_expression_multiple_static_fields_share_one_temp`）**：`const C = class { static x = 1; static y = 2 };` → 多 static 字段在 `static_fields` 循环里产多个 `_a.<n> = …` 并共用单 temp → `var _a;\nconst C = (_a = class {\n}, _a.x = 1, _a.y = 2, _a);` → 即绿（同 tracer 路径，锁多字段可达面）。
+4. **coverage（`class_expression_instance_and_static_fields_lower_together`）**：`const C = class { x = 1; static y = 2 };` → 实例字段进合成构造器（在被包裹的 class 值内），static 字段进逗号序列 → `var _a;\nconst C = (_a = class {\n    constructor() { this.x = 1; }\n}, _a.y = 2, _a);` → 即绿（构造器插入族 + static 逗号序列协同）。
+
+**DEFER 守卫（保证不误降级）**：`try_lower_class_expression` 在 `pre_statements` 非空（计算名 temp 缓存 / `var _C_x = new WeakMap();` 私有 brand）时返回 `None` → 类表达式整体保持不变。`class_expression_with_computed_field_is_left_unchanged`（`const C = class { [k] = 1 };` → 恒等）锁定该 DEFER 边界。blocked-by：Go 用 `pendingExpressions` 把计算名 key 内联进逗号序列（`_a = k, …`），而本端口的计算名处理走**确定性 `_a` + `SyntaxList` 语句** hoist，二者机制不同；私有 static / 私有实例（WeakMap brand）在表达式位同需 `pendingExpressions` 接线。
+
+**测试计数（6r 新增）**：`tsgo_transformers` +4 `#[test]`（tracer 1 + 多 static 1 + 混合 instance+static 1 + 计算名 DEFER 守卫 1；另：6o 的 `class_expression_with_static_field_is_left_unchanged` 被**改名重写**为 `named_class_expression_static_field_keeps_name_in_comma_sequence`，净计数 +0），本轮无新 doctest。crate 合计 **134 unit + 24 doctest**（6q 基线 130 + 24）。
+
+### upstream（ast/printer）增长（6r）
+
+- **无**。逗号序列/temp 包裹全走 arena 既有构造器（`new_binary_expression` + `Kind::CommaToken`/`EqualsToken` token、`new_property_access_expression`）+ 既有 printer 优先级括号（`emit_initializer` 的 `DISALLOW_COMMA` 已能为逗号序列加括号）+ **6c-3/6i 既有** `EmitContext` 变量环境（`start/end_variable_environment`、`add_variable_declaration`）+ **6p 既有** `factory().new_temp_variable`。未触碰 `internal/ast/*` 或 `internal/printer/*`。
+
+### DEFER（本轮确认的 blocked-by，class-expr 维度）
+
+- **class-expr 计算名 / 私有实例（WeakMap）/ 私有 static 字段的语句 hoist**：均需 Go `pendingExpressions` 内联进逗号序列；本端口计算名/私有降级走确定性命名 + `SyntaxList` 语句，机制不兼容。blocked-by：移植 `pendingExpressions` 接线（或让计算名/WeakMap brand 命名走 name generator 并产表达式而非语句）。
+- **函数体内 / 嵌套作用域的 class-expr static hoist**：本轮仅在 `SourceFile` 开变量环境；嵌套作用域（函数体、块）的 temp hoist 需按 6i 模式逐作用域线程化 `VisitFunctionBody`（exponentiation 已有，可后续复用）。
+- 其余 classfields DEFER（私有方法/accessor WeakSet、参数属性、`--target`/`useDefineForClassFields` 门控）同 6o/6q 列表不变。
+
+## 6s worklog（optionalchain `(a?.b)()` this-capture + `delete a?.b`，新增 `SyntheticReferenceExpression` AST 节点；red→green 推进记录）
+
+> 本轮解锁 6h 报告里 DEFER 的两个 optionalchain 子集：括号可选调用的 **this-capture**（`(a?.b)()`）与 **`delete a?.b`**。前者是 6h 注记中「唯一需 AST 增长的剩余子集」——需新增 Go `SyntheticReferenceExpression` 工厂节点（捆绑 `expression` + `thisArg`，供把调用降级成 `<access>.call(thisArg, …)`）。结构镜像 Go `optionalchain.go:visitCallExpression`/`visitParenthesizedExpression`/`visitNonOptionalExpression`/`visitDeleteExpression` + `visitOptionalExpression` 的 captureThisArg/isDelete 分支。
+>
+> **scope**：`-p tsgo_ast`（additive 节点）+ `-p tsgo_transformers`；printer/checker 仅 `cargo build` 确认 additive-safe（均无需改动，见下）。
+
+先确认基线绿（`cargo test -p tsgo_ast` = 53 unit + 26 doctest；`cargo test -p tsgo_transformers` = 134 unit + 24 doctest）。逐行为红→绿：
+
+**AST 节点（tracer，`-p tsgo_ast`）**
+1. **`synthetic_reference_expression_visits_expression_then_this_arg`**：`new_synthetic_reference_expression(expr, this_arg)` → 编译红（构造器不存在）→ 新增 `NodeData::SyntheticReferenceExpression(SyntheticReferenceData{expression, this_arg})` variant + 构造器（lib.rs）+ `for_each_child`(lib.rs) + `visit_each_child`(visitor.rs)，遍历序 `expression`→`this_arg` → kind == `SyntheticReferenceExpression`、子节点 `[expression, this_arg]` → 绿。`Kind::SyntheticReferenceExpression` 早在 `kind_generated.rs`，故只补 `NodeData` 侧。详见 ast `impl.md` 「P5 期附加」。
+
+**transformer（`-p tsgo_transformers`）**
+2. **`parenthesized_optional_call_captures_this`（this-capture，tracer）**：`(a?.b)();` → 红（旧行为 `(a === null || a === void 0 ? void 0 : a.b)();`，丢失 `this`）→ 在 ec-threaded `optional_chain_visit` 加非可选 `CallExpression` 臂 `visit_call_expression`：检测被括号包裹且 `skip_parentheses` 后含 `OPTIONAL_CHAIN` 的 callee → `visit_parenthesized_expression`(captureThisArg=true) → `visit_non_optional_expression` → `lower_optional_expression`（扩 `capture_this_arg`/`is_delete` 参 + 新 `build_chain_segments_capturing`：末段 property/element access 若 captureThisArg 则捕获 thisArg（简单 receiver 直用、否则 hoist temp），并把结果包进 `SyntheticReferenceExpression`）→ 经 `new_function_call_call`（`target.call(thisArg, …args)`）→ `(a === null || a === void 0 ? void 0 : a.b).call(a);` → 绿。baseline: `conformance/.../callChain/parentheses.ts`。
+3. **`delete_optional_access_lowered`（delete，tracer）**：`delete a?.b;` → 红（旧行为 `delete (a === null || … : a.b);`，delete 落在条件式整体上）→ 加 `DeleteExpression` 臂 `visit_delete_expression`：操作数 `skip_parentheses` 后含 `OPTIONAL_CHAIN` → `visit_non_optional_expression(isDelete=true)` → `lower_optional_expression(is_delete=true)`：守卫真值支用 `true`（`new_keyword_expression(Kind::TrueKeyword)`）、访问支用 `delete <access>`（`new_delete_expression`）→ `a === null || a === void 0 ? true : delete a.b;` → 绿。baseline: `conformance/.../delete/deleteChain.ts`。
+4. **`delete_parenthesized_optional_access_keeps_parens`（泛化，直接绿）**：`delete (a?.b);` → `visit_delete_expression` 操作数为括号 → `visit_non_optional_expression` → `visit_parenthesized_expression(isDelete=true)`，内层降级（thisArg 为空，非 synthetic-ref）后重新包回括号 → `(a === null || a === void 0 ? true : delete a.b);`（保留原括号，delete 仍在 present 支）→ 直接绿。baseline: deleteChain.ts `delete (o1?.b);`。
+
+> 设计/divergence：(1) `SyntheticReferenceExpression` 是 transform-only 节点，仅在 transform 内被 `visit_call_expression`/`visit_parenthesized_expression` 消费（解开成 `.call(…)` 或重包括号），**不进入 emit**；故顶层 `optional_chain_visit` 的可选 access 臂传 `capture_this_arg=false`，永不产出 synthetic-ref 给 printer。(2) `skip_parentheses_is_optional_chain` 为本模块私有 arena 读取器（穿过嵌套括号判 `OPTIONAL_CHAIN`），镜像 Go `SkipParentheses`，**未碰 `internal/ast/*`** 的 utilities。(3) `new_function_call_call` 镜像 Go `printer/factory.go:NewFunctionCallCall`（`target.call(thisArg, …args)` = `NewMethodCall(target,"call",[thisArg,…])`），就地用 arena 构造器，未新增 printer 工厂。(4) Go 的 `RestoreOuterExpressions`/`SetOriginal`/`AddEmitFlags(EFNoComments)`/super→this 改写、以及 call 段 `leftThisArg`（`a?.b?.()` 这类多链 call this 线程化）仍 **DEFER**（不在 `(a?.b)()`/`delete a?.b` 可达子集内）。
+
+**测试计数（6s 新增）**：`tsgo_ast` +1 `#[test]`（synthetic-ref 构造+遍历）+1 doctest（`new_synthetic_reference_expression`）→ **54 unit + 27 doctest**（基线 53+26）。`tsgo_transformers` +3 `#[test]`（this-capture 1 + delete 1 + 括号 delete 泛化 1），本轮无新 doctest → **137 unit + 24 doctest**（6r 基线 134+24）。
+
+### upstream（ast/printer/checker）增长（6s）
+
+- **ast**：**新增**（additive）`NodeData::SyntheticReferenceExpression(SyntheticReferenceData{expression, this_arg})` + 构造器 `new_synthetic_reference_expression` + `for_each_child`/`visit_each_child` 两处穷尽匹配臂。`Kind` 侧无新增（`Kind::SyntheticReferenceExpression` 既有）。详见 ast `impl.md`/`tests.md`「P5 期附加」。
+- **printer / checker**：**无需改动**。printer 主 emit 分发按 `Kind`（含 catch-all）、checker 不对 `NodeData` 做穷尽匹配，故新 `NodeData` variant 不破坏其编译；`cargo build -p tsgo_printer -p tsgo_checker` 均绿，**未触碰其源码**（无 compile-only arm）。synthetic-ref 在 emit 前已被 transform 解开，printer 无需 arm（与 Go 一致）。
+
+### DEFER（本轮确认的 blocked-by，optionalchain 维度）
+
+- **call 段 this 线程化（`a?.b?.()` / `a?.()` 多链 call 的 `leftThisArg`）**：Go `visitOptionalExpression` 在首段为 call 且左侧带 thisArg 时用 `NewFunctionCallCall` 线程化 `this`（含 `super`→`this` 改写、`EFNoComments` clone）。本轮只做 property/element 末段 captureThisArg（`(a?.b)()` 可达子集）。blocked-by：`leftThisArg` 线程化 + `EmitContext.HasAutoGenerateInfo`/`AddEmitFlags`/`clone` 接线。
+- **`RestoreOuterExpressions` / `SetOriginal` / `node.Loc` 透传**：本端口合成节点不携带 Loc/Original（沿用 6g/6c-1 注记，emit 不依赖）；如后续 sourcemap/comment parity 需要再回填。
+- **嵌套作用域内的括号可选调用 / delete temp-hoist**：本轮 this-capture 的非简单 thisArg temp 走 `add_variable_declaration`（落最近 var-env），可达；但更深的「控制流体 / switch case / 对象方法简写」嵌套仍随 6i DEFER 列表不变。
+
+## 6t worklog（optionalchain 可选 call 段 `leftThisArg` 线程化；red→green 推进记录）
+
+> 本轮解锁 6s DEFER 的 **call 段 `this` 线程化**：当 optional-chain 的首段是 call（`<receiver>?.()`）时，receiver 自身的接收者要作为该调用的 `this`（Go 的 `leftThisArg`），否则降级成裸 `_t()` 会丢 `this`。复用 6s 落地的 `SyntheticReferenceExpression`（`expression` + `this_arg`）+ `new_function_call_call`，以及 6c-3/6i 的 temp/var-env。结构镜像 Go `optionalchain.go:visitOptionalExpression`（`isCallChain(chain[0])` → receiver `this`-capture；segment loop 首段 call + `leftThisArg != nil` → `NewFunctionCallCall`）+ `visitPropertyOrElementAccessExpression`（非可选 access 的 captureThisArg 分支）。
+>
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing，**ZERO** ast/printer/checker 增长——6s 已加 `SyntheticReferenceExpression`）。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 137 unit + 24 doctest）。逐行为红→绿：
+
+1. **`optional_member_then_optional_call_threads_this`（tracer，genuine RED）**：`a?.b?.();` → 红（旧行为 `… ? void 0 : _a()`，丢 `this`）→ 在 `lower_optional_expression` 把 receiver 改走 `visit_non_optional_expression(receiver, capture=is_call_chain(chain[0]), false)`，若返回 `SyntheticReferenceExpression` 则拆出 `left_this_arg` + `captured`；`build_chain_segments_capturing` 增 `left_this_arg` 参，首段 call 且 `i==0` 时经 `prepare_call_this_arg` + `new_function_call_call` 线程化 → `var _a;\n(_a = a === null || a === void 0 ? void 0 : a.b) === null || _a === void 0 ? void 0 : _a.call(a);` → 绿。inner `a?.b` 经既有可选-access `capture_this_arg` 路径产出 synthetic-ref（thisArg=`a`）。baseline: `conformance/.../callChain/callChain.3.ts`（`a?.m?.({x:12})`）。
+2. **`nested_optional_member_then_optional_call_threads_temp_this`（泛化，直接绿）**：`a?.b.c?.();` → inner `a?.b.c` 末段 `.c` 的 receiver `a.b` 非简单 → 捕获 `this` 时 hoist `_a`（`(_a = a.b).c`），外层 conditional hoist `_b`，call 段线程化 → `var _a, _b;\n(_b = a === null || a === void 0 ? void 0 : (_a = a.b).c) === null || _b === void 0 ? void 0 : _b.call(_a);`。`_a` 为 auto-gen temp（`has_auto_generate_info`）→ `prepare_call_this_arg` 直用不 clone。直接绿（slice 1 实现已泛化此分支）。
+3. **`non_optional_member_then_optional_call_threads_this`（genuine RED）**：`a.b?.();`（**非可选** member receiver）→ 红（`… ? void 0 : _a()`）→ `visit_non_optional_expression` 增非可选 property/element access 臂 `visit_access_capturing_this`（镜像 Go `visitPropertyOrElementAccessExpression` 非可选 + captureThisArg）：access 自身接收者（简单直用、否则 hoist temp）作 thisArg，重建 access 包进 `SyntheticReferenceExpression` → 外层 hoist `_a`、call 段 `_a.call(a)` → `var _a;\n(_a = a.b) === null || _a === void 0 ? void 0 : _a.call(a);` → 绿。baseline: `conformance/.../callChain/callChain.js`（`o3.b?.().c`）。
+
+> 设计/divergence：(1) `prepare_call_this_arg` 镜像 Go 的 leftThisArg 处理——非 auto-gen 节点 `clone_node` + `set_emit_flags(… | NO_COMMENTS)`（避免把 receiver 注释重复到 `this` 实参），auto-gen temp 直用；`super` receiver → `None`（DEFER，需 super→this 改写）。(2) receiver 经 `visit_non_optional_expression` 而非 `optional_chain_visit`：当 `capture=false`（首段非 call，如 `a?.b`/`f()?.b`/`a?.b?.c`）两者等价（已有用例保持绿），`capture=true` 才捕获 `this`。(3) `is_call_chain` 镜像 Go `isCallChain`（`CallExpression` 且带 `OPTIONAL_CHAIN`）。(4) element-access 参数沿用 arena-only `optional_chain_visit_arena`（与 `build_chain_segments_capturing` 一致），与 Go `VisitNode` 的细微差异同既有注记。(5) 仍 DEFER：`super` call receiver、tagged template。
+
+**测试计数（6t 新增）**：`tsgo_transformers` +3 `#[test]`（`a?.b?.()` genuine RED 1 + `a?.b.c?.()` 泛化 1 + `a.b?.()` genuine RED 1），本轮无新 doctest → **140 unit + 24 doctest**（6s 基线 137+24）。
+
+### upstream（ast/printer/checker）增长（6t）
+
+- **无**。复用 6s 的 `SyntheticReferenceExpression` 节点 + `new_function_call_call` + `EmitContext.{has_auto_generate_info,emit_flags,set_emit_flags}` + `NodeArena.clone_node`（均既有），未触碰 `internal/ast/*`、`internal/printer/*`。`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净。
+
+### DEFER（本轮确认的 blocked-by，optionalchain 维度）
+
+- **call 段 `super` receiver（`super.b?.()`）**：`prepare_call_this_arg` 命中 `Kind::SuperKeyword` 返回 `None`（整链 verbatim）。blocked-by：Go 的 `super`→`this`（`NewThisExpression`）改写未接线；baseline `callChainWithSuper`。
+- **tagged-template 段 / call receiver（`a?.()?.()`）**：`build_chain_segments_capturing` 段 kind 越界（tagged template）仍 `None`；`visit_non_optional_expression` 的 `CallExpression` receiver 走 fallthrough 未做 `this`-capture。blocked-by：`flattenChain` 的 tagged-template 分支 + call-receiver `visitCallExpression(captureThisArg)`。
+- **`RestoreOuterExpressions` / `SetOriginal` / `node.Loc` 透传**：沿用 6s 注记，合成节点不携带 Loc/Original（emit 不依赖），sourcemap/comment parity 需要时回填。
+
+## 6u worklog（`esmodule` ESM 变换可达子集；red→green 推进记录）
+
+> 本轮落地 `moduletransforms/esmodule.rs` 的可达核心（`--module es2015/esnext`）。ESM 目标与 CommonJS 不同：**保留** import/export 语法，故 value import/export 走恒等透传；结构性可达面是 `visitSourceFile` 守卫、`export =`/`import =` 的 elision、以及 `createEmptyImports`。无真实 ReferenceResolver / EmitResolver，故 **type-only import elision** 与**作用域正确引用重写** DEFER（与 6e-2 CommonJS 同缺口）。
+>
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing）。复用 6e `collect_external_module_info` 的同源 `IsExternalModuleIndicator` 结构逻辑（本轮以本地 `statement_is_external_module_indicator` 镜像 `internal/ast/utilities.go:IsExternalModuleIndicator`，供 `createEmptyImports` 判据）。**ZERO** ast/printer/checker 增长（全走 arena 既有构造器 `new_named_exports`/`new_export_declaration`/`new_source_file`）。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 140 unit + 24 doctest）。逐行为红→绿：
+
+1. **`value_import_and_use_preserved_under_esnext`（tracer，genuine RED）**：先建 `esmodule.rs` 桩（`es_module_visit` = `todo!()`）+ `esmodule_test.rs` tracer + `mod.rs` 注册 → `todo!()` panic 红 → 实现 `new_es_module_transformer` + `es_module_visit`（SourceFile → `transform_es_module` 恒等返回）→ `import { x } from "m"; x;`（`module: esnext`）保留为 `import { x } from "m";\nx;` → 绿。证明 transformer 入口已接线 + value import/export 透传。
+2. **`export_equals_is_elided_and_empty_imports_appended`（genuine RED）**：`export = x;`（esnext）期望 `export {};` → 红（恒等透传出 `export = x;`）→ 把 `transform_es_module` 改为逐顶层语句重建：`ExportAssignment` 且 `is_export_equals` 在非 preserve 下 elide（镜像 Go `visitExportAssignment`：`GetEmitModuleKind() != Preserve → return nil`）+ 守卫（`is_declaration_file || !(is_external_module || isolatedModules)` → 原样返回，镜像 `visitSourceFile`）+ `createEmptyImports`（原 external module 指示器存在、emit module kind 非 preserve、重建语句中无 `IsExternalModuleIndicator` → 追加 `export {};`，镜像 `visitSourceFile` 末尾 + `utilities.go:createEmptyImports`）→ 绿。
+3. **`import_equals_require_is_elided_and_empty_imports_appended`（genuine RED）**：为守纪律先**回退**步骤 2 中提前写入的 `import =` 分支（避免"无红先实现"），加 `import x = require("m");`（esnext）期望 `export {};` → 红（透传出 `import x = require("m");`）→ 再加回 `ImportEqualsDeclaration` 且 `(emit_module_kind as i32) < Node16` 的 elide 臂（镜像 Go `visitImportEqualsDeclaration`：`GetEmitModuleKind() < Node16 → return nil`；Node16+ 同步 require 形态 DEFER）→ `createEmptyImports` 复用 → 绿。
+4. **可达透传行为（spec/regression，恒等到达即绿）**：`export default 1;`、`const x = 1; export { x };`、`export * from "m";`、`export { x } from "m";`、`import * as ns from "m"; ns;` 均经 catch-all 臂原样保留（镜像 Go 的 `visitExportAssignment` 非 export= 分支、`visitExportDeclaration` 的 `Module > ES2015` preserve 分支、`visitImportDeclaration` 的 `RewriteRelativeImportExtensions` off 分支）；`non_module_file_is_passthrough`（`const x = 1;` 无指示器 → 守卫原样返回，无 spurious `export {};`）；`value_import_and_use_preserved_under_es2015`（tracer 在 es2015 同样成立）。
+
+> 设计/divergence：(1) `ModuleKind` 未实现 `PartialOrd`，`< Node16` 比较走 `as i32` 显式转换（镜像 Go 整数序）。(2) 采用**顶层语句重建**（与 CommonJS 6e-3 一致）而非完整递归 `visit_each_child` 分发——可达 ESM 变换全部作用于模块顶层语句，import/export 不可嵌套，行为等价且回避 `visit_each_child` 回调只拿 `&mut NodeArena`（拿不到 `EmitContext`）的签名错配。(3) `createEmptyImports` 判据以**原始** `external_module_indicator.is_some()` 代替 Go 的 `IsExternalModule(result)`——Go 的 `UpdateSourceFile` 保留 `ExternalModuleIndicator`，而 Rust `new_source_file` 重置为 `None`，故用原始值，语义等价。(4) `--module preserve` 的 `export =`→`module.exports = e` 与 es2015 `export * as ns` 命名空间改写本轮 DEFER（前者超出 es2015/esnext scope，后者需 `NewGeneratedNameForNode`）。
+
+**测试计数（6u 新增）**：`tsgo_transformers` +10 `#[test]`（tracer 1 + export= elision 1 + import= elision 1 + 透传/守卫 7）+1 doctest（`new_es_module_transformer`）→ **150 unit + 25 doctest**（6t 基线 140+24）。
+
+### upstream（ast/printer/checker）增长（6u）
+
+- **无**。全走 arena 既有构造器（`new_named_exports`/`new_export_declaration`/`new_source_file`）+ 6e `collect_external_module_info` 同源结构逻辑 + 6e-2 `TransformOptions.compiler_options`，未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`。`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净。
+
+### DEFER（本轮确认的 blocked-by，esmodule 维度）
+
+- **type-only import elision**（`import type` / 未被 value 引用的类型导入）：可达子集无法判定哪些 import 被 value 使用。blocked-by：checker `EmitResolver`（同 6e-2 CommonJS 缺口）。
+- **作用域正确引用重写**：blocked-by 真实 `ReferenceResolver`（checker `resolveName`/`EmitResolver`，当前 no-op 占位）。
+- `--module preserve` 的 `export =`→`module.exports = e`、`--rewriteRelativeImportExtensions` 模块说明符重写、动态 `import()` 重写、Node16+ `import =`→同步 require helper、es2015 `export * as ns from "m"` 命名空间改写、external-helpers（tslib）import 注入。
+
+## 6ab worklog（`esmodule` `export * as ns from "m"` 命名空间 re-export 改写；red→green 推进记录）
+
+> 本轮收口 6u 的 DEFER 项「es2015 `export * as ns from "m"` 命名空间改写」（解锁前置 6p `new_generated_name_for_node` 已就绪）。Go ground truth：`moduletransforms/esmodule.go:visitExportDeclaration`——当 `ModuleSpecifier != nil`、`Module <= ES2015`（即 es2015；esnext/更高合法故透传）、且 `ExportClause` 是 `NamespaceExport` 时，改写为 `import * as <gen> from "m"` + re-export `<gen>`；`gen = NewGeneratedNameForNode(ns)`。re-export 形态依 `IsExportNamespaceAsDefaultDeclaration`（名为 `default`）分两支：`export default <gen>`（`NewExportAssignment`）vs `export { <gen> as ns }`（`NewExportSpecifier(propertyName=gen, name=oldIdentifier)`）。
+>
+> **Go-confirmed 行为（含 tsc 对拍）**：`tsc --module es2015`：`export * as ns from "m"` → `import * as ns_1 from "m";\nexport { ns_1 as ns };`；`export * as default from "m"` → `import * as default_1 from "m";\nexport default default_1;`。`tsc --module esnext`：两者均**原样透传**（合法语法）。故改写仅在 `Module <= ES2015` 触发，否则透传（与 6u 的 catch-all preserve 臂一致）。
+>
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing）。**ZERO** ast/printer/checker 增长——全走 arena 既有构造器（`new_namespace_import`/`new_import_clause`/`new_import_declaration`/`new_export_specifier`/`new_named_exports`/`new_export_declaration`/`new_export_assignment`）+ 6p `ec.factory().new_generated_name_for_node`（emit 时经既有 printer name-generator 接线 materialize 成 `ns_1`/`default_1`）。
+
+逐行为红→绿：
+
+1. **`namespace_reexport_rewrites_to_import_and_named_export_under_es2015`（tracer，genuine RED）**：`export * as ns from "m";`（es2015）期望 `import * as ns_1 from "m";\nexport { ns_1 as ns };` → 红（6u catch-all 臂透传出 `export * as ns from "m";`）→ 加 `ExportDeclaration` 臂（`export_is_namespace_reexport` = `ModuleSpecifier.is_some() && ExportClause is NamespaceExport`）+ `rewrite_namespace_reexport`（`new_generated_name_for_node(ns)` → namespace import + named export，同一 synth NodeId 复用于 import 与 export specifier 的 propertyName，镜像 Go 单指针复用）→ 绿。**本步先不门控 module**（最小实现）。
+2. **`namespace_reexport_is_preserved_under_esnext`（guard，genuine RED）**：`export * as ns from "m";`（esnext）期望原样透传 → 红（步骤 1 的未门控改写在 esnext 也改写成了 `import * as ns_1 …`）→ 加门控 `(options.module as i32) <= (ModuleKind::Es2015 as i32)`（镜像 Go `Module > ES2015 → preserve`，用**原始** `compilerOptions.Module` 而非 `GetEmitModuleKind`）→ 绿。
+3. **`namespace_reexport_as_default_rewrites_to_export_default_under_es2015`（coverage，genuine RED）**：`export * as default from "m";`（es2015）期望 `import * as default_1 from "m";\nexport default default_1;` → 红（步骤 1 的 named-export 臂产出 `export { default_1 as default };`）→ 在 `rewrite_namespace_reexport` 加 `IsExportNamespaceAsDefaultDeclaration` 分支（`arena.text(old_identifier) == "default"` → `new_export_assignment(None, false, None, gen)`；镜像 Go `ModuleExportNameIsDefault` + `NewExportAssignment`）→ 绿。
+
+> 设计/divergence：(1) 门控用 `options.module`（原始 `--module` 值）而非 `get_emit_module_kind()`——镜像 Go `visitExportDeclaration` 的 `tx.compilerOptions.Module > core.ModuleKindES2015`。(2) `rewriteModuleSpecifier` 在可达子集为恒等（`--rewriteRelativeImportExtensions` off），故直接复用原 `module_specifier`/`attributes` NodeId（与 6u 同源 DEFER）。(3) 合成节点不携带 Loc/Original（emit 不依赖），Go 的 `SetOriginal(importDecl, ExportClause)` / `SetOriginal(exportDecl, node)` sourcemap/comment 透传 DEFER（与既有轮一致）。(4) `default` 探测用 `arena.text` 直接比较——可达子集名为 identifier；string-literal module-export-name（`export * as "default"`）DEFER。
+
+**测试计数（6ab 新增）**：`tsgo_transformers` +3 `#[test]`（es2015 named rewrite tracer 1 + esnext passthrough guard 1 + es2015 export-default coverage 1）→ **182 unit + 28 doctest**（6aa 基线 179+28，doctest 无新增）。`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净（均实跑）。
+
+### DEFER（本轮确认的 blocked-by，esmodule 维度，承接 6u）
+
+- **type-only import elision**、**作用域正确引用重写**：blocked-by checker `EmitResolver` / 真实 `ReferenceResolver`（同 6u）。
+- `--module preserve` 的 `export =`→`module.exports`、`--rewriteRelativeImportExtensions` 说明符重写、动态 `import()`、import assertions/attributes 透传细节、Node16+ `import =`→同步 require、external-helpers（tslib）注入；`export * as "default"`（string-literal export 名）。
+
+## 6ac worklog（`impliedmodule` 按文件 module format 分派 CJS/ESM；red→green 推进记录）
+
+> 本轮移植 `moduletransforms/impliedmodule.go:NewImpliedModuleTransformer` + `visitSourceFile` 分派：检查文件 emit module format，`format >= core.ModuleKindES2015` → 委托 `NewESModuleTransformer`，否则 → `NewCommonJSModuleTransformer`；`node.IsDeclarationFile` → 原样返回。Go 缓存 cjs/esm 子 transformer（lazy）；Rust 侧 eager 构建两者（无副作用：`new_*_transformer` 仅设标志 + 装闭包，不动 arena），行为等价。
+>
+> **Go-confirmed 分派谓词**：`format := tx.getEmitModuleFormatOfFile(node)`（= `GetEmitModuleFormatOfFileWorker` = `GetImpliedNodeFormatForEmitWorker` 非 None 则取之，否则 `options.GetEmitModuleKind()`）；`if format >= core.ModuleKindES2015 { esm } else { cjs }`。ModuleKind 判别值：`CommonJs=1 < Es2015=5 <= EsNext=99 <= Node16=100 <= NodeNext=199`，故 commonjs/amd/umd/system → CJS，es2015/esnext/node16+ → ESM。
+>
+> **可达子集 / DEFER**：per-file `impliedNodeFormat`（来自 `SourceFileMetaData` / package.json `type`）**未接线**（同 compiler P6-2 缺口），故 `GetImpliedNodeFormatForEmitWorker` 的 Node16/NodeNext 分支不可达；本轮分派纯用 `compiler_options.module`（即 `GetEmitModuleKind` 在可达子集的退化值）。DEFER：per-file `impliedNodeFormat`/`.cjs`/`.mjs` 探测（blocked-by `SourceFileMetaData` 未 thread 进 `TransformOptions`）、AMD/UMD/System 格式。
+>
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing）。**ZERO** ast/printer/checker 增长——消费既有 CJS/ESM 公开入口（`new_common_js_module_transformer`/`new_es_module_transformer`）+ `Transformer::run_visit`（crate 内既有 `pub(crate)`，复用同一 `EmitContext` 借用避免 RefCell 重借）。未改动任一公开链 API。
+
+逐行为红→绿：
+
+1. **`commonjs_source_delegates_to_common_js_transform`（tracer，genuine RED）**：`module: commonjs` 下 `export default 1;` 期望 = CJS transform 同输入输出（`Object.defineProperty(exports, "__esModule", …)` + `exports.default = 1;`）→ 红（visit 体为 `todo!()` panic）→ 最小实现：无条件委托 `cjs.run_visit` → 绿。
+2. **`esnext_source_delegates_to_es_module_transform`（genuine RED）**：`module: esnext` 下 `export = x;` 期望 = ESM transform 输出 `export {};`（`export =` 在 ES 目标 elide + `createEmptyImports`）→ 红（无条件 CJS 臂：module≠commonjs 故 CJS 透传出 `export = x;`）→ 加最小二分 `if format == ModuleKind::EsNext { esm } else { cjs }` → 绿。
+3. **`es2015_source_routes_to_es_module_transform`（谓词边界，genuine RED）**：`module: es2015` 下 `export = x;` 期望 ESM 输出 `export {};`→ 红（步骤 2 的 `== EsNext` 把 es2015 误路由到 CJS 透传 `export = x;`）→ 提取谓词 `is_es_module_format(format) = (format as i32) >= (ModuleKind::Es2015 as i32)`（镜像 Go `format >= core.ModuleKindES2015`）替换 `== EsNext` → 绿。
+4. **`declaration_file_is_returned_unchanged`（守卫，genuine RED）**：`.d.ts` 内 `export = x;`（module: commonjs）期望原样 `export = x;`→ 红（无守卫时委托 CJS 把 `export =` 降级成 `module.exports = x;`）→ 在分派前加 `IsDeclarationFile` 守卫（`NodeData::SourceFile.is_declaration_file` → 直接 `return node`；同时非 SourceFile 节点透传）→ 绿。
+
+> 设计/divergence：(1) 分派谓词消费 `compiler_options.module`（而非 per-file `getEmitModuleFormatOfFile`）——per-file 路径 DEFER（blocked-by `SourceFileMetaData`）。(2) eager 构建 cjs/esm 子 transformer 取代 Go 的 lazy 缓存——无 arena 副作用，输出等价；规避 borrow-checker（闭包内 `&mut EmitContext` 已借用，`run_visit` 直接吃 `&mut EmitContext` 不重借 RefCell）。(3) `is_es_module_format` 设为 `pub fn`（带 doctest），便于谓词独立验证。
+
+**测试计数（6ac 新增）**：`tsgo_transformers` +4 `#[test]`（commonjs→CJS tracer + esnext→ESM + es2015 谓词边界 + 声明文件守卫）+ 2 doctest（`new_implied_module_transformer` + `is_es_module_format`）→ **186 unit + 30 doctest**（6ab 基线 182+28）。`cargo test -p tsgo_transformers` 全绿、`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净（均实跑）。
+
+### DEFER（本轮确认的 blocked-by，impliedmodule 维度）
+
+- **per-file `impliedNodeFormat`/`.cjs`/`.mjs` 探测**：blocked-by `SourceFileMetaData`（package.json `type` + 文件扩展名）未 thread 进 `TransformOptions`（同 compiler P6-2 `getEmitModuleFormatOfFile` 缺口）。当前分派退化为按 `compiler_options.module` 全局判定。
+- **AMD/UMD/System 格式**：Go `impliedmodule` 仅二分 CJS/ESM。System transform 本身的 register-wrapper 核心已在 6ae 独立落地（`systemmodule.rs`，`module: system` 直接入口），但 impliedmodule 分派器尚未把 `ModuleKind::System` 接到它（仍二分）；AMD/UMD transform 本身尚未移植。
+
+## 6ad worklog（commonjsmodule 动态 `import()` 降级；red→green 推进记录）
+
+> 本轮在 6e/6v/6w/6x CommonJS 面上长出 **动态 `import()` 降级**：`module: commonjs` 下把 `import(expr)` 降为 `Promise.resolve().then(() => __importStar(require(expr)))`。Go ground truth：`commonjsmodule.go:visitCallExpression`（`IsImportCall && shouldTransformImportCall` → `visitImportCallExpression`）→ `createImportCallExpressionCommonJS`。
+>
+> **Go 形态确认（关键，纠正任务简报）**：`createImportCallExpressionCommonJS`（commonjsmodule.go:1864）**无条件**把 `require(...)` 包进 `NewImportStarHelper`（= `__importStar(...)`），**与 `esModuleInterop` 无关**。已对 raw GitHub `microsoft/typescript-go/main` 同文件核对（行 1908 `requireCall := tx.Factory().NewImportStarHelper(...)` 无 `if getESModuleInterop`）——故**不存在简报里说的「无 interop 基础形 `Promise.resolve().then(() => require("m"))`」**；唯一形态即 importStar-wrapped。回调用 **arrow**（`NewArrowFunction`，`() => ...`，非 function expr）。参数 `arg` 为 `isSimpleInlineableExpression`（`!IsIdentifier && (StringLiteralLike|NumericLiteral|KeywordKind)`）时 `needSyncEval=false`：直接内联进 `require(arg)`、`Promise.resolve()` 无参、arrow 无形参；否则 `needSyncEval=true` 走 `Promise.resolve(\`${x}\`).then((s) => … require(s))` 模板形（本轮 DEFER）。
+>
+> **解析器缺口（blocked-by，决定测试形态）**：`internal/parser/lib.rs:parse_left_hand_side_expression_or_higher` 仍 **DEFER(phase-3) 动态 `import(...)` call head**（仅处理 `import.meta`）；实测 `parse_shared("const p = import(\"m\");")` **解析器死循环**（`import` 关键字落 `parse_primary_expression` 的 `_` 臂不消费 token）。`internal/parser` **不在本轮编辑边界**（仅 `internal/transformers/**` + 本两文档）。故 transformer 降级逻辑用**合成 AST**（直接 arena 构造 `CallExpression{ expression: ImportKeyword, arguments: [...] }` —— 即解析器**本应**产出的结构）经公开入口 `new_common_js_module_transformer(...).transform_source_file(...)` 行为级验证。端到端 parse→transform 路径 blocked-by 解析器动态 import call-head（phase-3）。
+>
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing）。复用 6e-3 interop helper infra（`request_emit_helper(IMPORT_STAR_HELPER)`/`wrap_in_helper("__importStar", …)`）+ 既有 emit-substitution（`set_node_substitution`，对标 Go `onSubstituteNode`，在打印期把 import-call 节点替换为降级表达式）。**ZERO** ast/printer/checker 增长——全走既有 arena 构造器（`new_keyword_expression`/`new_call_expression`/`new_property_access_expression`/`new_arrow_function`/`new_token`/`new_identifier`）。未改动任一公开链 API。
+
+逐行为红→绿：
+
+1. **`dynamic_import_lowers_to_promise_resolve_then_import_star_require`（tracer，genuine RED）**：合成 `const p = import("m");`（module: commonjs）→ 红（无降级，恒等保留 `const p = import("m");`，实测）→ 最小实现：在 kept-statement 循环加 `register_dynamic_import_substitutions`（递归 `collect_import_calls` 找 `is_import_call` = CallExpression 且 `expression.kind == ImportKeyword`），命中且首参为 `is_simple_inlineable_expression`（本轮：StringLiteral/NoSubstitutionTemplate/Numeric/BigInt/true/false/null 字面量子集）时经 `build_downleveled_import(vec![arg])` 建 `Promise.resolve().then(() => __importStar(require("m")))` + `set_node_substitution(call, lowered)` → 绿（prologue `var __importStar = …;`）。`let arg = arg?;` 守卫令无参 import() 暂 defer（恒等）以保 slice 2 真红。
+2. **`no_argument_dynamic_import_lowers_to_require_with_no_args`（genuine RED）**：合成 `const p = import();` → 红（slice 1 的 `arg?` 守卫令无参恒等保留 `const p = import();`，实测）→ 把 `lower_dynamic_import_call` 的 `arg?` 改为 `match arg { None => Vec::new(), Some(arg) => { 非 inlineable → return None; vec![arg] } }`，无参时 `require()` 空参表（仍 importStar 包裹，对标 Go `requireArguments` nil 分支）→ `const p = Promise.resolve().then(() => __importStar(require()));` → 绿。
+
+> 设计/divergence：(1) **importStar 无条件包裹**忠实 Go（非 esModuleInterop 门控）——故无「base form first then interop variant」两片，唯一形态即包裹形；简报「base form (no interop)」与 Go 背离，以 Go ground truth 为准。(2) **arrow** 回调（非 function expr），对标 Go `NewArrowFunction`。(3) 降级经 `set_node_substitution`（打印期替换）而非重建语句树——契合既有 use-site 重写架构，import-call 节点在 kept 语句子树内被就地替换。(4) **合成 AST** 测试（非 `parse_shared`）——解析器 DEFER 动态 import call-head（死循环），blocked-by phase-3 解析器；合成节点 = 解析器本应产出的结构，行为级走公开 transformer 入口。(5) `is_simple_inlineable_expression` 取 Go 谓词的字面量子集（KeywordKind 仅列 true/false/null）——本轮可达参数为 string literal，足够；完整 KeywordKind 集 DEFER。
+
+**测试计数（6ad 新增）**：`tsgo_transformers` +2 `#[test]`（string-literal arg tracer 1 + no-arg 边界 1），本轮无新 doctest（`new_common_js_module_transformer` 已有 doctest）→ **188 unit + 30 doctest**（6ac 基线 186+30）。`cargo test -p tsgo_transformers` 全绿、`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净（均实跑）。
+
+### upstream（ast/printer/checker）增长（6ad）
+
+- **无**。动态 import 降级全走 arena 既有构造器 + 6e-3 helper infra（`request_emit_helper(IMPORT_STAR_HELPER)`/`wrap_in_helper`，`IMPORT_STAR_HELPER` 早在 6d-2 定义）+ 既有 `set_node_substitution`/`for_each_child`。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`、`internal/parser/*`。
+
+### DEFER（本轮确认的 blocked-by，动态 import 维度）
+
+- **解析器动态 `import(...)` call head**（端到端 parse→transform）：blocked-by `internal/parser/lib.rs:parse_left_hand_side_expression_or_higher` 的 `DEFER(phase-3)`（实测解析器对 `import("m")` 死循环）。本轮 transformer 降级用合成 AST 验证。
+- **`needSyncEval` 模板形**（非 inlineable 参数，如 `import(someVar)` / 拼接表达式 → `Promise.resolve(\`${x}\`).then((s) => __importStar(require(s)))`）：本轮对非 inlineable 参数 `return None`（恒等保留），blocked-by `NewTemplateExpression`/`NewTemplateHead`/`NewTemplateSpan`/`NewTemplateTail` + 参数化 arrow（`(s) =>`）构造的对标移植。
+- **spread 参数 `import(...args)`**、**top-level-await import**、**`import.meta`**：同既有 DEFER。
+- **`shouldTransformImportCall` 的 module-kind 门控**（Node16+/preserve 不降级、`ModuleKindNone && languageVersion>=ES2020` 透传）：本轮恒走降级（`module: commonjs` 已是降级前提），完整门控 DEFER。
+
+## 6v worklog（commonjsmodule 深化 — combined default+named import + `export … from "m"` re-export，red→green 推进记录）
+
+> 本轮在 6e-3 CommonJS 面上长出两个可达子集（name-matched，无真实 ReferenceResolver，同 6e-2/6e-3 缺口）：**combined default+named import**（`import d, { x } from "m"`）与 **named re-export**（`export { x } from "m"` / `export { a as b } from "m"`）。Go ground truth：`commonjsmodule.go:visitTopLevelImportDeclaration`（combined 落 `else` 单 `const m_1 = …` 分支 + `getHelperExpressionForImport`）+ `getImportNeedsImportStarHelper`（externalmoduleinfo.go）+ `visitTopLevelExportDeclaration`（NamedExports 分支：`var m_1 = require("m")` + 逐 specifier `createExportExpression(liveBinding=true)`）。
+>
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing）。复用 6e `collect_external_module_info`（识别 external import/export）、6e-2 emit-substitution（import use-site `x`→`m_1.x` 重写）、6e-3 interop helper builder（`request_emit_helper`/`wrap_in_helper`/`new_unscoped_helper_name`）。**ZERO** ast/printer/checker 增长。
+
+**Go 形态确认（esModuleInterop on/off）**：用 `tsc --module commonjs`（开/关 esModuleInterop）对拍：
+- combined `import d, { x } from "m"; d; x;` → 两种 interop 模式**输出相同**：`const m_1 = __importStar(require("m"));\nm_1.default;\nm_1.x;`。与 Go 一致——Go `getHelperExpressionForImport`（commonjsmodule.go:700）**不**门控 esModuleInterop，`getImportNeedsImportStarHelper` 对「默认 import 混非默认命名 ref」返回 true，故走 `__importStar`（**非**任务提示里写的 `__importDefault`——以 Go ground truth 为准）。本端口既有 default-only/namespace import 也已无条件发 helper，行为一致。
+- re-export `export { x } from "m";` → `var m_1 = require("m");\nObject.defineProperty(exports, "x", { enumerable: true, get: function () { return m_1.x; } });`（Go `createExportExpression` liveBinding=true 的 getter 形态，**非**任务提示里的 `exports.x = m_1.x`——以 Go ground truth 为准；`var` 而非 `const`，对标 Go `NodeFlagsNone`）。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 150 unit + 25 doctest）。逐行为红→绿：
+
+1. **`combined_default_and_named_import_uses_import_star_helper`（tracer，genuine RED）**：`import d, { x } from "m"; d; x;` → 红（旧 `NamedImports` 臂 `if default_name.is_some() { return None; }` 守卫令 combined import 整句恒等保留：`import d, { x } from "m";\nd;\nx;`）→ 移除该守卫，在 `NamedImports` 臂改为：先读 named elements；若 `default_name` 存在则 push 默认绑定（`d`→`m_1.default`，member=`"default"`）并把 require 经 `wrap_in_helper("__importStar", …)` + `request_emit_helper(IMPORT_STAR_HELPER)`（Go `getImportNeedsImportStarHelper` 的可达子集：默认 import + 非默认命名 ref），否则裸 require → `const m_1 = __importStar(require("m"));\nm_1.default;\nm_1.x;`（prologue `var __importStar = …;`）→ 绿。use-site `d`/`x` 经既有 6e-2 substitution 重写。
+2. **`re_export_named_binding_lowers_to_require_and_live_binding_getter`（genuine RED）**：`export { x } from "m";` → 红（`lower_export_declaration` 对带 module specifier 的 NamedExports `return None` → 整句恒等保留：`Object.defineProperty(exports, "__esModule", { value: true });\nexport { x } from "m";`）→ 把 module-specifier 分支重构为：非 string-literal specifier → None；无 export clause → `export *`（既有 `make_export_star`）；NamedExports → `var m_1 = require("m");`（新 `build_var_binding`，无 CONST flag）+ 逐 specifier `make_live_binding_export(export_name, m_1.<member>)`（新 helper，建 `Object.defineProperty(exports, "<name>", { enumerable: true, get: function () { return <value>; } });`，对标 Go `createExportExpression` liveBinding 分支）→ `…__esModule…;\nvar m_1 = require("m");\nObject.defineProperty(exports, "x", { enumerable: true, get: function () { return m_1.x; } });` → 绿。`build_const_binding`/`build_var_binding` 抽共享 `build_binding(_, _, _, is_const)`。
+3. **`re_export_renamed_binding_uses_property_name_for_value`（coverage，直接绿/泛化）**：`export { a as b } from "m";` → export 名取 specifier `name`（`b`）、getter 值的 member 取 `property_name.unwrap_or(name)`（`a`）→ `Object.defineProperty(exports, "b", { enumerable: true, get: function () { return m_1.a; } });` → slice-2 实现下直接绿（锁定 rename 路径，对标 Go `specifier.PropertyNameOrName()` / `GetExportName(specifier)`）。
+
+> 设计/divergence：(1) combined import 的 `__importStar` 选择取 Go `getImportNeedsImportStarHelper` 的**可达子集**（默认 import + 至少一个非默认命名 ref → importStar）；`import d, { default as y }`（仅默认 ref → Go 走 `__importDefault`）的 ref 计数边界 DEFER。(2) re-export require var 名沿用确定性 `<module>_1`（Go 用 `NewGeneratedNameForNode`）——多个 `export {} from "m"` 会撞名（`m_1`），同既有 import 的确定性命名 DEFER（blocked-by 碰撞无关的 `NewGeneratedNameForNode`）。(3) re-export 用 **live-binding** getter（Go liveBinding=true），而 *local* `export { x }`（无 module specifier）仍用既有 `exports.x = x` 简单赋值（Go 该路径 liveBinding=false 子集）——两路径忠实对应 Go 的 liveBinding 取值。(4) 未建 `exports.x = void 0` 导出名初始化、`"use strict"` prologue（沿用 6e-3 既有简化）。(5) `export * as ns from "m"`（NamespaceExport）、string-literal export 名 DEFER。
+
+**测试计数（6v 新增）**：`tsgo_transformers` +3 `#[test]`（combined import 1 + re-export 1 + re-export rename coverage 1），本轮无新 doctest（`new_common_js_module_transformer` 已有 doctest）→ **153 unit + 25 doctest**（6u 基线 150+25）。
+
+### upstream（ast/printer/checker）增长（6v）
+
+- **无**。combined import + re-export 全走 arena 既有构造器（`new_variable_statement`/`new_variable_declaration(_list)`/`new_call_expression`/`new_property_access_expression`/`new_object_literal_expression`/`new_property_assignment`/`new_function_expression`/`new_block`/`new_return_statement`/`new_keyword_expression`/`new_string_literal`/`new_identifier`/`add_flags`）+ 6e `collect_external_module_info` + 6e-2 substitution/compiler_options + 6e-3 helper infra（`request_emit_helper`/`wrap_in_helper`/`new_unscoped_helper_name`，`IMPORT_STAR_HELPER` 早在 6d-2 定义）。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`。`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净。
+
+### DEFER（本轮确认的 blocked-by，commonjsmodule 维度）
+
+- **作用域正确的 use 解析**（import use-site `d`/`x` 当前按名匹配；shadowing 局部同名会被误重写）：blocked-by 真实 `ReferenceResolver`（checker `resolveName`/`EmitResolver`，占位 no-op）。同 6e-2/6e-3 缺口。
+- **碰撞无关的 require var 名**（确定性 `<module>_1`，多 import/re-export 同模块会撞）：blocked-by `NewGeneratedNameForNode`。
+- **`default as`-only 命名 import**（Go 走 `__importDefault` 而非 `__importStar`）、**`export * as ns from "m"`**（NamespaceExport）、**string-literal export/import 名**、**`export =`**、**动态 `import()`**、**`import =`**、**`exports.x = void 0` 导出名初始化 + `"use strict"`**、**local `export { x }` 的 live-binding 形态**（当前用简单赋值）。
+
+## 6w worklog（commonjsmodule `export =` + 导出函数/类声明降级；red→green 推进记录）
+
+> 本轮在 6e/6e-3/6v CommonJS 面上长出三个可达子集（name-matched，无真实 ReferenceResolver，同 6e-2/6e-3 缺口）：**`export =`**（`export = e` → `module.exports = e;`，并**抑制** `__esModule` 标记）、**导出函数声明**（`export function f() {}` → 保留本地 `function f() {}` + `exports.f = f;`）、**导出类声明**（`export class C {}` → 保留本地 `class C {}` + `exports.C = C;`）。Go ground truth：`commonjsmodule.go:appendExportEqualsIfNeeded`/`visitExportEquals`（`module.exports = <visited expr>`）、`visitTopLevelFunctionDeclaration` + `appendExportsOfClassOrFunctionDeclaration`（剥 export/default 修饰、`exports.<name> = <localName>`；函数声明的导出赋值经 `exportedFunctions` 循环置于**自定义 prologue**、即声明之前，因函数声明 hoist）、`visitTopLevelClassDeclaration`（返回 `[class C {}, exports.C = C]`，类不 hoist 故赋值在声明**之后**就地）。
+>
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing）。复用 6e `collect_external_module_info`（已识别 `export_equals`）、6e-3 export-lowering 机器（`make_exports_assignment`）、`modifiervisitor::extract_modifiers`（剥 `EXPORT_DEFAULT` 修饰）。**ZERO** ast/printer/checker 增长。
+
+**Go 形态确认（tsc --module commonjs）**：
+- `export = x;` → `"use strict";\nmodule.exports = x;`（本端口沿用 6e-3 简化**不**发 `"use strict"`，且 `__esModule` 标记被抑制——`module_has_exports` 对 `is_export_equals` 的 `ExportAssignment` 返回 false，对标 Go：`export =` 是整模块 CommonJS 导出，不打 `__esModule`）→ 端口形态 `module.exports = x;`。
+- `export function f() {}` → `"use strict";\nObject.defineProperty(exports, "__esModule", { value: true });\nexports.f = f;\nfunction f() { }`（赋值在声明**之前**，因函数 hoist）。
+- `export class C {}` → `…__esModule…;\nclass C {\n}\nexports.C = C;`（赋值在声明**之后**，因类不 hoist）。
+- `export default function f() {}` → `…__esModule…;\nexports.default = f;\nfunction f() { }`；`export default class C {}` → `…;\nclass C {\n}\nexports.default = C;`（导出名取 `default`）。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 153 unit + 25 doctest）。逐行为红→绿：
+
+1. **`export_equals_becomes_module_exports_without_marker`（tracer，genuine RED）**：`export = x;` → 红（`lower_export_default` 对 `is_export_equals` `return None` → 整句恒等保留 `export = x;`）→ 把 `lower_export_default` 的 `export =` 臂改为返回新 `make_module_exports_assignment(ec, expression)`（建 `module.exports = <expr>;`：`module.exports` property-access 作左值、`=` token、`expression` 作右值的 `ExpressionStatement`）→ `module.exports = x;`（无 `__esModule`，因 `module_has_exports` 已对 `is_export_equals` 返回 false）→ 绿。
+2. **`exported_function_declaration_keeps_decl_and_assigns_export`（genuine RED）**：`export function f() {}` → 红（catch-all 臂恒等保留 `export function f() { }`，无标记）→ (a) `module_has_exports` 增 `FunctionDeclaration`/`ClassDeclaration` 带 EXPORT 修饰的臂（触发标记）；(b) `transform_common_js_module` 重构语句循环为 `body` + `hoisted_function_exports` 两段（marker 移到循环后，`out = [marker?] + hoisted_function_exports + body`）；(c) 新增 `FunctionDeclaration` + `declaration_has_export_modifier` 守卫臂，调 `lower_exported_function_declaration`（剥 `EXPORT_DEFAULT` 修饰重建 `function f() {}`、`exports.f = f;` 入 hoisted）→ `Object.defineProperty(exports, "__esModule", { value: true });\nexports.f = f;\nfunction f() { }` → 绿。
+3. **`exported_class_declaration_keeps_decl_and_assigns_export`（genuine RED）**：`export class C {}` → 红（恒等保留 `export class C {\n}`，但标记已因 slice 2 的 `module_has_exports` 出现）→ 增 `ClassDeclaration` + 守卫臂，调 `lower_exported_class_declaration`（剥修饰经 `new_class_like` 重建 `class C {}`，`decl` 与 `exports.C = C;` 顺序入 `body`——类不 hoist）→ `…__esModule…;\nclass C {\n}\nexports.C = C;` → 绿。
+4. **`exported_default_function_declaration_assigns_default_export` / `exported_default_class_declaration_assigns_default_export`（coverage，直接绿/泛化）**：`export default function f() {}` / `export default class C {}` → slice 2/3 的 `is_default`（`modifier_flags.contains(DEFAULT)`）分支已泛化导出名取 `default`，直接绿，锁定 named-default 路径（对标 Go `appendExportsOfClassOrFunctionDeclaration` 的 `HasSyntacticModifier(decl, ModifierFlagsDefault) → "default"`）。
+
+> 设计/divergence：(1) **函数导出赋值 hoisting**：Go 把所有导出函数的 `exports.f = f;` 经 `exportedFunctions` 循环置于自定义 prologue（`EFCustomPrologue`），位于**整个 body 之前**（甚至 external-helpers import 之前）；本端口收集进 `hoisted_function_exports` 并置于 marker 之后、`body` 之前——对**单导出函数模块**（本轮 tracer）行为一致，但若模块在导出函数前还有其它顶层语句（如 `const a = 1; export function f(){}`），Go 会把 `exports.f = f;` 提到 `const a = 1` 之上而本端口提到 marker 之后、`a` 之前同样在前——**仍一致**（因 hoisted 段整体在 body 之前）；仅当存在 require-helper import 注入时排序细节 DEFER。(2) **类不 hoist**：`exports.C = C;` 就地跟在 `class C {}` 之后（Go `visitTopLevelClassDeclaration` 的 `[decl, export]` 顺序）。(3) 修饰剥离用 `extract_modifiers(_, _, !EXPORT_DEFAULT)`（保留 `async` 等其它修饰，对标 Go `ExtractModifiers(_, _, ^ModifierFlagsExportDefault)`）。(4) **匿名** `export default function () {}` / `export default class {}`（`name == None`）返回 `None` → 落 catch-all 恒等，DEFER（需 `NewGeneratedNameForNode` 合成名）。(5) 沿用确定性命名 / 不发 `"use strict"` / `exports.x = void 0` 初始化等 6e-3 既有简化；`export =` 与 `import =` 互斥、`export =` 抑制其它导出的全局副作用未建模（本轮 tracer 仅单 `export =`）。
+
+**测试计数（6w 新增）**：`tsgo_transformers` +5 `#[test]`（`export =` 1 + 导出函数 1 + 导出类 1 + default 函数/类 coverage 2），本轮无新 doctest（`new_common_js_module_transformer` 已有 doctest）→ **158 unit + 25 doctest**（6v 基线 153+25）。
+
+### upstream（ast/printer/checker）增长（6w）
+
+- **无**。`export =`/导出函数/类全走 arena 既有构造器（`new_property_access_expression`/`new_binary_expression`/`new_token`/`new_expression_statement`/`new_function_declaration`/`new_class_like`/`new_identifier`）+ 6e `collect_external_module_info`（已含 `export_equals`）+ `modifiervisitor::extract_modifiers`（既有 crate 级 re-export）。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`。`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净。
+
+### DEFER（本轮确认的 blocked-by，commonjsmodule 维度）
+
+- **作用域正确的 use 解析**（同 6e-2/6e-3/6v 缺口）：blocked-by 真实 `ReferenceResolver`（checker `resolveName`/`EmitResolver`，占位 no-op）。
+- **碰撞无关的 require var 名**：blocked-by `NewGeneratedNameForNode`。
+- **匿名 `export default function () {}` / `export default class {}`**（需合成名）、**`export =` 与 `import =` 互斥/`export =` 抑制其它导出**、**导出函数赋值与 external-helpers import 注入的精确 prologue 排序**、**`"use strict"` prologue + `exports.x = void 0` 导出名初始化**（→ 6x 落地）、**动态 `import()`**、**`import =`**（→ 6x 落地非导出 require 形态）、**`export * as ns from "m"`**、**string-literal export/import 名**、**local `export { x }` 的 live-binding 形态**（当前用简单赋值）。
+
+## 6x worklog（commonjsmodule `import =`(require) + `exports.x = void 0` 导出名初始化；estransforms `usestrict` prologue 移植；red→green 推进记录）
+
+> 本轮推进 6w-推荐的三块 CommonJS-surface（全结构性、resolver-free）：(1) **`import x = require("m")`** → `const x = require("m");`（emit module kind < Node16）；(2) **`exports.<name> = void 0;` 导出名初始化**（marker 之后、body 之前的零初始化）；(3) **`"use strict"` prologue**。
+>
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing；编辑边界 `internal/transformers/**`）。**ZERO** ast/printer/checker 增长。
+
+### Go ground-truth 校正（briefing 偏离，已 VERIFY 跟随 Go + tsc）
+
+> briefing 称"`"use strict"` prologue 由 commonjs transform 插入"。**实际 Go ground truth：`"use strict"` 不在 commonjsmodule.go——它是一个独立 transformer `estransforms/usestrict.go`（`NewUseStrictTransformer`）**，在 emit 管线里位于 ES down-leveler 之后、module transformer 之前（`emitter.go:161`）。`commonjsmodule.go:transformCommonJSModule` 仅用 `SplitStandardPrologue` **保留**源里已有的 prologue，从不**新增** `"use strict"`。条件（`usestrict.go:visitSourceFile`）：JSON 跳过；外部模块且按 ESM 输出（`moduleKind >= ES2015 && (moduleKind == Preserve || format >= ES2015)`）跳过；否则 `Factory().EnsureUseStrict(statements)` 前置 `"use strict";`（已存在则去重）。→ 故本轮把 `"use strict"` 作为**独立 transformer 移植到 `estransforms/usestrict.rs`**（仍在 `internal/transformers/**` 边界内），**不**塞进 commonjs transform。
+>
+> 其它 tsc-verified 形态（`tsc --module commonjs --target es2017`，已实测）：
+> - `import x = require("./m"); x;` → `const x = require("./m");\nx;`（`x` 是真正的 `const`，**use 不重写**；未用的 import= 被 import-elision 擦除——本端口无 elision 故恒降级；import-only 模块下本端口沿用既有"仅 value 导出才发 `__esModule`"简化故无 marker，与既有 `named_import_and_use` 测试一致）。
+> - `export const a = 1; export const b = 2;` → `exports.b = exports.a = void 0;`（**链式、逆序**——名按源序 `[a,b]` fold，最后一个名在最外层；Go `transformCommonJSModule` 的 50-名分块循环：`right = void 0`，`for name: right = (exports.<name> = right)`）。
+> - `export class C {}` → **有** `exports.C = void 0;`（非默认类名进 `exportedNames`）；`export function f() {}` → **无** void-0（函数走 `exportedFunctions`，不进 `exportedNames`）；`export default 1/function/class`、`export *`、`export =` → **无** void-0。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 158 unit + 25 doctest）。逐行为红→绿：
+
+1. **`import_equals_require_lowers_to_const_require`（tracer，genuine RED）**：`import x = require("m"); x;` → 红（无 `ImportEqualsDeclaration` 臂 → catch-all 恒等保留 `import x = require("m");`）→ `transform_common_js_module` 增 `Kind::ImportEqualsDeclaration` 臂调 `lower_import_equals_to_require`（取 `ImportEqualsData{name, module_reference}`；仅 `ExternalModuleReference` 的 string-literal 形态降级；非导出；建 `const <name> = require("<m>");`，复用 `build_require_call`+`build_const_binding`；**不**入 `bindings` 故 use 保留）→ `const x = require("m");\nx;` → 绿。
+2. **`export_const_becomes_exports_assignment`（更新既有 → genuine RED）**：把期望改为 tsc-correct（含 `exports.y = void 0;`）→ 红（无 void-0 init）→ `transform_common_js_module` 在 marker 后、`hoisted_function_exports` 前 `out.extend(make_exports_void_zero_inits(ec, &exported_name_texts))`（先 snapshot `info.exported_names` 文本避免跨 `arena_mut` 借用；最小实现：每名一句）→ `…__esModule…;\nexports.y = void 0;\nexports.y = 1;` → 绿；同步更新 `local_named_export`/`re_export_named`/`re_export_renamed`（单名，直接绿）。
+3. **`multiple_exported_names_share_chained_void_zero_init`（genuine RED）**：`export const a=1; export const b=2;` → 红（每名独立句 `exports.a = void 0;\nexports.b = void 0;`）→ 把 `make_exports_void_zero_inits` 重构为 Go 的 50-名分块链式 fold（`right=void 0`，每名 `right = new_binary(exports.<name>, =, right)`，整块一句）→ `exports.b = exports.a = void 0;` → 绿。
+4. **`exported_class_declaration_keeps_decl_and_assigns_export`（更新既有 → genuine RED）**：期望加 `exports.C = void 0;` → 红（`collect_external_module_info` 未收集类名）→ `externalmoduleinfo.rs` 增 `Kind::ClassDeclaration` 臂：非默认且有名的 `export class C {}` → `add_unique_exported_name(C)`（**排除** `default` 与函数声明，对标 Go `collectExternalModuleInfo` 的 ClassDeclaration 分支只对非默认调 `addExportedName`）→ `…;\nexports.C = void 0;\nclass C {\n}\nexports.C = C;` → 绿；`exported_function_declaration`（无 void-0）与 `exported_default_*`（默认排除）保持绿。
+5. **`commonjs_module_gains_use_strict_prologue`（tracer，genuine RED）**：新建 `estransforms/usestrict.rs`（先 passthrough stub + 接入 `estransforms/mod.rs`），测 `export const y = 1;`（module=CommonJs）经 `new_use_strict_transformer` → 红（stub 恒等无 `"use strict"`）→ 还原真实逻辑（JSON 跳过；`is_external && emit_module_kind >= ES2015` 跳过 [format 门控 DEFER]；否则 `ensure_use_strict` 前置 `"use strict";`，首句已是 use-strict prologue 则去重）→ `"use strict";\nexport const y = 1;` → 绿。
+6. **`existing_use_strict_prologue_is_not_duplicated` / `esm_external_module_skips_use_strict`（companion coverage，直接绿）**：`"use strict"; var x = 1;`（CommonJs）→ 不重复；`export const y = 1;`（EsNext，外部模块按 ESM 输出）→ 跳过、无 `"use strict"`——锁定 `EnsureUseStrict` 去重分支与 ESM-skip 分支。
+
+> 设计/divergence：(1) **`"use strict"` 是独立 transformer**（见上 ground-truth 校正），不在 commonjs transform。(2) **void-0 链式逆序**精确对标 Go fold（最后名最外层），含 50-名分块（>50 导出走多句，无测试覆盖但忠实移植）。(3) void-0 仅处理 identifier 导出名（property-access 形态）；string-literal 导出名（element-access）DEFER。(4) **`import =` 仅非导出 + `= require("m")` 形态**：`export import x = require("m")`（Go → `exports.x = require(...)`）与内部模块引用（`import x = a.b`，Go panic「应在更早 transformer 处理」）返回 `None` 落 catch-all 恒等保留，DEFER。(5) **use-strict 的 `format` 门控**（`getEmitModuleFormatOfFile`，逐文件/`package.json`-`type`/resolver 相关）未入 `TransformOptions`，本端口以 emit module kind 近似 `format >= ES2015`——对非 Node ESM kind（`ES2015..=ESNext`/`Preserve`）精确，对 `Node16+`（CJS format 仍应发 `"use strict"`）不精确，DEFER。(6) import-only 模块仍沿用既有"仅 value 导出才发 `__esModule`"简化（Go 对任意外部模块都发）。
+
+**测试计数（6x 新增）**：`tsgo_transformers` +5 `#[test]`（import= 1 + 多名 void-0 链 1 + use-strict tracer/dedup/ESM-skip 3）+1 doctest（`new_use_strict_transformer`），其余 4 处为既有测试更新（单名 void-0 × 3 + 导出类 void-0 × 1）→ **163 unit + 26 doctest**（6w 基线 158+25）。
+
+### upstream（ast/printer/checker）增长（6x）
+
+- **无**。三块全走 arena 既有构造器（`new_void_expression`/`new_numeric_literal`/`new_binary_expression`/`new_property_access_expression`/`new_token`/`new_expression_statement`/`new_string_literal`/`new_source_file`/`new_identifier`）+ 6e `collect_external_module_info`（本轮在 `internal/transformers/moduletransforms/externalmoduleinfo.rs` 内增非默认 `export class` 名收集，未触碰其它 crate）。新增 `internal/transformers/estransforms/usestrict.rs`（+ `usestrict_test.rs`，接入 `estransforms/mod.rs`）。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`、`internal/compiler/*`、任何 `.go`。`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净。
+
+### DEFER（本轮确认的 blocked-by）
+
+- **作用域正确的 use 解析**（同 6e-2..6w 缺口）：blocked-by 真实 `ReferenceResolver`。
+- **Node16+ `import = require()`**（同步 `require` helper 形态）：blocked-by emit module kind >= Node16 的 require-helper 注入（本轮仅 < Node16 的 `const x = require(...)`）。
+- **`export import x = require("m")`**（→ `exports.x = require(...)`）、**内部模块 `import x = a.b`**、**string-literal 导出名 void-0（element-access）**、**use-strict 的逐文件 `format` 门控（`getEmitModuleFormatOfFile`）**、**import-only 模块的 `__esModule` marker**（对标 Go 任意外部模块）。
+
+## 6x worklog（commonjsmodule `import =` + `exports.<name> = void 0` 导出名初始化 + 独立 `usestrict` transformer；red→green 推进记录）
+
+> 本轮在 6e/6e-3/6v/6w CommonJS 面上长出 6w 推荐的三块 CommonJS-surface（结构性、resolver-free）：**`import =`**（`import x = require("m")` → `const x = require("m");`）、**`exports.<name> = void 0` 导出名初始化**（在 `__esModule` 标记之后为每个导出名零初始化）、以及 **`"use strict"` prologue**。三块都先用 tsc（`5.7.3 --module commonjs`）对拍确认形态，再 land。
+>
+> **Go ground-truth 修正（briefing 偏离）**：briefing 称 `"use strict"` 由 CommonJS transform 插入——**Go 并非如此**。`"use strict"` 由**独立 transformer** `estransforms/usestrict.go`（`NewUseStrictTransformer`）负责，在 emit 管线里排在 ES down-leveler 之后、module transformer 之前（`emitter.go:161`）。其条件：JSON 跳过；外部模块若以 ESM 形态 emit（`moduleKind >= ES2015 && (moduleKind == Preserve || format >= ES2015)`）则跳过（ESM 恒 strict）；否则 `Factory().EnsureUseStrict` 前插 `"use strict";`（已存在则不重复）。故本轮把它移植为 `estransforms/usestrict.rs`（仍在 `internal/transformers/**` 边界内），**不**塞进 commonjsmodule。
+>
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing）。复用 6e `collect_external_module_info`（`exported_names`、新增非 default `export class` 名收集）、6e-3 `make_exports_assignment` 机器、arena 既有 `new_void_expression`/`new_numeric_literal`/`new_import_equals_declaration` 数据。**ZERO** ast/printer/checker 增长。
+
+**Go/tsc 形态确认（tsc 5.7.3 --module commonjs --target es2017，本端口为对应 transform 单跑的形态）**：
+- `import x = require("./m"); x;` → tsc `"use strict";\nObject.defineProperty(exports, "__esModule", { value: true });\nconst x = require("./m");\nx;`（注：未用的 `import =` 被类型擦除 elide，需有 use 才 emit `const`）。本端口 commonjs-only 单跑：沿用 6e-3「仅 value 导出才发 `__esModule`」简化，import-only 模块不发标记（与既有 `named_import_and_use` 测试约定一致）→ `const x = require("m");\nx;`。`x` 是真 `const`，其 use 不改写（不入 `bindings`）。
+- `export const y = 1;` → `…__esModule…;\nexports.y = void 0;\nexports.y = 1;`（导出名先零初始化）。
+- `export const a = 1; export const b = 2;` → `…;\nexports.b = exports.a = void 0;\nexports.a = 1;\nexports.b = 2;`（**链式、逆序**：源序 `a,b` 折叠成 `exports.b = exports.a = void 0`，最后一个名在最外层；Go 50 一 chunk）。
+- `const x = 1; export { x };` → `…;\nexports.x = void 0;\nconst x = 1;\nexports.x = x;`；`export { x } from "m"` / `export { a as b } from "m"` → 导出名（`x` / `b`）同样进零初始化，再 require + live-binding getter。
+- `export class C {}` → `…;\nexports.C = void 0;\nclass C {\n}\nexports.C = C;`（类名进导出名）；但 `export function f() {}` **不**进（Go 把函数记进 `exportedFunctions`，不入 `exportedNames`）；`export default …` / `export = …` / `export * from "m"` 也不进。
+- usestrict 单跑：`export const y = 1;`（module=CommonJs）→ `"use strict";\nexport const y = 1;`（只前插指令，不降级 export——降级是 module transformer 的事）；已存在 `"use strict"` 不重复；外部模块在 module=EsNext 下跳过。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 158 unit + 25 doctest）。逐行为红→绿：
+
+1. **`import_equals_require_lowers_to_const_require`（tracer，genuine RED）**：`import x = require("m"); x;` → 红（无 `ImportEqualsDeclaration` 臂 → catch-all 恒等保留 `import x = require("m");`）→ `transform_common_js_module` 增 `Kind::ImportEqualsDeclaration` 臂调 `lower_import_equals_to_require`（取 `ImportEqualsData.name`/`module_reference`，要求 `ExternalModuleReference` 且其 expression 为 `StringLiteral`，建 `const <name> = require("<m>");`；`export import =`/内部模块引用返回 `None` 落 catch-all DEFER）→ `const x = require("m");\nx;` → 绿。
+2. **`export_const_becomes_exports_assignment`（既有测试改期望，genuine RED）**：把期望加 `exports.y = void 0;` → 红（无零初始化）→ `transform_common_js_module` 在 marker 后调 `make_exports_void_zero_inits(ec, &exported_name_texts)`（先 snapshot `info.exported_names` 文本，避免跨 `arena_mut` 持 `info` 借用）；最小实现：逐名一句 `exports.<name> = void 0;` → 单名通过 → 绿。
+3. **`multiple_exported_names_share_chained_void_zero_init`（genuine RED）**：`export const a; export const b;` → 红（逐名两句 `exports.a = void 0;\nexports.b = void 0;`，期望单句链）→ 重构 `make_exports_void_zero_inits` 为 chunk(50) 折叠：`right = void 0`，对 chunk 内每名 `right = (exports.<name> = right)`，每 chunk 一句 → `exports.b = exports.a = void 0;` → 绿。同步更新 `local_named_export` / `re_export_named` / `re_export_renamed` 三既有测试期望（均单导出名，链式实现下直接绿，作回归覆盖）。
+4. **`exported_class_declaration_keeps_decl_and_assigns_export`（既有测试改期望，genuine RED）**：期望加 `exports.C = void 0;` → 红（`collect_external_module_info` 未收类名）→ 增 `Kind::ClassDeclaration` 臂：带 EXPORT 且**非** DEFAULT、有名 → `add_unique_exported_name`（对标 Go `addExportedName(name)`；default 类只记 binding、函数声明记 `exportedFunctions`，均不收）→ `exports.C = void 0;` 出现 → 绿。既有 `exported_function_declaration`（不发 void-0）与 `exported_default_function/class`（default 不收）保持绿，锁定排除路径。
+5. **`commonjs_module_gains_use_strict_prologue`（tracer，genuine RED）**：新建 `estransforms/usestrict.rs`（先 passthrough stub）+ 接进 `estransforms/mod.rs` + 写测试 → 红（恒等无 `"use strict"`）→ 实现 `transform_use_strict`：JSON 跳过；`is_external && emit_module_kind >= ES2015` 跳过（DEFER 精确 `format` 门控）；否则 `ensure_use_strict`（首句已是 `"use strict"` 前缀指令则原样返回，否则前插 `new_string_literal("use strict")` 的 `ExpressionStatement`）重建 SourceFile → `"use strict";\nexport const y = 1;` → 绿。companion 覆盖：`existing_use_strict_prologue_is_not_duplicated`（dedup 分支）、`esm_external_module_skips_use_strict`（module=EsNext 外部模块跳过）。
+
+> 设计/divergence：(1) **`__esModule` for import-only 模块**：Go `shouldEmitUnderscoreUnderscoreESModule` = `isExternalModule && exportEquals == nil`（import-only 也发标记）；本端口沿用 6e-3「仅 value 导出发标记」简化（`module_has_exports`），故 `import x = require("m")` 单跑无标记——与既有 `named_import_and_use` 约定一致，DEFER 完整外部模块门控。(2) **void-0 链逆序**：与 tsc 一致（源序 `a,b` → `exports.b = exports.a = void 0`），chunk(50) 忠实移植。(3) **导出名集合**：复用/扩展 `collect_external_module_info.exported_names`，仅含可达子集（`export const`、local/re-export named、非 default `export class`）；string-literal 导出名走 element-access 形态 DEFER（本轮全 identifier）。(4) **usestrict 的 `format` 门控**：Go `getEmitModuleFormatOfFile`（per-file，依赖 package.json type/resolver）未线进 `TransformOptions`，本端口以 emit module kind 近似 `format >= ES2015`——对非 Node ESM kind（`ES2015..=ESNext`/`Preserve`）精确，对 `Node16+`（CJS format 仍应发 `"use strict"`）不精确，DEFER。(5) `import =` 仅 external-module-reference 非 export 形；`export import x = require("m")`（→ `exports.x = require(...)`）与 Node16+ 同步 require helper DEFER。(6) 沿用确定性命名 / 作用域无关 use 改写 / 不发 `"use strict"`（commonjs-only 单跑）等既有简化。
+
+**测试计数（6x 新增）**：`tsgo_transformers` +5 `#[test]`（`import =` 1 + 多名 void-0 链 1 + usestrict tracer/dedup/ESM-skip 3；`export const`/`export class`/`local named`/`re-export ×2` 为既有测试改期望，不计数）+1 doctest（`new_use_strict_transformer`）→ **163 unit + 26 doctest**（6w 基线 158+25）。
+
+### upstream（ast/printer/checker）增长（6x）
+
+- **无**。`import =`/void-0/usestrict 全走 arena 既有构造器（`new_import_equals_declaration` 数据读取、`new_void_expression`/`new_numeric_literal`/`new_property_access_expression`/`new_binary_expression`/`new_token`/`new_expression_statement`/`new_string_literal`/`new_source_file`）+ 6e `collect_external_module_info`（本轮于 `moduletransforms` 内扩 `export class` 名收集，仍在 `internal/transformers/**`）。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`、任何 `.go`。`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净。
+
+### DEFER（本轮确认的 blocked-by）
+
+- **作用域正确的 use 解析**（同 6e-2…6w 缺口）：blocked-by 真实 `ReferenceResolver`。
+- **碰撞无关的 require var 名**：blocked-by `NewGeneratedNameForNode`。
+- **import-only 模块的 `__esModule` 标记 / 完整外部模块门控**：blocked-by 完整 `shouldEmitUnderscoreUnderscoreESModule`（`IsExternalModule`）端口决策。
+- **`export import x = require("m")`（→ `exports.x = require(...)`）、Node16+ `import =` 同步 require helper**：blocked-by resolver / helper 基建。
+- **usestrict 精确 `format` 门控（`getEmitModuleFormatOfFile`）**：blocked-by per-file module-format 分析（resolver）。
+- **string-literal 导出名 void-0（element-access 形）、匿名 default decl、`export * as ns`、动态 `import()`、local `export { x }` live-binding**：同既有 DEFER。
+
+## 6y worklog（estransforms `forawait` — async 生成器函数声明 → `__asyncGenerator` 包装；red→green 推进记录）
+
+> 本轮落地 ES2018 **async 生成器函数声明**降级（`forawait.go` 的 async-generator 分支；`for await` 本身 DEFER）。Go ground truth 不在 `async.go`（那只管 ES2017 `__awaiter`），而在 **`forawait.go`**（ES2018 transformer，同时管 `for await` 与 async 生成器）：`visitFunctionDeclaration`（`Async && Generator` 分支）→ `transformAsyncGeneratorFunctionBody` → `NewAsyncGeneratorHelper(generatorFunc, hasLexicalThis)`；body 内 `visitAwaitExpression`/`visitYieldExpression`/`visitReturnStatement` 按 `enclosingFunctionFlags` 改写。
+>
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing，新增 `new_for_await_transformer` 公共入口，additive；不改既有 transformer 入口）。**ZERO** ast/printer/checker 增长（全走 arena 既有构造器 + `factory.new_generated_name_for_node`/`new_unscoped_helper_name`）。
+
+### Go ground-truth 校正（briefing 偏离，已 VERIFY 跟随 Go + tsc）
+
+> briefing 的 tracer 称「`await x` → `yield __await(x)`，且 **`yield x` 保留 `yield x`**」。**实测 Go（`forawait.go:visitYieldExpression` 非 `*` 分支 → `createDownlevelAwait`）+ tsc（`6.0.3 --target es2017`）均为 `yield e` → `yield yield __await(e)`**（先 await 再 yield 该值）。本端口跟随 Go：
+> - `async function* g() { await x; yield y; }` → `function g() { return __asyncGenerator(this, arguments, function* g_1() { yield __await(x); yield yield __await(y); }); }`
+> - `yield* y;` → `yield __await(yield* __asyncDelegator(__asyncValues(y)));`（prologue helper 序：`__asyncValues`,`__await`,`__asyncDelegator`,`__asyncGenerator`，tsc 对拍一致）
+> - `return y;` → `return yield __await(y);`；bare `yield;` → `yield yield __await(void 0);`
+>
+> **helper 定义位置校正**：briefing 要求「确保 `__asyncGenerator`/`__await` 在 helper 表中（缺则移植 Go 定义）」。helper 表在 `internal/printer/emithelpers.rs`，而 printer 出本轮编辑范围（边界仅 `internal/transformers/**`）。故把 `__await`/`__asyncGenerator`/`__asyncDelegator`/`__asyncValues` 四个 `EmitHelper` **`pub static` 定义在 `forawait.rs` 内**（文本 verbatim Go `helpers.go`，tsc 对拍逐字一致；`request_emit_helper(&'static EmitHelper)` 跨 crate 可用；`ASYNC_GENERATOR_HELPER`/`ASYNC_DELEGATOR_HELPER` 的 `dependencies = &[&AWAIT_HELPER]` 引用本 crate static）。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 163 unit + 26 doctest）。逐行为红→绿：
+
+1. **`async_generator_function_lowers_to_async_generator_wrapper`（tracer，genuine RED）**：先建 `forawait.rs` 骨架（`for_await_visit` 仅 `SourceFile`→visit_source_file + 容器透传）+ 四个 helper static + `mod.rs` 注册 + tracer 测试 → 红（恒等输出 `async function* g() { await x; yield y; }`）→ 实现 `visit_async_generator_function_declaration`（剥 async 修饰 + 去 asterisk）+ `build_async_generator_wrapper_body`（inner `function* g_1`，名经 `new_generated_name_for_node`；`build_async_generator_call` 请求 `__await`+`__asyncGenerator`、`this`/`arguments` 实参）+ `convert_async_generator_body_node`（`AwaitExpression`→`yield __await(x)`；非 `*` `YieldExpression` 带 expr →`yield (yield __await(e))`）→ 绿。
+2. **`async_generator_yield_delegate_uses_async_delegator`（yield*，genuine RED）**：`async function* a() { yield* y; }` → 红（`yield* y` 透传）→ 在 YieldExpression 臂加 `asterisk_token.is_some()` 分支：`__asyncValues(e)` → `__asyncDelegator(...)` → `yield* __asyncDelegator(...)`（复用原 asterisk token）→ `__await(...)` → `yield __await(...)`（`build_async_values_call`/`build_async_delegator_call`）→ 绿。helper 序经依赖（`asyncDelegator`→`await`）+ 请求序得 `asyncValues,await,asyncDelegator,asyncGenerator`，与 tsc 一致。
+3. **`async_generator_return_awaits_value`（return，genuine RED）**：`async function* b() { return y; }` → 红（`return y;` 透传）→ 加 `ReturnStatement` 臂 → `return yield __await(y)`（`create_downlevel_await`，None→void 0）→ 绿。
+4. **`async_generator_bare_yield_uses_void_zero`（bare yield，genuine RED）**：`async function* c() { yield; }` → 红（`yield;` 透传）→ 把非 `*` YieldExpression 分支的 expr 改 `match { Some=>convert, None=>void 0 }` → `yield yield __await(void 0)` → 绿。
+5. **`async_generator_method_is_left_unchanged`（DEFER 守卫，characterization）**：`class C { async *m() { await x; } }` → 仅匹配 `FunctionDeclaration`，方法体不被改写（printer 仅把类规范化为多行）→ `class C {\n    async *m() { await x; }\n}`，锁定「async 生成器方法本轮不误降级」边界。
+
+> 设计/divergence：(1) body 改写用 ec-threaded 递归（`convert_async_generator_body_node` + `visit_each_child_converting` map 替换），停在嵌套函数样作用域（各自 async 边界），镜像 async.rs 6m 模式但穿 `&mut EmitContext` 以请求 helper。(2) `hasLexicalThis` 对函数声明恒为 `true`（自身 `this`），Go 的 hierarchy-facts 线程化（方法/箭头/super）DEFER。(3) helper 请求序逐字镜像 Go factory（`NewAsyncGeneratorHelper`：await 后 asyncGenerator；`NewAsyncDelegatorHelper`：await 后 asyncDelegator），优先级均 `None` → printer stable-sort 保留请求序。(4) 未设 Go `NewAsyncGeneratorHelper` 的 `EFAsyncFunctionBody|EFReuseTempVariableScope` emit flags（async.rs awaiter 同样未设，可达子集 emit 不依赖）；变量环境 merge / 非简单参数 / super 捕获 DEFER。
+
+**测试计数（6y 新增）**：`tsgo_transformers` +5 `#[test]`（tracer 1 + yield* 1 + return 1 + bare yield 1 + 方法 DEFER 守卫 1）+1 doctest（`new_for_await_transformer`）→ **168 unit + 27 doctest**（6x 基线 163+26）。
+
+### upstream（ast/printer/checker）增长（6y）
+
+- **无**。全走 arena 既有构造器（`new_function_declaration`/`new_function_expression`/`new_block`/`new_return_statement`/`new_yield_expression`/`new_call_expression`/`new_keyword_expression`/`new_identifier`/`new_token`/`new_void_expression`/`new_numeric_literal`）+ factory `new_generated_name_for_node`/`new_unscoped_helper_name` + EmitContext `request_emit_helper`/`read_emit_helpers`/`add_emit_helper`（均既有）。四个 `EmitHelper` static 定义在 `internal/transformers/estransforms/forawait.rs`（**未**触碰 `internal/printer/emithelpers.rs`）。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`、任何 `.go`。`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净。
+
+### DEFER（本轮确认的 blocked-by，forawait 维度）
+
+- **`for await (x of y)` downlevel**：完整 async-iteration 脚手架（`__asyncValues` 迭代器 + downlevel-`await(.next())` + generated-name iterator/result/value temps + `iterator.return` 清理嵌套 try/finally，`convertForOfStatementHead`）。blocked-by：该脚手架体量大，部分实现会产出错误代码。
+- **async 生成器方法 / 函数表达式 / 箭头**：blocked-by `EmitContext` super-capture（`_super`/`_superIndex` 绑定 + `AsyncSuperHelper`）+ hierarchy-facts `hasLexicalThis` 跨作用域线程化。
+- **非简单参数列表**（默认/rest 参数 → 占位参 + inner 转发）、**变量环境 merge**（`StartVariableEnvironment`/`EndAndMergeVariableEnvironmentList`）、**top-level await**、**`EFAsyncFunctionBody`/`EFReuseTempVariableScope` emit flags**。
+
+## 6z worklog（estransforms `forawait` — `for await (x of y)` downlevel → async-iteration 脚手架；red→green 推进记录）
+
+> 本轮落地 6y 自身 DEFER 的 **`for await (x of y)` downlevel**（`forawait.go:transformForAwaitOfStatement` + `convertForOfStatementHead`）。Go ground truth：`visitForOfStatement`（`AwaitModifier != nil` 分支）→ `transformForAwaitOfStatement`：`__asyncValues(<expr>)` 迭代器 temp + `result` temp + C-style `for`（var list `nonUserCode=true, iterator=__asyncValues(expr), result`；条件 `result = downlevelAwait(iterator.next()), done = result.done, !done`；incrementor `nonUserCode=true`）+ `convertForOfStatementHead`（`value=result.value; nonUserCode=false; <绑定>; <body>`）+ `try { for } catch (e) { errorRecord = { error: e } } finally { try { if (!nonUserCode && !done && (returnMethod = iterator.return)) downlevelAwait(returnMethod.call(iterator)) } finally { if (errorRecord) throw errorRecord.error } }`。`done`/`errorRecord`/`returnMethod`/`value` 经 `AddVariableDeclaration` hoist。
+>
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing，复用 6y `new_for_await_transformer` 公共入口，不改入口）。**ZERO** ast/printer/checker 增长（全走 arena 既有构造器 + factory `new_temp_variable`/`new_unique_name`/`new_generated_name_for_node` + EmitContext `start/end_variable_environment`/`add_variable_declaration`/`set_emit_flags`/`request_emit_helper`）。
+
+### Go/tsc ground-truth 校正（已 VERIFY 对拍 `tsc 5.6 --target es2017`）
+
+> 在 `--target es2017` 下 `async`/`await` 原生保留、仅 ES2018 `for await` downlevel，故 tsc 输出**等价于 forawait-only stage**（plain async 函数内 `createDownlevelAwait` 走非生成器分支 → `await`，非 `yield __await`）。对拍输入 `async function f() { for await (const x of gen()) {} }` →
+> ```js
+> var __asyncValues = …;
+> async function f() {
+>     var _a, e_1, _b, _c;
+>     try {
+>         for (var _d = true, _e = __asyncValues(gen()), _f; _f = await _e.next(), _a = _f.done, !_a; _d = true) {
+>             _c = _f.value;
+>             _d = false;
+>             const x = _c;
+>         }
+>     }
+>     catch (e_1_1) { e_1 = { error: e_1_1 }; }
+>     finally {
+>         try { if (!_d && !_a && (_b = _e.return)) await _b.call(_e); }
+>         finally { if (e_1) throw e_1.error; }
+>     }
+> }
+> ```
+> temp 映射：`done=_a`、`errorRecord(NewUniqueName "e")=e_1`、`returnMethod=_b`、`value=_c`、`nonUserCode=_d`、`iterator(NewTempVariable)=_e`、`result(NewTempVariable)=_f`、`catchVariable(NewGeneratedNameForNode errorRecord)=e_1_1`。仅请求 `__asyncValues` helper。
+>
+> **校正 1（identifier 源 DEFER，printer 限制）**：Go 对 **identifier 源**（`for await (const x of y)`）令 `iterator = NewGeneratedNameForNode(y)`（→ `y_1`）、`result = NewGeneratedNameForNode(iterator)`（→ `y_1_1`），依赖 printer 的 **resolving `getTextOfNode`**（对已生成名取其 resolved 文本作 base）。Rust printer 的 `namegenerator.generate_name_for_node` 用 raw `arena().text()`——对 generated-name 节点其文本为 `""`（`new_generated_name_for_node` 建的 identifier text=""）→ `result` 名退化为 `"1"`（非法 JS）。故 **identifier 源 DEFER**（blocked-by：printer resolving 名生成未移植）；本轮用**非 identifier 源 `gen()`**，iterator/result 走 `NewTempVariable` → 干净 `_e`/`_f`。
+>
+> **校正 2（catch 变量 cosmetic 偏离）**：同因，`catchVariable = NewGeneratedNameForNode(errorRecord "e_1")` Go/tsc 得 `e_1_1`，Rust 用 raw text `"e"` → `makeUniqueName("e")` → `"e_1"` 已 reserved → **`e_2`**。catch 变量是 fresh binding，名字语义无关 → 纯 cosmetic 偏离，已在测试注释 + DEFER 记录。锁定 Rust 实际输出 `e_2`。
+>
+> **校正 3（函数体 multi-line）**：Go `for await` 不重建函数体（原 parsed block 保留 `MultiLine`，`UpdateBlock` 透传）。Rust 必须重建函数体（注入 hoisted vars + 转换后 for-await）→ synthesized block 经 `emit_function_body` 的 `should_emit_block_function_body_on_single_line` 默认**单行**（与普通 block 经 `emit_block` 默认多行不对称）。故在 `visit_for_await_function_body` 重建时：若 hoist 非空（说明降级了 for-await）则置 `EmitFlags::MULTI_LINE`，匹配 tsc 多行脚手架；无 hoist 且无 child 改动则**原样返回**（保留源 block 多行布局与身份，不扰动无 for-await 的普通函数）。
+
+先确认基线绿（`cargo test -p tsgo_transformers` = 168 unit + 27 doctest）。逐行为红→绿：
+
+1. **`for_await_of_lowers_to_async_iteration_scaffold`（tracer，genuine RED）**：`async function f() { for await (const x of gen()) {} }` → 红（恒等透传 `for await (const x of gen()) { }`）→ 实现 `for_await_visit` 新增 `FunctionDeclaration`（非 async-gen）→ `visit_function_declaration`（变量环境包裹函数体）+ `ForOfStatement`（`await_modifier.is_some()`）→ `transform_for_await_of_statement`（完整脚手架，`create_downlevel_await_value` = 非生成器 `await`）+ `convert_for_of_statement_head` + `create_for_of_binding_statement`（VariableDeclarationList → `const x = _c`，保 `BLOCK_SCOPED` flags）+ helper `new_assignment`/`inline_expressions_ec`/`new_function_call_call`，catch/finally 子块置 `SINGLE_LINE`，函数体置 `MULTI_LINE` → 绿（catch 变量锁 `e_2`，见校正 2）。
+2. **`for_await_of_body_statements_follow_the_binding`（body 引用 x，characterization）**：`{ use(x); }` → body 语句经 `convert_for_of_statement_head` 的 block-splice（`statements.extend(block.statements)`）拼在 `const x = _c` 后 → 绿。脚手架是单体 Go 函数的忠实端口，body 拼接随 tracer 一并落地（空 body tracer 无法区分；忠实端口不能产「部分脚手架」——6y DEFER 注明部分实现会产出错误代码），故此为锁定可达分支的 characterization 测试。
+3. **`for_await_of_existing_variable_target_binds_with_assignment`（existing-variable target，characterization）**：`for await (x of gen())` → `create_for_of_binding_statement` 非-VariableDeclarationList 分支 → plain assignment `x = _c;`（非声明）→ 绿。
+
+> 设计/divergence：(1) `enclosingFunctionFlags` **未线程化**——本轮只支持 async 非生成器 `for await`（downlevel = `await`）；async 生成器内 `for await`（需 `yield __await`）DEFER。(2) hoisted temps 经新增的 plain-function 变量环境（镜像 optionalchain 6i），top-level `for await`（无函数变量环境）DEFER。(3) nested-loop 的 `errorRecord` reset（`ancestorFacts & IterationContainer` → `errorRecord = void 0, __asyncValues(…)`）未实现，本轮 initializer 恒为 `__asyncValues(<expr>)`。(4) source-map ranges（`SetSourceMapRange`）/`SetOriginal`/`EFNoTokenTrailingSourceMaps` 未设（可达子集 emit 不依赖，与 6y/async.rs 一致）。
+
+**测试计数（6z 新增）**：`tsgo_transformers` +3 `#[test]`（tracer 1 + body-ref 1 + assignment-target 1），doctest 不变 → **171 unit + 27 doctest**（6y 基线 168+27）。
+
+### upstream（ast/printer/checker）增长（6z）
+
+- **无**。全走 arena 既有构造器（`new_for_statement`/`new_try_statement`/`new_catch_clause`/`new_if_statement`/`new_throw_statement`/`new_variable_declaration(_list)`/`new_variable_statement`/`new_binary_expression`/`new_prefix_unary_expression`/`new_property_access_expression`/`new_call_expression`/`new_object_literal_expression`/`new_property_assignment`/`new_await_expression`/`new_expression_statement`/`new_block`/`new_token`/`new_identifier`/`new_keyword_expression`）+ factory `new_temp_variable`/`new_unique_name`/`new_generated_name_for_node` + EmitContext `start/end_variable_environment`/`add_variable_declaration`/`set_emit_flags`/`request_emit_helper`/`add_emit_helper`（均既有，6z 仅新增 `EmitFlags` re-export 引用，无新 API）。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`、任何 `.go`。`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净。
+
+### DEFER（本轮确认的 blocked-by，forawait 6z 维度）
+
+- **identifier 源 `for await (const x of y)`**：blocked-by printer resolving `getTextOfNode`（嵌套 generated-name 解析，未移植）；Rust 现状会令 `result` 名退化为非法 `"1"`。
+- **async 生成器内 `for await`**：blocked-by `createDownlevelAwait` 的生成器分支（`yield __await(...)`）= `enclosingFunctionFlags` 跨作用域线程化（本轮 transformer 是无状态 free-fn，未持 enclosing flags）。
+- **destructuring 循环变量**（`for await (const [a, b] of …)`）：blocked-by destructuring flattener（`CreateForOfBindingStatement` 仅取 `Declarations[0].Name`，绑定模式需 6h destructuring）。
+- **top-level `for await`**：blocked-by 源文件级变量环境 hoist（本轮只在 plain-function-body 起变量环境）+ top-level await。
+- **label / `continue` / `break` interplay**（`visitLabeledStatement` + `RestoreEnclosingLabel`，`outermostLabeledStatement` 现恒 nil）、**nested-loop `errorRecord` reset**（`ancestorFacts & IterationContainer`）。
+
+## 6aa worklog（estransforms `spread` — ES2015 数组字面量 + 调用参 spread → `__spreadArray`/`.apply`；red→green 推进记录）
+
+> 本轮落地 ES2015 **数组字面量 spread**（`[...a, b]`）与 **调用参 spread**（`f(...args)`）降级（pre-ES2015 目标）。**关键发现：Go 端无 ES2015 spread transform**——`estransforms/` 无 `spread.go`/`es2015.go`，`GetESTransformer` 链止于 `NewES2016Transformer`（`default`/更老目标 fall through 到它，根本不降级 spread）。故 briefing 引用的 Go `transformAndSpreadElements`/`visitArrayLiteralExpression`/`spreadArrayHelper` **在本仓不存在**；ground truth 取 **`tsc --target es5` 实测对拍**（upstream `microsoft/TypeScript` `src/compiler/transformers/es2015.ts`）。新增 `spread.rs`（含 `SPREAD_ARRAY_HELPER` 定义，`tsgo_printer` 出编辑范围，同 `forawait.rs` 就地定义，verbatim tsc 文本）+ 注册 `pub mod spread;`。
+
+### tsc `--target es5` 对拍（已 VERIFY，本轮 ground truth）
+
+```
+[...a, b];        -> __spreadArray(__spreadArray([], a, true), [b], false);
+const c = [...a]; -> var c = __spreadArray([], a, true);   // const->var 是另一 stage，本 transform 仅降 spread
+[1, ...a, 2];     -> __spreadArray(__spreadArray([1], a, true), [2], false);
+f(...args);       -> f.apply(void 0, args);                // 单 spread 捷径，无 __spreadArray、无 helper
+f(a, ...args);    -> f.apply(void 0, __spreadArray([a], args, false));
+o.m(...args);     -> o.m.apply(o, args);                   // 标识符受体复用为 this
+new C(...args);   -> new (C.bind.apply(C, __spreadArray([void 0], args, false)))();  // DEFER
+```
+
+> **briefing 校正**：briefing 称 `f(...args)` → `f.apply(void 0, __spreadArray([], args, false))`，实测 tsc 为 `f.apply(void 0, args)`（arg-list 单 spread 段经 single-segment 捷径直接传 bare 段表达式，不包 `__spreadArray`，也不请求 helper）。
+> **pack 旗标规律**（对拍 6 例验证）：`pack = is_spread_segment && !is_argument_list`——数组字面量的 spread 段 `pack=true`、arg-list 的 spread 段恒 `pack=false`；任何字面量段恒 `pack=false`。最干净对照：`[...a, ...args]` → `__spreadArray(__spreadArray([], a, true), args, true)` vs `f(...a, ...args)` → `f.apply(void 0, __spreadArray(__spreadArray([], a, false), args, false))`（结构同、仅 pack 旗标差）。
+
+### red→green 逐行为
+
+1. **`array_spread_then_element_lowers_to_spread_array_segments`（tracer，genuine RED）**：`[...a, b];` → 红（skeleton 恒等透传 `[...a, b];`）→ 实现 `transform_and_spread_elements`（分段 + 累加器 + `__spreadArray` 折叠）+ `SPREAD_ARRAY_HELPER` request/prologue attach → 绿。
+2. **`single_array_spread_folds_into_spread_array`（coverage/泛化）**：`const c = [...a];` → 复用 tracer 的折叠（单 spread 段，数组无 single-segment 捷径）→ 绿。
+3. **`leading_literal_array_spread_starts_accumulator_at_first_segment`（coverage/泛化）**：`[1, ...a, 2];` → 走 `starts_with_spread=false` 路径（累加器起于 `[1]`）→ 绿。
+4. **`call_with_single_spread_argument_lowers_to_apply`（call tracer，genuine RED）**：`f(...args);` → 红（透传 `f(...args);`）→ 实现 `CallExpression` 臂 + `try_lower_call_with_spread`（标识符 callee → `void 0` 受体）+ arg-list single-segment 捷径 → 绿。
+5. **`call_with_leading_argument_and_spread_folds_into_spread_array`（coverage/泛化）**：`f(a, ...args);` → arg-list 多段折叠（`pack=false`）→ 绿。
+6. **`member_call_with_spread_captures_receiver_as_this`（genuine RED）**：`o.m(...args);` → 先把 `PropertyAccessExpression` 受体臂回退为 `return None`(DEFER) → 红（透传 `o.m(...args);`）→ 实现简单标识符受体复用为 `apply` `this` → 绿。
+7. **DEFER 守卫（characterization）**：`new C(...args);`（`NewExpression` 不处理）与 `a.b.m(...args);`（非简单成员受体 → `return None`）均保持不变 → 绿。
+
+### scope / upstream 增长（6aa）
+
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing；新增 `new_spread_transformer` 公共入口，未改既有入口）。**ZERO** ast/printer/checker 增长——全走 arena 既有构造器（`new_array_literal_expression`/`new_call_expression`/`new_property_access_expression`/`new_keyword_expression`(true/false)/`new_identifier`/`new_numeric_literal`/`new_void_expression`）+ factory `new_unscoped_helper_name` + EmitContext `request_emit_helper`/`add_emit_helper`/`read_emit_helpers`（均既有）。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`、任何 `.go`。`SPREAD_ARRAY_HELPER` 作 `spread.rs` 内 `pub static EmitHelper`（不增 `tsgo_printer`）。
+>
+> **测试计数（6aa 新增）**：`tsgo_transformers` +8 `#[test]`（array tracer 1 + 2 coverage + call tracer 1 + 2 coverage + 2 DEFER 守卫）+ 1 doctest → **179 unit + 28 doctest**（6z 基线 171+27）。`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净。
+
+### DEFER（本轮确认的 blocked-by，spread 维度）
+
+- **`new C(...args)`**：blocked-by `new`-target bind 形（`new (C.bind.apply(C, __spreadArray([void 0], args, false)))()`，需 construct + `bind.apply` 合成）。
+- **`super(...args)`**：blocked-by `super` 受体捕获（super-call 的 `_super.apply` / `_this = _super.call(...)` 形）。
+- **非简单成员受体**（`foo().m(...args)`、`a.b.m(...args)`）：blocked-by `createCallBinding` 的 capture temp（受体须经变量环境 hoist 求值一次：`(_a = a.b).m.apply(_a, args)`）。
+- **`--downlevelIteration`**：blocked-by `__read`/`__spread`/`__spreadArrays` 迭代 helper 形。
+- **wiring 进 `GetESTransformer`**：无 `NewES2015Transformer` 链（`definitions` 端口本身 DEFER）；本轮仅以公共入口 `new_spread_transformer` 直测，待 ES2015 stage 成形后再接链。
+- **packed-array-literal spread**（`[...[1, 2]]`）的 `PackedSpread`（`pack=false` 直接段）与 `isPackedArrayLiteral` single-segment 捷径：可达子集仅覆盖标识符 spread（`UnpackedSpread`）。
+
+## 6ae worklog（`systemmodule` System.register 包装核心；red→green 推进记录）
+
+> 本轮新增 `systemmodule.rs`（`module: system`），落地 **System.register 包装核心**：把模块体包进 `System.register([<deps>], function (exports_1, context_1) { "use strict"; return { setters: [<setters>], execute: function () { <body> } }; })`。Go ground truth `moduletransforms/systemmodule.go:NewSystemModuleTransformer`/`transformSourceFile`/`createSystemModuleBody`（本仓 `_submodules/TypeScript` 为空、无 `.go` 镜像，shape 取 **tsc `--module system` 已知输出**对拍 + 既有 CJS/ESM 端口的同源构造器/打印器约束）。复用 6e `collect_external_module_info` 收 external imports。
+
+### Go-confirmed shape（打印器约束下）
+
+```
+System.register([<deps>], function (exports_1, context_1) {
+    "use strict";
+    return { setters: [<setters>], execute: function () { <body> } };
+});
+```
+
+> **打印器约束**：Rust 打印器对 array/object 字面量**恒单行**（`emit_expressions.rs` 硬编码 `multi_line=false`，per-node `MultiLine` 未携带），故 return 对象 / setters 数组 / deps 数组 / 空 execute 块均**内联**（tsc 实为多行）；仅外层 module body block 设 `EmitFlags::MULTI_LINE`（Go `multiLine: true`）才多行。本轮 expected 取打印器实际输出（= tsc 结构，仅 whitespace 差），与既有 CJS `{ value: true }` 内联对象一致。
+> **name generator 偏离（TODO(port)）**：binding-less import 的 setter param Go 用 `factory.createUniqueName("")`，tsc 渲染 `_1`；Rust name generator 空 base 路径有 `!base_name.is_empty()` 守卫，丢前导 `_` → 渲染 `1`（偏离 Go：Go 对空 base `charCodeAt(-1)=NaN !== '_'` 故补 `_`）。为复现 tsc `_1`，setter param 传 base `"_"`（`new_unique_name("_")` → `_1`）。printer 出编辑范围，记 TODO(port) 待对齐空 base 路径。
+
+### red→green 逐行为
+
+1. **`empty_module_wraps_in_system_register`（tracer，genuine RED）**：`""` → 红（passthrough 输出 `""`）→ 实现 register wrapper（`exports_1`/`context_1` via `new_unique_name`、`"use strict"` 前导、`return { setters: [], execute: function () { } }`，外层 body 设 `MULTI_LINE`）→ 绿 `System.register([], function (exports_1, context_1) {\n    "use strict";\n    return { setters: [], execute: function () { } };\n});`。
+2. **`side_effect_import_adds_dependency_and_setter`（genuine RED）**：`import "m";` → 红（deps `[]`/setters `[]`）→ 实现 `collect_external_module_info` → 收 module specifier 进 deps 数组 + 每依赖一个空体 setter（`function (_1) { }`）→ 绿 `System.register(["m"], …, return { setters: [function (_1) { }], execute: function () { } } …)`。
+3. **`top_level_value_statement_moves_into_execute_body`（genuine RED）**：`f();` → 红（execute 体空 `{ }`）→ 实现 `is_module_syntax_statement` 分区，非 import/export 语法的顶层语句按源序移入 execute 体 → 绿 `… execute: function () { f(); } …`。
+4. **`non_system_module_kind_is_passthrough`（gate 覆盖）**：`module != System` → 透传（`f();` 不变）。
+
+### scope / upstream 增长（6ae）
+
+> **scope**：仅 `-p tsgo_transformers`（内部 transform plumbing；新增 `new_system_module_transformer` 公共入口 + `pub mod systemmodule;`，未改既有公共链入口）。**ZERO** ast/printer/checker 增长——全走 arena 既有构造器（`new_array_literal_expression`/`new_object_literal_expression`/`new_property_assignment`/`new_function_expression`/`new_parameter_declaration`/`new_block`/`new_return_statement`/`new_string_literal`/`new_expression_statement`/`new_property_access_expression`/`new_call_expression`/`new_identifier`）+ factory `new_unique_name` + EmitContext `set_emit_flags`（均既有）。复用 6e `collect_external_module_info`。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`、任何 `.go`。
+>
+> **测试计数（6ae 新增）**：`tsgo_transformers` +4 `#[test]`（empty tracer + side-effect import + execute body + gate passthrough，前 3 均 genuine RED→GREEN）+ 1 doctest → **192 unit + 31 doctest**（6ad 基线 188+30）。`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净、`cargo fmt -p tsgo_transformers -- --check` 干净。
+
+### DEFER（本轮确认的 blocked-by，systemmodule 维度）
+
+- **export-setter 接线**：named export → register 体内 `exports({...})` 调用、每依赖 setter 体转发 import binding。blocked-by 真实 `ReferenceResolver`（checker `resolveName`/`EmitResolver`，同 CJS 缺口）。
+- **import binding 重写 / hoisting / live bindings**：import 名用点改为依赖局部绑定、var/function hoist 进 register 体、live-binding `exports(...)` 更新。blocked-by `ReferenceResolver`。
+- **`var __moduleName = context_1 && context_1.id;`**、**module-name 首参**（`System.register("name", [deps], …)`）、**`export *` star helper**、**dependency 分组/去重**（同模块多 import 合并为一组一 setter）、**`export =` 交互**。
+
+## 6af worklog — `tstransforms/importelision`（作用域正确未引用 value import 省略）
+
+> 本轮被 checker **4an** 解锁（`EmitResolver::is_referenced(program, node) -> bool` + `resolve_reference`，作用域正确：把 identifier *use* 经作用域链解析到声明 symbol，内层 shadowing 胜出；`is_referenced` 排除声明自身名节点、是真作用域查询而非按名匹配）。本轮把真·作用域正确的未引用 import 省略接进 transform 管线，落地 Go `ImportElisionTransformer` 的 import 侧可达子集。
+
+### resolver 如何接线（additive）
+
+- 新增公共类型 `EmitReferenceResolver`（`lib.rs`）：包 `Rc<dyn tsgo_checker::BoundProgram>` + `tsgo_checker::EmitResolver`，暴露 `is_referenced(node) -> bool`（委托 `EmitResolver::is_referenced(program, node)`，Go `emitResolver.IsReferencedAliasDeclaration`）。
+- 经 **新 factory 的额外入参** `new_import_elision_transformer(opt: &TransformOptions, resolver: EmitReferenceResolver)` 传入——**不是** `TransformOptions` 字段。原因（关键约束）：`internal/compiler/emitter.rs:107` 用**穷举字面量** `TransformOptions { context, compiler_options }` 构造它，给 struct 加字段会破坏 `tsgo_compiler` 编译，而 compiler crate 不在本 lane 编辑范围。额外入参是不改任何既有签名的纯 additive 方案。
+- 节点 id 对齐：`EmitReferenceResolver` 的 `BoundProgram` 自带独立 parse+bind 的 arena；因 parse 确定性，其节点 id 与 transform 读取的（独立 parse 的）`EmitContext` arena 一致，故 transform 拿到的原始 import 声明节点 id 在 resolver 程序里解析为同一句法节点。测试 helper `build_reference_resolver`（`test_support.rs`，`#[cfg(test)]`）用 `tsgo_parser`+`tsgo_binder` 建一个 crate-local `BoundProgram`（checker 的 `StubProgram` 是 `pub(crate)`，跨 crate 不可见，故自建）。
+
+### red→green 切片（每片 input → emitted-shape）
+
+1. **`unused_named_import_is_elided`（genuine RED）**：`import { x } from "m";`（x 未用）期望 `∅` → 红（先 stub `import_elision_visit` 为恒等透传，emit 出 `import { x } from "m";`）→ 实现 SourceFile/ImportDeclaration/ImportClause/NamedImports/ImportSpecifier 各臂（`is_referenced` 为 false → specifier 丢 → NamedImports 空 → ImportClause 空 → 整 ImportDeclaration 省略）→ 绿。
+2. **`used_named_import_is_kept`（guard）**：`import { x } from "m";\nx;` → 原样保留（`x` 被 value 引用，`is_referenced` 为 true，specifier 与外层 import 存活）。
+3. **`shadowed_use_does_not_keep_import_alive`（headline，genuine RED）**：`import { x } from "m";\nfunction f() {\n    var x = 1;\n    x;\n}` 期望仅函数 → 先把 keep-决策临时改成 `true`（模拟按名匹配——文本里 `x` 出现就续命）观察红（import 被错误保留）→ 还原为 `resolver.is_referenced(node)`（作用域正确：内层 `var x` shadow，外层 import 未引用，`is_referenced` 为 false）→ 绿。证明真作用域解析 vs 按名匹配。
+4. **guard 群**：per-specifier 丢弃（`import { a, b } from "m";\na;` → `import { a } from "m";\na;`，含尾逗号修复——rebuild 用 `NodeList::new` 给 undefined range 避免 printer 从源跨度推断尾逗号）、side-effect-only `import "m";` 不省略、namespace import 省略/保留、default import 省略/保留。
+
+### scope / upstream 增长（6af）
+
+> **scope**：仅 `-p tsgo_transformers`。新增 `pub mod importelision;`（tstransforms）+ `pub fn new_import_elision_transformer` + 公共 `EmitReferenceResolver`（均 additive 新公共项，未改既有签名）。**ZERO** ast/printer/checker 增长——全走 arena 既有构造器（`new_source_file`/`new_import_declaration`/`new_import_clause`/`new_named_imports`）+ `visit_nodes_removable`（既有）；消费 checker 4an 既有 `EmitResolver`。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`、任何 `.go`、README、root Cargo。
+>
+> **测试计数（6af 新增）**：`tsgo_transformers` +9 `#[test]`（slice1 + scope-correct + 7 guard；slice1 与 scope-correct 均 genuine RED→GREEN）+ 4 doctest（`EmitReferenceResolver` ×3 + `new_import_elision_transformer`）→ **201 unit + 35 doctest**（6ae 基线 192+31）。`cargo test -p tsgo_transformers` 全绿；`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_transformers -- --check` 干净；`cargo build -p tsgo_compiler` 绿（证明公共 API additive）。
+
+### DEFER（本轮确认的 blocked-by，importelision 维度）
+
+- **export 侧**（`ExportAssignment` / `ExportDeclaration` / `NamedExports` / `ExportSpecifier`）：需 `EmitResolver::IsValueAliasDeclaration`（未移植）。blocked-by checker `isValueAliasDeclaration`。
+- **`ImportEqualsDeclaration`**（`import x = require("m")` / `import x = a.b`）：需 `EmitResolver::IsTopLevelValueImportEqualsWithEntityName` + `shouldEmitImportEqualsDeclaration` 的 external-module 判定。blocked-by checker 相应查询。
+- **type-only 位置 use 续命 value import**（一个*类型*位置的 use 不应让 value import 存活）：需每 use 点的 type-vs-value meaning。blocked-by checker `markLinkedReferences`（4an 自身亦 DEFER 了此项）。
+- **`IsInJSFile` 短路**（`.js`/`.jsx` 源保留全部 import）：本轮测试为 `.ts`，`should_emit_alias_declaration` 简化为纯 `is_referenced`。blocked-by emit-context `ParseNode` + JS-file flag 接线。
+- **`verbatimModuleSyntax`/`isolatedModules`/`importsNotUsedAsValues` 策略变体**、**跨文件 alias**。
+
+### 推荐下一轮
+
+- checker 侧补 `EmitResolver::is_value_alias_declaration`（解锁 export 侧 + `export =` elision）；之后本 lane 接线 importelision 的 `ExportDeclaration`/`NamedExports`/`ExportSpecifier`/`ExportAssignment` 各臂。
+- 或：把 importElision transform 串进 CommonJS/ESM 管线（chain importElision → moduletransform），端到端验证未用 import 不再 emit `require(...)`。
+
+## 6ag worklog — `tstransforms/importelision` EXPORT 侧（type-only export specifier 省略）
+
+> 本轮被 checker **4ao** 解锁（`EmitResolver::is_value_alias_declaration(program, node) -> bool` + `is_referenced_alias_declaration(program, node) -> bool`，均为 additive 公共方法）。落地 Go `ImportElisionTransformer` 的 **export specifier 侧**可达子集：按 `is_value_alias_declaration` 丢弃 type-only / 非值 export specifier，空 `NamedExports` 整 `ExportDeclaration` 省略。
+
+### resolver 如何接线（additive，复用 6af `EmitReferenceResolver`）
+
+- `EmitReferenceResolver`（`lib.rs`）**additive 扩展**两个透传方法（未改既有签名 / 字段）：
+  - `is_value_alias_declaration(node) -> bool` → 委托 `EmitResolver::is_value_alias_declaration(program, node)`（Go `emitResolver.IsValueAliasDeclaration`）。
+  - `is_referenced_alias_declaration(node) -> bool` → 委托 `EmitResolver::is_referenced_alias_declaration(program, node)`（Go `emitResolver.IsReferencedAliasDeclaration`）。
+- 节点 id 对齐同 6af（独立 parse+bind 的 `BoundProgram` 与 transform arena 因 parse 确定性共享 id）。`new_import_elision_transformer(opt, resolver)` 签名**不变**（resolver 仍是同一句柄，只是多用了它新增的方法）。
+
+### red→green 切片（每片 input → emitted-shape；import-elision 单跑，未串 type eraser）
+
+1. **`type_only_export_specifier_is_elided`（tracer，genuine RED）**：`interface I {}\nexport { I };` 期望 `interface I {\n}`（export 整丢，interface 透传——type eraser 未在本管线，故 interface 留存）→ 先无 export 各臂，`export { I };` 经 default 臂透传见红 → 实现 `ExportDeclaration`/`NamedExports`/`ExportSpecifier` 各臂（`is_value_alias_declaration(I)` 为 false → specifier 丢 → `NamedExports` 空 → `ExportDeclaration` export clause `None` → 整声明省略）→ 绿。
+2. **`value_export_specifier_is_kept`（guard）**：`function f() {}\nexport { f };` → 原样（`f` 是 value，`is_value_alias_declaration` true，specifier 与外层 export 存活）。
+3. **`type_only_export_specifier_dropped_value_specifier_kept`（per-specifier）**：`interface I {}\nfunction f() {}\nexport { I, f };` → `interface I {\n}\nfunction f() { }\nexport { f };`（逐 specifier 丢——type-only `I` 丢、value `f` 留，`UpdateNamedExports` over 存活元素；rebuild 用 `NodeList::new` 避免源跨度尾逗号）。
+4. **`export_star_reexport_is_kept`（export_clause None 分支）**：`export * from "m";` → 原样（无 export clause，跳过 clause 访问直接 rebuild，镜像 Go `n.ExportClause == nil`）。
+
+### scope / upstream 增长（6ag）
+
+> **scope**：仅 `-p tsgo_transformers`。新增 `import_elision_visit` 的 `ExportDeclaration`/`NamedExports`/`ExportSpecifier` 各臂 + `visit_export_declaration`/`visit_named_exports`（私有）+ `EmitReferenceResolver` 两个 additive 透传方法。**ZERO** ast/printer/checker 增长——export 各臂全走 arena 既有构造器（`new_export_declaration`/`new_named_exports`）+ `visit_nodes_removable`（既有）；消费 checker 4ao 既有 `EmitResolver`。`new_import_elision_transformer` 签名未变。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`、任何 `.go`、README、root Cargo。
+>
+> **测试计数（6ag 新增）**：`tsgo_transformers` +4 `#[test]`（slice1 tracer genuine RED→GREEN + 3 guard/coverage）+ 2 doctest（`EmitReferenceResolver::is_value_alias_declaration` / `is_referenced_alias_declaration`）→ **205 unit + 37 doctest**（6af 基线 201+35）。`cargo test -p tsgo_transformers` 全绿；`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_transformers -- --check` 干净；`cargo build -p tsgo_compiler` 绿（证明公共 API additive）。
+
+### DEFER（本轮确认的 blocked-by，importelision export 维度）
+
+- **`ImportEqualsDeclaration` 省略**（`import x = require("m")` 未引用应省略）：**实测 BLOCKED**。checker 4ao `is_referenced` 的 `declaration_name` 辅助**未列 `ImportEqualsDeclaration`**，故声明自身名 `x` 未被排除，扫描标识符时 `x` 解析回自身 symbol → `is_referenced` 恒为 true → `is_referenced_alias_declaration` 恒为 true → 未用 `import =` 也被错误保留（已用 throwaway 双例 used/unused 实测两者均"保留"、不可区分，确认无可观察的省略行为）。无法在不改 `internal/checker/**`（边界外）的前提下驱动出区分性 GREEN，故本轮不接 `ImportEqualsDeclaration` 臂。blocked-by checker 4ao `declaration_name` 未排除 `ImportEqualsDeclaration` 名节点（+ `IsTopLevelValueImportEqualsWithEntityName` 用于 entity-name 形）。
+- **`ExportAssignment` 省略**（`export = e` / `export default e`）：checker 4ao `is_value_alias_declaration` 的 `match` 仅处理 `ImportSpecifier | ExportSpecifier`，`ExportAssignment` 落 `_ => false`；而 Go `isValueAliasDeclarationWorker` 的 `KindExportAssignment` 分支对非 identifier 表达式返回 `true`、对 identifier 走 `isAliasResolvedToValue`。直接接线会把所有 `export default x` 误省略（Go 会保留 `let x; export default x;`）。blocked-by checker `isValueAliasDeclarationWorker` 的 `ExportAssignment` 分支（4ao DEFER）。
+- **跨模块 target value-ness**（re-export 一个 imported binding：`import { x } from "m"; export { x };`）：blocked-by checker `exports.go`/`resolveExternalModuleSymbol`/`getExportSymbolOfValueSymbolIfExported`（4ao DEFER）。
+- **value 位置 use 的 type-only-ness**、**`verbatimModuleSyntax`/`isolatedModules` 策略变体**、**`export *`（带 export clause 的 namespace re-export 改写）**。
+
+## 6ah worklog — `tstransforms/importelision` `import =` / `export =` 侧（external-module import-equals + export-assignment 省略）
+
+> 本轮被 checker **4ap** 解锁——4ap 扩展了 `EmitResolver`：(a) `is_referenced` 的 `declaration_name` 辅助新增 `ImportEqualsDeclaration => Some(d.name)` 臂，未引用的 `import x = require("m")` 现把自身名 `x` 排除出引用扫描，故 `is_referenced_alias_declaration` 现报 **false**（6ag 实测时恒 true）；(b) `is_value_alias_declaration` 新增 `ExportAssignment` 臂（`export = <value>` → true，type-only `export = I` → false，非 identifier 表达式 → true）。本轮**仅消费**这两处扩展，**未改 `internal/checker/**`**。
+
+### resolver 如何接线（additive，复用 6af/6ag `EmitReferenceResolver`）
+
+- 直接复用 6ag 已加的 `EmitReferenceResolver::is_referenced_alias_declaration(node)` / `is_value_alias_declaration(node)` 两个透传方法——**本轮 ZERO 新增透传**，只是 import-elision 各臂首次调用它们处理 `import =`/`export =`。
+- `new_import_elision_transformer(opt, resolver)` 签名**不变**（resolver 同一句柄）。节点 id 对齐同 6af/6ag（独立 parse+bind 的 `BoundProgram` 与 transform arena 因 parse 确定性共享 id）。
+
+### red→green 切片（每片 input → emitted-shape；import-elision 单跑，未串 type eraser）
+
+1. **`unused_import_equals_require_is_elided`（tracer，genuine RED）**：`import x = require("m");` 期望 `""` → 红（6ag default 臂透传出 `import x = require("m");`）→ 加 `ImportEqualsDeclaration` 臂 + `visit_import_equals_declaration`：`is_external_module_import_equals_declaration`（模块引用 kind == `ExternalModuleReference`）为真时，`!is_referenced_alias_declaration(node)` → `None`；否则（entity-name 形）`Some(node)`（DEFER）→ 绿。
+2. **`used_import_equals_require_is_kept`（guard）**：`import x = require("m");\nx;` → 原样保留（`x` 被引用，`is_referenced_alias_declaration` true）。守护省略臂不误删被引用 import。
+3. **`type_only_export_equals_is_elided`（genuine RED）**：`interface I {}\nexport = I;` 期望 `interface I {\n}`（interface 透传因未串 type eraser；`export =` 整丢）→ 红（default 臂透传出 `...\nexport = I;`）→ 加 `ExportAssignment` 臂：`is_value_alias_declaration(node).then_some(node)`（type-only `I` → false → `None`）→ 绿。
+4. **`value_export_equals_is_kept`（guard）**：`function f() {}\nexport = f;` → `function f() { }\nexport = f;`（`f` 是 value，`is_value_alias_declaration` true → 保留）。守护省略臂不误删 value `export =`。
+
+> divergence/设计：(1) `import =` 外部模块形保留时直接返回原 `Some(node)`（同 namespace-import 臂），而非 Go 的 `VisitEachChild`——其子（名 + `require(...)`）无可省略 import 结构，等价。(2) `should_emit_alias_declaration`（既有，调 `is_referenced`）**未改**，新 import-equals 臂直接调 `is_referenced_alias_declaration` 以精确镜像 Go `shouldEmitAliasDeclaration→IsReferencedAliasDeclaration`；二者对 alias-symbol 声明等价，故既有 14 用例不受影响。(3) `ExportAssignment` 臂未按 `is_export_equals` 分支——Go 的 `KindExportAssignment` 对 `export =` 与 `export default` 同样处理（均经 `isValueAliasDeclaration`），本轮 scope 仅测 `export =`。
+
+### scope / upstream 增长（6ah）
+
+> **scope**：仅 `-p tsgo_transformers`。新增 `import_elision_visit` 的 `ImportEqualsDeclaration`/`ExportAssignment` 两臂 + `visit_import_equals_declaration`/`is_external_module_import_equals_declaration`（私有）。**ZERO** ast/printer/checker 增长——`import =`/`export =` 臂全走 arena 既有 data 读取 + checker 4ap 既有 `EmitResolver`（经 6ag 既有透传）。`new_import_elision_transformer` 签名未变。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`、任何 `.go`、README、root Cargo。
+>
+> **测试计数（6ah 新增）**：`tsgo_transformers` +4 `#[test]`（2 genuine RED→GREEN + 2 guard）+ 0 doctest → **209 unit + 37 doctest**（6ag 基线 205+37）。`cargo test -p tsgo_transformers` 全绿；`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_transformers -- --check` 干净；`cargo build -p tsgo_compiler` 绿（证明公共 API additive）。
+
+### DEFER（本轮确认的 blocked-by，importelision `import =`/`export =` 维度）
+
+- **entity-name `import x = a.b`**：4ap 仍 DEFER `IsTopLevelValueImportEqualsWithEntityName`（Go `shouldEmitImportEqualsDeclaration` 的 `!IsExternalModule && isTopLevelValueImportEqualsWithEntityName` 分支）。本轮 `visit_import_equals_declaration` 的 else 分支保留原样。blocked-by checker `IsTopLevelValueImportEqualsWithEntityName`。
+- **跨模块 re-export**（`import { x } from "m"; export = x` / `export { x }`）：target value-ness 需跨模块解析。blocked-by checker `resolveExternalModuleSymbol`/`getExportSymbolOfValueSymbolIfExported`。
+- **value 位置 use 的 type-only-ness**、**`verbatimModuleSyntax`/`isolatedModules`/const-enum 策略变体**、`import "m";` attribute 访问。
+
+## 6ai worklog — `moduletransforms/commonjsmodule` 作用域正确的 import use-site 重写（消费 4an `resolve_reference`）
+
+> 本轮被 checker **4an** 解锁——`EmitResolver::resolve_reference(program, node) -> Option<SymbolId>`：把一个**值位置**标识符 use 解析到它引用的声明 symbol（沿作用域链外推，内层 shadow 优先）。落地长期 DEFER 的「作用域正确 use 重写」（6e/6e-2/6e-3/6v/6w 一直按名匹配）：CommonJS 下一个 imported binding 的 use 必须重写为 require-alias 上的限定成员访问，且**仅当**该 use 真的解析到该 import（非局部 / 非 shadow）。**未改 `internal/checker/**`**。
+
+### resolve_reference 如何消费 / 接线（additive）
+
+- `EmitReferenceResolver`（`lib.rs`）**additive 扩展**两个透传方法（未改既有签名 / 字段，复用 6af 的句柄）：
+  - `resolve_reference(node) -> Option<SymbolId>`（委托 `EmitResolver::resolve_reference(program, node)`，Go `Checker.resolveName`/`getResolvedSymbol`）。
+  - `symbol_of_declaration(node) -> Option<SymbolId>`（委托 `BoundProgram::symbol_of_node`，Go `getSymbolOfDeclaration`）——把每个 import binding 映射到其声明 symbol。
+- **新 factory** `new_common_js_module_transformer_with_resolver(opt, resolver)`（additive 第二入参）——既有 `new_common_js_module_transformer(opt)` 签名**不变**，内部都委托 `build_common_js_module_transformer(opt, Option<resolver>)`。emitter 构造的入口不受影响（CJS 入口当前 Rust emitter 未构造，但仍按 6af 约定走 additive 新 factory，不改既有签名）。
+- **与既有 require-alias 的关联**：`ImportBinding` 新增 `decl: Option<NodeId>`（命名 import = `ImportSpecifier` 节点；default = `ImportClause`；namespace = `NamespaceImport`）。substitution 阶段：先对每个 binding 用 `symbol_of_declaration(decl)` 取声明 symbol；再对每个 use 标识符 `resolve_reference(use)`，若解析到的 symbol 命中某 binding 的声明 symbol，则重写为该 binding 既有的 `require_var`/`member`（`m_1.x`），**复用既有 alias 方案**，不另造命名。无 resolver 时回退按名匹配（pre-6ai 行为）。
+- **节点 id 对齐**：同 6af——`EmitReferenceResolver` 的 `BoundProgram` 自带独立 parse+bind 的 arena；parse 确定性使其节点 id 与 transform 读取的 `EmitContext` arena 一致，故 transform 的 use 节点 id 在 resolver 程序里解析为同一句法节点。
+
+### red→green 切片（每片 input → emitted-shape；行为级过真实 CJS transform pipeline）
+
+1. **`scoped_named_import_use_rewrites_to_member_access`（tracer，genuine RED）**：`import { x } from "m";\nx;`（commonjs）期望 `const m_1 = require("m");\nm_1.x;`。先把 resolver 臂留空（no-op）→ 红（use 仍是裸 `x`）→ 填入按名匹配（minimal）→ 绿。
+2. **`scoped_shadowed_use_is_not_rewritten`（headline scope guard，genuine RED）**：`import { x } from "m";\nfunction f() {\n    var x = 1;\n    x;\n}` 期望内层 `x` **不**重写：`const m_1 = require("m");\nfunction f() {\n    var x = 1;\n    x;\n}`。按名匹配会把内层 `x` 误写成 `m_1.x` → 红 → 切换到 `resolve_reference`（内层 `x` 解析到局部 `var x`，symbol 不命中 import）→ 绿。证明真作用域解析 vs 按名匹配的价值。import 仍照常降级为 `const m_1 = require("m");`（CJS 不省略未用 import——那是 import-elision 的职责）。
+3. **`scoped_import_use_inside_call_argument_is_rewritten`（coverage）**：`import { x } from "m";\nconsole.log(x);` → `const m_1 = require("m");\nconsole.log(m_1.x);`（调用参内重写；`console`/`log` 解析不到 import 故不动）。
+
+### scope / upstream 增长（6ai）
+
+> **scope**：仅 `-p tsgo_transformers`。新增 `new_common_js_module_transformer_with_resolver` + `build_common_js_module_transformer`（私有）+ `substitute_import_use`（私有，抽出既有 emit 逻辑）+ `ImportBinding.decl` 字段 + `EmitReferenceResolver` 两个 additive 透传方法（`resolve_reference`/`symbol_of_declaration`）。**ZERO** ast/printer/checker 增长——全走 arena 既有构造器 + 既有 `set_node_substitution`；消费 checker 4an 既有 `EmitResolver::resolve_reference`。既有 `new_common_js_module_transformer` 签名未变。未触碰 `internal/ast/*`、`internal/printer/*`、`internal/checker/*`、任何 `.go`、README、root Cargo。
+>
+> **测试计数（6ai 新增）**：`tsgo_transformers` +3 `#[test]`（slice1 tracer + scope guard 均 genuine RED→GREEN + call-arg coverage）+ 3 doctest（`EmitReferenceResolver::resolve_reference` / `symbol_of_declaration` + `new_common_js_module_transformer_with_resolver`）→ **212 unit + 40 doctest**（6ah 基线 209+37）。`cargo test -p tsgo_transformers` 全绿；`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_transformers -- --check` 干净；`cargo build -p tsgo_compiler` 绿（证明公共 API additive）。
+
+### DEFER（本轮确认的 blocked-by，CJS use-site 重写维度）
+
+- **default / namespace import 的 use 重写经 resolver**：本轮 resolver 臂对三类 binding 都走同一 symbol 匹配，但仅命名 import 有行为级测试；default/namespace 仍主要由按名回退（无 resolver 的既有测试）覆盖。→ **6aj 已补**（default/namespace 行为级 + scope guard 覆盖；见 6aj worklog）。
+- **export 引用重写**（local `export { x }` 的 `exports.x` use-site）：blocked-by `GetReferencedExportContainer`（4an 未移植）。
+- **shorthand-property-assignment 展开**（`{ x }` → `{ x: m_1.x }`）、string-literal 名 element-access 形（`m_1["x"]`）：blocked-by `markLinkedReferences` + 完整 `visitExpressionIdentifier` 形态。
+- **ESM / System 的作用域正确引用重写**：独立轮次（同缺口，blocked-by resolver 接线进 esmodule/systemmodule）。
+
+## 6aj worklog — `moduletransforms/commonjsmodule` default & namespace import use-site 重写（行为级覆盖，复用 6ai resolver 接线）
+
+> 本轮目标：把 6ai 明确 DEFER 的 **default & namespace import 的作用域正确 use 重写行为级覆盖** 补齐。Go ground truth：`commonjsmodule.go:substituteExpressionIdentifier` / import-reference 替换——default-import binding 的 use → `<alias>.default`（interop 走 `__importDefault(require(...))`），namespace-import binding 的 use → 裸 alias（`__importStar(require(...))` 的 `m_1`）。
+
+### 诚实的 red→green 记录（关键：本轮观察到 GREEN 而非 RED）
+
+逐行为 test-first 推进，每片先写测试再 `cargo test -p tsgo_transformers --lib <name>` 观察：
+
+1. **`scoped_default_import_use_rewrites_to_default_member`**：`import d from "m";\nd;`（commonjs + resolver）期望 `var __importDefault = …;\nconst m_1 = __importDefault(require("m"));\nm_1.default;`。写完 → **直接 GREEN**。
+2. **`scoped_namespace_import_use_rewrites_to_bare_alias`**：`import * as ns from "m";\nns;` 期望 `const m_1 = __importStar(require("m"));\nm_1;`。写完 → **直接 GREEN**。
+3. **`scoped_shadowed_default_import_use_is_not_rewritten`**（headline scope guard，default 形）：`import d from "m";\nfunction f() {\n    var d = 1;\n    d;\n}` 期望内层 `d` **保持裸**（resolve 到局部 `var d`，symbol 不命中 import），import 仍降级为 `const m_1 = __importDefault(require("m"));`。写完 → **直接 GREEN**。
+4. **`scoped_shadowed_namespace_import_use_is_not_rewritten`**（scope guard 镜像，namespace 形）：`import * as ns from "m";\nfunction f() {\n    var ns = 1;\n    ns;\n}` → 内层 `ns` 保持裸。写完 → **直接 GREEN**。
+
+**为何没看到 RED（诚实说明）**：6ai 落地 resolver 臂时已把 `register_import_use_substitutions` 的匹配写成**对 `ImportBinding.decl` 泛化**——named=`ImportSpecifier`、default=`ImportClause`、namespace=`NamespaceImport` 三类 binding 都在 `lower_import_to_require` 里设了 `decl`，substitution 阶段统一用 `symbol_of_declaration(decl)` 取声明 symbol、再与 `resolve_reference(use)` 比对。故 default/namespace 的 resolver-path 行为**早在 6ai 就已正确**，只是缺行为级测试（6ai DEFER 明列）。本轮属于"补齐 DEFER 的行为覆盖"，**无 impl 变更**。我不伪造 RED（破坏再修是 TDD 文档明禁的剧场行为）。
+
+**测试非空泛的硬证据**：slice 1（模块级 `d` → `m_1.default`，发生重写）证明 resolver 把 `d` 解析到 import；slice 3（内层 `d` 保持裸）证明 resolver 作用域正确。二者合证 resolver-path 真在工作且作用域正确——若 resolver 返回 None，slice 1 会红（`d` 不重写）；若按名匹配，slice 3 会红（内层 `d` 误写成 `m_1.default`）。两片同绿即排除这两种退化。
+
+### scope / upstream 增长（6aj）
+
+> **scope**：仅 `-p tsgo_transformers`。**ZERO** ast/printer/checker 增长，**ZERO** impl 变更——复用 6ai `new_common_js_module_transformer_with_resolver` + `ImportBinding.decl` 字段 + `register_import_use_substitutions` 的 resolver 臂 + 既有 `set_node_substitution`；消费 checker 4an 既有 `EmitResolver::resolve_reference`。仅新增 4 个 `#[test]` + 更新 `commonjsmodule.rs` 模块 doc（把 default/namespace 从"仅按名回退覆盖"更新为"6aj resolver 行为级覆盖含 scope guard"）。既有公共 fn 签名全未变。未触碰 `internal/checker/**`、任何其它 crate、root Cargo、任何 `.go`、README。
+>
+> **测试计数（6aj 新增）**：`tsgo_transformers` +4 `#[test]`（default use / namespace use / default scope guard / namespace scope guard，全 test-first 但观察到直接 GREEN——见上"诚实说明"）+ 0 doctest（无新公共 API）→ **216 unit + 40 doctest**（6ai 基线 212+40）。`cargo test -p tsgo_transformers` 全绿；`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_transformers -- --check` 干净；`cargo build -p tsgo_compiler` 绿（证明公共 API additive）。
+
+### DEFER（本轮确认的 blocked-by，CJS use-site 重写维度）
+
+- **export 引用重写**（local `export { x }` 的 `exports.x` use-site）：blocked-by `GetReferencedExportContainer`（4an 未移植）。
+- **shorthand-property-assignment 展开**（`{ x }` → `{ x: m_1.x }`）、string-literal 名 element-access 形（`m_1["x"]`）：blocked-by `markLinkedReferences` + 完整 `visitExpressionIdentifier` 形态。
+- **combined default+named interop 边角**（超出可达最小面）、**ESM / System 的作用域正确引用重写**：独立轮次（同缺口，blocked-by resolver 接线进 esmodule/systemmodule）。
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

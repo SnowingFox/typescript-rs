@@ -382,3 +382,14 @@ Rust：`arena.new_identifier(text) -> NodeId`：`push` 一个 `Node{ kind: KindI
 - **`utilities.rs` 中依赖 scanner 的项**（`skip_trivia`/`get_token_pos_of_node` 等）：`// DEFER(phase-3): blocked-by tsgo_scanner`。
 - **`Type` 图**：`TypeId`/`TypeArena` 在 P4 checker；本包只落 `Symbol`/`SymbolId`。
 - **`FlowNode` 完整构建**：本包定义结构与 flag；实际控制流图由 binder（P3）填充。
+
+#### P5 期附加（transformers 切片驱动；additive，`tsgo_ast`/`tsgo_printer`/`tsgo_checker` 保持全绿）
+
+> 由 transformers 的 optionalchain 6s 轮（`(a?.b)()` this-capture + `delete a?.b`）驱动。`Kind::SyntheticReferenceExpression` 早已存在于 `kind_generated.rs`，本轮只补 `NodeData` 侧的承载/遍历。
+
+- **`NodeData::SyntheticReferenceExpression(SyntheticReferenceData{ expression: NodeId, this_arg: NodeId })`**：镜像 Go `ast_generated.go:SyntheticReferenceExpression`（`ExpressionBase` + `Expression` + `ThisArg`）。一个 **transform-only** 节点，捆绑"表达式 + 捕获的 thisArg"，供 optionalchain 把括号可选调用 `(a?.b)()` 降级成 `<access>.call(thisArg, …)`。`// Go: ast_generated.go:SyntheticReferenceExpression`
+- **构造器 `new_synthetic_reference_expression(expression, this_arg)`**（lib.rs）`// Go: NodeFactory.NewSyntheticReferenceExpression`。
+- **`for_each_child`(lib.rs) + `visit_each_child`(visitor.rs)**：先 `expression` 后 `this_arg`，镜像 Go `ForEachChild`/`VisitEachChild`。
+- **`is_expression_kind` 不收录**（与 Go 一致：`isExpressionKind` 不含 `KindSyntheticReferenceExpression`），故 `is_left_hand_side_expression_kind` 等谓词不改。
+- **printer/checker 无需新增 arm**：该节点在 transform 内被消费/替换（FunctionCallCall 解开成普通 `.call(…)`），不进入 emit；printer 主分发按 `Kind`（含 catch-all）、checker 不对 `NodeData` 做穷尽匹配，二者 `cargo build` 均仍绿，**未触碰其源码**。
+- 测试：`internal/ast/lib_test.rs:synthetic_reference_expression_visits_expression_then_this_arg`（构造器 kind + 子节点遍历顺序）。`tsgo_ast` 单测 53→54、doctest 26→27。

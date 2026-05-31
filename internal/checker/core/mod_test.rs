@@ -96,6 +96,119 @@ fn get_union_type_dedups_collapses_and_interns() {
     );
 }
 
+// Go: internal/checker/checker.go:Checker.getIntersectionType (intern by members)
+#[test]
+fn get_intersection_type_interns_by_members() {
+    let mut c = Checker::new();
+    // Two distinct type parameters never reduce, so `A & B` is a real
+    // two-member intersection.
+    let a = c.new_type_parameter(None);
+    let b = c.new_type_parameter(None);
+    let ab = c.get_intersection_type(&[a, b]);
+    // The constructed type is an intersection of the two members.
+    assert_eq!(c.get_type(ab).flags(), TypeFlags::INTERSECTION);
+    assert_eq!(c.get_type(ab).intersection_types().unwrap(), &[a, b]);
+    // Re-requesting the same constituents (in either order) yields the same id.
+    assert_eq!(c.get_intersection_type(&[a, b]), ab);
+    assert_eq!(c.get_intersection_type(&[b, a]), ab);
+}
+
+// Go: internal/checker/checker.go:Checker.getIntersectionType (trivial reductions)
+#[test]
+fn get_intersection_type_trivial_reductions() {
+    let mut c = Checker::new();
+    let a = c.new_type_parameter(None);
+    // An empty intersection is `unknown`; a single member collapses.
+    assert_eq!(c.get_intersection_type(&[]), c.unknown_type());
+    assert_eq!(c.get_intersection_type(&[a]), a);
+    // `unknown` is the identity element: it is dropped from the set.
+    assert_eq!(c.get_intersection_type(&[a, c.unknown_type()]), a);
+    assert_eq!(
+        c.get_intersection_type(&[c.unknown_type()]),
+        c.unknown_type()
+    );
+    // `never` short-circuits the whole intersection.
+    assert_eq!(
+        c.get_intersection_type(&[a, c.never_type()]),
+        c.never_type()
+    );
+    // `any` short-circuits to `any`.
+    assert_eq!(c.get_intersection_type(&[a, c.any_type()]), c.any_type());
+}
+
+// Go: internal/checker/checker.go:Checker.addTypeToIntersection (flatten + dedup)
+#[test]
+fn get_intersection_type_flattens_and_dedups() {
+    let mut c = Checker::new();
+    let a = c.new_type_parameter(None);
+    let b = c.new_type_parameter(None);
+    let cc = c.new_type_parameter(None);
+    // Duplicate members collapse to a single occurrence.
+    let ab = c.get_intersection_type(&[a, b]);
+    assert_eq!(c.get_intersection_type(&[a, a, b]), ab);
+    // A nested intersection is flattened into the outer set: `(A & B) & C`
+    // interns identically to `A & B & C`.
+    let abc = c.get_intersection_type(&[a, b, cc]);
+    assert_eq!(c.get_intersection_type(&[ab, cc]), abc);
+    assert_eq!(c.get_type(abc).intersection_types().unwrap(), &[a, b, cc]);
+}
+
+// Go: internal/checker/checker.go:Checker.getIntersectionTypeEx (union
+// distribution via getCrossProductIntersections)
+#[test]
+fn get_intersection_type_distributes_over_union() {
+    let mut c = Checker::new();
+    let x = c.new_type_parameter(None);
+    let a = c.new_type_parameter(None);
+    let b = c.new_type_parameter(None);
+    let a_or_b = c.get_union_type(&[a, b]);
+    // `X & (A | B)` normalizes to `(X & A) | (X & B)`.
+    let result = c.get_intersection_type(&[x, a_or_b]);
+    let xa = c.get_intersection_type(&[x, a]);
+    let xb = c.get_intersection_type(&[x, b]);
+    let expected = c.get_union_type(&[xa, xb]);
+    assert_eq!(result, expected);
+    // The distributed result is a union (of two intersections), not an
+    // intersection that still contains a union constituent.
+    assert_eq!(c.get_type(result).flags(), TypeFlags::UNION);
+}
+
+// Go: internal/checker/checker.go:Checker.getIntersectionTypeEx
+// (disjoint-domain reduction via the `TypeFlagsDisjointDomains` guard)
+#[test]
+fn get_intersection_type_disjoint_domains_reduce_to_never() {
+    let mut c = Checker::new();
+    // `string & number` is empty: a string-like and a number-like type belong to
+    // disjoint domains, so the intersection reduces to `never`.
+    assert_eq!(
+        c.get_intersection_type(&[c.string_type(), c.number_type()]),
+        c.never_type()
+    );
+    // Other disjoint primitive-domain pairs reduce too.
+    assert_eq!(
+        c.get_intersection_type(&[c.number_type(), c.bigint_type()]),
+        c.never_type()
+    );
+    assert_eq!(
+        c.get_intersection_type(&[c.string_type(), c.boolean_type()]),
+        c.never_type()
+    );
+    assert_eq!(
+        c.get_intersection_type(&[c.es_symbol_type(), c.number_type()]),
+        c.never_type()
+    );
+    // `object` (the non-primitive intrinsic) is disjoint from every primitive.
+    assert_eq!(
+        c.get_intersection_type(&[c.non_primitive_type(), c.string_type()]),
+        c.never_type()
+    );
+    // A primitive intersected with a (non-disjoint) type variable still interns
+    // as a real intersection — the disjoint guard must not over-fire.
+    let t = c.new_type_parameter(None);
+    let st = c.get_intersection_type(&[c.string_type(), t]);
+    assert_eq!(c.get_type(st).flags(), TypeFlags::INTERSECTION);
+}
+
 // Go: internal/checker/printer.go:Checker.TypeToString (intrinsic names)
 #[test]
 fn type_to_string_of_intrinsics() {
@@ -206,4 +319,151 @@ fn new_checker_retains_program() {
     let c = Checker::new_checker(p);
     // The checker exposes the program it was constructed over.
     assert_eq!(c.program().map(|prog| prog.root()), Some(root));
+}
+
+// Go: internal/checker/checker.go:Checker.getGlobalSymbol
+#[test]
+fn get_global_symbol_resolves_global_value_by_meaning() {
+    // A script source file's top-level declarations are the synthetic globals
+    // (the merged-globals stand-in until lib.d.ts loading lands in P6).
+    let p = std::rc::Rc::new(crate::core::test_support::StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare var g: number;",
+    ));
+    let c = Checker::new_checker(p);
+    // The global value `g` resolves under VALUE meaning.
+    let g = c
+        .get_global_symbol("g", SymbolFlags::VALUE)
+        .expect("global g");
+    assert!(c
+        .program()
+        .unwrap()
+        .symbol(g)
+        .flags
+        .contains(SymbolFlags::FUNCTION_SCOPED_VARIABLE));
+    // A name absent from the globals stays unresolved (Go returns nil → 2304).
+    assert_eq!(c.get_global_symbol("nope", SymbolFlags::VALUE), None);
+    // Meaning filters the lookup: `g` is a value, not a type.
+    assert_eq!(c.get_global_symbol("g", SymbolFlags::TYPE), None);
+}
+
+// Go: internal/checker/checker.go:Checker.getGlobalType
+#[test]
+fn get_global_type_resolves_global_interface_off_program() {
+    // A synthetic global `interface Foo` plus a global value `foo` (so a
+    // value-only name can be distinguished from a global type).
+    let p = std::rc::Rc::new(crate::core::test_support::StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Foo {\n  bar: string;\n}\ndeclare const foo: Foo;",
+    ));
+    let mut c = Checker::new_checker(p);
+    // The global type `Foo` resolves to an object (interface) type.
+    let foo = c.get_global_type("Foo").expect("global type Foo");
+    assert!(c.get_type(foo).as_object().is_some());
+    // Cached on a second lookup (same id).
+    assert_eq!(c.get_global_type("Foo"), Some(foo));
+    // A value-only name is not a global type.
+    assert_eq!(c.get_global_type("foo"), None);
+    // An unknown name resolves to nothing.
+    assert_eq!(c.get_global_type("Missing"), None);
+}
+
+// 4al S1: the checker reads its compiler options off the retained program (Go's
+// `c.compilerOptions = program.Options()`), so a target set on the program's
+// options is visible through `Checker::compiler_options`.
+// Go: internal/checker/checker.go:NewChecker (c.compilerOptions = program.Options())
+#[test]
+fn compiler_options_reflects_program_options() {
+    use tsgo_core::compileroptions::{CompilerOptions, ScriptTarget};
+    let options = CompilerOptions {
+        target: ScriptTarget::Es2015,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(
+        crate::core::test_support::StubProgram::parse_and_bind_with_options(
+            "/a.ts",
+            "declare const x: string;",
+            options,
+        ),
+    );
+    let c = Checker::new_checker(p);
+    // The program's `--target` is visible through the checker.
+    assert_eq!(c.compiler_options().target, ScriptTarget::Es2015);
+    // A program without options reports the all-defaults case.
+    let q = std::rc::Rc::new(crate::core::test_support::StubProgram::parse_and_bind(
+        "/b.ts", "",
+    ));
+    let d = Checker::new_checker(q);
+    assert_eq!(d.compiler_options().target, ScriptTarget::None);
+}
+
+// 4al S2: `get_strict_option_value` mirrors Go's `GetStrictOptionValue`: an
+// explicit per-option tri-state wins, otherwise the option is enabled iff
+// `strict` is not explicitly false (so an unset `strict` enables it — the
+// `!= TSFalse` rule, faithful to Go).
+// Go: internal/core/compileroptions.go:GetStrictOptionValue
+#[test]
+fn get_strict_option_value_follows_strict_and_explicit() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    // With `strict: true`, an unset per-option value resolves to enabled.
+    let strict = CompilerOptions {
+        strict: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let c = Checker::new_checker(std::rc::Rc::new(
+        crate::core::test_support::StubProgram::parse_and_bind_with_options("/a.ts", "", strict),
+    ));
+    assert!(c.get_strict_option_value(Tristate::Unknown));
+    // An explicit per-option `false` wins over `strict: true`.
+    assert!(!c.get_strict_option_value(Tristate::False));
+    // With `strict: false`, an unset per-option value is off.
+    let off = CompilerOptions {
+        strict: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let d = Checker::new_checker(std::rc::Rc::new(
+        crate::core::test_support::StubProgram::parse_and_bind_with_options("/b.ts", "", off),
+    ));
+    assert!(!d.get_strict_option_value(Tristate::Unknown));
+    // An explicit per-option `true` still wins over `strict: false`.
+    assert!(d.get_strict_option_value(Tristate::True));
+    // With `strict` unset, the `!= TSFalse` rule enables it (Go-faithful).
+    assert!(Checker::new().get_strict_option_value(Tristate::Unknown));
+}
+
+// 4al S2: `strict_null_checks` reads `strictNullChecks` through
+// `GetStrictOptionValue` (Go's `c.strictNullChecks`): an explicit value wins,
+// otherwise it follows `strict` (`!= TSFalse`).
+// Go: internal/checker/checker.go:NewChecker (c.strictNullChecks)
+#[test]
+fn strict_null_checks_reads_option() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    // Explicit `strictNullChecks: false` wins over `strict: true` -> off.
+    let snc_off = CompilerOptions {
+        strict: Tristate::True,
+        strict_null_checks: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(
+        crate::core::test_support::StubProgram::parse_and_bind_with_options("/a.ts", "", snc_off),
+    );
+    assert!(!Checker::new_checker(p).strict_null_checks());
+    // Implied by `strict: true` (per-option unset) -> on.
+    let strict = CompilerOptions {
+        strict: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let q = std::rc::Rc::new(
+        crate::core::test_support::StubProgram::parse_and_bind_with_options("/b.ts", "", strict),
+    );
+    assert!(Checker::new_checker(q).strict_null_checks());
+    // Explicitly off when `strict: false` and `strictNullChecks` unset.
+    let off = CompilerOptions {
+        strict: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let r = std::rc::Rc::new(
+        crate::core::test_support::StubProgram::parse_and_bind_with_options("/c.ts", "", off),
+    );
+    assert!(!Checker::new_checker(r).strict_null_checks());
 }

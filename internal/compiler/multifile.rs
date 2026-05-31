@@ -1,0 +1,373 @@
+//! A real multi-file [`BoundProgram`] view the checker pool drives per file.
+//!
+//! Where [`BoundFile`](crate::BoundFile) bridges *one* bound source file, this
+//! module joins *every* bound [`ParsedFile`] of a program (lib + sources) into a
+//! single program with one *merged* global table and one *merged* symbol space,
+//! and implements the multi-file surface the checker's round-4aa `BoundProgram`
+//! exposes: [`source_files`](BoundProgram::source_files),
+//! [`file_handle`](BoundProgram::file_handle),
+//! [`file_view`](BoundProgram::file_view), and
+//! [`view_for_symbol`](BoundProgram::view_for_symbol).
+//!
+//! # Why offset-merge (mirrors the checker's `MultiFileProgram` harness)
+//!
+//! The parser mints a fresh arena (and fresh, 0-based [`SymbolId`]s and
+//! [`NodeId`]s) per file, so two files' raw ids collide. The files keep
+//! *separate node arenas* (a node id is only ever read through its owning file's
+//! [`FileView::arena`]) but share *one offset-merged symbol vector*: file `i`'s
+//! symbol ids are shifted by the sum of the previous files' symbol counts, and
+//! every symbol-id-bearing field (members/exports, `parent`, `export_symbol`,
+//! the `locals`/`node_symbol` maps, and the merged `globals`) is rewritten to
+//! that merged id. Source-file *handles* fold the file index into the high bits
+//! so they never collide either.
+//!
+//! This is the compiler-side counterpart of the checker's test-only
+//! `MultiFileProgram`; it consumes the program's already-bound [`ParsedFile`]s
+//! rather than parsing strings.
+//!
+//! DEFER(P6): cross-file declaration MERGE for same-named declarations (first
+//! file wins here, as in the harness) and the `/// <reference lib>` graph.
+//! blocked-by: the binder's cross-file `mergeSymbol`/`mergeSymbolTable` +
+//! triple-slash lib-reference resolution (P6-8).
+
+use std::rc::Rc;
+
+use rustc_hash::FxHashMap;
+use tsgo_ast::flow::{FlowList, FlowListId, FlowNode, FlowNodeId, FlowSwitchClauseData};
+use tsgo_ast::{NodeArena, NodeId, Symbol, SymbolId, SymbolTable};
+use tsgo_checker::BoundProgram;
+use tsgo_core::compileroptions::CompilerOptions;
+
+use crate::host::ParsedFile;
+
+/// The high-bit shift used to fold a file index into a multi-file source-file
+/// handle, so two separately-parsed files (whose raw arena ids both start at 0)
+/// never collide as program file handles. The low 24 bits hold the file's raw
+/// root node id; the upper bits hold the file index.
+///
+/// This caps a file at `2^24` nodes, far beyond any reachable input. It matches
+/// the checker harness's `FILE_INDEX_SHIFT` so handles are encoded identically.
+const FILE_INDEX_SHIFT: u32 = 24;
+
+/// An owned, shareable single-file [`BoundProgram`] view into one file of a
+/// [`MultiFileBoundProgram`].
+///
+/// Its [`arena`](BoundProgram::arena) is *this* file's node arena (so its
+/// file-local node ids resolve), while [`symbol`](BoundProgram::symbol) indexes
+/// the program-wide *merged* symbol vector and [`globals`](BoundProgram::globals)
+/// is the program-wide *merged* global table — so a reference into another
+/// file's globals (e.g. the lib file's `String`) resolves while checking this
+/// file.
+///
+/// Side effects: none (shares the program's arenas / symbols via `Rc`).
+// Go: internal/compiler/program.go:Program (per-file checking context)
+pub(crate) struct FileView {
+    arena: Rc<NodeArena>,
+    root: NodeId,
+    /// The collision-free program file handle (see [`encode_file_handle`]); the
+    /// diagnostics partition key, distinct from the raw arena `root`.
+    handle: NodeId,
+    symbols: Rc<Vec<Symbol>>,
+    globals: Rc<SymbolTable>,
+    node_symbol: Rc<FxHashMap<NodeId, SymbolId>>,
+    locals: Rc<FxHashMap<NodeId, SymbolTable>>,
+    node_flow: Rc<FxHashMap<NodeId, FlowNodeId>>,
+    flow_nodes: Rc<Vec<FlowNode>>,
+    flow_lists: Rc<Vec<FlowList>>,
+    flow_switch: Rc<FxHashMap<FlowNodeId, FlowSwitchClauseData>>,
+    /// The program's real compiler options, shared by every view so the
+    /// checker's option-gated diagnostics read the actual `--target` /
+    /// `--downlevelIteration` (see [`BoundProgram::compiler_options`]).
+    options: Rc<CompilerOptions>,
+}
+
+impl BoundProgram for FileView {
+    fn arena(&self) -> &NodeArena {
+        &self.arena
+    }
+
+    fn root(&self) -> NodeId {
+        self.root
+    }
+
+    fn file_handle(&self) -> NodeId {
+        self.handle
+    }
+
+    fn symbol_of_node(&self, node: NodeId) -> Option<SymbolId> {
+        self.node_symbol.get(&node).copied()
+    }
+
+    fn symbol(&self, id: SymbolId) -> &Symbol {
+        &self.symbols[id.index()]
+    }
+
+    fn locals(&self, container: NodeId) -> Option<&SymbolTable> {
+        self.locals.get(&container)
+    }
+
+    fn globals(&self) -> Option<&SymbolTable> {
+        Some(&self.globals)
+    }
+
+    fn flow_node_of(&self, node: NodeId) -> Option<FlowNodeId> {
+        self.node_flow.get(&node).copied()
+    }
+
+    fn flow_node(&self, id: FlowNodeId) -> FlowNode {
+        self.flow_nodes[id.0 as usize]
+    }
+
+    fn flow_list(&self, id: FlowListId) -> FlowList {
+        self.flow_lists[id.0 as usize]
+    }
+
+    fn flow_switch_clause_data(&self, id: FlowNodeId) -> Option<FlowSwitchClauseData> {
+        self.flow_switch.get(&id).copied()
+    }
+
+    fn compiler_options(&self) -> &CompilerOptions {
+        &self.options
+    }
+}
+
+/// A real multi-file bound program: every bound [`ParsedFile`] of the program
+/// joined into one program with one *merged* global table and one *merged*
+/// symbol space — the production counterpart of the checker's test-only
+/// `MultiFileProgram`.
+///
+/// The checker pool drives it per file via [`BoundProgram::source_files`] +
+/// [`BoundProgram::file_view`]; cross-file global type building uses
+/// [`BoundProgram::view_for_symbol`].
+///
+/// Side effects: none (shares the files' arenas / bind results via `Rc`).
+// Go: internal/compiler/program.go:Program (the checker's multi-file view)
+pub struct MultiFileBoundProgram {
+    views: Vec<Rc<FileView>>,
+    merged_globals: Rc<SymbolTable>,
+    /// `[start, end)` merged-symbol-id range owned by each file, parallel to
+    /// `views`, used to map a merged symbol back to its declaring file.
+    symbol_ranges: Vec<(u32, u32)>,
+    /// The program's real compiler options (see
+    /// [`BoundProgram::compiler_options`]).
+    options: Rc<CompilerOptions>,
+}
+
+impl MultiFileBoundProgram {
+    /// Joins every *bound* file of `files` into one multi-file program with
+    /// all-defaults compiler options.
+    ///
+    /// This is the additive, options-free overload kept for callers that do not
+    /// carry a program (and for the existing P6 tests); the checker then sees
+    /// all-defaults options. To surface the program's REAL options to the
+    /// checker's option-gated diagnostics, use [`Self::new_with_options`].
+    ///
+    /// Side effects: none (offset-merges the files' symbol spaces; shares their
+    /// arenas via `Rc`).
+    // Go: internal/compiler/program.go:Program (built from processedFiles)
+    pub fn new(files: &[ParsedFile]) -> MultiFileBoundProgram {
+        MultiFileBoundProgram::new_with_options(files, Rc::new(CompilerOptions::default()))
+    }
+
+    /// Joins every *bound* file of `files` into one multi-file program carrying
+    /// the program's real `options` (unbound files are skipped — the program
+    /// binds every file before building the checker pool, so in practice all are
+    /// included).
+    ///
+    /// The shared `options` are returned by
+    /// [`BoundProgram::compiler_options`] (on the program and every per-file
+    /// view), so the checker's option-gated diagnostics (e.g. `2802` for-of
+    /// downlevel-iteration gating) read the program's actual
+    /// `--target`/`--downlevelIteration`/`--strict` config end-to-end.
+    ///
+    /// Side effects: none (offset-merges the files' symbol spaces; shares their
+    /// arenas and options via `Rc`).
+    // Go: internal/compiler/program.go:Program (built from processedFiles; c.compilerOptions = program.Options())
+    pub fn new_with_options(
+        files: &[ParsedFile],
+        options: Rc<CompilerOptions>,
+    ) -> MultiFileBoundProgram {
+        // Only bound files contribute (their symbol/flow side maps exist).
+        let bound: Vec<&ParsedFile> = files.iter().filter(|f| f.is_bound()).collect();
+
+        // Each file's symbol ids are offset by the running symbol total, so the
+        // merged symbol space is collision-free.
+        let mut offsets: Vec<u32> = Vec::with_capacity(bound.len());
+        let mut running = 0u32;
+        for file in &bound {
+            offsets.push(running);
+            running += file.bind_result().expect("bound").symbols.len() as u32;
+        }
+
+        // The merged symbol vector: every file's symbols re-mapped to merged ids.
+        let mut merged_symbols: Vec<Symbol> = Vec::with_capacity(running as usize);
+        for (i, file) in bound.iter().enumerate() {
+            let off = offsets[i];
+            for symbol in &file.bind_result().expect("bound").symbols {
+                merged_symbols.push(remap_symbol(symbol, off));
+            }
+        }
+        let merged_symbols = Rc::new(merged_symbols);
+
+        // The merged global table: the union of every file's top-level (root
+        // `locals`) declarations, with merged ids (Go's `Checker.globals`).
+        // DEFER(P6): cross-file symbol MERGE for same-named declarations
+        // (declaration merging) — first file wins here, mirroring the harness.
+        // blocked-by: `mergeSymbol`/`mergeSymbolTable` (the binder's cross-file
+        // merge) + `globalThis`.
+        let mut merged_globals = SymbolTable::default();
+        for (i, file) in bound.iter().enumerate() {
+            let off = offsets[i];
+            let bind = file.bind_result().expect("bound");
+            if let Some(locals) = bind.locals.get(&file.node()) {
+                for (name, &sid) in locals {
+                    merged_globals
+                        .entry(name.clone())
+                        .or_insert(SymbolId(sid.0 + off));
+                }
+            }
+        }
+        let merged_globals = Rc::new(merged_globals);
+
+        let mut views = Vec::with_capacity(bound.len());
+        let mut symbol_ranges = Vec::with_capacity(bound.len());
+        for (i, file) in bound.iter().enumerate() {
+            let off = offsets[i];
+            let bind = file.bind_result().expect("bound");
+            symbol_ranges.push((off, off + bind.symbols.len() as u32));
+            let root = file.node();
+            let node_symbol: FxHashMap<NodeId, SymbolId> = bind
+                .node_symbol
+                .iter()
+                .map(|(&node, &sid)| (node, SymbolId(sid.0 + off)))
+                .collect();
+            let locals: FxHashMap<NodeId, SymbolTable> = bind
+                .locals
+                .iter()
+                .map(|(&container, table)| (container, remap_table(table, off)))
+                .collect();
+            views.push(Rc::new(FileView {
+                arena: file.arena_rc(),
+                root,
+                handle: encode_file_handle(i, root),
+                symbols: Rc::clone(&merged_symbols),
+                globals: Rc::clone(&merged_globals),
+                node_symbol: Rc::new(node_symbol),
+                locals: Rc::new(locals),
+                node_flow: Rc::new(bind.node_flow.clone()),
+                flow_nodes: Rc::new(bind.flow_nodes.clone()),
+                flow_lists: Rc::new(bind.flow_lists.clone()),
+                flow_switch: Rc::new(bind.flow_switch_data.clone()),
+                options: Rc::clone(&options),
+            }));
+        }
+
+        MultiFileBoundProgram {
+            views,
+            merged_globals,
+            symbol_ranges,
+            options,
+        }
+    }
+}
+
+/// Folds a file index and its raw root node id into a collision-free file
+/// handle (see [`FILE_INDEX_SHIFT`]).
+fn encode_file_handle(index: usize, raw_root: NodeId) -> NodeId {
+    NodeId(((index as u32) << FILE_INDEX_SHIFT) | raw_root.0)
+}
+
+impl BoundProgram for MultiFileBoundProgram {
+    fn arena(&self) -> &NodeArena {
+        // A degenerate single-file accessor (delegates to the first file); the
+        // checker reaches a specific file's arena via `file_view`.
+        self.views[0].arena()
+    }
+
+    fn root(&self) -> NodeId {
+        self.views[0].root()
+    }
+
+    fn symbol_of_node(&self, node: NodeId) -> Option<SymbolId> {
+        self.views[0].symbol_of_node(node)
+    }
+
+    fn symbol(&self, id: SymbolId) -> &Symbol {
+        // The symbol vector is shared (merged), so any view resolves any id.
+        self.views[0].symbol(id)
+    }
+
+    fn locals(&self, container: NodeId) -> Option<&SymbolTable> {
+        self.views[0].locals(container)
+    }
+
+    fn globals(&self) -> Option<&SymbolTable> {
+        Some(&self.merged_globals)
+    }
+
+    fn flow_node_of(&self, node: NodeId) -> Option<FlowNodeId> {
+        self.views[0].flow_node_of(node)
+    }
+
+    fn flow_node(&self, id: FlowNodeId) -> FlowNode {
+        self.views[0].flow_node(id)
+    }
+
+    fn flow_list(&self, id: FlowListId) -> FlowList {
+        self.views[0].flow_list(id)
+    }
+
+    fn source_files(&self) -> Vec<NodeId> {
+        self.views.iter().map(|view| view.file_handle()).collect()
+    }
+
+    fn file_view(&self, file: NodeId) -> Option<Rc<dyn BoundProgram>> {
+        let index = (file.0 >> FILE_INDEX_SHIFT) as usize;
+        self.views
+            .get(index)
+            .map(|view| Rc::clone(view) as Rc<dyn BoundProgram>)
+    }
+
+    fn view_for_symbol(&self, symbol: SymbolId) -> Option<Rc<dyn BoundProgram>> {
+        let index = self
+            .symbol_ranges
+            .iter()
+            .position(|&(start, end)| symbol.0 >= start && symbol.0 < end)?;
+        Some(Rc::clone(&self.views[index]) as Rc<dyn BoundProgram>)
+    }
+
+    fn compiler_options(&self) -> &CompilerOptions {
+        &self.options
+    }
+}
+
+/// Re-maps a symbol's id-bearing fields into a merged symbol space by `offset`.
+///
+/// Symbol-id fields (`members`/`exports` table values, `parent`,
+/// `export_symbol`) are shifted; declaration *node* ids stay file-local (they
+/// are only ever read through the owning file's arena).
+fn remap_symbol(symbol: &Symbol, offset: u32) -> Symbol {
+    Symbol {
+        flags: symbol.flags,
+        check_flags: symbol.check_flags,
+        name: symbol.name.clone(),
+        declarations: symbol.declarations.clone(),
+        value_declaration: symbol.value_declaration,
+        members: remap_table(&symbol.members, offset),
+        exports: remap_table(&symbol.exports, offset),
+        parent: symbol.parent.map(|p| SymbolId(p.0 + offset)),
+        export_symbol: symbol.export_symbol.map(|p| SymbolId(p.0 + offset)),
+    }
+}
+
+/// Re-maps a symbol table's values into the merged symbol space by `offset`.
+fn remap_table(table: &SymbolTable, offset: u32) -> SymbolTable {
+    table
+        .iter()
+        .map(|(name, &sid)| (name.clone(), SymbolId(sid.0 + offset)))
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "multifile_test.rs"]
+mod tests;

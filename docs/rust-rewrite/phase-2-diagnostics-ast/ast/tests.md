@@ -211,6 +211,7 @@
 | `deep_clone_synthetic_location` | 合成位置 | `deep_clone_node` 后所有节点 `loc==(-1,-1)`；尾逗号列表末元素 `(-2,-2)` | deepclone.go（syntheticLocation 分支） | ✓ |
 | `deep_clone_reparse_sets_parent_and_flag` | reparse 变体 | `deep_clone_reparse` 后 `set_parent_in_children` 生效（子 `parent` 指向新父）、根置 `NodeFlagsReparsed`、`loc` 非合成 | deepclone.go:DeepCloneReparse | ✓ |
 | `for_each_child_count_matches_visit_each_child` | 两遍历器一致 | 同一手建树，`for_each_child` 计数 == `get_children`（经 `visit_each_child` 收集）计数 | deepclone_test.go:getChildren | ✓ |
+| `synthetic_reference_expression_visits_expression_then_this_arg` | P5 附加节点：构造 + 子遍历 | `new_synthetic_reference_expression(expr, this_arg)` → kind == `SyntheticReferenceExpression`，`for_each_child` 收集 `[expression, this_arg]` | ast_generated.go:SyntheticReferenceExpression.ForEachChild | ✓ |
 
 > **P3 回填（持续扩展，parser-backed）**：`TestDeepCloneNodeSanityCheck` 的真实解析版现位于 `internal/parser/deepclone_test.rs::deep_clone_node_sanity_check`（`ast` crate 不能依赖 `tsgo_parser`，否则倒置依赖边）。它用 `parse_source_file` 解析片段，再 `arena.deep_clone_node(file)` 跑 Go 的 BFS 不变量（每对 `(orig, clone)` id 不同 + 子节点数相等）。case 数随 parser 切片扩展：Round 1 = 28、Round 2 = ~60、Round 3 = ~95、**Round 4 = ~107**（新增 type-args-in-call/instantiation/负字面量类型/装饰器/import 属性/export 属性/import-type 属性，以及独立的 **TSX** 表：JSX 元素·fragment·命名空间成员，和 **JSON** 表：对象·数组）。剩余缺口为 JSDoc 簇（随 JSDoc+reparser 子系统整体 DEFER），逼近 Go 的 ~270 全表。
 

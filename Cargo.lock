@@ -504,6 +504,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+
+[[package]]
 name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -783,6 +789,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_ls_lsconv"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tsgo_bundled",
+ "tsgo_core",
+ "tsgo_lsproto",
+ "tsgo_tspath",
+]
+
+[[package]]
 name = "tsgo_lsproto"
 version = "0.0.0"
 dependencies = [
@@ -980,6 +998,86 @@ dependencies = [
  "tsgo_core",
  "tsgo_module",
  "tsgo_tspath",
+]
+
+[[package]]
+name = "tsgo_testutil_baseline"
+version = "0.0.0"
+dependencies = [
+ "regex",
+ "similar",
+ "tempfile",
+ "tsgo_collections",
+ "tsgo_repo",
+ "tsgo_stringutil",
+]
+
+[[package]]
+name = "tsgo_testutil_emittestutil"
+version = "0.0.0"
+dependencies = [
+ "tsgo_ast",
+ "tsgo_core",
+ "tsgo_printer",
+ "tsgo_testutil_parsetestutil",
+]
+
+[[package]]
+name = "tsgo_testutil_filefixture"
+version = "0.0.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
+name = "tsgo_testutil_fixtures"
+version = "0.0.0"
+dependencies = [
+ "tsgo_repo",
+ "tsgo_testutil_filefixture",
+]
+
+[[package]]
+name = "tsgo_testutil_fsbaselineutil"
+version = "0.0.0"
+dependencies = [
+ "regex",
+ "tsgo_collections",
+ "tsgo_vfs",
+]
+
+[[package]]
+name = "tsgo_testutil_jstest"
+version = "0.0.0"
+dependencies = [
+ "tempfile",
+ "tsgo_json",
+ "tsgo_repo",
+ "tsgo_tspath",
+]
+
+[[package]]
+name = "tsgo_testutil_parsetestutil"
+version = "0.0.0"
+dependencies = [
+ "tsgo_ast",
+ "tsgo_core",
+ "tsgo_diagnostics",
+ "tsgo_diagnosticwriter",
+ "tsgo_locale",
+ "tsgo_parser",
+ "tsgo_tspath",
+]
+
+[[package]]
+name = "tsgo_testutil_race"
+version = "0.0.0"
+
+[[package]]
+name = "tsgo_testutil_stringtestutil"
+version = "0.0.0"
+dependencies = [
+ "tsgo_stringutil",
 ]
 
 [[package]]

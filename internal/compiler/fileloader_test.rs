@@ -13,8 +13,15 @@ use crate::program::ProgramOptions;
 fn opts_for(files: &[(&str, &str)], cwd: &str, roots: &[&str]) -> ProgramOptions {
     let fs: Arc<dyn Fs + Send + Sync> = Arc::new(MapFs::from_map(files.iter().copied(), true));
     let host = Arc::new(new_compiler_host(cwd, fs, "/lib"));
+    // These tests assert pure root-file discovery; disable the automatic
+    // default-lib include (this host's `/lib` does not serve the bundled libs,
+    // so an included lib would otherwise show up as a missing file).
+    let options = CompilerOptions {
+        no_lib: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
     let config: ParsedCommandLine = new_parsed_command_line(
-        CompilerOptions::default(),
+        options,
         roots.iter().map(|s| s.to_string()).collect(),
         ComparePathsOptions {
             use_case_sensitive_file_names: true,

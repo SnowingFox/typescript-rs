@@ -29,17 +29,22 @@
 //!   round-6h `destructuring.go`; rest in parameters / `for-of` / `catch` /
 //!   assignment-destructuring patterns (need the parameter / assignment
 //!   flatteners + `FlattenDestructuringAssignment`).
-//! - `optionalchain` landed a 6d+6h subset: 6d lowered single-`?.` chains with a
-//!   simple receiver; 6h deepened it (ec-threaded, var-environment like
+//! - `optionalchain` landed a 6d+6h+6i subset: 6d lowered single-`?.` chains
+//!   with a simple receiver; 6h deepened it (ec-threaded, var-environment like
 //!   `exponentiation`) with **receiver temp-hoisting** (`f()?.b` → `var _a;
 //!   (_a = f()) === null || _a === void 0 ? void 0 : _a.b`) and **multiple
-//!   `?.`** (`a?.b?.c` → nested guards, one temp per link), both on the
-//!   top-level statement path. DEFER: temp-hoisting chains nested in
-//!   non-top-level scopes (function bodies, no var-environment active yet),
-//!   `this`-capture for parenthesized optional calls (`(a?.b)()`), tagged
-//!   templates, and `delete a?.b`. blocked-by: nested-scope variable-environment
-//!   wiring, and `this`-capture needs the `SyntheticReferenceExpression`
-//!   machinery, not yet ported.
+//!   `?.`** (`a?.b?.c` → nested guards, one temp per link). 6i wired
+//!   **per-scope variable environments**, threading the emit context through
+//!   function-like bodies (function declarations / expressions, arrow bodies,
+//!   class methods) so a temp-hoisting chain inside such a body lands in *that*
+//!   body's leading `var ...;` rather than at module top. DEFER: temp-hoisting
+//!   chains nested in *still-unthreaded* positions (control-flow statement
+//!   bodies like `if`/`for`/`while`, `switch` cases, object-literal method
+//!   shorthands, constructor / accessor bodies), `this`-capture for
+//!   parenthesized optional calls (`(a?.b)()`), tagged templates, and
+//!   `delete a?.b`. blocked-by: threading the emit context through the
+//!   remaining statement/member kinds, and `this`-capture needs the
+//!   `SyntheticReferenceExpression` machinery, not yet ported.
 //! - `namedevaluation` landed a 6d-2 subset (`var f = <anonymous fn>` →
 //!   `__setFunctionName(<fn>, "f")`) as the end-to-end validation of the new
 //!   printer emit-helper infrastructure (`request_emit_helper` + unscoped
@@ -48,21 +53,50 @@
 //!   property-declaration/export=, computed-name `__propKey` caching, anonymous
 //!   class `static { __setFunctionName(this, …) }` blocks) + `EmitContext`
 //!   assigned-name tracking + target/`useDefineForClassFields` gating.
-//! - `async` landed a 6d-3 subset: a top-level **async function declaration**
-//!   lowers to the `__awaiter(this, void 0, void 0, function* () { … })` wrapper
-//!   with `await X` → `yield X` in the (direct) body. DEFER: async methods/
-//!   accessors/arrows, async generators (`__asyncGenerator`), super/lexical-
-//!   `this`/`arguments` capture, default/rest parameter handling, and top-level
-//!   `await` — these need the `EmitContext` super-capture + parameter/variable-
-//!   environment machinery not yet ported.
-//! - `forawait`. DEFER (scope): `for await (x of y)` has no minimal tracer — the
-//!   faithful lowering always emits the full async-iteration scaffold
-//!   (`__asyncValues` iterator + downlevel-`await` of `.next()` +
-//!   generated-name iterator/result/value temps + an `iterator.return` cleanup
-//!   nested `try/finally`). The `__asyncValues`/`__await` helpers exist, but the
-//!   generated-name + `.call`/`convertForOfStatementHead` scaffolding is too
-//!   large to land faithfully as a tracer this round; a partial version would
-//!   emit broken code. blocked-by: the async-iteration lowering scaffold.
+//! - `async` landed a 6d-3 + 6m subset: 6d-3 lowered a top-level **async
+//!   function declaration** to the `__awaiter(this, void 0, void 0,
+//!   function* () { … })` wrapper with `await X` → `yield X` in the (direct)
+//!   body. 6m extended it (via an emit-context-threaded `VisitEachChild`) to
+//!   **async function expressions** and **async methods** (same wrapper, lexical
+//!   `this` → first arg `this`) and **async arrows** (concise-body arrow
+//!   returning the `__awaiter(…)` call directly; at module top there is no
+//!   lexical `this`, so the first arg is `void 0`). DEFER: async accessors,
+//!   async generators (`__asyncGenerator`), `super` in async methods (needs a
+//!   `_super` binding), threading `asyncContextHasLexicalThis` through nested
+//!   scopes (an arrow inside an async method should thread `this`), lexical-
+//!   `arguments`/`_this` capture, default/rest parameter handling, `for await`,
+//!   and top-level `await` — these need the `EmitContext` super-capture +
+//!   parameter machinery and the async-generator helpers not yet ported.
+//! - `forawait` landed a 6y subset: the ES2018 **async-generator function
+//!   declaration** lowering (`async function* g() { ... }` → `function g() {
+//!   return __asyncGenerator(this, arguments, function* g_1() { ... }); }`, with
+//!   `await x` → `yield __await(x)`, `yield e` → `yield yield __await(e)`,
+//!   `yield* e` → `yield __await(yield* __asyncDelegator(__asyncValues(e)))`,
+//!   `return e` → `return yield __await(e)`). The `__await`/`__asyncGenerator`/
+//!   `__asyncDelegator`/`__asyncValues` helper definitions live in `forawait.rs`
+//!   itself (the `tsgo_printer` crate is out of that round's edit scope). 6z
+//!   landed the **`for await (x of y)` downlevel** inside an async (non-
+//!   generator) function: the full async-iteration scaffold — `__asyncValues`
+//!   iterator temp + `result` temp + the C-style `for` with `result = await
+//!   iterator.next(), done = result.done, !done` + loop variable bound from
+//!   `result.value` + the `try/catch/finally` `iterator.return` cleanup (down-
+//!   level `await`), with the `done`/`errorRecord`/`returnMethod`/`value` temps
+//!   hoisted into the enclosing function body's variable environment. DEFER:
+//!   `for await` with an **identifier source** (`for await (const x of y)`) —
+//!   derives the iterator/result names from the source identifier and needs the
+//!   printer's resolving `getTextOfNode` for the nested generated name (un-
+//!   ported; the non-identifier `gen()` source uses clean `NewTempVariable`
+//!   temps); `for await` inside an **async generator** (needs
+//!   `createDownlevelAwait`'s `yield __await(...)` form = enclosing-function-
+//!   flags threading); **destructuring** loop variables, **top-level** `for
+//!   await`, **labeled**/`continue`/`break` interplay, the **nested-loop
+//!   `errorRecord` reset**; async-generator **methods** / **function
+//!   expressions** / **arrows** (need the `_super` binding plus `hasLexicalThis`
+//!   hierarchy-facts threading; a function declaration always has its own
+//!   `this`), non-simple parameter lists, the variable-environment merge, and
+//!   top-level `await`. blocked-by: the printer's resolving name generation,
+//!   enclosing-function-flags threading, the destructuring flattener, and the
+//!   `EmitContext` super-capture plus parameter machinery.
 //! - `using`. DEFER (parser): the `tsgo_parser` crate does not parse
 //!   statement-level `using x = expr;` (reports "';' expected"), so the stage
 //!   cannot be exercised through the parse→transform→emit path, and the parser
@@ -71,6 +105,23 @@
 //!   portable once the parser supports `using`. blocked-by: parser `using`
 //!   declaration support. (`await using` additionally needs async disposal.)
 //! - `esdecorator`. blocked-by: checker metadata.
+//! - `spread` landed a 6aa subset: the ES2015 **array-literal** spread
+//!   (`[...a, b]` → `__spreadArray(__spreadArray([], a, true), [b], false)`, the
+//!   nested segment fold with the array-literal `pack=true`/literal `pack=false`
+//!   flags) and **call-argument** spread (`f(...args)` → `f.apply(void 0,
+//!   args)`, `f(a, ...args)` → `f.apply(void 0, __spreadArray([a], args,
+//!   false))` with the argument-list `pack=false` flag and the lone-spread
+//!   shortcut; `o.m(...args)` → `o.m.apply(o, args)` capturing a plain
+//!   identifier receiver as `this`). The `__spreadArray` helper definition lives
+//!   in `spread.rs` (the `tsgo_printer` crate is out of edit scope, mirroring
+//!   `forawait.rs`). The Go port has no ES2015 spread transform, so shapes are
+//!   verified against `tsc --target es5`. DEFER: `new C(...args)` (construct +
+//!   `bind.apply`), `super(...args)`, non-simple member receivers needing a
+//!   capture temp, `--downlevelIteration` (`__read`/`__spread`); object spread
+//!   is already in `objectrestspread` (6d/6g). blocked-by: the `new`-target bind
+//!   form, `super` receiver capture, the `createCallBinding` temp-capture, and
+//!   the iteration helpers. Also DEFER wiring into `GetESTransformer` (no
+//!   `NewES2015Transformer` chain exists yet) — with the `definitions` port.
 //!
 //! - `classfields` named-helper private form (`__classPrivateFieldGet/Set`),
 //!   private static fields, private methods/accessors (`WeakSet`), `accessor`
@@ -84,8 +135,12 @@
 //!   `tstransforms` concern; collision-free temps/brands need the name
 //!   generator; the rest need checker info not yet ported.
 //! - `exponentiation` `**=` temp-hoisting targets nested in non-top-level
-//!   scopes. blocked-by: scope-level variable-environment nesting (function
-//!   bodies) is not yet wired through the visit.
+//!   scopes: 6i wired function declaration bodies (their own variable
+//!   environment), so `function f() { a.x **= b; }` now hoists `var _a;` inside
+//!   `f`. DEFER: `**=` targets nested in still-unthreaded positions
+//!   (control-flow statement bodies, class methods / function expressions /
+//!   arrows for this stage, nested classes). blocked-by: threading the emit
+//!   context through those remaining kinds in `exponentiation`.
 //! - `definitions` (`GetESTransformer` target dispatch + the per-version
 //!   transformer chains). blocked-by: depends on every es stage being ported.
 //! - `classthis` / `nullishcoalescing` / `logicalassignment` / `optionalcatch`
@@ -95,6 +150,9 @@
 pub mod r#async;
 pub mod classfields;
 pub mod exponentiation;
+pub mod forawait;
 pub mod namedevaluation;
 pub mod objectrestspread;
 pub mod optionalchain;
+pub mod spread;
+pub mod usestrict;

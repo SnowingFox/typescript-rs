@@ -113,3 +113,17 @@ fn for_each_child_array_literal_and_block_lists() {
     let block = arena.new_block(NodeList::new(vec![s1]));
     assert_eq!(collect_children(&arena, block), vec![s1]);
 }
+
+// Go: internal/ast/ast_generated.go:NewSyntheticReferenceExpression / ForEachChild
+// A synthetic reference carries an `expression` plus the captured `thisArg`;
+// its children are visited expression-then-thisArg, mirroring Go's
+// `SyntheticReferenceExpression.ForEachChild`.
+#[test]
+fn synthetic_reference_expression_visits_expression_then_this_arg() {
+    let mut arena = NodeArena::new();
+    let expression = arena.new_identifier("expr");
+    let this_arg = arena.new_identifier("a");
+    let synth = arena.new_synthetic_reference_expression(expression, this_arg);
+    assert_eq!(arena.kind(synth), Kind::SyntheticReferenceExpression);
+    assert_eq!(collect_children(&arena, synth), vec![expression, this_arg]);
+}

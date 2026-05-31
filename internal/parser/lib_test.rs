@@ -1384,6 +1384,45 @@ fn parse_meta_properties() {
     assert!(nt.diagnostics.is_empty() && im.diagnostics.is_empty());
 }
 
+// Dynamic `import("m")` in expression position parses to a `CallExpression`
+// whose callee is an `import` keyword expression (kind `ImportKeyword`), with the
+// module specifier as its single argument. Before the fix the parser could not
+// consume the `import` token in primary-expression position and looped forever.
+// Go: parser.go:parseLeftHandSideExpressionOrHigher (import call) / tests.md:parse_dynamic_import_call
+#[test]
+fn parse_dynamic_import_call() {
+    let result = parse_ts("import(\"m\");");
+    let call = only_expr(&result);
+    match result.arena.data(call) {
+        NodeData::CallExpression(d) => {
+            assert_eq!(result.arena.kind(d.expression), Kind::ImportKeyword);
+            assert_eq!(d.arguments.nodes.len(), 1);
+            assert_eq!(result.arena.kind(d.arguments.nodes[0]), Kind::StringLiteral);
+        }
+        other => panic!("expected CallExpression, got {other:?}"),
+    }
+    assert!(result.diagnostics.is_empty());
+}
+
+// Guard: the `import` look-ahead added for dynamic `import(...)` must not divert
+// an import *statement* (`import x from "m"`) into expression parsing. The
+// statement form is dispatched as a declaration (its next token is an
+// identifier, not `(`/`<`/`.`), while the call form parses as an expression.
+// Go: parser.go:scanStartOfDeclaration / parseLeftHandSideExpressionOrHigher
+#[test]
+fn parse_import_keyword_statement_vs_call() {
+    let decl = parse_ts("import x from \"m\";");
+    match decl.arena.data(statements(&decl)[0]) {
+        NodeData::ImportDeclaration(d) => assert!(d.import_clause.is_some()),
+        other => panic!("expected ImportDeclaration, got {other:?}"),
+    }
+    assert!(decl.diagnostics.is_empty());
+
+    let call = parse_ts("import(\"m\");");
+    assert_eq!(call.arena.kind(only_expr(&call)), Kind::CallExpression);
+    assert!(call.diagnostics.is_empty());
+}
+
 // Go: parser.go:parseMemberExpressionRest (optional chain + non-null)
 #[test]
 fn parse_optional_chain_and_non_null() {

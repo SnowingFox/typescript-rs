@@ -1,0 +1,16 @@
+[package]
+name = "tsgo_testutil_parsetestutil"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tsgo_ast = { path = "../../ast" }
+tsgo_core = { path = "../../core" }
+tsgo_diagnostics = { path = "../../diagnostics" }
+tsgo_diagnosticwriter = { path = "../../diagnosticwriter" }
+tsgo_locale = { path = "../../locale" }
+tsgo_parser = { path = "../../parser" }
+tsgo_tspath = { path = "../../tspath" }

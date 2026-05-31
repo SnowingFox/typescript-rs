@@ -10,7 +10,7 @@
 //! depend on `compilerOptions`.
 
 use tsgo_ast::utilities::modifier_to_flag;
-use tsgo_ast::{Kind, ModifierFlags, NodeData, NodeId};
+use tsgo_ast::{Kind, ModifierFlags, NodeData, NodeFlags, NodeId};
 
 use super::program::BoundProgram;
 use super::Checker;
@@ -34,6 +34,7 @@ impl Checker {
         if modifiers.is_empty() {
             return false;
         }
+        let node_kind = program.arena().kind(node);
         let mut flags = ModifierFlags::empty();
         for modifier in modifiers {
             let kind = program.arena().kind(modifier);
@@ -45,15 +46,26 @@ impl Checker {
             if matches!(
                 kind,
                 Kind::PublicKeyword | Kind::ProtectedKeyword | Kind::PrivateKeyword
-            ) && flags.intersects(ModifierFlags::ACCESSIBILITY_MODIFIER)
-            {
-                self.error(
-                    program,
-                    modifier,
-                    &tsgo_diagnostics::ACCESSIBILITY_MODIFIER_ALREADY_SEEN,
-                    &[],
-                );
-                return true;
+            ) {
+                if flags.intersects(ModifierFlags::ACCESSIBILITY_MODIFIER) {
+                    self.error(
+                        program,
+                        modifier,
+                        &tsgo_diagnostics::ACCESSIBILITY_MODIFIER_ALREADY_SEEN,
+                        &[],
+                    );
+                    return true;
+                }
+                // An accessibility modifier must precede `static`.
+                if flags.contains(ModifierFlags::STATIC) {
+                    self.error(
+                        program,
+                        modifier,
+                        &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                        &[modifier_text(kind), "static"],
+                    );
+                    return true;
+                }
             }
             if kind == Kind::AsyncKeyword && flags.contains(ModifierFlags::AMBIENT) {
                 self.error(
@@ -73,7 +85,197 @@ impl Checker {
                 );
                 return true;
             }
+            // The `accessor` modifier cannot be combined with `readonly`.
+            if kind == Kind::AccessorKeyword && flags.contains(ModifierFlags::READONLY) {
+                self.error(
+                    program,
+                    modifier,
+                    &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                    &["accessor", "readonly"],
+                );
+                return true;
+            }
+            // The `accessor` modifier may only appear on a property declaration.
+            if kind == Kind::AccessorKeyword && node_kind != Kind::PropertyDeclaration {
+                self.error(
+                    program,
+                    modifier,
+                    &tsgo_diagnostics::X_ACCESSOR_MODIFIER_CAN_ONLY_APPEAR_ON_A_PROPERTY_DECLARATION,
+                    &[],
+                );
+                return true;
+            }
+            // `readonly` may only appear on a property declaration or index
+            // signature (a parameter property is handled by `checkParameter`).
+            if kind == Kind::ReadonlyKeyword
+                && !matches!(
+                    node_kind,
+                    Kind::PropertyDeclaration
+                        | Kind::PropertySignature
+                        | Kind::IndexSignature
+                        | Kind::Parameter
+                )
+            {
+                self.error(
+                    program,
+                    modifier,
+                    &tsgo_diagnostics::X_READONLY_MODIFIER_CAN_ONLY_APPEAR_ON_A_PROPERTY_DECLARATION_OR_INDEX_SIGNATURE,
+                    &[],
+                );
+                return true;
+            }
             flags |= flag;
+        }
+        false
+    }
+
+    /// Grammar checks for a single variable declaration (Go's
+    /// `checkGrammarVariableDeclaration`): a `const` declaration must have an
+    /// initializer, else `1155`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker};
+    /// # fn demo<P: BoundProgram>(c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// c.check_grammar_variable_declaration(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarVariableDeclaration(1567)
+    pub fn check_grammar_variable_declaration(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let (name, initializer) = match program.arena().data(node) {
+            NodeData::VariableDeclaration(d) => (d.name, d.initializer),
+            _ => return false,
+        };
+        // DEFER(phase-4-checker-4s+): binding patterns (destructuring) and the
+        // for-in/for-of declaration forms. blocked-by: binding-element checking
+        // + for-in/of statement descent.
+        if program.arena().kind(name) != Kind::Identifier {
+            return false;
+        }
+        // Combined node flags (Go's `getCombinedNodeFlags`): a variable
+        // declaration's `let`/`const`/`using` and ambient bits live on the
+        // enclosing `VariableDeclarationList` and `VariableStatement`.
+        let arena = program.arena();
+        let mut combined = arena.flags(node);
+        if let Some(list) = arena.parent(node) {
+            combined |= arena.flags(list);
+            if let Some(statement) = arena.parent(list) {
+                combined |= arena.flags(statement);
+            }
+        }
+        // DEFER(phase-4-checker-4s+): ambient declarations route to
+        // `checkAmbientInitializer` in Go; skip them here. blocked-by: ambient
+        // initializer checking.
+        if combined.contains(NodeFlags::AMBIENT) {
+            return false;
+        }
+        // A for-in/for-of loop variable has no initializer by design, so Go
+        // gates the whole `initializer == nil` block (including the const-must-
+        // be-initialized requirement) on the declaration's parent-parent NOT
+        // being a for-in/for-of statement.
+        // Go: internal/checker/checker.go:Checker.checkGrammarVariableDeclaration
+        if let Some(list) = arena.parent(node) {
+            if let Some(grandparent) = arena.parent(list) {
+                if matches!(
+                    arena.kind(grandparent),
+                    Kind::ForInStatement | Kind::ForOfStatement
+                ) {
+                    return false;
+                }
+            }
+        }
+        let block_scope_kind = combined & NodeFlags::BLOCK_SCOPED;
+        // DEFER(phase-4-checker-4s+): `using`/`await using` and
+        // definite-assignment (`!`) variants. blocked-by: `using` disposability
+        // + definite-assignment checks.
+        if initializer.is_none() && block_scope_kind == NodeFlags::CONST {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::X_0_DECLARATIONS_MUST_BE_INITIALIZED,
+                &["const"],
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Checks that a constructor declaration `node` has no return type
+    /// annotation (Go's `checkGrammarConstructorTypeAnnotation`): one present is
+    /// `1093`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker};
+    /// # fn demo<P: BoundProgram>(c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// c.check_grammar_constructor_type_annotation(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarConstructorTypeAnnotation(1884)
+    pub fn check_grammar_constructor_type_annotation(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let type_node = match program.arena().data(node) {
+            NodeData::ConstructorDeclaration(d) => d.type_node,
+            _ => return false,
+        };
+        if let Some(type_node) = type_node {
+            self.error(
+                program,
+                type_node,
+                &tsgo_diagnostics::TYPE_ANNOTATION_CANNOT_APPEAR_ON_A_CONSTRUCTOR_DECLARATION,
+                &[],
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Checks that a constructor declaration `node` has no type parameters
+    /// (Go's `checkGrammarConstructorTypeParameters`): any present are `1092`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker};
+    /// # fn demo<P: BoundProgram>(c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// c.check_grammar_constructor_type_parameters(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarConstructorTypeParameters(1869)
+    pub fn check_grammar_constructor_type_parameters(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let first_type_parameter = match program.arena().data(node) {
+            NodeData::ConstructorDeclaration(d) => match &d.type_parameters {
+                // Report on the first type parameter; Go reports over the whole
+                // (trivia-trimmed) `<...>` list span.
+                Some(list) => list.nodes.first().copied(),
+                None => return false,
+            },
+            _ => return false,
+        };
+        if let Some(type_parameter) = first_type_parameter {
+            self.error(
+                program,
+                type_parameter,
+                &tsgo_diagnostics::TYPE_PARAMETERS_CANNOT_APPEAR_ON_A_CONSTRUCTOR_DECLARATION,
+                &[],
+            );
+            return true;
         }
         false
     }

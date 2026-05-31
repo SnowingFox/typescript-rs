@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use tsgo_tspath::Path;
 
-use crate::fileloader::{FileLoader, ProcessedFiles};
+use crate::fileloader::{get_default_lib_file_priority, FileLoader, ProcessedFiles};
 use crate::host::ParsedFile;
 
 /// One node in the file-discovery graph: a file to read, parse, and resolve the
@@ -28,6 +28,11 @@ pub struct ParseTask {
     sub_tasks: Vec<Path>,
     file: Option<ParsedFile>,
     loaded: bool,
+    /// Whether this task loads a default-library file (`lib.*.d.ts`). Lib tasks
+    /// have their `/// <reference lib>` directives expanded into more lib tasks,
+    /// and are collected lib-first (sorted by priority) by [`FilesParser::collect_files`].
+    // Go: internal/compiler/filesparser.go:parseTask.libFile
+    is_lib: bool,
 }
 
 /// The file-discovery worklist: every reachable file keyed by its canonical
@@ -65,19 +70,34 @@ impl FilesParser {
     // Go: internal/compiler/fileloader.go:fileLoader.addRootTask
     pub fn add_root_task(&mut self, loader: &FileLoader, normalized_file_path: String) {
         let path = loader.to_path(&normalized_file_path);
-        self.ensure_task(path.clone(), normalized_file_path);
+        self.ensure_task(path.clone(), normalized_file_path, false);
+        self.root_paths.push(path);
+    }
+
+    /// Registers `normalized_file_path` as a default-library root to load (its
+    /// `/// <reference lib>` directives are expanded; see [`Self::parse`]).
+    ///
+    /// Side effects: none (records the task; no I/O until [`Self::parse`]).
+    // Go: internal/compiler/fileloader.go:fileLoader.addRootTask (with libFile)
+    pub fn add_lib_root_task(&mut self, loader: &FileLoader, normalized_file_path: String) {
+        let path = loader.to_path(&normalized_file_path);
+        self.ensure_task(path.clone(), normalized_file_path, true);
         self.root_paths.push(path);
     }
 
     /// Inserts an unloaded task for `path` if one does not exist yet.
     ///
+    /// The `is_lib` flag is first-wins: an existing task keeps its flag (mirroring
+    /// Go, where the first task to register a path fixes its `libFile`).
+    ///
     /// Side effects: none.
-    fn ensure_task(&mut self, path: Path, normalized_file_path: String) {
+    fn ensure_task(&mut self, path: Path, normalized_file_path: String, is_lib: bool) {
         self.tasks_by_path.entry(path).or_insert(ParseTask {
             normalized_file_path,
             sub_tasks: Vec::new(),
             file: None,
             loaded: false,
+            is_lib,
         });
     }
 
@@ -93,17 +113,29 @@ impl FilesParser {
             let path = queue[head].clone();
             head += 1;
 
-            let normalized = match self.tasks_by_path.get(&path) {
-                Some(task) if !task.loaded => task.normalized_file_path.clone(),
+            let (normalized, is_lib) = match self.tasks_by_path.get(&path) {
+                Some(task) if !task.loaded => (task.normalized_file_path.clone(), task.is_lib),
                 _ => continue,
             };
 
             let file = loader.parse_source_file(&normalized);
             let mut sub_tasks = Vec::new();
             if let Some(parsed) = &file {
+                // A lib file's `/// <reference lib>` directives pull in more lib
+                // files (e.g. the `lib.d.ts` aggregator references `lib.es5.d.ts`,
+                // `lib.dom.d.ts`, ...). The parser does not expose these
+                // directives yet, so the loader scans the lib's leading trivia.
+                if is_lib {
+                    for resolved_name in loader.resolve_lib_references(parsed) {
+                        let sub_path = loader.to_path(&resolved_name);
+                        self.ensure_task(sub_path.clone(), resolved_name, true);
+                        queue.push(sub_path.clone());
+                        sub_tasks.push(sub_path);
+                    }
+                }
                 for resolved_name in loader.resolve_import_file_names(parsed) {
                     let sub_path = loader.to_path(&resolved_name);
-                    self.ensure_task(sub_path.clone(), resolved_name);
+                    self.ensure_task(sub_path.clone(), resolved_name, false);
                     queue.push(sub_path.clone());
                     sub_tasks.push(sub_path);
                 }
@@ -121,11 +153,15 @@ impl FilesParser {
 
     /// Collects the loaded files into a deterministic [`ProcessedFiles`]: a
     /// depth-first walk of the roots that appends each file *after* its imports
-    /// (so referenced files precede their referrers) and visits each file once.
+    /// (so referenced files precede their referrers) and visits each file once,
+    /// then orders the lib files *first* — sorted by
+    /// [`get_default_lib_file_priority`] — ahead of the source files (Go's
+    /// `sortLibs` + `append(libFiles, files...)`). `default_library_path` is the
+    /// normalized lib directory the priority ranking is relative to.
     ///
     /// Side effects: none (consumes the worklist).
-    // Go: internal/compiler/filesparser.go:filesParser.getProcessedFiles
-    pub fn collect_files(mut self) -> ProcessedFiles {
+    // Go: internal/compiler/filesparser.go:filesParser.getProcessedFiles (sortLibs + libs first)
+    pub fn collect_files(mut self, default_library_path: &str) -> ProcessedFiles {
         let mut order: Vec<Path> = Vec::new();
         let mut seen: HashSet<Path> = HashSet::new();
         let roots = self.root_paths.clone();
@@ -133,20 +169,33 @@ impl FilesParser {
             self.collect_post_order(root, &mut seen, &mut order);
         }
 
-        let mut files: Vec<ParsedFile> = Vec::new();
-        let mut files_by_path: HashMap<Path, usize> = HashMap::new();
+        // Partition into lib files and source files in traversal order, keeping
+        // the (path, file) pair so the final list can be assembled libs-first.
+        let mut lib_entries: Vec<(Path, ParsedFile)> = Vec::new();
+        let mut file_entries: Vec<(Path, ParsedFile)> = Vec::new();
         let mut missing_files: Vec<String> = Vec::new();
         for path in order {
             let Some(task) = self.tasks_by_path.remove(&path) else {
                 continue;
             };
             match task.file {
-                Some(file) => {
-                    files_by_path.insert(path, files.len());
-                    files.push(file);
-                }
+                Some(file) if task.is_lib => lib_entries.push((path, file)),
+                Some(file) => file_entries.push((path, file)),
                 None => missing_files.push(task.normalized_file_path),
             }
+        }
+
+        // Sort the libs by priority (stable, so equal priorities keep traversal
+        // order); the worklist already deduplicated by path.
+        lib_entries.sort_by_key(|(_, file)| {
+            get_default_lib_file_priority(file.file_name(), default_library_path)
+        });
+
+        let mut files: Vec<ParsedFile> = Vec::with_capacity(lib_entries.len() + file_entries.len());
+        let mut files_by_path: HashMap<Path, usize> = HashMap::new();
+        for (path, file) in lib_entries.into_iter().chain(file_entries) {
+            files_by_path.insert(path, files.len());
+            files.push(file);
         }
 
         ProcessedFiles::from_parts(files, files_by_path, missing_files)

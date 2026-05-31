@@ -176,6 +176,38 @@ pub(crate) fn is_signed_numeric_literal(arena: &NodeArena, id: NodeId) -> bool {
     }
 }
 
+/// Reports whether a declaration carries a dynamic (computed, non-literal) name.
+///
+/// A dynamic name is one whose runtime value is not statically known, e.g.
+/// `[Symbol.iterator]` or `[expr]`. Such declarations are bound anonymously
+/// under `InternalSymbolNameComputed` rather than by their text, which is why
+/// the binder must consult this before naming a member.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:HasDynamicName
+pub(crate) fn has_dynamic_name(arena: &NodeArena, declaration: NodeId) -> bool {
+    match name_of_declaration(arena, declaration) {
+        Some(name) => is_dynamic_name(arena, name),
+        None => false,
+    }
+}
+
+/// Reports whether a name node is dynamic (a computed property name whose
+/// expression is neither a string/numeric literal nor a signed numeric literal).
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsDynamicName
+pub(crate) fn is_dynamic_name(arena: &NodeArena, name: NodeId) -> bool {
+    let expr = match arena.data(name) {
+        NodeData::ComputedPropertyName(d) => d.expression,
+        // The `ElementAccessExpression` name arm is reached only via JS expando
+        // assignment declarations (`a[b] = ...`), which are deferred in this port.
+        // DEFER: JS expando assignment names. // Go: utilities.go:IsDynamicName
+        _ => return false,
+    };
+    !is_string_or_numeric_literal_like(arena, expr) && !is_signed_numeric_literal(arena, expr)
+}
+
 /// Reports whether a node is a class declaration or class expression.
 ///
 /// Side effects: none (pure).

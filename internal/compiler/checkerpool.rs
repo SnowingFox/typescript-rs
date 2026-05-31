@@ -5,32 +5,34 @@
 //! ([`CompilerCheckerPool`]), real checker creation through the checker's public
 //! `Checker::new_checker(Rc<dyn BoundProgram>)` retain seam (round 4l), the
 //! file→checker association (`i % K`) plus the grouped-iteration shape, and —
-//! new in P6-4 — *driving* per-file diagnostics through the pool
-//! ([`CompilerCheckerPool::collect_diagnostics`]).
+//! since P6-6 — *driving* per-file diagnostics over a real multi-file
+//! [`BoundProgram`] ([`CompilerCheckerPool::collect_diagnostics`]).
 //!
-//! # How the pool drives checking (P6-4)
+//! # How the pool drives checking (P6-6)
 //!
 //! Go builds K checkers over one shared `*Program` and each checker collects
-//! diagnostics for its `i % K` file subset. The ported [`BoundProgram`] is a
-//! single bound file (see [`BoundFile`]), so the shared program is the first
-//! bound file (the "seed"): the pool `Rc::clone`s it into each of the K
-//! checkers (Go's "one program per pool"), then drives
-//! [`Checker::get_diagnostics`] for the file the program represents.
+//! diagnostics for its `i % K` file subset. The pool now builds one
+//! [`MultiFileBoundProgram`] over *all* bound files (lib + sources, with a
+//! merged global table) and `Rc::clone`s it into each of the K checkers (Go's
+//! "one program per pool"). [`Self::collect_diagnostics`] then iterates the
+//! program's [`source_files`](BoundProgram::source_files) handles in input
+//! order, driving the file's associated checker (`i % K`) via
+//! [`Checker::get_diagnostics`], which returns *only that file's* diagnostics
+//! (Go's `collection.GetDiagnosticsForFile(name)` partitioning).
 //!
-//! DEFER(P6): the grouped-*parallel* collection, non-exclusive emit access, and
-//! true multi-file per-file diagnostics (Go's
-//! `collection.GetDiagnosticsForFile(name)` filtering).
-//! blocked-by: a multi-file `compiler.Program` `BoundProgram` view + parallel
-//! `Arc` checkers (PORTING §6) + lib globals — the checker retains an `Rc` (not
-//! `Arc`) single-file program today, so the pool drives sequentially over the
-//! seed file.
+//! DEFER(P6): the grouped-*parallel* collection (across checkers) and
+//! non-exclusive emit access.
+//! blocked-by: parallel `Arc` checkers (PORTING §6) — the checker retains an
+//! `Rc` (not `Arc + Send + Sync`) program today, so the pool drives the per-file
+//! subsets sequentially.
 
 use std::rc::Rc;
 
 use tsgo_checker::{BoundProgram, Checker, Diagnostic};
+use tsgo_core::compileroptions::CompilerOptions;
 
-use crate::boundfile::BoundFile;
 use crate::host::ParsedFile;
+use crate::multifile::MultiFileBoundProgram;
 
 /// Computes how many checkers the built-in pool should create.
 ///
@@ -73,8 +75,8 @@ pub struct CompilerCheckerPool {
     checkers: Vec<Checker>,
     /// File index → owning checker index, assigned `i % checker_count`.
     file_associations: Vec<usize>,
-    /// The bound program the K checkers share (Go: one `*Program` per pool).
-    /// `None` until [`Self::create_checkers`] finds a bound seed file.
+    /// The multi-file bound program the K checkers share (Go: one `*Program` per
+    /// pool). `None` until [`Self::create_checkers`] builds it.
     program: Option<Rc<dyn BoundProgram>>,
 }
 
@@ -107,33 +109,59 @@ impl CompilerCheckerPool {
     /// Creates the real checkers (idempotently) and assigns each file to a
     /// checker round-robin (`file_index % checker_count`).
     ///
-    /// The K checkers all share one program: a [`BoundFile`] over the first
-    /// bound file (the "seed") is placed in an `Rc<dyn BoundProgram>` and
-    /// `Rc::clone`d into each [`Checker::new_checker`] call, mirroring Go where
-    /// one `*Program` is shared by every checker in the pool. Files must be
-    /// bound first (see
-    /// [`Program::bind_source_files`](crate::Program::bind_source_files)); a file
-    /// without a bind result is skipped when picking the seed.
+    /// The K checkers all share one program: a [`MultiFileBoundProgram`] over
+    /// *all* the bound files (lib + sources, with a merged global table) is
+    /// placed in an `Rc<dyn BoundProgram>` and `Rc::clone`d into each
+    /// [`Checker::new_checker`] call, mirroring Go where one `*Program` is
+    /// shared by every checker in the pool. Files must be bound first (see
+    /// [`Program::bind_source_files`](crate::Program::bind_source_files));
+    /// unbound files do not contribute a source-file handle.
     ///
     /// Side effects: allocates `checker_count` checkers (each allocates its
     /// intrinsic-type arena) and retains the shared program.
     // Go: internal/compiler/checkerpool.go:createCheckers
     pub fn create_checkers(&mut self, files: &[ParsedFile]) {
+        self.create_checkers_with_options(files, Rc::new(CompilerOptions::default()));
+    }
+
+    /// Creates the real checkers (idempotently) over a program carrying the
+    /// real compiler `options`, associating each file to a checker round-robin
+    /// (`file_index % checker_count`).
+    ///
+    /// Identical to [`Self::create_checkers`] except the shared
+    /// [`MultiFileBoundProgram`] is built with `options`, so every checker's
+    /// [`Checker::compiler_options`](tsgo_checker::Checker::compiler_options)
+    /// reads the program's actual `--target`/`--downlevelIteration`/`--strict`
+    /// (round 4al's option-gated diagnostics) end-to-end, rather than the
+    /// all-defaults the options-free overload supplies.
+    ///
+    /// Side effects: allocates `checker_count` checkers (each allocates its
+    /// intrinsic-type arena) and retains the shared program.
+    // Go: internal/compiler/checkerpool.go:createCheckers (program.Options())
+    pub fn create_checkers_with_options(
+        &mut self,
+        files: &[ParsedFile],
+        options: Rc<CompilerOptions>,
+    ) {
         if !self.checkers.is_empty() {
             return;
         }
-        self.file_associations = (0..files.len()).map(|i| i % self.checker_count).collect();
 
-        // Go constructs every checker over the same shared program; the ported
-        // single-file `BoundProgram` makes the seed file that shared program.
-        if let Some(seed) = files.iter().find_map(BoundFile::for_file) {
-            let program: Rc<dyn BoundProgram> = Rc::new(seed);
-            for _ in 0..self.checker_count {
-                self.checkers
-                    .push(Checker::new_checker(Rc::clone(&program)));
-            }
-            self.program = Some(program);
+        // Go constructs every checker over the same shared `*Program`; the
+        // ported counterpart is one `MultiFileBoundProgram` over every bound
+        // file, shared by `Rc::clone`, carrying the program's real options.
+        let program: Rc<dyn BoundProgram> =
+            Rc::new(MultiFileBoundProgram::new_with_options(files, options));
+        // Associate by source-file handle index (the checker drives one file per
+        // handle); `i % K` mirrors Go's `fileAssociations`.
+        let file_count = program.source_files().len();
+        self.file_associations = (0..file_count).map(|i| i % self.checker_count).collect();
+
+        for _ in 0..self.checker_count {
+            self.checkers
+                .push(Checker::new_checker(Rc::clone(&program)));
         }
+        self.program = Some(program);
     }
 
     /// The number of checkers actually created by [`Self::create_checkers`].
@@ -178,21 +206,22 @@ impl CompilerCheckerPool {
             .collect()
     }
 
-    /// Drives type-checking of the shared program through the pool and returns
-    /// the collected semantic diagnostics.
+    /// Drives type-checking of every file through the pool and returns the
+    /// collected semantic diagnostics, in input file order.
     ///
-    /// The program is checked by the checker the program's file is associated
-    /// with (file `0`, i.e. checker `0 % K`), via [`Checker::get_diagnostics`],
-    /// which itself runs `checkSourceFile`. Returns an empty list when no
-    /// checkers were created (no bound seed file). Idempotent: the checker
-    /// guards re-checking, so repeated calls do not double-report.
+    /// Each file's source-file handle (from
+    /// [`BoundProgram::source_files`]) is checked by its associated checker
+    /// (`i % K`) via [`Checker::get_diagnostics`], which runs `checkSourceFile`
+    /// and returns *only that file's* diagnostics (Go's
+    /// `collection.GetDiagnosticsForFile(name)` partitioning). The per-file
+    /// results are concatenated in file order, so the output is deterministic
+    /// and independent of the `i % K` assignment. Returns an empty list when no
+    /// checkers were created (no bound files). Idempotent: the checker guards
+    /// re-checking, so repeated calls do not double-report.
     ///
-    /// DEFER(P6): true multi-file collection — driving each checker's `i % K`
-    /// file subset and `GetDiagnosticsForFile(name)` filtering — needs a
-    /// multi-file `BoundProgram`; today the shared program is the single seed
-    /// file, so only its diagnostics are produced.
-    /// blocked-by: multi-file `compiler.Program` view + parallel `Arc` checkers
-    /// (PORTING §6).
+    /// DEFER(P6): grouped-*parallel* collection across checkers.
+    /// blocked-by: parallel `Arc` checkers (PORTING §6) — the checker retains an
+    /// `Rc` program, so the per-file subsets are driven sequentially.
     // Go: internal/compiler/checkerpool.go:forEachCheckerGroupDo + program.go:getDiagnostics
     pub fn collect_diagnostics(&mut self) -> Vec<Diagnostic> {
         // The K checkers share one `Rc<dyn BoundProgram>`; clone the handle so it
@@ -200,10 +229,18 @@ impl CompilerCheckerPool {
         let Some(program) = self.program.clone() else {
             return Vec::new();
         };
-        let root = program.root();
-        // The seed file is file `0`, owned by checker `0 % K`.
-        let checker_index = self.checker_index_for_file(0).unwrap_or(0);
-        self.checkers[checker_index].get_diagnostics(root).to_vec()
+        let mut diagnostics = Vec::new();
+        // Iterate handles in input file order for a deterministic result.
+        for (file_index, handle) in program.source_files().into_iter().enumerate() {
+            let checker_index = self.checker_index_for_file(file_index).unwrap_or(0);
+            diagnostics.extend(
+                self.checkers[checker_index]
+                    .get_diagnostics(handle)
+                    .iter()
+                    .cloned(),
+            );
+        }
+        diagnostics
     }
 }
 

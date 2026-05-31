@@ -10,6 +10,7 @@
 //! error reporting, and the `Ternary` recursion machinery) is deferred.
 
 use rustc_hash::FxHashMap;
+use tsgo_ast::{SymbolFlags, SymbolId};
 
 use super::declared_types::{get_properties_of_type, get_property_of_type, get_type_of_symbol};
 use super::program::BoundProgram;
@@ -260,12 +261,21 @@ impl Checker {
         if s.intersects(TypeFlags::ES_SYMBOL_LIKE) && t.intersects(TypeFlags::ES_SYMBOL) {
             return true;
         }
-        // strictNullChecks-independent nullable rules (the non-strict "assignable
-        // to anything" rule is DEFER'd until compiler options are wired).
-        if s.intersects(TypeFlags::UNDEFINED) && t.intersects(TypeFlags::VOID_LIKE) {
+        // In non-strictNullChecks mode, `undefined` and `null` are assignable to
+        // anything except `never`. Since unions and intersections may reduce to
+        // `never`, they are excluded here. Under strictNullChecks, `undefined`
+        // is only assignable to itself / `void`, and `null` only to itself
+        // (`any`/`unknown` are handled by the top-type rules above).
+        if s.intersects(TypeFlags::UNDEFINED)
+            && ((!self.strict_null_checks() && !t.intersects(TypeFlags::UNION_OR_INTERSECTION))
+                || t.intersects(TypeFlags::VOID_LIKE))
+        {
             return true;
         }
-        if s.intersects(TypeFlags::NULL) && t.intersects(TypeFlags::NULL) {
+        if s.intersects(TypeFlags::NULL)
+            && ((!self.strict_null_checks() && !t.intersects(TypeFlags::UNION_OR_INTERSECTION))
+                || t.intersects(TypeFlags::NULL))
+        {
             return true;
         }
         if s.intersects(TypeFlags::OBJECT) && t.intersects(TypeFlags::NON_PRIMITIVE) {
@@ -328,6 +338,42 @@ impl Checker {
                     .iter()
                     .all(|&m| self.is_type_related_to(program, m, target, relation));
             }
+            // Target intersection: source must relate to EACH constituent
+            // (Go's `typeRelatedToEachType`). Deconstructed after unions, which
+            // are always at the top of a normalized type.
+            if tf.contains(TypeFlags::INTERSECTION) {
+                let members = self
+                    .get_type(target)
+                    .intersection_types()
+                    .unwrap_or(&[])
+                    .to_vec();
+                return members
+                    .iter()
+                    .all(|&m| self.is_type_related_to(program, source, m, relation));
+            }
+            // Source intersection: first try whether SOME constituent relates
+            // to the target on its own (Go's `someTypeRelatedToType` for
+            // `IntersectionStateSource`). When none does, Go falls back to
+            // checking the full intersection viewed as an object — its
+            // synthesized properties — against the target. We reach that
+            // fallback when the target is an object type (e.g. `A & B` ↔ `AB`).
+            if sf.contains(TypeFlags::INTERSECTION) {
+                let members = self
+                    .get_type(source)
+                    .intersection_types()
+                    .unwrap_or(&[])
+                    .to_vec();
+                if members
+                    .iter()
+                    .any(|&m| self.is_type_related_to(program, m, target, relation))
+                {
+                    return true;
+                }
+                if tf.contains(TypeFlags::OBJECT) {
+                    return self.properties_related_to(program, source, target, relation);
+                }
+                return false;
+            }
         }
         if sf.contains(TypeFlags::OBJECT) && tf.contains(TypeFlags::OBJECT) {
             if relation == RelationKind::Identity {
@@ -340,7 +386,9 @@ impl Checker {
     }
 
     // For each property of `target`, `source` must have a property whose type is
-    // related. (Optional-property handling is deferred.)
+    // related. A missing source property is tolerated only when the target
+    // property is optional and the relation does not require optional properties
+    // (Go's `getUnmatchedProperty` with `requireOptionalProperties`).
     // Go: internal/checker/relater.go:Checker.propertiesRelatedTo (4d subset)
     fn properties_related_to(
         &mut self,
@@ -349,10 +397,15 @@ impl Checker {
         target: TypeId,
         relation: RelationKind,
     ) -> bool {
+        // Go: subtype/strictSubtype relations still require optional members to
+        // be matched; assignability/comparability/identity do not.
+        let require_optional_properties =
+            relation == RelationKind::Subtype || relation == RelationKind::StrictSubtype;
         for (name, target_prop) in get_properties_of_type(self, target) {
             let Some(source_prop) = get_property_of_type(self, source, &name) else {
-                // DEFER(phase-4-checker-4e): optional properties may be missing.
-                // blocked-by: optionality + `exactOptionalPropertyTypes` (4e).
+                if !require_optional_properties && self.symbol_is_optional(program, target_prop) {
+                    continue;
+                }
                 return false;
             };
             let source_type = get_type_of_symbol(self, program, source_prop, None);
@@ -360,8 +413,38 @@ impl Checker {
             if !self.is_type_related_to(program, source_type, target_type, relation) {
                 return false;
             }
+            // An optional source property cannot satisfy a required target
+            // (class) member: the source value might lack the property entirely.
+            // Comparability passes Go's `skipOptional`, tolerating the mismatch.
+            if relation != RelationKind::Comparable
+                && self.symbol_is_optional(program, source_prop)
+                && self.symbol_is_class_member(program, target_prop)
+                && !self.symbol_is_optional(program, target_prop)
+            {
+                return false;
+            }
         }
         true
+    }
+
+    // Reports whether a property symbol was declared optional (`a?: T`).
+    // Routes synthesized union/intersection property symbols to the checker's
+    // transient arena instead of the program (which would panic on a tagged id).
+    // Go: internal/checker/relater.go usage of `ast.SymbolFlagsOptional`
+    fn symbol_is_optional(&self, program: &dyn BoundProgram, symbol: SymbolId) -> bool {
+        self.resolved_symbol_flags(program, symbol)
+            .contains(SymbolFlags::OPTIONAL)
+    }
+
+    // Reports whether a symbol is a class member (method/accessor/property).
+    // Go: internal/ast/symbolflags.go:SymbolFlagsClassMember
+    fn symbol_is_class_member(&self, program: &dyn BoundProgram, symbol: SymbolId) -> bool {
+        const CLASS_MEMBER: SymbolFlags = SymbolFlags::METHOD
+            .union(SymbolFlags::GET_ACCESSOR)
+            .union(SymbolFlags::SET_ACCESSOR)
+            .union(SymbolFlags::PROPERTY);
+        self.resolved_symbol_flags(program, symbol)
+            .intersects(CLASS_MEMBER)
     }
 }
 

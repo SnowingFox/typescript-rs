@@ -77,6 +77,18 @@ fn type_to_string_union_of_named() {
     assert_eq!(type_to_string(&mut c, &p, union), "A | B");
 }
 
+// Go: internal/checker/checker.go:Checker.typeToString (intersection recursion)
+#[test]
+fn type_to_string_intersection_of_named() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface A {}\ninterface B {}");
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, sym(&p, "A"), None);
+    let b = get_declared_type_of_symbol(&mut c, &p, sym(&p, "B"), None);
+    let inter = c.get_intersection_type(&[a, b]);
+    // Intersection members are id-sorted (A built before B), printed program-aware.
+    assert_eq!(type_to_string(&mut c, &p, inter), "A & B");
+}
+
 // Go: internal/checker/printer.go:typeToString (intrinsics/literals delegate)
 #[test]
 fn type_to_string_intrinsics_and_literals_delegate() {

@@ -11,6 +11,7 @@ bitflags = "2.11.1"
 rustc-hash = "2.1.2"
 tsgo_ast = { path = "../ast" }
 tsgo_binder = { path = "../binder" }
+tsgo_bundled = { path = "../bundled" }
 tsgo_checker = { path = "../checker" }
 tsgo_collections = { path = "../collections" }
 tsgo_core = { path = "../core" }
@@ -34,5 +35,4 @@ tsgo_tspath = { path = "../tspath" }
 tsgo_vfs = { path = "../vfs" }
 
 [dev-dependencies]
-tsgo_bundled = { path = "../bundled" }
 tsgo_repo = { path = "../repo" }

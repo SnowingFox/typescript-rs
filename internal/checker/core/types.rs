@@ -580,6 +580,30 @@ pub struct UnionType {
     pub types: Vec<TypeId>,
 }
 
+/// The payload of an intersection type (`A & B`), holding its constituents by
+/// id.
+///
+/// Like [`UnionType`], members are stored deduplicated and sorted by [`TypeId`]
+/// so the interning key and printed form are deterministic. (Go preserves the
+/// source order of intersection constituents; sorting here mirrors the union
+/// sibling and is sufficient for the reachable assignability behaviors — full
+/// order preservation is deferred.)
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{IntersectionType, TypeId};
+/// let d = IntersectionType { types: vec![TypeId(1), TypeId(2)] };
+/// assert_eq!(d.types.len(), 2);
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go:IntersectionType
+#[derive(Clone, Debug, PartialEq)]
+pub struct IntersectionType {
+    /// The intersection's constituent type ids, deduplicated and id-sorted.
+    pub types: Vec<TypeId>,
+}
+
 /// The payload of a type parameter (`T` in `interface Foo<T>` or a generic
 /// function). Includes the synthesized `this` type parameter of an interface.
 ///
@@ -607,8 +631,8 @@ pub struct TypeParameter {
 /// interface (PORTING, section 3).
 ///
 /// Round 4a modeled only the [`IntrinsicType`] variant; 4b adds [`LiteralType`]
-/// and [`UnionType`]; 4c adds [`ObjectType`]; 4d adds [`TypeParameter`].
-/// Intersection and the remaining variants are added in later sub-phases.
+/// and [`UnionType`]; 4c adds [`ObjectType`]; 4d adds [`TypeParameter`]; 4v adds
+/// [`IntersectionType`]. The remaining variants are added in later sub-phases.
 ///
 /// # Examples
 /// ```
@@ -627,6 +651,8 @@ pub enum TypeData {
     Literal(LiteralType),
     /// A union type (`A | B`).
     Union(UnionType),
+    /// An intersection type (`A & B`).
+    Intersection(IntersectionType),
     /// An object/interface/class/enum type (members + signatures).
     Object(ObjectType),
     /// A type parameter (`T`), including the interface `this` type.
@@ -737,6 +763,18 @@ impl Type {
     pub fn union_types(&self) -> Option<&[TypeId]> {
         match &self.data {
             TypeData::Union(d) => Some(&d.types),
+            _ => None,
+        }
+    }
+
+    /// Returns the constituent type ids if this is an intersection type, else
+    /// `None`.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/types.go:IntersectionType.types
+    pub fn intersection_types(&self) -> Option<&[TypeId]> {
+        match &self.data {
+            TypeData::Intersection(d) => Some(&d.types),
             _ => None,
         }
     }

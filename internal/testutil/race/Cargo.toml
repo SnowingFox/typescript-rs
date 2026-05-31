@@ -1,0 +1,14 @@
+[package]
+name = "tsgo_testutil_race"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+# Go selects `Enabled` via the `//go:build race` / `//go:build !race` build
+# tags (set by `go test -race`). Rust has no `-race` build tag, so the closest
+# faithful mirror is an opt-in Cargo feature that flips the compile-time
+# constant. Default (feature off) mirrors `norace.go` (`Enabled = false`).
+[features]
+race = []

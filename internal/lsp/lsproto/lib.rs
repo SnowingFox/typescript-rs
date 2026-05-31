@@ -20,8 +20,10 @@
 
 mod baseproto;
 mod generated;
+mod lsp;
 mod util;
 
 pub use baseproto::{BaseReader, BaseWriter};
 pub use generated::*;
+pub use lsp::*;
 pub use util::{compare_positions, compare_ranges};

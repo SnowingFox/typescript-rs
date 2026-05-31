@@ -2,12 +2,16 @@
 //! the shared, structural analysis of a module's imports and exports, consumed
 //! by the CommonJS/ESM transforms.
 //!
-//! # Scope (round 6e)
+//! # Scope (rounds 6e + 6x)
 //!
 //! Collects the **structural** facts reachable from the parsed AST without the
 //! checker's reference resolver: the external import/re-export declarations,
 //! the exported names, whether the module has an `export *`, and an `export =`.
-//! The resolver-dependent classification in Go's
+//! Round 6x adds non-default `export class C {}` names to `exported_names`
+//! (matching Go's `addExportedName`; default classes record only a binding, and
+//! exported functions are tracked separately, so neither is collected here),
+//! which drives the CommonJS `exports.C = void 0;` export-name initializer. The
+//! resolver-dependent classification in Go's
 //! `addExportedNamesForExportDeclaration` (function-vs-binding via
 //! `GetReferencedImportDeclaration`) is deferred — see `moduletransforms/mod.rs`.
 
@@ -99,6 +103,26 @@ pub fn collect_external_module_info(arena: &NodeArena, source_file: NodeId) -> E
                     for declaration in declarations {
                         collect_exported_variable_name(arena, declaration, &mut info);
                     }
+                }
+            }
+            Kind::ClassDeclaration => {
+                // `export class C {}` (non-default, named) contributes the class
+                // name as an exported name. `export default class` only records
+                // an exported binding (deferred), and exported function
+                // declarations are tracked separately (not as exported names),
+                // so neither is collected here.
+                let (modifiers, name) = match arena.data(node) {
+                    NodeData::ClassDeclaration(d) => (d.modifiers.clone(), d.name),
+                    _ => continue,
+                };
+                let Some(modifiers) = modifiers else { continue };
+                if !modifiers.modifier_flags.contains(ModifierFlags::EXPORT)
+                    || modifiers.modifier_flags.contains(ModifierFlags::DEFAULT)
+                {
+                    continue;
+                }
+                if let Some(name) = name {
+                    add_unique_exported_name(arena, name, &mut info);
                 }
             }
             _ => {}

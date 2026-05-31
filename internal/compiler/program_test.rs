@@ -8,6 +8,7 @@ use tsgo_vfs::Fs;
 
 use super::*;
 use crate::host::new_compiler_host;
+use crate::BoundFile;
 
 fn program_for(files: &[(&str, &str)], cwd: &str, roots: &[&str]) -> Program {
     program_with(files, cwd, roots, CompilerOptions::default(), false)
@@ -35,6 +36,362 @@ fn program_with(
         config: Arc::new(config),
         single_threaded,
     })
+}
+
+/// Builds a program whose host file system serves the embedded `bundled:///`
+/// libs (so the automatic default-lib include can read the real `lib.*.d.ts`),
+/// rooting the default library at [`tsgo_bundled::lib_path`].
+fn program_with_bundled_libs(
+    files: &[(&str, &str)],
+    cwd: &str,
+    roots: &[&str],
+    options: CompilerOptions,
+    single_threaded: bool,
+) -> Program {
+    let inner = MapFs::from_map(files.iter().copied(), true);
+    let fs: Arc<dyn Fs + Send + Sync> = Arc::new(tsgo_bundled::wrap_fs(inner));
+    let host = Arc::new(new_compiler_host(cwd, fs, tsgo_bundled::lib_path()));
+    let config = new_parsed_command_line(
+        options,
+        roots.iter().map(|s| s.to_string()).collect(),
+        ComparePathsOptions {
+            use_case_sensitive_file_names: true,
+            current_directory: cwd.to_string(),
+        },
+    );
+    new_program(ProgramOptions {
+        host,
+        config: Arc::new(config),
+        single_threaded,
+    })
+}
+
+/// With root files and `noLib` off (and no explicit `--lib`), the program
+/// automatically includes the default library file resolved from the emit
+/// target (`lib.d.ts` for ES5), reads it from the bundled embed, and binds it
+/// along with the rest of the program.
+// Go: internal/compiler/fileloader.go:processAllProgramFiles (default-lib include)
+#[test]
+fn loads_and_binds_default_lib_file() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es5,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "export const x = 1;")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    // ES5 is not in the target->full-lib map, so Go falls back to `lib.d.ts`.
+    let lib_name = "bundled:///libs/lib.d.ts";
+    assert!(
+        program
+            .source_files()
+            .iter()
+            .any(|f| f.file_name() == lib_name),
+        "default lib should be part of the program"
+    );
+    // The lib participates in binding like any other source file.
+    program.bind_source_files();
+    let lib = program
+        .source_files()
+        .iter()
+        .find(|f| f.file_name() == lib_name)
+        .expect("lib file loaded");
+    assert!(lib.is_bound());
+}
+
+/// An explicit `--lib` list includes the named lib file(s) (resolved by short
+/// name, e.g. `es5` -> `lib.es5.d.ts`) instead of the target's default lib.
+/// Unlike the reference-only default aggregators, `lib.es5.d.ts` carries the
+/// real `Array`/`String`/`Object` declarations.
+// Go: internal/compiler/fileloader.go:processAllProgramFiles (--lib branch)
+#[test]
+fn loads_explicit_lib_files() {
+    let options = CompilerOptions {
+        lib: vec!["es5".to_string()],
+        ..Default::default()
+    };
+    let program = program_with_bundled_libs(
+        &[("/src/index.ts", "export const x = 1;")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    assert!(
+        program
+            .source_files()
+            .iter()
+            .any(|f| f.file_name() == "bundled:///libs/lib.es5.d.ts"),
+        "explicit --lib es5 should load lib.es5.d.ts"
+    );
+}
+
+/// P6-8: with the DEFAULT lib (no explicit `--lib`), the program follows the
+/// aggregator `lib.d.ts`'s `/// <reference lib>` directives and pulls in the
+/// real declaration libs it references (`lib.es5.d.ts`, `lib.dom.d.ts`, ...),
+/// not just the reference-only aggregator. The parser does not expose lib
+/// reference directives yet, so the loader scans the lib's leading trivia for
+/// them (see `FileLoader::resolve_lib_references`).
+// Go: internal/compiler/filesparser.go:load (file.LibReferenceDirectives -> pathForLibFile)
+#[test]
+fn default_lib_expands_reference_graph() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es5,
+        ..Default::default()
+    };
+    let program = program_with_bundled_libs(
+        &[("/src/index.ts", "export const x = 1;")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let names: Vec<&str> = program
+        .source_files()
+        .iter()
+        .map(|f| f.file_name())
+        .collect();
+    // The aggregator itself is present (ES5 -> `lib.d.ts`)...
+    assert!(
+        names.contains(&"bundled:///libs/lib.d.ts"),
+        "aggregator present: {names:?}"
+    );
+    // ...and so are the libs it references via `/// <reference lib>`.
+    assert!(
+        names.contains(&"bundled:///libs/lib.es5.d.ts"),
+        "default lib must pull in lib.es5.d.ts: {names:?}"
+    );
+    assert!(
+        names.contains(&"bundled:///libs/lib.dom.d.ts"),
+        "default lib must pull in lib.dom.d.ts: {names:?}"
+    );
+}
+
+/// End to end: a program with the default lib loaded resolves the real
+/// `Array`/`String`/`Object` globals through the checker's round-4z global
+/// machinery. The lib file's top-level declarations are the program's globals
+/// (see `BoundFile::globals`), so a checker built over the lib's bound view
+/// finds them via `get_global_symbol`/`get_global_type`.
+///
+/// DEFER(P6): checking a *separate* source file (e.g. `s.length`) against these
+/// lib globals (so `.length` resolves with no 2339) needs a multi-file program
+/// view that merges the lib globals with the checked file's own scope.
+/// blocked-by: multi-file `compiler.Program` `BoundProgram` view + cross-file
+/// global merge (P6-8).
+// Go: internal/checker/checker.go:Checker.getGlobalSymbol/getGlobalType (over the program's lib globals)
+#[test]
+fn resolves_real_lib_globals_end_to_end() {
+    use std::rc::Rc;
+    use tsgo_ast::SymbolFlags;
+    use tsgo_checker::{BoundProgram, Checker};
+
+    let options = CompilerOptions {
+        lib: vec!["es5".to_string()],
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "var s: string = \"a\";\ns.length;")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    // Bind every file (including the lib) and build the pool's checkers.
+    program.create_checkers();
+
+    // The loaded lib's bound view carries the program's global symbol table.
+    let lib = program.default_lib_file().expect("default lib loaded");
+    let view: Rc<dyn BoundProgram> = Rc::new(BoundFile::for_file(lib).expect("lib is bound"));
+    let mut checker = Checker::new_checker(view);
+
+    // Real lib globals resolve through the checker's 4z global lookup.
+    assert!(
+        checker
+            .get_global_symbol("Array", SymbolFlags::TYPE)
+            .is_some(),
+        "global type `Array`"
+    );
+    assert!(
+        checker
+            .get_global_symbol("String", SymbolFlags::TYPE)
+            .is_some(),
+        "global type `String`"
+    );
+    assert!(
+        checker
+            .get_global_symbol("Object", SymbolFlags::VALUE)
+            .is_some(),
+        "global value `Object`"
+    );
+    // A name absent from the lib globals stays unresolved.
+    assert!(checker
+        .get_global_symbol("NotAGlobal", SymbolFlags::VALUE)
+        .is_none());
+    // And a real lib interface type builds via `get_global_type`.
+    assert!(
+        checker.get_global_type("Object").is_some(),
+        "global interface type `Object` builds"
+    );
+}
+
+/// End to end (P6-6): a program over a real source file plus a second file that
+/// declares the `String` global resolves `s.length` *across files* — there is
+/// NO 2339, because the multi-file `BoundProgram` merges the two files' globals
+/// and the checker resolves `length` against the other file's `String`
+/// interface. The negative control (no `String` file) reports 2339, so the
+/// resolution genuinely comes from the cross-file global.
+///
+/// This realizes the P6-5 deferral (`s.length` cross-file). The full real
+/// default-lib graph (the `/// <reference lib>` aggregator -> real declaration
+/// libs) is still DEFER(P6-8); a synthetic-but-real `String`-declaring file
+/// proves the cross-file merge through the same multi-file program the real lib
+/// flows through.
+// Go: internal/checker/checker.go:Checker.getApparentType (cross-file lib `String`)
+#[test]
+fn resolves_string_length_across_files_end_to_end() {
+    let options = CompilerOptions {
+        no_lib: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    // Positive: the `String` global lives in a *separate* file from `s.length`.
+    let mut program = program_with(
+        &[
+            ("/lib.ts", "interface String {\n  length: number;\n}"),
+            ("/index.ts", "var s: string = \"a\";\ns.length;"),
+        ],
+        "/",
+        &["/lib.ts", "/index.ts"],
+        options.clone(),
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.is_empty(),
+        "cross-file `String.length` must resolve (no 2339): {diags:?}"
+    );
+
+    // Negative control: without the `String`-declaring file, `length` does not
+    // resolve and the access reports 2339.
+    let mut program = program_with(
+        &[("/index.ts", "var s: string = \"a\";\ns.length;")],
+        "/",
+        &["/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert_eq!(diags.len(), 1, "no lib -> 2339: {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+/// End to end with the REAL bundled lib: a program over `--lib es5` plus a
+/// source file resolves `s.length` against the real `interface String` declared
+/// in `lib.es5.d.ts` — across files, through the multi-file `BoundProgram`'s
+/// merged globals — so there is NO 2339. This upgrades the P6-5
+/// `resolves_real_lib_globals_end_to_end` deferral: checking a *separate* source
+/// file against the real lib globals now works.
+// Go: internal/checker/checker.go:Checker.getApparentType (cross-file lib `String`)
+#[test]
+fn resolves_string_length_via_real_lib_es5() {
+    let options = CompilerOptions {
+        lib: vec!["es5".to_string()],
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "var s: string = \"a\";\ns.length;")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "`s.length` must resolve against the real lib `String` (no 2339): {diags:?}"
+    );
+}
+
+/// End to end (P6-8): a program with the DEFAULT lib (no explicit `--lib`)
+/// resolves a real global declared in a *referenced* lib. The aggregator
+/// `lib.d.ts` pulls in `lib.es5.d.ts` via `/// <reference lib>`, so the merged
+/// globals carry the real `interface String` and `s.length` resolves with no
+/// 2339 — the same cross-file resolution P6-6 proved with `--lib es5`, now via
+/// the DEFAULT lib.
+///
+/// The partial binder `panic!`s on some real lib constructs (e.g.
+/// `lib.dom.d.ts`'s `[Symbol.x]` computed property names); such libs are skipped
+/// (left unbound, excluded from the checker view). `String` lives in the
+/// bindable `lib.es5.d.ts`, so it still resolves.
+// Go: internal/checker/checker.go:Checker.getApparentType (cross-file lib `String` via the default lib)
+#[test]
+fn resolves_real_global_via_default_lib_end_to_end() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es5,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "var s: string = \"a\";\ns.length;")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    // `s.length` must resolve against the real `String` from the referenced
+    // `lib.es5.d.ts` (pulled in by the default `lib.d.ts` aggregator).
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == 2339 && d.message.contains("'length'")),
+        "`s.length` must resolve against the default lib's real `String` (no 2339): {diags:?}"
+    );
+}
+
+/// P6-8: the loaded lib set is deterministically ordered — lib files come first,
+/// sorted by `getDefaultLibFilePriority` (by each lib's short-name position in
+/// `tsgo_tsoptions::LIBS`), ahead of the source files — independent of discovery
+/// or list order. Here `--lib` lists `scripthost` before `es5`, but `es5`
+/// (priority 1) sorts before `scripthost`, and the source file comes last.
+// Go: internal/compiler/fileloader.go:sortLibs/getDefaultLibFilePriority + filesparser.go:getProcessedFiles (libs first)
+#[test]
+fn lib_set_is_sorted_by_priority_and_precedes_sources() {
+    let options = CompilerOptions {
+        lib: vec!["scripthost".to_string(), "es5".to_string()],
+        ..Default::default()
+    };
+    let program = program_with_bundled_libs(
+        &[("/src/index.ts", "export const x = 1;")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let names: Vec<&str> = program
+        .source_files()
+        .iter()
+        .map(|f| f.file_name())
+        .collect();
+    let pos = |needle: &str| {
+        names
+            .iter()
+            .position(|n| *n == needle)
+            .unwrap_or_else(|| panic!("{needle} must be present in {names:?}"))
+    };
+    // es5 (Libs index 0 -> priority 1) sorts before scripthost.
+    assert!(
+        pos("bundled:///libs/lib.es5.d.ts") < pos("bundled:///libs/lib.scripthost.d.ts"),
+        "libs sorted by priority: {names:?}"
+    );
+    // The source file follows all libs (Go appends `files` after sorted `libs`).
+    assert_eq!(
+        *names.last().unwrap(),
+        "/src/index.ts",
+        "source file follows libs: {names:?}"
+    );
 }
 
 /// Tracer bullet: a program built from one in-memory file exposes that file and
@@ -187,6 +544,104 @@ fn program_collects_semantic_diagnostics() {
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, 2304);
     assert_eq!(diags[0].message, "Cannot find name 'y'.");
+}
+
+/// The for-of `2802` repro: a `[Symbol.iterator]`-bearing object (neither an
+/// array nor a string) iterated by for-of. The file self-declares `Symbol`,
+/// `Iterator`, `It`, and `it`, so it needs no lib and binds end-to-end through
+/// the compiler. Under a `--target` below `es2015` with no `--downlevelIteration`
+/// the iteration reports `2802`; once an option permits downlevelling it does
+/// not (the option-gated behavior this round wires end-to-end).
+const FOR_OF_SYMBOL_ITERATOR_SRC: &str = "interface SymbolConstructor { readonly iterator: unique symbol; }\ndeclare var Symbol: SymbolConstructor;\ninterface Iterator<T> { next(): { value: T }; }\ninterface It { [Symbol.iterator](): Iterator<string>; }\ndeclare const it: It;\nfor (const x of it) {\n}";
+
+/// End to end (P6-options): a program built with `--target es2015` over the
+/// for-of `[Symbol.iterator]` repro does NOT report `2802`, because the checker
+/// now reads the program's REAL `target` through
+/// [`BoundProgram::compiler_options`] (round 4al's gating). Before this round
+/// the pool built the checker's program with all-defaults options (`target`
+/// unset, i.e. below `es2015`), so the gating fired regardless of the program's
+/// `--target` — this test is the RED that drove threading the real options
+/// through the pool.
+// Go: internal/checker/checker.go:Checker.getIterationDiagnosticDetails (target gating)
+#[test]
+fn program_for_of_iterable_with_es2015_target_no_2802() {
+    use tsgo_core::compileroptions::ScriptTarget;
+    let options = CompilerOptions {
+        no_lib: tsgo_core::tristate::Tristate::True,
+        target: ScriptTarget::Es2015,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[("/a.ts", FOR_OF_SYMBOL_ITERATOR_SRC)],
+        "/",
+        &["/a.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2802),
+        "es2015 target must not gate the iteration (no 2802): {diags:?}"
+    );
+}
+
+/// End to end (P6-options) — positive control for the gating direction: the
+/// SAME repro under `--target es5` (below `es2015`, no `--downlevelIteration`)
+/// DOES report `2802`. This proves the for-of is genuinely checked end-to-end
+/// (so `program_for_of_iterable_with_es2015_target_no_2802`'s clean result is
+/// the real `es2015` allowance, not a file that silently failed to bind/check),
+/// and that the gating reads the program's REAL `--target`.
+// Go: internal/checker/checker.go:Checker.getIterationDiagnosticDetails (target gating)
+#[test]
+fn program_for_of_iterable_with_es5_target_reports_2802() {
+    use tsgo_core::compileroptions::ScriptTarget;
+    let options = CompilerOptions {
+        no_lib: tsgo_core::tristate::Tristate::True,
+        target: ScriptTarget::Es5,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[("/a.ts", FOR_OF_SYMBOL_ITERATOR_SRC)],
+        "/",
+        &["/a.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert_eq!(diags.len(), 1, "es5 target gates the iteration: {diags:?}");
+    assert_eq!(diags[0].code, 2802);
+    assert_eq!(
+        diags[0].message,
+        "Type 'It' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher."
+    );
+}
+
+/// End to end (P6-options): the SAME repro under `--downlevelIteration` (with an
+/// `es5` target) does NOT report `2802` — the other half of the option-gated
+/// behavior difference, proving the checker reads the program's REAL
+/// `--downlevelIteration` through [`BoundProgram::compiler_options`].
+// Go: internal/checker/checker.go:Checker.getIterationDiagnosticDetails (downlevelIteration gating)
+#[test]
+fn program_for_of_iterable_with_downlevel_iteration_no_2802() {
+    use tsgo_core::compileroptions::ScriptTarget;
+    let options = CompilerOptions {
+        no_lib: tsgo_core::tristate::Tristate::True,
+        target: ScriptTarget::Es5,
+        downlevel_iteration: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[("/a.ts", FOR_OF_SYMBOL_ITERATOR_SRC)],
+        "/",
+        &["/a.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2802),
+        "--downlevelIteration must permit the iteration (no 2802): {diags:?}"
+    );
 }
 
 /// A single-threaded program uses one checker and reports its host/command line.

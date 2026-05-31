@@ -194,6 +194,63 @@ impl<'a> NodeFactory<'a> {
         self.new_generated_private_identifier(GeneratedIdentifierFlags::UNIQUE, text, None, options)
     }
 
+    /// Allocates a new unique name deterministically derived from `node`.
+    ///
+    /// Side effects: appends a node and records an auto-generate entry keyed to
+    /// `node`.
+    // Go: internal/printer/factory.go:NodeFactory.NewGeneratedNameForNode
+    pub fn new_generated_name_for_node(&mut self, node: NodeId) -> NodeId {
+        self.new_generated_name_for_node_ex(node, AutoGenerateOptions::default())
+    }
+
+    /// Allocates a new unique name deterministically derived from `node`, with
+    /// options. A non-empty prefix or suffix implies the `OPTIMISTIC` flag.
+    ///
+    /// Side effects: appends a node and records an auto-generate entry keyed to
+    /// `node`.
+    // Go: internal/printer/factory.go:NodeFactory.NewGeneratedNameForNodeEx
+    pub fn new_generated_name_for_node_ex(
+        &mut self,
+        node: NodeId,
+        mut options: AutoGenerateOptions,
+    ) -> NodeId {
+        if !options.prefix.is_empty() || !options.suffix.is_empty() {
+            options.flags = options.flags | GeneratedIdentifierFlags::OPTIMISTIC;
+        }
+        self.new_generated_identifier(GeneratedIdentifierFlags::NODE, "", Some(node), options)
+    }
+
+    /// Allocates a new unique private name deterministically derived from `node`.
+    ///
+    /// Side effects: appends a node and records an auto-generate entry keyed to
+    /// `node`.
+    // Go: internal/printer/factory.go:NodeFactory.NewGeneratedPrivateNameForNode
+    pub fn new_generated_private_name_for_node(&mut self, node: NodeId) -> NodeId {
+        self.new_generated_private_name_for_node_ex(node, AutoGenerateOptions::default())
+    }
+
+    /// Allocates a new unique private name deterministically derived from
+    /// `node`, with options. A non-empty prefix or suffix implies `OPTIMISTIC`.
+    ///
+    /// Side effects: appends a node and records an auto-generate entry keyed to
+    /// `node`.
+    // Go: internal/printer/factory.go:NodeFactory.NewGeneratedPrivateNameForNodeEx
+    pub fn new_generated_private_name_for_node_ex(
+        &mut self,
+        node: NodeId,
+        mut options: AutoGenerateOptions,
+    ) -> NodeId {
+        if !options.prefix.is_empty() || !options.suffix.is_empty() {
+            options.flags = options.flags | GeneratedIdentifierFlags::OPTIMISTIC;
+        }
+        self.new_generated_private_identifier(
+            GeneratedIdentifierFlags::NODE,
+            "",
+            Some(node),
+            options,
+        )
+    }
+
     /// Marks a freshly created node as synthesized, mirroring Go's
     /// `EmitContext.onCreate` hook fired by the embedded `ast.NodeFactory`.
     ///

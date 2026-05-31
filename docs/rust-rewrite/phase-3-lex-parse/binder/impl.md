@@ -20,7 +20,11 @@ binder 还顺带：识别 `"use strict"` prologue、容器/this-容器/block-sco
 
 ## 执行状态（wave 2 实现）
 
-**已实现并全绿**（`cargo test -p tsgo_binder` = 31 单测 + 10 doctest；`clippy -D warnings` 干净；`fmt` 干净；rustdoc `missing_docs` 干净）：
+**已实现并全绿**（`cargo test -p tsgo_binder` = 40 单测 + 10 doctest；`clippy -D warnings` 干净；`fmt` 干净；rustdoc `missing_docs` 干净）：
+
+> **计算属性名上游修复（solo round）**：`bind_property_or_method_or_accessor` 此前缺少 Go 的 `HasDynamicName` 守卫，对 `[Symbol.iterator]` 这类 **dynamic（计算且非字面量）名** 会落到 `get_declaration_name` 的 ComputedPropertyName 分支并 `panic!`（`symbols.rs:278`，1:1 对应 Go `binder.go:343`）。这正是 P6-8 绑定真实 `lib.dom.d.ts` panic、不得不 `catch_unwind` 跳过的根因。本轮按 Go `binder.go:985 bindPropertyOrMethodOrAccessor` 补回守卫：`has_dynamic_name(node)` → `bind_anonymous_declaration(node, flags, InternalSymbolNameComputed)`，否则走原 `declare_symbol_and_add_to_symbol_table`。在 `astquery.rs` 新增 `has_dynamic_name`/`is_dynamic_name`（1:1 对应 `ast/utilities.go:HasDynamicName`/`IsDynamicName`）。`get_declaration_name` 第 278 行的 `panic!` 保留为不变量断言（与 Go `binder.go:343` 一致，守卫后不可达）。
+>
+> **与本轮任务前提的偏离（重要，已据 Go ground truth 校正）**：任务描述称 binder 应把 `[Symbol.iterator]` 映射成 `__@iterator`、把其它非字面量计算名映射成 `Missing`，并引用 `tryGetWellKnownSymbolNameOfComputedPropertyName`/`isWellKnownSymbolSyntactically`。但**本仓库 Go 侧不存在这两个函数**，`getDeclarationName` 对所有非字面量计算名一律 `panic`，从不返回 `__@iterator`/`Missing`；真正的行为是上游 `bindPropertyOrMethodOrAccessor` 用 `HasDynamicName` 守卫把 **所有** dynamic 计算名（含 well-known symbol 与任意表达式）统一匿名绑为 `InternalSymbolNameComputed`（`__computed`）。`__@iterator` 形态是 **checker 的 late-binding**（`internal/checker/flow.go:getPropertyNameForKnownSymbolName` + `getGlobalESSymbolConstructorSymbol`），不属于 binder。故本轮按真实 Go 实现移植（`__computed`），并把 `__@iterator` late-binding 留给 checker 轮次。
 
 - 符号机制：`new_symbol`/`declare_symbol(_ex)`（建/合并/冲突诊断分支）/`addDeclarationToSymbol`/`SetValueDeclaration`/`getDeclarationName`/`getDisplayName`/`GetSymbolNameForPrivateIdentifier`/`getOptionalSymbolFlagForNode`。
 - 表分发：`declareModuleMember`/`declareClassMember`/`declareSourceFileMember`/`declareSymbolAndAddToSymbolTable`。
@@ -179,6 +183,8 @@ binder 还顺带：识别 `"use strict"` prologue、容器/this-容器/block-sco
 - **`NameResolver`/`ReferenceResolver` 的回调字段**：Go 用函数字段注入 checker 行为。Rust 用 `Box<dyn Fn>`/trait；具体形态与 checker（P4）协同定。本轮文档先用闭包字段表达。
 - **`sync.Pool` → 暂不池化/`thread_local`**：`// PERF(port): binder pool`。
 - **`BindOnce`/`IsBound`**：靠 P2 SourceFile 的一次性绑定原语（`OnceCell`/`Once`）。
+- **计算属性名 `__@iterator` 形态属 checker，非 binder**：Go binder 对 dynamic 计算名（well-known symbol 与任意表达式）统一绑为 `InternalSymbolNameComputed`（`__computed`），不区分 well-known；`__@<sym>`（如 `__@iterator`）由 checker 的 `getPropertyNameForKnownSymbolName`（`internal/checker/flow.go`）经全局 `Symbol` 构造器类型 late-bind。binder 侧 1:1 移植即 `__computed`，详见「执行状态」小节的偏离说明。
+- **`is_dynamic_name` 的 `ElementAccessExpression` 名臂推迟**：Go `IsDynamicName` 还处理 `a[b]=...` 形 element-access 名，但该名仅来自 JS expando 赋值声明（本包整体 DEFER 的 JS 路径），故 `astquery::is_dynamic_name` 暂只实现 `ComputedPropertyName` 臂，element-access 臂标 `// DEFER`（JS expando）。
 
 ## 转交 / 推迟（DEFER）
 

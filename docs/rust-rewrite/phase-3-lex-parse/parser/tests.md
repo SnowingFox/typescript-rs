@@ -108,6 +108,16 @@
 
 **DEFER（理由见 impl.md）**：`TestJSDocImportTypeParentChain` —— 依赖 JSDoc+reparser 子系统（≈2000 行，JS-only），整体推迟到专门 round；`BenchmarkParse`/`FuzzParser` —— P10。
 
+## Round 6ad-fix 行为级测试（动态 `import(...)` 表达式：消除挂死，全绿）
+
+> 修复 parser 无限循环（挂死）：表达式位置的 `import` 关键字未被消费 → token 不前进 → 列表循环不终止。红是「编译通过但运行挂死」，绿是「终止并产出正确节点」。每条带 `// Go:` 锚。
+
+| Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
+|---|---|---|---|---|
+| `parse_dynamic_import_call` | 动态 import 解析为 import 调用表达式（不再挂死） | `import("m");` → `CallExpression{ expression: ImportKeyword, arguments: [StringLiteral] }`，0 诊断 | `parser.go:parseLeftHandSideExpressionOrHigher`（import call 分支 + `parseKeywordExpression`/`nextTokenIsOpenParenOrLessThan`） | ✓ |
+| `parse_import_keyword_statement_vs_call` | 守卫：import 语句路径不受动态 import lookahead 影响 | `import x from "m";` → `ImportDeclaration`(import_clause Some)；`import("m");` → `CallExpression` | `parser.go:scanStartOfDeclaration` / `parseLeftHandSideExpressionOrHigher` | ✓ |
+| `parse_meta_properties`（既有，沿用为守卫） | `import.meta` 仍为 MetaProperty | `import.meta;` → `MetaProperty{ ImportKeyword, "meta" }` | `parser.go:parseLeftHandSideExpressionOrHigher`（meta 分支） | ✓ |
+
 ## 与 impl.md 的对齐核对
 
 - [ ] 每个 Go `func Test*` 都已映射：唯一 `TestJSDocImportTypeParentChain` 已拆为 2 条 Rust 测试（去重 + parent 链）

@@ -18,10 +18,11 @@
 
 | Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `submodule_accepted_files_exist` | `submoduleAccepted.txt` 每个条目在 `reference/submoduleAccepted/<name>` 存在 | 读 `submoduleAccepted.txt`（84KB 列表）逐行 stat → 全部存在 | `baseline_test.go:TestSubmoduleAcceptedFilesExist` | |
-| `submodule_triaged_files_exist` | `submoduleTriaged.txt` 每个条目在 `reference/submoduleTriaged/<name>` 存在 | 读 `submoduleTriaged.txt`（8KB 列表）逐行 stat → 全部存在 | `baseline_test.go:TestSubmoduleTriagedFilesExist` | |
+| `submodule_accepted_files_exist` | `submoduleAccepted.txt` 每个条目在 `reference/submoduleAccepted/<name>` 存在 | 读 `submoduleAccepted.txt`（82KB 列表）逐行 stat → 全部存在 | `baseline_test.go:TestSubmoduleAcceptedFilesExist` | ✓ |
+| `submodule_triaged_files_exist` | `submoduleTriaged.txt` 每个条目在 `reference/submoduleTriaged/<name>` 存在 | 读 `submoduleTriaged.txt`（4.5KB 列表）逐行 stat → 全部存在 | `baseline_test.go:TestSubmoduleTriagedFilesExist` | ✓ |
 
-> 注：这两个测试依赖 TS submodule checkout（Go 里 `RunAgainstSubmodule` 路径）。Rust 侧无 submodule 时 `—`（skip），有 submodule 时 `✓`。
+> 注：这两个测试用 `referenceRoot`（本仓 `testdata/baselines/reference`，列表 txt 与 reference 目录均存在）→ 全绿。它们**不**依赖 TS submodule checkout（该路径只影响 `RunAgainstSubmodule`/submodule diff）。实测：`reference/submoduleAccepted` 与 `reference/submoduleTriaged` 下所列文件均存在。
+> Rust 测试位置：`internal/testutil/baseline/lib_test.rs`（`use super::*;`）。
 
 ## B. 移植补充的行为级 Rust 测试（基础设施正确性兜底）
 
@@ -31,19 +32,31 @@
 
 | Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
 |---|---|---|---|---|
-| `run_matches_reference_no_error` | actual == reference 内容 → 无失败，仅写 local | actual=`"foo\n"`, reference 文件=`"foo\n"` → harness.failures 空 | Go `writeComparison`（expected==actual 不报错） | |
-| `run_mismatch_reports_error` | actual != reference → 报 "baseline has changed" | actual=`"foo\n"`, reference=`"bar\n"` → 1 个失败，含 "has changed" | Go `writeComparison` line ~241 | |
-| `run_missing_reference_reports_new` | reference 不存在 → 报 "new baseline created" | actual=`"x"`, 无 reference → 失败含 "new baseline created at" | Go `writeComparison` line ~236 | |
-| `run_empty_actual_panics` | actual=="" → panic（要求用 NoContent） | actual=`""` → panic "the generated content was" | Go `writeComparison` line ~197 | |
-| `run_nocontent_writes_delete_marker` | actual==NoContent 且 reference 存在 → 写 `<local>.delete` | actual=NoContent, reference 存在 → local.delete 文件被建 | Go `writeComparison` line ~220 | |
+| `write_comparison_equal_content_no_failure` | actual == reference 内容 → 无失败，且 local 不写 | actual=`"foo\n"`, reference 文件=`"foo\n"` → harness.failures 空 | Go `writeComparison`（expected==actual 不报错） | ✓ |
+| `write_comparison_mismatch_reports_changed` | actual != reference → 报 "has changed" + 写 local | actual=`"foo\n"`, reference=`"bar\n"` → 1 个失败，含 "has changed" | Go `writeComparison` line ~241 | ✓ |
+| `write_comparison_missing_reference_reports_new` | reference 不存在 → 报 "new baseline created" | actual=`"x"`, 无 reference → 失败含 "new baseline created at" | Go `writeComparison` line ~236 | ✓ |
+| `write_comparison_empty_actual_panics` | actual=="" → panic（要求用 NoContent） | actual=`""` → `#[should_panic]` "the generated content was" | Go `writeComparison` line ~197 | ✓ |
+| `write_comparison_nocontent_writes_delete_marker` | actual==NoContent 且 reference 存在 → 写 `<local>.delete` | actual=NoContent, reference 存在 → local.delete 文件被建，local 不写 | Go `writeComparison` line ~220 | ✓ |
+| `write_comparison_submodule_messages` | submodule 模式两档报错 | ref 缺失→"does not exist in the TypeScript submodule"；ref 不同→"does not match the reference..." | Go `writeComparison` line ~234/239 | ✓ |
+| `run_creates_new_local_baseline_for_unknown_name` | `run`（非 submodule）写 local + 报 new baseline | 唯一子目录+新文件名 → 失败含 "new baseline created" + local 内容正确（用后清理） | Go `Run` | ✓ |
+| `run_submodule_writes_categorized_diff` | `run`（submodule）三档 diff 写入 | `is_submodule=true` + 非空 actual → `local/submodule/<sub>/<f>.diff` 被建（用后清理） | Go `Run`（submodule 分支） | ✓ |
+| `run_against_submodule_reports_missing_in_submodule` | `RunAgainstSubmodule` 报 submodule 缺失 | submodule 未 checkout → 失败含 "does not exist in the TypeScript submodule" + local 写入 | Go `RunAgainstSubmodule` | ✓ |
 
 ### B.2 `baseline::diff_text` / `get_baseline_diff`（diff 字节一致性）
 
 | Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
 |---|---|---|---|---|
-| `diff_text_basic_unified` | 两段文本的 unified diff 头/体格式 | `expected="a\nb\nc"`, `actual="a\nB\nc"` → 含 `--- old.x` / `+++ new.x` / `-b` / `+B` | Go `DiffText`（`similar` 须对齐 `patience` 输出） | |
-| `diff_identical_returns_nocontent` | 内容相同 → NoContent | expected==actual → `<no content>` | Go `getBaselineDiff` line ~151 | |
-| `diff_header_line_numbers_skipped` | `@@ -N,M +K,L @@` 改写成 `@@= skipped -d, +d lines =@@` | 多 hunk diff → 头部全部按"相对上一 hunk 起点的增量"改写 | Go `getBaselineDiff` line ~166（fixUnifiedDiff 正则） | |
+| `diff_text_basic_unified` | 两段文本的 unified diff 头/体格式 | `expected="a\nb\nc\n"`, `actual="a\nB\nc\n"` → 含 `--- old.x` / `+++ new.x` / `@@` / `-b` / `+B` | Go `DiffText`（`similar`；与 `patience` 字节对齐留 P10 conformance 端到端验证） | ✓ |
+| `get_baseline_diff_identical_returns_nocontent` | 内容相同 → NoContent | expected==actual → `<no content>` | Go `getBaselineDiff` line ~151 | ✓ |
+| `get_baseline_diff_fixups_applied` | fixup 闭包先归一化再比较 | `fixup_new` 把 actual 归一成 expected → `<no content>` | Go `getBaselineDiff` line ~145-150（fixupOld/New） | ✓ |
+| `get_baseline_diff_header_line_numbers_skipped` | `@@ -N,M +K,L @@` 改写成 `@@= skipped -d, +d lines =@@` | 12 行文件两处分离改动→2 个 hunk → 头部全部按"相对上一 hunk 起点的增量"改写，无残留 `@@ -` | Go `getBaselineDiff` line ~166（fixUnifiedDiff 正则） | ✓ |
+
+> **本轮额外补测（baseline 子包）**：`read_file_name_set_skips_blank_and_comments`（`readFileNameSet`：跳过空行/`#` 注释 + 去重，✓）；`testmain` 子模块 `record_action_*`（三分支，✓）/ `do_write_recorded_baselines_writes_one_per_line`（✓）/ `fnv64a_known_vectors`（FNV-1a 已知向量，✓）/ `track_returns_runnable_cleanup`（disabled→no-op，✓）/ `record_baseline_noop_when_disabled`（✓）。本轮 `tsgo_testutil_baseline` 共 **23 单测 + 6 doctest** 全绿。
+
+> **B.3–B.6 仍 DEFER（`—`）**：以下属于 `harnessutil` / `tsbaseline` 子包，依赖尚未移植：
+> - B.3 `compile_files` / B.4 `get_file_based_test_configurations` / B.5 `skip_unsupported_compiler_options` → `—` **blocked-by: P6 `tsgo_compiler` + P4 `tsgo_checker`/`tsgo_printer`/`tsgo_tsoptions`**（真编译 harness）。
+> - B.6 `do_error_baseline` → `—` **blocked-by: `harnessutil` + checker/diagnosticwriter**。
+> - B.7 `dedent`（`stringtestutil`）+ B.8 `race::enabled` → **本轮已落地 ✅**（独立零依赖叶子 crate，详见 B.7 / B.8）。
 
 ### B.3 `harnessutil::compile_files`（真编译路径）
 
@@ -82,11 +95,28 @@
 | `error_baseline_format` | 错误 baseline 文本结构 | 1 个 TS2322 → `.errors.txt` 含 `==== file.ts (1 errors) ====` + 源码行 + `!!! error TS2322` | 取自 `reference/compiler/*.errors.txt` 真实样本 | |
 | `error_baseline_no_errors_nocontent` | 无错 → NoContent | diagnostics 空 → `<no content>` | Go `DoErrorBaseline` line ~41 | |
 
-### B.7 `stringtestutil::dedent`
+### B.7 `stringtestutil::dedent`（已落地 ✅，crate `tsgo_testutil_stringtestutil`）
+
+> Go 包无 `_test.go`，按 PORTING §8.6 写行为级单测；每个 expected 取自**真实 Go `Dedent` 实测输出**（用 in-repo 临时 main 调真包采集，已删除）。`// Go: internal/testutil/stringtestutil/stringtestutil.go:Dedent`。
 
 | Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
 |---|---|---|---|---|
-| `dedent_strips_common_indent` | 去公共缩进 | 缩进文本 → 去掉公共前导空白 | Go `Dedent`（多包单测复用，需先对） | |
+| `single_line_without_indentation_is_unchanged` | slice1 identity | `"hello"` → `"hello"` | Go `Dedent` 实测 | ✓ |
+| `strips_leading_and_trailing_blank_lines` | slice2 去首尾空行 | `"\nhello\n"` → `"hello"` | Go `Dedent` 实测 | ✓ |
+| `removes_common_leading_indentation` | slice3 去公共缩进 | `"\n    function f() {\n        return 1;\n    }\n"` → `"function f() {\n    return 1;\n}"` | Go `Dedent` 实测 | ✓ |
+| `expands_leading_tabs_to_four_spaces` | tab→4空格 | `"\n\tfoo\n\t\tbar\n"` → `"foo\n    bar"` | Go `Dedent` 实测 | ✓ |
+| `preserves_interior_blank_lines` | 内部空行保留 | `"\n  a\n\n  b\n"` → `"a\n\nb"` | Go `Dedent` 实测 | ✓ |
+| `multi_line_without_indentation_is_unchanged` | 多行零缩进 | `"a\nb\nc"` → `"a\nb\nc"` | Go `Dedent` 实测 | ✓ |
+| `handles_mixed_tab_and_space_indentation` | tab+space 混合 | `"\n\t  x\n\t\t  y\n"` → `"x\n    y"` | Go `Dedent` 实测 | ✓ |
+
+### B.8 `race::enabled`（已落地 ✅，crate `tsgo_testutil_race`）
+
+> Go 包用 build-tag 选 `Enabled`（无 `_test.go`）。Rust 偏离：`#[cfg(feature="race")]` 双常量；测试断言 cfg 选定值。`// Go: internal/testutil/race/race.go:Enabled (+ norace.go)`。
+
+| Rust 测试 | 验证内容 | 期望 | 依据 | 完成 |
+|---|---|---|---|---|
+| `enabled_matches_cfg_selected_value` | cfg 选定值 | 默认（无 feature）`enabled()==false`（对齐 `norace.go`）；`--features race` 时 `==true`（对齐 `race.go`） | Go build-tag 二值语义 | ✓ |
+| `const_and_accessor_agree` | const/accessor 一致 | `enabled() == ENABLED` | 不漂移自检 | ✓ |
 
 ## 与 impl.md 的对齐核对
 
@@ -104,4 +134,12 @@
 | `do_type_and_symbol_baseline` 的 walker 细节 | `.types`/`.symbols` 正确性由 conformance 端到端逐字节兜底，单测意义有限 | conformance-parity |
 | `do_sourcemap_*` baseline | 同上，由 sourcemap conformance baseline 兜底 | conformance-parity |
 | `lsptestutil` LSPClient 往返 | 由 fourslash 框架冒烟测试覆盖（fourslash 跑通即证明 client 对） | fourslash |
-| `projecttestutil` / `jstest` / `fixtures` / `autoimporttestutil` | 仅特定业务包用，对应包单测落地时再补 | 各业务包 / DEFER |
+| `projecttestutil` / `autoimporttestutil` | 仅特定业务包用，对应包单测落地时再补 | 各业务包 / DEFER |
+
+## 已落地的外围叶子 testutil（本轮 PERIPHERAL lane，无 Go `_test.go`，行为级 red→green）
+
+| crate | 测试（单测 / doctest） | 备注 |
+|---|---|---|
+| `tsgo_testutil_fsbaselineutil` | 11 / 5 | `sanitize_internal_symbol_name`（3）+ `baseline_fs_with_diff` 全分类（new/symlink/modified/deleted/rewrite/mtime/lib，8）；diff 经 in-crate `MapFsView` fake 端到端验证。expected 取 Go `differ.go` 字面量（`*new* \n`/`-> .. *new*`/`*deleted*`/`*modified* \n`/`*rewrite with same content*`/`*mTime changed*`/`*Lib*\n`） |
+| `tsgo_testutil_jstest` | 7 / 5 | `node_exe`/`should_skip_no_nodejs`/`LOADER_SCRIPT`/`build_ts_loader_script`/`typescript_module_url` + `eval_node_script`（求和 / 反序列化对象 / run-error，node 真跑、缺 node 自跳过） |
+| `tsgo_testutil_fixtures` | 3 / 1 | `bench_fixtures` 名单顺序 + string-backed `empty.ts` + file-backed 路径锚定 submodule（expected 取 `benchfixtures.go` 字面量） |

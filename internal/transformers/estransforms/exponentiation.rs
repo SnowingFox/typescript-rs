@@ -1,19 +1,22 @@
 //! Port of Go `internal/transformers/estransforms/exponentiation.go`: lowers the
 //! ES2016 exponentiation operator (`**`, `**=`) to `Math.pow` calls.
 //!
-//! # Scope (rounds 6c-1 + 6c-3)
+//! # Scope (rounds 6c-1 + 6c-3 + 6i)
 //!
 //! Lowers `a ** b` → `Math.pow(a, b)` and `a **= b` → `a = Math.pow(a, b)`.
 //! For a property-access assignment target (`a.x **= b`) a temp is hoisted for
 //! the receiver, yielding `(_a = a).x = Math.pow(_a.x, b)` with a hoisted
-//! `var _a;` at the top of the (top-level) scope, using the
+//! `var _a;` at the top of the enclosing scope, using the
 //! [`EmitContext`](tsgo_printer::EmitContext) variable environment.
 //!
-//! The top-level statement path (`SourceFile` → `ExpressionStatement` →
-//! `BinaryExpression`) threads the emit context so temps can be allocated and
-//! hoisted; descent into other nodes is arena-only (handling `**` and
-//! identifier `**=` everywhere, deferring temp-hoisting `**=` targets nested in
-//! non-top-level scopes — see `estransforms/mod.rs`).
+//! The emit context is threaded through the source-file statement path
+//! (`SourceFile` → `ExpressionStatement` → `BinaryExpression`) and, since round
+//! 6i, through **function declaration bodies** (each opening its own variable
+//! environment, mirroring Go's `VisitFunctionBody`), so a `**=` target temp
+//! hoisted in a function body lands in *that* function's leading `var ...;`
+//! rather than at module top. Descent into other nodes is arena-only (handling
+//! `**` and identifier `**=` everywhere, deferring temp-hoisting `**=` targets
+//! nested in still-unthreaded scopes — see `estransforms/mod.rs`).
 
 use crate::{new_transformer, TransformOptions, Transformer};
 use tsgo_ast::{Kind, NodeArena, NodeData, NodeFlags, NodeId, NodeList, VisitOptions};
@@ -45,6 +48,7 @@ pub fn new_exponentiation_transformer(opt: &TransformOptions) -> Transformer {
 fn exponentiation_visit(ec: &mut EmitContext, node: NodeId) -> NodeId {
     match ec.arena().kind(node) {
         Kind::SourceFile => visit_source_file(ec, node),
+        Kind::FunctionDeclaration => visit_function_declaration(ec, node),
         Kind::ExpressionStatement => {
             let expression = match ec.arena().data(node) {
                 NodeData::ExpressionStatement(d) => d.expression,
@@ -55,9 +59,11 @@ fn exponentiation_visit(ec: &mut EmitContext, node: NodeId) -> NodeId {
         }
         Kind::BinaryExpression => visit_binary_expression(ec, node),
         _ => {
-            // Descent into non-top-level nodes is arena-only: `**` and identifier
-            // `**=` are still lowered; temp-hoisting `**=` targets nested here are
-            // deferred.
+            // Nodes not on a threaded path (control-flow statement bodies,
+            // nested classes, ...) recurse arena-only: `**` and identifier `**=`
+            // are still lowered everywhere, but temp-hoisting `**=` targets
+            // nested there are deferred. Function declaration bodies are handled
+            // by the arm above.
             let opts = VisitOptions {
                 synthetic_location: false,
                 clone_lists: false,
@@ -99,6 +105,72 @@ fn visit_source_file(ec: &mut EmitContext, node: NodeId) -> NodeId {
         NodeList::new(all),
         end_of_file_token,
     )
+}
+
+/// Rebuilds a function declaration, visiting its body inside its own variable
+/// environment so a `**=` target temp hoisted in the body lands in that scope
+/// (round 6i), not at module top.
+///
+/// Side effects: pushes/pops a variable environment; rebuilds the function.
+// Go: internal/printer/emitcontext.go:EmitContext.VisitFunctionBody
+fn visit_function_declaration(ec: &mut EmitContext, node: NodeId) -> NodeId {
+    let (
+        modifiers,
+        asterisk_token,
+        name,
+        type_parameters,
+        parameters,
+        type_node,
+        full_signature,
+        body,
+    ) = match ec.arena().data(node) {
+        NodeData::FunctionDeclaration(d) => (
+            d.modifiers.clone(),
+            d.asterisk_token,
+            d.name,
+            d.type_parameters.clone(),
+            d.parameters.clone(),
+            d.type_node,
+            d.full_signature,
+            d.body,
+        ),
+        _ => unreachable!("kind/data mismatch"),
+    };
+    let body = visit_function_body(ec, body);
+    ec.arena_mut().new_function_declaration(
+        modifiers,
+        asterisk_token,
+        name,
+        type_parameters,
+        parameters,
+        type_node,
+        full_signature,
+        body,
+    )
+}
+
+/// Visits a function-like block body within a fresh variable environment, then
+/// prepends the hoisted `var ...;` declarations collected during the visit to
+/// the body's statement list. Returns `None` for an absent body (e.g. an
+/// overload signature).
+///
+/// Side effects: pushes/pops a variable environment; rebuilds the body block.
+// Go: internal/printer/emitcontext.go:EmitContext.VisitFunctionBody
+fn visit_function_body(ec: &mut EmitContext, body: Option<NodeId>) -> Option<NodeId> {
+    let body = body?;
+    let statements = match ec.arena().data(body) {
+        NodeData::Block(d) => d.list.nodes.clone(),
+        // Non-block bodies are not produced for function declarations.
+        _ => return Some(body),
+    };
+    ec.start_variable_environment();
+    let mut visited = Vec::with_capacity(statements.len());
+    for statement in statements {
+        visited.push(exponentiation_visit(ec, statement));
+    }
+    let mut all = ec.end_variable_environment();
+    all.extend(visited);
+    Some(ec.arena_mut().new_block(NodeList::new(all)))
 }
 
 /// Lowers a `**`/`**=` binary expression (emit-context path).

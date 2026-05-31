@@ -38,6 +38,10 @@
 | `bind_multiple_default_exports` | 多默认导出报错 | `"export default 1; export default 2;"` → 报 `A_module_cannot_have_multiple_default_exports` | `declareSymbolEx` | ✓ |
 | `bind_enum_namespace_merge` | enum 与不可合并者冲突 | `"enum E{} var E;"` → 报 `Enum_declarations_can_only_merge_with_namespace_or_other_enum_declarations`（按 Go 实测确认触发分支） | `declareSymbolEx` | ✓ |
 | `bind_private_identifier_name` | 私有标识符符号名 | `"class C { #x = 1; }"` → `#x` 符号名 = `GetSymbolNameForPrivateIdentifier(C, "#x")` 格式（`__#<id>@#x`） | `GetSymbolNameForPrivateIdentifier` | ✓ |
+| `bind_computed_well_known_symbol_no_panic` | **well-known symbol 计算名不再 panic**（P6-8 lib.dom 触发点）| `"interface I { [Symbol.iterator](): void }"` → 不 panic；该 method 的 `node.Symbol` 名 = `InternalSymbolNameComputed`（`__computed`），**不**进 `I.members` 表 | `bindPropertyOrMethodOrAccessor`（`HasDynamicName` 守卫）| ✓ |
+| `bind_computed_arbitrary_name_no_panic` | 任意非字面量计算名（另一绑定点：类属性）| `"class C { [bar] = 1 }"` → 不 panic；属性 `node.Symbol` 名 = `__computed` | `bindPropertyOrMethodOrAccessor` | ✓ |
+| `bind_computed_literal_name_preserved` | 字面量计算名保留文本（守卫不过宽）| `"class C { [\"foo\"]: number }"` → `C.members` 含 `foo`，**不**含 `__computed` | `getDeclarationName`（literal 分支）| ✓ |
+| `bind_lib_style_well_known_symbols_no_panic` | **回归**：lib.dom 风格接口混用多个 well-known symbol + 普通成员 | `"interface AsyncIterable<T> { length:number; [Symbol.iterator](): void; [Symbol.asyncIterator](): void }"` → 不 panic；`length` 仍按名可达；两个计算成员均绑为 `__computed` | `bindPropertyOrMethodOrAccessor` | ✓ |
 
 ### 行为级用例：控制流图（依据：TS flow 语义 + Go 实测）
 
@@ -65,7 +69,7 @@
 
 | Rust 测试文件 | 覆盖 | 完成 |
 |---|---|---|
-| `astquery_test.rs` | `name_of_declaration` / `is_property_name_literal` / `is_block_or_catch_scoped` / `is_potentially_executable_node` / `declaration_name_to_string` | ✓ |
+| `astquery_test.rs` | `name_of_declaration` / `is_property_name_literal` / `is_block_or_catch_scoped` / `is_potentially_executable_node` / `declaration_name_to_string` / `is_dynamic_name`(well-known/literal/identifier) / `has_dynamic_name`(computed/literal) | ✓ |
 | `flow_test.rs` | `is_narrowing_expression`（标识符 vs `true` 关键字）+ 上述 5 条流用例 | ✓ |
 | `nameresolver_test.rs` | `NameResolver::new` / `get_local_symbol_for_export_default`（无声明 → None） | ✓ |
 | `referenceresolver_test.rs` | `new_reference_resolver` / 各 `GetReferenced*` 推迟查询返回 None | ✓ |

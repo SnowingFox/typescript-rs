@@ -119,3 +119,32 @@ fn renamed_leading_binding_excludes_property_key() {
 fn non_simple_initializer_with_leading_binding_is_left_unchanged() {
     check_downlevel("var { a, ...rest } = f();", "var { a, ...rest } = f();");
 }
+
+// ---- Object rest in an assignment target (round 6k) ---------------------
+// `FlattenDestructuringAssignment` at `FlattenLevelObjectRest`: an object-rest
+// **assignment** routes through the generic destructuring flattener, which keeps
+// the non-rest bindings as an object assignment pattern and lowers the rest with
+// the shared `__rest` helper. The statement's `(` parentheses are preserved so
+// `{` is not parsed as a block.
+
+// Go: internal/transformers/estransforms/objectrestspread.go:visitBinaryExpression +
+//     internal/transformers/destructuring.go:flattenObjectBindingOrAssignmentPattern (rest arm)
+// Tracer bullet: `({ a, ...r } = o);` -> `({ a } = o, r = __rest(o, ["a"]));`,
+// requesting the `__rest` helper (emitted once in the module prologue).
+#[test]
+fn object_rest_assignment_keeps_bindings_and_lowers_rest() {
+    check_downlevel(
+        "({ a, ...r } = o);",
+        &format!("{REST_PROLOGUE}\n({{ a }} = o, r = __rest(o, [\"a\"]));"),
+    );
+}
+
+// Go: internal/printer/factory.go:NodeFactory.NewRestHelper (multiple excluded keys, assignment)
+// Each kept binding contributes one excluded key, in source order.
+#[test]
+fn object_rest_assignment_lists_all_kept_keys() {
+    check_downlevel(
+        "({ a, b, ...r } = o);",
+        &format!("{REST_PROLOGUE}\n({{ a, b }} = o, r = __rest(o, [\"a\", \"b\"]));"),
+    );
+}

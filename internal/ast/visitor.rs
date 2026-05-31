@@ -273,6 +273,17 @@ impl NodeArena {
                     id
                 }
             }
+            NodeData::SyntheticReferenceExpression(d) => {
+                let expression = visit(self, d.expression);
+                let this_arg = visit(self, d.this_arg);
+                if expression != d.expression || this_arg != d.this_arg {
+                    let new = self.new_synthetic_reference_expression(expression, this_arg);
+                    self.copy_node_meta(new, id);
+                    new
+                } else {
+                    id
+                }
+            }
             NodeData::ThrowStatement(d) => {
                 let expression = visit(self, d.expression);
                 if expression != d.expression {

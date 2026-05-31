@@ -1,0 +1,12 @@
+[package]
+name = "tsgo_testutil_fsbaselineutil"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+regex = "1.12.3"
+tsgo_collections = { path = "../../collections" }
+tsgo_vfs = { path = "../../vfs" }

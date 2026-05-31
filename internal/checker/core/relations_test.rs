@@ -127,6 +127,129 @@ fn assignable_structural_subset() {
     assert!(!c.is_type_assignable_to(&p, pp, q));
 }
 
+// Go: internal/checker/relater.go:Relater.propertyRelatedTo (skipOptional for comparable)
+#[test]
+fn comparable_is_lenient_about_optional_vs_required() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface S { a?: string }\ninterface T { a: string }",
+    );
+    let mut c = Checker::new();
+    let s = get_declared_type_of_symbol(&mut c, &p, sym(&p, "S"), None);
+    let t = get_declared_type_of_symbol(&mut c, &p, sym(&p, "T"), None);
+    // Assignability rejects an optional source against a required target.
+    assert!(!c.is_type_assignable_to(&p, s, t));
+    // Comparability passes `skipOptional`, so the optional/required mismatch is
+    // tolerated and `S` is comparable to `T`.
+    assert!(c.is_type_comparable_to(&p, s, t));
+}
+
+// Go: internal/checker/relater.go:typeRelatedToEachType (target intersection)
+#[test]
+fn assignable_to_target_intersection_requires_each_constituent() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { x: number }\ninterface B { y: string }\ninterface AB { x: number; y: string }",
+    );
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, sym(&p, "A"), None);
+    let b = get_declared_type_of_symbol(&mut c, &p, sym(&p, "B"), None);
+    let ab_obj = get_declared_type_of_symbol(&mut c, &p, sym(&p, "AB"), None);
+    let inter = c.get_intersection_type(&[a, b]);
+    // `AB` has both `x` and `y`, so it is related to each constituent of `A & B`.
+    assert!(c.is_type_assignable_to(&p, ab_obj, inter));
+    // `A` alone is missing `y`, so it is not related to the `B` constituent.
+    assert!(!c.is_type_assignable_to(&p, a, inter));
+}
+
+// Go: internal/checker/relater.go:someTypeRelatedToType (source intersection)
+#[test]
+fn assignable_from_source_intersection_needs_some_constituent() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { x: number }\ninterface B { y: string }",
+    );
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, sym(&p, "A"), None);
+    let b = get_declared_type_of_symbol(&mut c, &p, sym(&p, "B"), None);
+    let inter = c.get_intersection_type(&[a, b]);
+    // `A & B` is assignable to either constituent (a constituent relates to it).
+    assert!(c.is_type_assignable_to(&p, inter, a));
+    assert!(c.is_type_assignable_to(&p, inter, b));
+}
+
+// Go: internal/checker/relater.go:structuredTypeRelatedTo (source intersection
+// viewed as an object falls back to propertiesRelatedTo over synthesized props)
+#[test]
+fn source_intersection_relates_structurally_to_object() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { x: number }\ninterface B { y: string }\ninterface AB { x: number; y: string }",
+    );
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, sym(&p, "A"), None);
+    let b = get_declared_type_of_symbol(&mut c, &p, sym(&p, "B"), None);
+    let ab_obj = get_declared_type_of_symbol(&mut c, &p, sym(&p, "AB"), None);
+    let inter = c.get_intersection_type(&[a, b]);
+    // No single constituent has both members, but `A & B` viewed as an object
+    // has `x` and `y`, so it is assignable to `AB`.
+    assert!(c.is_type_assignable_to(&p, inter, ab_obj));
+    // Guard: a lone `{x}` still lacks `y`, so it is not assignable to `AB`.
+    assert!(!c.is_type_assignable_to(&p, a, ab_obj));
+}
+
+// 4am: the strictNullChecks assignability gate at the relation level. Under
+// `--strictNullChecks false`, `undefined`/`null` are assignable to a
+// non-nullable, non-union target (`string`); under `--strictNullChecks true`
+// they are not. A checker built over a program carrying the option drives
+// `c.strict_null_checks()`, which the simple-type rule reads.
+// Go: internal/checker/relater.go:Checker.isSimpleTypeRelatedTo (strictNullChecks null/undefined)
+#[test]
+fn assignable_null_undefined_gated_on_strict_null_checks() {
+    use crate::core::Checker;
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+
+    let off = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "",
+        CompilerOptions {
+            strict_null_checks: Tristate::False,
+            ..CompilerOptions::default()
+        },
+    ));
+    let mut c = Checker::new_checker(off);
+    let s = c.string_type();
+    let null_t = c.null_type();
+    let undef_t = c.undefined_type();
+    let p = empty_program();
+    // Non-strict: both nullable sources flow into the non-nullable `string`.
+    assert!(c.is_type_assignable_to(&p, null_t, s));
+    assert!(c.is_type_assignable_to(&p, undef_t, s));
+
+    let on = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "",
+        CompilerOptions {
+            strict_null_checks: Tristate::True,
+            ..CompilerOptions::default()
+        },
+    ));
+    let mut c = Checker::new_checker(on);
+    let s = c.string_type();
+    let null_t = c.null_type();
+    let undef_t = c.undefined_type();
+    let void_t = c.void_type();
+    // Strict: neither is assignable to the non-nullable `string`...
+    assert!(!c.is_type_assignable_to(&p, null_t, s));
+    assert!(!c.is_type_assignable_to(&p, undef_t, s));
+    // ...but the flag-independent rules still hold: `undefined` -> `void`,
+    // and each nullable source -> itself.
+    assert!(c.is_type_assignable_to(&p, undef_t, void_t));
+    assert!(c.is_type_assignable_to(&p, null_t, null_t));
+    assert!(c.is_type_assignable_to(&p, undef_t, undef_t));
+}
+
 // Go: internal/checker/relater.go:Relation.get/set
 #[test]
 fn relation_cache_get_set() {

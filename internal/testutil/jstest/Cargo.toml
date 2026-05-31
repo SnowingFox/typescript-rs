@@ -1,0 +1,13 @@
+[package]
+name = "tsgo_testutil_jstest"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tempfile = "3.27.0"
+tsgo_json = { path = "../../json" }
+tsgo_repo = { path = "../../repo" }
+tsgo_tspath = { path = "../../tspath" }

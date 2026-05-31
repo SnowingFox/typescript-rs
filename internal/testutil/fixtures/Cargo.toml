@@ -1,0 +1,11 @@
+[package]
+name = "tsgo_testutil_fixtures"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tsgo_repo = { path = "../../repo" }
+tsgo_testutil_filefixture = { path = "../filefixture" }

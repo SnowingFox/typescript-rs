@@ -2953,6 +2953,17 @@ impl Parser {
     fn parse_left_hand_side_expression_or_higher(&mut self) -> NodeId {
         let pos = self.node_pos();
         let expression = if self.token == Kind::ImportKeyword
+            && self.look_ahead(|p| p.next_token_is_open_paren_or_less_than())
+        {
+            // Dynamic `import(...)`: parse the `import` keyword as a bare keyword
+            // expression so `parseCallExpressionRest` can consume the argument
+            // list. We look ahead for `(`/`<` so a leading `import` that actually
+            // starts an import statement (e.g. `import * as foo`) is not eagerly
+            // consumed here.
+            // DEFER(phase-3): set sourceFlags |= PossiblyContainsDynamicImport.
+            // blocked-by: finishSourceFile / source-flags tracking.
+            self.parse_keyword_expression()
+        } else if self.token == Kind::ImportKeyword
             && self.look_ahead(|p| p.next_token() == Kind::DotToken)
         {
             // `import.meta` metaproperty.
@@ -2961,8 +2972,6 @@ impl Parser {
             let name = self.parse_identifier_name();
             let node = self.arena.new_meta_property(Kind::ImportKeyword, name);
             self.finish_node(node, pos)
-            // DEFER(phase-3): dynamic `import(...)` call head.
-            // blocked-by: import-call expression parsing.
         } else {
             self.parse_member_expression_or_higher()
         };

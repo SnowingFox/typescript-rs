@@ -27,6 +27,7 @@ mod optionsfields;
 mod parsedbuildcommandline;
 mod parsedcommandline;
 mod parsinghelpers;
+mod tsconfigparsing;
 pub mod tsoptionstest;
 mod wildcarddirectories;
 
@@ -44,6 +45,7 @@ pub use optionsfields::*;
 pub use parsedbuildcommandline::*;
 pub use parsedcommandline::*;
 pub use parsinghelpers::*;
+pub use tsconfigparsing::*;
 pub use wildcarddirectories::*;
 
 /// A diagnostic produced while parsing options.

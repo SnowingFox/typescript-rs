@@ -1,8 +1,9 @@
 //! [`NameGenerator`]: produces stable auto-generated identifier text.
 //!
-//! Generates temp (`_a`, `_b`, ...), loop (`_i`), unique (`foo_1`), and private
-//! (`#foo_1`) names, plus (in a later slice) node-based names. Auto/loop/unique
-//! names are cached by [`AutoGenerateId`]; node-based names by [`NodeId`].
+//! Generates temp (`_a`, `_b`, ...), loop (`_i`), unique (`foo_1`), private
+//! (`#foo_1`), and node-based names (e.g. `f_1` for `function f`, `class_1` for
+//! a class expression). Auto/loop/unique names are cached by [`AutoGenerateId`];
+//! node-based names by the resolved source [`NodeId`].
 
 use crate::emitcontext::{AutoGenerateId, EmitContext};
 use crate::generatedidentifierflags::GeneratedIdentifierFlags;
@@ -49,8 +50,12 @@ struct NameGenerationScope {
 // Go: internal/printer/namegenerator.go:NameGenerator
 pub struct NameGenerator<'a> {
     context: &'a EmitContext,
-    // The node-id-keyed caches (`node_id_to_generated_name` and its private twin)
-    // back node-based generated names and are added with the Wave 3b port.
+    /// Generated names for specific nodes (node-based names), keyed by the
+    /// resolved source node's id.
+    node_id_to_generated_name: FxHashMap<NodeId, String>,
+    /// Generated private names for specific nodes, keyed by the resolved source
+    /// node's id.
+    node_id_to_generated_private_name: FxHashMap<NodeId, String>,
     auto_generated_id_to_generated_name: FxHashMap<AutoGenerateId, String>,
     name_generation_scope: Vec<NameGenerationScope>,
     private_name_generation_scope: Vec<NameGenerationScope>,
@@ -64,6 +69,8 @@ impl<'a> NameGenerator<'a> {
     pub fn new(context: &'a EmitContext) -> NameGenerator<'a> {
         NameGenerator {
             context,
+            node_id_to_generated_name: FxHashMap::default(),
+            node_id_to_generated_private_name: FxHashMap::default(),
             auto_generated_id_to_generated_name: FxHashMap::default(),
             name_generation_scope: Vec::new(),
             private_name_generation_scope: Vec::new(),
@@ -113,8 +120,15 @@ impl<'a> NameGenerator<'a> {
         let ctx = self.context;
         if let Some(auto_generate) = ctx.get_auto_generate_info(name) {
             if auto_generate.flags.is_node() {
-                // DEFER(phase-4): node-based generated names (Wave 3b). // blocked-by: generateNameForNode + isUniqueLocalName + binder Locals/cross-arena access
-                todo!("generate_name for node-based auto-generate (Wave 3b)")
+                // Node names generate unique names based on their original node
+                // and are cached based on that node's id.
+                let flags = auto_generate.flags;
+                let prefix = auto_generate.prefix.clone();
+                let suffix = auto_generate.suffix.clone();
+                let is_private = ctx.arena().kind(name) == Kind::PrivateIdentifier;
+                let node = ctx.get_node_for_generated_name(name);
+                return self
+                    .generate_name_for_node_cached(node, is_private, flags, &prefix, &suffix);
             }
             let id = auto_generate.id;
             if let Some(cached) = self.auto_generated_id_to_generated_name.get(&id) {
@@ -172,6 +186,134 @@ impl<'a> NameGenerator<'a> {
             }
         }
         ctx.arena().text(name).to_string()
+    }
+
+    /// Returns the cached node-based name for `node`, generating and caching it
+    /// on first request. Node-based names are keyed by the resolved node's id so
+    /// repeated requests for the same node are stable.
+    // Go: internal/printer/namegenerator.go:NameGenerator.generateNameForNodeCached
+    fn generate_name_for_node_cached(
+        &mut self,
+        node: NodeId,
+        private_name: bool,
+        flags: GeneratedIdentifierFlags,
+        prefix: &str,
+        suffix: &str,
+    ) -> String {
+        let cache = if private_name {
+            &self.node_id_to_generated_private_name
+        } else {
+            &self.node_id_to_generated_name
+        };
+        if let Some(name) = cache.get(&node) {
+            return name.clone();
+        }
+        let name = self.generate_name_for_node(node, private_name, flags, prefix, suffix);
+        let cache = if private_name {
+            &mut self.node_id_to_generated_private_name
+        } else {
+            &mut self.node_id_to_generated_name
+        };
+        cache.insert(node, name.clone());
+        name
+    }
+
+    /// Generates a unique name derived from the kind and contents of `node`.
+    // Go: internal/printer/namegenerator.go:NameGenerator.generateNameForNode
+    fn generate_name_for_node(
+        &mut self,
+        node: NodeId,
+        private_name: bool,
+        flags: GeneratedIdentifierFlags,
+        prefix: &str,
+        suffix: &str,
+    ) -> String {
+        let ctx = self.context;
+        match ctx.arena().kind(node) {
+            Kind::Identifier | Kind::PrivateIdentifier => {
+                let base = ctx.arena().text(node).to_string();
+                self.make_unique_name(
+                    &base,
+                    flags.is_optimistic(),
+                    flags.is_reserved_in_nested_scopes(),
+                    private_name,
+                    prefix,
+                    suffix,
+                )
+            }
+            Kind::FunctionDeclaration | Kind::ClassDeclaration => {
+                assert!(
+                    !private_name && prefix.is_empty() && suffix.is_empty(),
+                    "Generated name for a class or function declaration cannot be private and may have neither a prefix nor suffix"
+                );
+                // Go short-circuits its `g.Context == nil && HasAutoGenerateInfo`
+                // guard, so with a context present (always here) it simply
+                // recurses into the declaration name when there is one.
+                match name_of_declaration_node(ctx.arena(), node) {
+                    // Recurse into the declaration name with no prefix/suffix.
+                    Some(name) => self.generate_name_for_node(name, false, flags, "", ""),
+                    None => self.generate_name_for_export_default(),
+                }
+            }
+            Kind::ExportAssignment => {
+                assert!(
+                    !private_name && prefix.is_empty() && suffix.is_empty(),
+                    "Generated name for an export assignment cannot be private and may have neither a prefix nor suffix"
+                );
+                self.generate_name_for_export_default()
+            }
+            Kind::ClassExpression => {
+                assert!(
+                    !private_name && prefix.is_empty() && suffix.is_empty(),
+                    "Generated name for a class expression cannot be private and may have neither a prefix nor suffix"
+                );
+                self.generate_name_for_class_expression()
+            }
+            Kind::MethodDeclaration | Kind::GetAccessor | Kind::SetAccessor => {
+                self.generate_name_for_method_or_accessor(node, private_name, prefix, suffix)
+            }
+            Kind::ComputedPropertyName => {
+                self.make_temp_variable_name(TEMP_FLAGS_AUTO, true, private_name, prefix, suffix)
+            }
+            _ => self.make_temp_variable_name(TEMP_FLAGS_AUTO, false, private_name, prefix, suffix),
+        }
+    }
+
+    /// Generates the unique name used for an `export default` declaration.
+    // Go: internal/printer/namegenerator.go:NameGenerator.generateNameForExportDefault
+    fn generate_name_for_export_default(&mut self) -> String {
+        self.make_unique_name("default", false, false, false, "", "")
+    }
+
+    /// Generates the unique name used for an anonymous class expression.
+    // Go: internal/printer/namegenerator.go:NameGenerator.generateNameForClassExpression
+    fn generate_name_for_class_expression(&mut self) -> String {
+        self.make_unique_name("class", false, false, false, "", "")
+    }
+
+    /// Generates a name for a method or accessor: derived from the member name
+    /// when it is an identifier, otherwise a fresh temp name.
+    // Go: internal/printer/namegenerator.go:NameGenerator.generateNameForMethodOrAccessor
+    fn generate_name_for_method_or_accessor(
+        &mut self,
+        node: NodeId,
+        private_name: bool,
+        prefix: &str,
+        suffix: &str,
+    ) -> String {
+        let ctx = self.context;
+        if let Some(name) = member_name_of(ctx.arena(), node) {
+            if ctx.arena().kind(name) == Kind::Identifier {
+                return self.generate_name_for_node_cached(
+                    name,
+                    private_name,
+                    GeneratedIdentifierFlags::NONE,
+                    prefix,
+                    suffix,
+                );
+            }
+        }
+        self.make_temp_variable_name(TEMP_FLAGS_AUTO, false, private_name, prefix, suffix)
     }
 
     /// Returns the next available temp name (`_a`..`_z`, `_0`, `_1`, ...),
@@ -359,6 +501,30 @@ impl<'a> NameGenerator<'a> {
             // NOTE: matches Strada (global, unscoped), but is known to be incorrect.
             self.generated_names.insert(name.to_string());
         }
+    }
+}
+
+/// Returns the optional name node of a function/class declaration.
+///
+/// Mirrors the `node.Name()` accessor Go calls in `generateNameForNode`, but is
+/// scoped to the declaration kinds the binder-free port handles.
+// Go: internal/ast/ast.go:Node.Name
+fn name_of_declaration_node(arena: &tsgo_ast::NodeArena, node: NodeId) -> Option<NodeId> {
+    match arena.data(node) {
+        tsgo_ast::NodeData::FunctionDeclaration(d) => d.name,
+        tsgo_ast::NodeData::ClassDeclaration(d) | tsgo_ast::NodeData::ClassExpression(d) => d.name,
+        _ => None,
+    }
+}
+
+/// Returns the name node of a method or accessor declaration.
+// Go: internal/ast/ast.go:Node.Name
+fn member_name_of(arena: &tsgo_ast::NodeArena, node: NodeId) -> Option<NodeId> {
+    match arena.data(node) {
+        tsgo_ast::NodeData::MethodDeclaration(d) => Some(d.name),
+        tsgo_ast::NodeData::GetAccessorDeclaration(d)
+        | tsgo_ast::NodeData::SetAccessorDeclaration(d) => Some(d.name),
+        _ => None,
     }
 }
 

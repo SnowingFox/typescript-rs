@@ -12,7 +12,7 @@
 | Go 测试文件 | 顶层函数 | 已移植并全绿 | 推迟 |
 |---|---|---|---|
 | `utilities_test.go` | 4 | **4 ✓**（`escape_string_table`/`escape_non_ascii_string_table`/`escape_jsx_attribute_string_table`/`is_recognized_triple_slash_comment_table`，全子用例对齐 Go 字面量） | 0 |
-| `namegenerator_test.go` | 36 | **16 ✓**（temp 1-3/scoped/scoped_reserved、loop 1-3/scoped、unique 1-2/scoped、unique_private 1-2/scoped） | **20**（所有 `generated_name_for_*` node-based 用例，`— DEFER(phase-4)`，blocked-by binder Locals + 跨 arena `generateNameForNode`/`isUniqueLocalName`） |
+| `namegenerator_test.go` | 36 | **31 ✓**（temp 1-3/scoped/scoped_reserved、loop 1-3/scoped、unique 1-2/scoped、unique_private 1-2/scoped 共 16；**[6p]** node-based 15：identifier 1-3、node_cached、export_assignment、class_expression、function_declaration 1-2、class_declaration 1-2、method 1-2、private_name_for_method、computed_property_name、other） | **5**（namespace 1-4 `— DEFER(phase-4)` blocked-by binder `Locals`/`isUniqueLocalName`；import/export `— DEFER` blocked-by `GetExternalModuleName`）|
 | `printer_test.go` | 65 | **~46**（`TestEmit` 全部已实现 NodeKind 家族子用例 + 21 parenthesizer func） | 见下（解析器受限子用例 + 37 parenthesizer + 4 name-gen-emit transform） |
 
 ### Round 2：emit 核心 + parenthesizer 进度
@@ -128,27 +128,27 @@
 | `unique_private_name_1` | 私有唯一名递增 | 2×`NewUniquePrivateName("#foo")` → `"#foo_1"`,`"#foo_2"` | `TestUniquePrivateName1` | |
 | `unique_private_name_2` | 同节点缓存 | 同 name 两次 → `"#foo_1"`,`"#foo_1"` | `TestUniquePrivateName2` | |
 | `unique_private_name_scoped` | 私有名嵌套作用域恒保留 | scope 内 → `"#foo_2"` | `TestUniquePrivateNameScoped` | |
-| `generated_name_for_identifier_1` | 基于标识符节点 | `function f(){}` 的 `f` → `"f_1"` | `TestGeneratedNameForIdentifier1` | |
-| `generated_name_for_identifier_2` | prefix/suffix 直接拼 | `Ex{a,b}` → `"afb"` | `TestGeneratedNameForIdentifier2` | |
-| `generated_name_for_identifier_3` | 嵌套生成名 + `_1` | 对 `afb` 再生成 → `"afb_1"` | `TestGeneratedNameForIdentifier3` | |
-| `generated_name_for_namespace_1` | 不冲突则复用名 | `namespace foo {}` → `"foo"` | `TestGeneratedNameForNamespace1` | |
-| `generated_name_for_namespace_2` | 与局部冲突 → 生成 | `namespace foo { var foo; }` → `"foo_1"` | `TestGeneratedNameForNamespace2` | |
-| `generated_name_for_namespace_3` | 未作用域避免碰撞 | 两个 `foo` 命名空间 → `"foo_1"`,`"foo_2"` | `TestGeneratedNameForNamespace3` | |
-| `generated_name_for_namespace_4` | 作用域内（匹配 Strada，已知不正确） | scope 各自 → `"foo_1"`,`"foo_2"` | `TestGeneratedNameForNamespace4` | |
-| `generated_name_for_node_cached` | 同节点两次同名 | 同 ns 两次 → `"foo_1"`,`"foo_1"` | `TestGeneratedNameForNodeCached` | |
-| `generated_name_for_import` | import * as foo | `import * as foo from 'foo'` → `"foo_1"` | `TestGeneratedNameForImport` | |
-| `generated_name_for_export` | export * as foo | `export * as foo from 'foo'` → `"foo_1"` | `TestGeneratedNameForExport` | |
-| `generated_name_for_function_declaration_1` | export function | `export function f(){}` → `"f_1"` | `TestGeneratedNameForFunctionDeclaration1` | |
-| `generated_name_for_function_declaration_2` | export default function | `export default function(){}` → `"default_1"` | `TestGeneratedNameForFunctionDeclaration2` | |
-| `generated_name_for_class_declaration_1` | export class | `export class C {}` → `"C_1"` | `TestGeneratedNameForClassDeclaration1` | |
-| `generated_name_for_class_declaration_2` | export default class | `export default class {}` → `"default_1"` | `TestGeneratedNameForClassDeclaration2` | |
-| `generated_name_for_export_assignment` | export default expr | `export default 0` → `"default_1"` | `TestGeneratedNameForExportAssignment` | |
-| `generated_name_for_class_expression` | class 表达式 | `(class {})` → `"class_1"` | `TestGeneratedNameForClassExpression` | |
-| `generated_name_for_method_1` | 方法名 | `class C { m(){} }` → `"m_1"` | `TestGeneratedNameForMethod1` | |
-| `generated_name_for_method_2` | 数字字面量名 → temp | `class C { 0(){} }` → `"_a"` | `TestGeneratedNameForMethod2` | |
-| `generated_private_name_for_method` | 私有生成名 | `class C { m(){} }` → `"#m_1"` | `TestGeneratedPrivateNameForMethod` | |
-| `generated_name_for_computed_property_name` | 计算属性名 → temp | `class C { [x] }` → `"_a"` | `TestGeneratedNameForComputedPropertyName` | |
-| `generated_name_for_other` | 任意节点 → temp | 合成 object literal → `"_a"` | `TestGeneratedNameForOther` | |
+| `generated_name_for_identifier_1` | 基于标识符节点 | 合成 `Identifier("f")` → `"f_1"` | `TestGeneratedNameForIdentifier1` | ✓ **[6p]** |
+| `generated_name_for_identifier_2` | prefix/suffix 直接拼（optimistic） | `Ex{a,b}` → `"afb"` | `TestGeneratedNameForIdentifier2` | ✓ **[6p]** |
+| `generated_name_for_identifier_3` | 嵌套生成名 + `_1` | 对 `afb` 再生成 → `"afb_1"` | `TestGeneratedNameForIdentifier3` | ✓ **[6p]** |
+| `generated_name_for_namespace_1` | 不冲突则复用名 | `namespace foo {}` → `"foo"` | `TestGeneratedNameForNamespace1` | — DEFER(phase-4) blocked-by binder `Locals`/`isUniqueLocalName` |
+| `generated_name_for_namespace_2` | 与局部冲突 → 生成 | `namespace foo { var foo; }` → `"foo_1"` | `TestGeneratedNameForNamespace2` | — DEFER(phase-4) blocked-by binder `Locals` |
+| `generated_name_for_namespace_3` | 未作用域避免碰撞 | 两个 `foo` 命名空间 → `"foo_1"`,`"foo_2"` | `TestGeneratedNameForNamespace3` | — DEFER(phase-4) blocked-by binder `Locals` |
+| `generated_name_for_namespace_4` | 作用域内（匹配 Strada，已知不正确） | scope 各自 → `"foo_1"`,`"foo_2"` | `TestGeneratedNameForNamespace4` | — DEFER(phase-4) blocked-by binder `Locals` |
+| `generated_name_for_node_cached` | 同节点两次同名（node-id 缓存） | 合成 `Identifier("foo")` 两次生成名 → `"foo_1"`,`"foo_1"`（divergence：Go 用 namespace，binder-free 端口用 identifier，缓存语义同） | `TestGeneratedNameForNodeCached` | ✓ **[6p]** |
+| `generated_name_for_import` | import * as foo | `import * as foo from 'foo'` → `"foo_1"` | `TestGeneratedNameForImport` | — DEFER(phase-4) blocked-by `GetExternalModuleName` |
+| `generated_name_for_export` | export * as foo | `export * as foo from 'foo'` → `"foo_1"` | `TestGeneratedNameForExport` | — DEFER(phase-4) blocked-by `GetExternalModuleName` |
+| `generated_name_for_function_declaration_1` | function（有名）→ 递归 name | 合成 `function f(){}` → `"f_1"` | `TestGeneratedNameForFunctionDeclaration1` | ✓ **[6p]** |
+| `generated_name_for_function_declaration_2` | export default function（无名）| 合成无名 function → `"default_1"` | `TestGeneratedNameForFunctionDeclaration2` | ✓ **[6p]** |
+| `generated_name_for_class_declaration_1` | class（有名）→ 递归 name | 合成 `class C {}` → `"C_1"` | `TestGeneratedNameForClassDeclaration1` | ✓ **[6p]** |
+| `generated_name_for_class_declaration_2` | export default class（无名）| 合成无名 class → `"default_1"` | `TestGeneratedNameForClassDeclaration2` | ✓ **[6p]** |
+| `generated_name_for_export_assignment` | export default expr | 合成 `export default 0` → `"default_1"` | `TestGeneratedNameForExportAssignment` | ✓ **[6p]** |
+| `generated_name_for_class_expression` | class 表达式 | 合成 `ClassExpression{}` → `"class_1"` | `TestGeneratedNameForClassExpression` | ✓ **[6p]** |
+| `generated_name_for_method_1` | 方法名（identifier）| 合成 method `m` → `"m_1"` | `TestGeneratedNameForMethod1` | ✓ **[6p]** |
+| `generated_name_for_method_2` | 数字字面量名 → temp | 合成 method `0` → `"_a"` | `TestGeneratedNameForMethod2` | ✓ **[6p]** |
+| `generated_private_name_for_method` | 私有生成名 | 合成 method `m` 私有生成名 → `"#m_1"` | `TestGeneratedPrivateNameForMethod` | ✓ **[6p]** |
+| `generated_name_for_computed_property_name` | 计算属性名 → temp（reserved-in-nested-scopes）| 合成 `ComputedPropertyName([x])` → `"_a"` | `TestGeneratedNameForComputedPropertyName` | ✓ **[6p]** |
+| `generated_name_for_other` | 任意节点 → temp | 合成 object literal → `"_a"` | `TestGeneratedNameForOther` | ✓ **[6p]** |
 
 ---
 

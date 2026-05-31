@@ -1,0 +1,13 @@
+[package]
+name = "tsgo_testutil_emittestutil"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tsgo_ast = { path = "../../ast" }
+tsgo_core = { path = "../../core" }
+tsgo_printer = { path = "../../printer" }
+tsgo_testutil_parsetestutil = { path = "../parsetestutil" }

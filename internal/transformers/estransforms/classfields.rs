@@ -28,12 +28,34 @@
 //!   `var <temp> = k;` hoisted before the class (so it is evaluated once at
 //!   class-definition time) and the initializer becomes `this[<temp>] = init`.
 //!
+//! Round 6o extends the instance-field lowering to **class *expressions***
+//! (`const C = class { x = 1 };` → `const C = class { constructor() { this.x =
+//! 1; } };`): the same lowering runs in expression position whenever it produces
+//! a single node (instance fields only).
+//!
+//! Round 6r lowers a class expression with **static field(s)** by wrapping the
+//! class in a comma sequence with a hoisted temp
+//! (`const C = class { static x = 1 };` →
+//! `var _a;` + `const C = (_a = class {}, _a.x = 1, _a);`): the lowering core is
+//! shared via [`lower_class_parts`], and the expression-position consumer
+//! [`try_lower_class_expression`] allocates the temp with the round-6p
+//! [`new_temp_variable`](tsgo_printer::factory::NodeFactory::new_temp_variable)
+//! generator (reused in each position so it materializes the same `_a`) and
+//! hoists `var _a;` into the source file's variable environment (rounds 6c-3/6i).
+//! A class expression that would hoist statements *other than* static
+//! assignments (computed-name temp caches or `var _C_x = new WeakMap();` private
+//! brands) is still left unchanged, since Go threads those through
+//! `pendingExpressions` (comma-sequence inlining) which is not yet ported.
+//!
 //! Deferred (DEFER(P5), see `estransforms/mod.rs`): the **named-helper-import**
 //! private form (`__classPrivateFieldGet/Set`), **private static fields**,
 //! **private methods/accessors** (`WeakSet` brand checks), **`accessor` fields**
 //! (auto-accessor → backing field + get/set redirectors; needs the name
-//! generator + a second-pass result visitor), **class expressions** (statement
-//! hoisting needs IIFE/comma-sequence wrapping), **parameter properties**
+//! generator + a second-pass result visitor), **class-expression statement
+//! hoisting for computed/private fields** (these need Go's `pendingExpressions`
+//! comma-sequence inlining, not yet ported) and **nested-scope** class-expression
+//! static hoisting (only the source file opens a variable environment here),
+//! **parameter properties**
 //! (a TS-transform concern), constructor **prologue directives**,
 //! **anonymous-class** static/private members (need a generated class name),
 //! name-generator-backed **temp/brand uniqueness**, and
@@ -41,9 +63,11 @@
 //! the emit-context name generator, and/or checker info not yet ported.
 
 use crate::{new_transformer, TransformOptions, Transformer};
+use rustc_hash::FxHashMap;
 use tsgo_ast::{
     Kind, ModifierFlags, NodeArena, NodeData, NodeFlags, NodeId, NodeList, VisitOptions,
 };
+use tsgo_printer::emitcontext::AutoGenerateOptions;
 use tsgo_printer::EmitContext;
 
 /// Builds a [`Transformer`] that lowers class fields, sharing the pipeline's
@@ -59,9 +83,119 @@ use tsgo_printer::EmitContext;
 // Go: internal/transformers/estransforms/classfields.go:newClassFieldsTransformer
 pub fn new_class_fields_transformer(opt: &TransformOptions) -> Transformer {
     new_transformer(
-        Box::new(|ec: &mut EmitContext, node: NodeId| class_fields_visit(ec.arena_mut(), node)),
+        Box::new(|ec: &mut EmitContext, node: NodeId| class_fields_visit_ec(ec, node)),
         opt.context.clone(),
     )
+}
+
+/// Emit-context-threaded entry that reaches class declarations/expressions while
+/// threading the [`EmitContext`] (so the round-6p node-based name generator is
+/// available for **auto-accessor** lowering, which allocates a generated private
+/// backing-field name). Classes that contain an `accessor` member are routed to
+/// [`try_lower_auto_accessor_class`]; every other class falls back to the
+/// arena-only [`try_lower_simple_class`] (rounds 6c/6o). Non-class nodes recurse
+/// through [`visit_each_child_ec`] so a class nested in a statement is still
+/// reached.
+///
+/// Side effects: may push rebuilt nodes; allocates generated names.
+// Go: internal/transformers/estransforms/classfields.go:classFieldsTransformer.visit
+fn class_fields_visit_ec(ec: &mut EmitContext, node: NodeId) -> NodeId {
+    // The source file opens a variable environment so a temp hoisted for a
+    // class-expression static-field comma-sequence (`var _a;`) lands as a leading
+    // declaration at module top (round 6r).
+    if ec.arena().kind(node) == Kind::SourceFile {
+        return visit_source_file_ec(ec, node);
+    }
+    if matches!(
+        ec.arena().kind(node),
+        Kind::ClassDeclaration | Kind::ClassExpression
+    ) {
+        if class_has_auto_accessor(ec.arena(), node) {
+            // A class with an auto-accessor is lowered via the generated-name
+            // path; an unsupported accessor shape (static / computed / decorated)
+            // is left unchanged for the deferred fuller port rather than being
+            // mis-handled by the plain-field path.
+            return try_lower_auto_accessor_class(ec, node).unwrap_or(node);
+        }
+        if ec.arena().kind(node) == Kind::ClassExpression {
+            // Class expressions take the emit-context path so a static-field
+            // comma-sequence can allocate + hoist a temp (round 6r). Instance-only
+            // expressions (round 6o) are rebuilt in place there too.
+            if let Some(lowered) = try_lower_class_expression(ec, node) {
+                return lowered;
+            }
+        } else if let Some(lowered) = try_lower_simple_class(ec.arena_mut(), node) {
+            return lowered;
+        }
+    }
+    visit_each_child_ec(ec, node)
+}
+
+/// Wraps the source file's statements in a variable environment so a temp
+/// hoisted while lowering a class-expression static field is emitted as a
+/// leading `var _a;` statement (mirrors the exponentiation transformer's
+/// source-file handling).
+///
+/// Side effects: pushes/pops a variable environment; rebuilds the source file.
+// Go: internal/printer/emitcontext.go:EmitContext.VisitVariableEnvironment (top-level statements)
+fn visit_source_file_ec(ec: &mut EmitContext, node: NodeId) -> NodeId {
+    let (file_name, script_kind, language_variant, statements, end_of_file_token) =
+        match ec.arena().data(node) {
+            NodeData::SourceFile(d) => (
+                d.file_name.clone(),
+                d.script_kind,
+                d.language_variant,
+                d.statements.clone(),
+                d.end_of_file_token,
+            ),
+            _ => unreachable!("kind/data mismatch"),
+        };
+    ec.start_variable_environment();
+    let mut visited = Vec::with_capacity(statements.nodes.len());
+    for &statement in &statements.nodes {
+        visited.push(class_fields_visit_ec(ec, statement));
+    }
+    let mut all = ec.end_variable_environment();
+    all.extend(visited);
+    ec.arena_mut().new_source_file(
+        &file_name,
+        script_kind,
+        language_variant,
+        NodeList::new(all),
+        end_of_file_token,
+    )
+}
+
+/// Emit-context-threaded `VisitEachChild`: recurses [`class_fields_visit_ec`]
+/// over every child, then rebuilds the node with the transformed children
+/// (returning it unchanged when nothing changed, preserving source positions).
+///
+/// Side effects: may push rebuilt nodes through the recursive visits.
+// Go: internal/transformers/estransforms/classfields.go:classFieldsTransformer.visit (default: VisitEachChild)
+fn visit_each_child_ec(ec: &mut EmitContext, node: NodeId) -> NodeId {
+    let mut children = Vec::new();
+    ec.arena().for_each_child(node, &mut |child| {
+        children.push(child);
+        false
+    });
+    let mut replacements: FxHashMap<NodeId, NodeId> = FxHashMap::default();
+    for child in children {
+        let transformed = class_fields_visit_ec(ec, child);
+        if transformed != child {
+            replacements.insert(child, transformed);
+        }
+    }
+    if replacements.is_empty() {
+        return node;
+    }
+    let opts = VisitOptions {
+        synthetic_location: false,
+        clone_lists: false,
+    };
+    ec.arena_mut()
+        .visit_each_child(node, opts, &mut |_, child| {
+            replacements.get(&child).copied().unwrap_or(child)
+        })
 }
 
 /// Lowers class fields in the subtree rooted at `node`.
@@ -69,7 +203,10 @@ pub fn new_class_fields_transformer(opt: &TransformOptions) -> Transformer {
 /// Side effects: may push rebuilt nodes onto the arena.
 // Go: internal/transformers/estransforms/classfields.go:classFieldsTransformer.visit
 fn class_fields_visit(arena: &mut NodeArena, node: NodeId) -> NodeId {
-    if arena.kind(node) == Kind::ClassDeclaration {
+    if matches!(
+        arena.kind(node),
+        Kind::ClassDeclaration | Kind::ClassExpression
+    ) {
         if let Some(lowered) = try_lower_simple_class(arena, node) {
             return lowered;
         }
@@ -81,19 +218,41 @@ fn class_fields_visit(arena: &mut NodeArena, node: NodeId) -> NodeId {
     arena.visit_each_child(node, opts, &mut |a, c| class_fields_visit(a, c))
 }
 
-/// Lowers a class whose instance fields (plain identifier-named, with
-/// initializers) are hoisted into a constructor as `this.x = init` statements.
-/// Works for a synthesized constructor (no constructor present) or by inserting
-/// into an existing constructor body. Returns `None` (leaving the class for the
-/// deferred fuller port) for any shape outside this slice (static / private /
-/// computed / accessor fields, fields without initializers, multiple
-/// constructors).
+/// The receiver-agnostic pieces of a lowered class, produced by
+/// [`lower_class_parts`] and consumed by the two call sites: the
+/// statement-position [`try_lower_simple_class`] (which emits a `SyntaxList`
+/// with `C.x = ...` assignments using the class name) and the
+/// expression-position [`try_lower_class_expression`] (which wraps the class in
+/// a comma sequence with a temp, `_a.x = ...`).
+struct ClassLoweringParts {
+    /// The rebuilt class node (declaration or expression, per the input kind),
+    /// with instance fields moved into a constructor and static fields removed.
+    class: NodeId,
+    /// Statements that must be hoisted *before* the class: computed-name temp
+    /// caches (`var _a = k;`) then `var _C_x = new WeakMap();` brand declarations.
+    pre_statements: Vec<NodeId>,
+    /// Each static field as a `(name, initializer)` pair, kept receiver-agnostic
+    /// so the caller can build `C.x = init` (statement) or `_a.x = init`
+    /// (expression).
+    static_fields: Vec<(NodeId, NodeId)>,
+}
+
+/// Lowers a class's members into [`ClassLoweringParts`]: instance fields (plain
+/// identifier-named, with initializers) are hoisted into a constructor as
+/// `this.x = init` statements (synthesized or inserted into an existing
+/// constructor body); private instance fields become `WeakMap` brands; computed
+/// names are cached in temps; static fields are returned as receiver-agnostic
+/// `(name, init)` pairs. Returns `None` (leaving the class for the deferred
+/// fuller port) for any shape outside this slice (private static fields,
+/// non-identifier/computed static names, fields without initializers, multiple
+/// constructors, private methods/accessors).
 ///
 /// Side effects: may push rebuilt nodes onto the arena.
 // Go: internal/transformers/estransforms/classfields.go:classFieldsTransformer.transformClassMembers
-fn try_lower_simple_class(arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
+fn lower_class_parts(arena: &mut NodeArena, node: NodeId) -> Option<ClassLoweringParts> {
+    let kind = arena.kind(node);
     let (modifiers, name, type_parameters, heritage_clauses, members) = match arena.data(node) {
-        NodeData::ClassDeclaration(d) => (
+        NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => (
             d.modifiers.clone(),
             d.name,
             d.type_parameters.clone(),
@@ -110,7 +269,9 @@ fn try_lower_simple_class(arena: &mut NodeArena, node: NodeId) -> Option<NodeId>
     let private_env = build_private_env(arena, &members, name)?;
 
     let mut field_assignments = Vec::new();
-    let mut static_assignments = Vec::new();
+    // Static fields kept as `(name, initializer)` pairs; the receiver (class
+    // name `C` or temp `_a`) is chosen by the caller.
+    let mut static_fields: Vec<(NodeId, NodeId)> = Vec::new();
     // `var <temp> = <computed-key>;` statements hoisted before the class so each
     // computed property name is evaluated once at class-definition time.
     let mut computed_temp_decls = Vec::new();
@@ -147,15 +308,9 @@ fn try_lower_simple_class(arena: &mut NodeArena, node: NodeId) -> Option<NodeId>
                     field_assignments.push(make_private_set(arena, &brand, initializer));
                 } else if arena.kind(field_name) == Kind::Identifier {
                     if is_static {
-                        // `static x = 1` -> `C.x = 1;` after the class declaration.
-                        // An anonymous class would need a generated name -> deferred.
-                        let class_name = name?;
-                        static_assignments.push(make_static_assignment(
-                            arena,
-                            class_name,
-                            field_name,
-                            initializer,
-                        ));
+                        // `static x = 1` -> `<receiver>.x = 1` (statement after the
+                        // class declaration, or expression in the comma sequence).
+                        static_fields.push((field_name, initializer));
                     } else {
                         field_assignments.push(make_this_assignment(
                             arena,
@@ -205,7 +360,7 @@ fn try_lower_simple_class(arena: &mut NodeArena, node: NodeId) -> Option<NodeId>
         }
     }
     if field_assignments.is_empty()
-        && static_assignments.is_empty()
+        && static_fields.is_empty()
         && private_env.is_empty()
         && computed_temp_decls.is_empty()
     {
@@ -241,7 +396,7 @@ fn try_lower_simple_class(arena: &mut NodeArena, node: NodeId) -> Option<NodeId>
     };
 
     let class = arena.new_class_like(
-        Kind::ClassDeclaration,
+        kind,
         modifiers,
         name,
         type_parameters,
@@ -255,18 +410,363 @@ fn try_lower_simple_class(arena: &mut NodeArena, node: NodeId) -> Option<NodeId>
         let decl = make_weakmap_brand_var(arena, brand);
         pre_statements.push(decl);
     }
-    if pre_statements.is_empty() && static_assignments.is_empty() {
-        Some(class)
-    } else {
-        // Emit hoisted statements before, and `C.x = ...` assignments after, the
-        // class via a SyntaxList of statements.
-        let mut statements =
-            Vec::with_capacity(pre_statements.len() + 1 + static_assignments.len());
-        statements.extend(pre_statements);
-        statements.push(class);
-        statements.extend(static_assignments);
-        Some(arena.new_syntax_list(NodeList::new(statements)))
+    Some(ClassLoweringParts {
+        class,
+        pre_statements,
+        static_fields,
+    })
+}
+
+/// Lowers a class **declaration** (or an instance-field-only class expression):
+/// instance fields move into a constructor, and static/private/computed members
+/// that need hoisting are emitted via a `SyntaxList` of statements
+/// (`var ...; class C {...} C.x = ...;`). Returns `None` (leaving the class for
+/// the deferred fuller port) for shapes outside this slice, and for a class
+/// *expression* that needs statement hoisting (handled by
+/// [`try_lower_class_expression`] instead).
+///
+/// Side effects: may push rebuilt nodes onto the arena.
+// Go: internal/transformers/estransforms/classfields.go:classFieldsTransformer.visitClassDeclaration
+fn try_lower_simple_class(arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
+    let kind = arena.kind(node);
+    let name = match arena.data(node) {
+        NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d.name,
+        _ => return None,
+    };
+    let parts = lower_class_parts(arena, node)?;
+    if parts.pre_statements.is_empty() && parts.static_fields.is_empty() {
+        // Instance-field-only (round 6o for class expressions): no hoist needed.
+        return Some(parts.class);
     }
+    if kind == Kind::ClassExpression {
+        // A class *expression* that needs statement hoisting is wrapped in a comma
+        // sequence with a temp by `try_lower_class_expression` (round 6r); this
+        // arena-only path only builds the statement-position `SyntaxList`.
+        return None;
+    }
+    // `static x = 1` -> `C.x = 1;` after the class declaration. An anonymous
+    // declaration would need a generated class name -> deferred.
+    let class_name = name?;
+    let mut statements =
+        Vec::with_capacity(parts.pre_statements.len() + 1 + parts.static_fields.len());
+    statements.extend(parts.pre_statements);
+    statements.push(parts.class);
+    for (field_name, initializer) in parts.static_fields {
+        statements.push(make_static_assignment(
+            arena,
+            class_name,
+            field_name,
+            initializer,
+        ));
+    }
+    Some(arena.new_syntax_list(NodeList::new(statements)))
+}
+
+/// Lowers a class **expression** (emit-context path). Instance-field-only
+/// expressions stay a class expression (round 6o). A class expression with
+/// **static field(s)** is wrapped in a comma sequence with a hoisted temp
+/// (round 6r):
+///
+/// ```text
+/// const C = class { static x = 1 };
+/// ->
+/// var _a;
+/// const C = (_a = class {}, _a.x = 1, _a);
+/// ```
+///
+/// The temp (`_a`) is allocated via the round-6p emit-context name generator
+/// ([`new_temp_variable`](tsgo_printer::factory::NodeFactory::new_temp_variable))
+/// and declared with a `var _a;` hoisted into the enclosing scope's variable
+/// environment ([`add_variable_declaration`](EmitContext::add_variable_declaration)),
+/// matching Go's `AddVariableDeclaration` + `InlineExpressions` of
+/// `[temp = class, static assignments..., temp]`.
+///
+/// Returns `None` (leaving the class expression unchanged) for shapes still
+/// needing un-ported infra: any class expression whose lowering would hoist
+/// **statements other than static assignments** (computed-name temp caches or
+/// `var _C_x = new WeakMap();` private brands) — Go threads those through
+/// `pendingExpressions`, which is not yet ported.
+///
+/// Side effects: may push rebuilt nodes; may hoist a `var` declaration.
+// Go: internal/transformers/estransforms/classfields.go:visitClassExpressionInNewClassLexicalEnvironment
+fn try_lower_class_expression(ec: &mut EmitContext, node: NodeId) -> Option<NodeId> {
+    let parts = lower_class_parts(ec.arena_mut(), node)?;
+    if parts.pre_statements.is_empty() && parts.static_fields.is_empty() {
+        // Instance-field-only (round 6o): the class expression is rebuilt in
+        // place with a constructor; no statement hoisting is needed.
+        return Some(parts.class);
+    }
+    if !parts.pre_statements.is_empty() {
+        // Computed-name temp caches / private WeakMap brands in expression
+        // position need Go's `pendingExpressions` threading (comma-sequence
+        // initializers), which is not yet ported. Defer (leave unchanged).
+        return None;
+    }
+    // Static field(s): `(_a = class {...}, _a.x = init, ..., _a)`. The temp is
+    // reused (same node id) so the name generator materializes the same `_a` in
+    // each position.
+    let temp = ec.factory().new_temp_variable();
+    ec.add_variable_declaration(temp);
+    let equals = ec.arena_mut().new_token(Kind::EqualsToken);
+    let mut sequence = ec
+        .arena_mut()
+        .new_binary_expression(temp, equals, parts.class);
+    for (field_name, initializer) in parts.static_fields {
+        let assignment = make_temp_static_assignment(ec.arena_mut(), temp, field_name, initializer);
+        let comma = ec.arena_mut().new_token(Kind::CommaToken);
+        sequence = ec
+            .arena_mut()
+            .new_binary_expression(sequence, comma, assignment);
+    }
+    let comma = ec.arena_mut().new_token(Kind::CommaToken);
+    Some(ec.arena_mut().new_binary_expression(sequence, comma, temp))
+}
+
+/// Reports whether `member` is an **auto-accessor** property declaration
+/// (`accessor x`): a `PropertyDeclaration` carrying the `accessor` modifier.
+///
+/// Side effects: none (reads the arena).
+// Go: internal/ast/utilities.go:IsAutoAccessorPropertyDeclaration
+fn is_auto_accessor_property(arena: &NodeArena, member: NodeId) -> bool {
+    matches!(arena.data(member), NodeData::PropertyDeclaration(d) if d
+        .modifiers
+        .as_ref()
+        .is_some_and(|m| m.modifier_flags.contains(ModifierFlags::ACCESSOR)))
+}
+
+/// Reports whether a class declares at least one auto-accessor member.
+///
+/// Side effects: none (reads the arena).
+fn class_has_auto_accessor(arena: &NodeArena, node: NodeId) -> bool {
+    let members = match arena.data(node) {
+        NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => &d.members,
+        _ => return false,
+    };
+    members
+        .nodes
+        .iter()
+        .any(|&member| is_auto_accessor_property(arena, member))
+}
+
+/// Lowers a class whose members include auto-accessors (`accessor x = init`) to
+/// the **ES2022-native** shape: each auto-accessor becomes a private backing
+/// field plus a `get`/`set` redirector pair, e.g.
+///
+/// ```text
+/// class C { accessor x = 1; }
+/// ->
+/// class C {
+///     #x_accessor_storage = 1;
+///     get x() { return this.#x_accessor_storage; }
+///     set x(value) { this.#x_accessor_storage = value; }
+/// }
+/// ```
+///
+/// The backing-field name is allocated with the round-6p emit-context node-based
+/// generated *private* name generator
+/// ([`new_generated_private_name_for_node_ex`](tsgo_printer::factory::NodeFactory::new_generated_private_name_for_node_ex)
+/// with the `_accessor_storage` suffix), keyed to the accessor's name node so the
+/// field, getter, and setter all materialize the same `#x_accessor_storage` at
+/// emit time.
+///
+/// Returns `None` (leaving the class unchanged for the deferred fuller port) for
+/// any shape outside this slice: a **static** auto-accessor, a non-identifier
+/// (computed / string / private) accessor name, a **decorated** accessor, or a
+/// class that also contains other field/constructor members needing the WeakMap
+/// / constructor-insertion lowering.
+///
+/// # Divergence from Go
+/// Go re-runs a second-pass `accessorFieldResultVisitor` over the backing field
+/// and redirectors, which (at downlevel targets) would lower the private backing
+/// field to a `WeakMap` / `__classPrivateFieldGet`. This port lands only the
+/// **native** form (`shouldTransformPrivateElements` off), so the backing field
+/// stays a private class member; the WeakMap/static-block forms are DEFER'd.
+///
+/// Side effects: may push rebuilt nodes; allocates generated private names.
+// Go: internal/transformers/estransforms/classfields.go:transformAutoAccessor
+fn try_lower_auto_accessor_class(ec: &mut EmitContext, node: NodeId) -> Option<NodeId> {
+    let kind = ec.arena().kind(node);
+    let (modifiers, name, type_parameters, heritage_clauses, members) = match ec.arena().data(node)
+    {
+        NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => (
+            d.modifiers.clone(),
+            d.name,
+            d.type_parameters.clone(),
+            d.heritage_clauses.clone(),
+            d.members.clone(),
+        ),
+        _ => return None,
+    };
+
+    let mut new_members = Vec::with_capacity(members.nodes.len() + 2);
+    for &member in &members.nodes {
+        if is_auto_accessor_property(ec.arena(), member) {
+            let expanded = expand_auto_accessor(ec, member)?;
+            new_members.extend(expanded);
+        } else {
+            // Mixing with other lowerable members (plain/static/private fields,
+            // constructors) needs the constructor-insertion / WeakMap paths to
+            // run together with the accessor expansion -> deferred. Members that
+            // never need lowering (methods, regular accessors) are kept as-is.
+            match ec.arena().kind(member) {
+                Kind::PropertyDeclaration | Kind::Constructor => return None,
+                _ => new_members.push(member),
+            }
+        }
+    }
+
+    Some(ec.arena_mut().new_class_like(
+        kind,
+        modifiers,
+        name,
+        type_parameters,
+        heritage_clauses,
+        NodeList::new(new_members),
+    ))
+}
+
+/// Expands one auto-accessor property into `[backing field, getter, setter]`.
+/// Returns `None` for shapes outside the simplest slice (static, non-identifier
+/// name, or extra modifiers/decorators).
+///
+/// Side effects: pushes rebuilt nodes; allocates generated private names.
+// Go: internal/transformers/estransforms/classfields.go:transformAutoAccessor
+fn expand_auto_accessor(ec: &mut EmitContext, member: NodeId) -> Option<Vec<NodeId>> {
+    let (modifiers, accessor_name, initializer) = match ec.arena().data(member) {
+        NodeData::PropertyDeclaration(d) => (d.modifiers.clone(), d.name, d.initializer),
+        _ => return None,
+    };
+    // Simplest reachable shape: an accessor whose only modifiers are `accessor`
+    // and (optionally) `static` — no decorators, visibility, or `readonly` — and
+    // a plain identifier name.
+    let modifier_flags = modifiers
+        .as_ref()
+        .map(|m| m.modifier_flags)
+        .unwrap_or_default();
+    if !(modifier_flags & !(ModifierFlags::ACCESSOR | ModifierFlags::STATIC)).is_empty() {
+        return None;
+    }
+    if ec.arena().kind(accessor_name) != Kind::Identifier {
+        return None;
+    }
+
+    // Keep the surviving modifiers (i.e. `static`) on the backing field and both
+    // redirectors; the `accessor` keyword is dropped. Go mirrors this with its
+    // `visitModifier` (drops `accessor`, keeps real modifiers).
+    let result_modifiers = strip_accessor_modifier(ec, modifiers.as_ref());
+
+    let backing_field = {
+        let backing_name = new_accessor_backing_name(ec, accessor_name);
+        ec.arena_mut().new_property_declaration(
+            result_modifiers.clone(),
+            backing_name,
+            None,
+            None,
+            initializer,
+        )
+    };
+    let getter = build_accessor_get_redirector(ec, accessor_name, result_modifiers.clone());
+    let setter = build_accessor_set_redirector(ec, accessor_name, result_modifiers);
+    Some(vec![backing_field, getter, setter])
+}
+
+/// Returns the auto-accessor's modifiers with the `accessor` keyword removed,
+/// keeping `static`. An empty result is normalized to `None` so a modifier-free
+/// member emits no modifier list.
+///
+/// Side effects: none (reads node kinds; allocates a list value).
+// Go: internal/transformers/estransforms/classfields.go:classFieldsTransformer.visitModifier
+fn strip_accessor_modifier(
+    ec: &EmitContext,
+    modifiers: Option<&tsgo_ast::ModifierList>,
+) -> Option<tsgo_ast::ModifierList> {
+    let stripped = crate::extract_modifiers(ec, modifiers, ModifierFlags::STATIC)?;
+    if stripped.list.nodes.is_empty() {
+        None
+    } else {
+        Some(stripped)
+    }
+}
+
+/// Allocates the private backing-field name for an auto-accessor, derived from
+/// the accessor's name node so every reference materializes the same
+/// `#<name>_accessor_storage` text at emit time (round-6p generator).
+///
+/// Side effects: appends a node and records a node-based auto-generate entry.
+// Go: internal/transformers/estransforms/classfields.go:createAccessorPropertyBackingField (name)
+fn new_accessor_backing_name(ec: &mut EmitContext, accessor_name: NodeId) -> NodeId {
+    ec.factory().new_generated_private_name_for_node_ex(
+        accessor_name,
+        AutoGenerateOptions {
+            suffix: "_accessor_storage".to_string(),
+            ..Default::default()
+        },
+    )
+}
+
+/// Builds `get <name>() { return this.#<name>_accessor_storage; }`.
+///
+/// Side effects: pushes rebuilt nodes; allocates a generated private name.
+// Go: internal/transformers/estransforms/classfields.go:createAccessorPropertyGetRedirector
+fn build_accessor_get_redirector(
+    ec: &mut EmitContext,
+    accessor_name: NodeId,
+    modifiers: Option<tsgo_ast::ModifierList>,
+) -> NodeId {
+    let backing_name = new_accessor_backing_name(ec, accessor_name);
+    let this = ec.arena_mut().new_keyword_expression(Kind::ThisKeyword);
+    let access = ec
+        .arena_mut()
+        .new_property_access_expression(this, None, backing_name);
+    let return_stmt = ec.arena_mut().new_return_statement(Some(access));
+    let body = ec.arena_mut().new_block(NodeList::new(vec![return_stmt]));
+    ec.arena_mut().new_accessor_declaration(
+        Kind::GetAccessor,
+        modifiers,
+        accessor_name,
+        None,
+        NodeList::new(vec![]),
+        None,
+        None,
+        Some(body),
+    )
+}
+
+/// Builds `set <name>(value) { this.#<name>_accessor_storage = value; }`.
+///
+/// Side effects: pushes rebuilt nodes; allocates a generated private name.
+// Go: internal/transformers/estransforms/classfields.go:createAccessorPropertySetRedirector
+fn build_accessor_set_redirector(
+    ec: &mut EmitContext,
+    accessor_name: NodeId,
+    modifiers: Option<tsgo_ast::ModifierList>,
+) -> NodeId {
+    let backing_name = new_accessor_backing_name(ec, accessor_name);
+    let value_param_name = ec.arena_mut().new_identifier("value");
+    let value_param =
+        ec.arena_mut()
+            .new_parameter_declaration(None, None, value_param_name, None, None, None);
+    let this = ec.arena_mut().new_keyword_expression(Kind::ThisKeyword);
+    let access = ec
+        .arena_mut()
+        .new_property_access_expression(this, None, backing_name);
+    let value_ref = ec.arena_mut().new_identifier("value");
+    let equals = ec.arena_mut().new_token(Kind::EqualsToken);
+    let assignment = ec
+        .arena_mut()
+        .new_binary_expression(access, equals, value_ref);
+    let stmt = ec.arena_mut().new_expression_statement(assignment);
+    let body = ec.arena_mut().new_block(NodeList::new(vec![stmt]));
+    ec.arena_mut().new_accessor_declaration(
+        Kind::SetAccessor,
+        modifiers,
+        accessor_name,
+        None,
+        NodeList::new(vec![value_param]),
+        None,
+        None,
+        Some(body),
+    )
 }
 
 /// Builds a `C.<name> = <initializer>;` assignment statement referencing the
@@ -285,6 +785,23 @@ fn make_static_assignment(
     let equals = arena.new_token(Kind::EqualsToken);
     let assignment = arena.new_binary_expression(target, equals, initializer);
     arena.new_expression_statement(assignment)
+}
+
+/// Builds a `<temp>.<name> = <initializer>` assignment *expression* (no trailing
+/// statement) for a static field in the class-expression comma-sequence form,
+/// where `<temp>` is the wrapper temp holding the class value (`_a.x = 1`).
+///
+/// Side effects: pushes the access/assignment nodes.
+// Go: internal/transformers/estransforms/classfields.go:transformPropertyOrClassStaticBlock (static, temp receiver)
+fn make_temp_static_assignment(
+    arena: &mut NodeArena,
+    temp: NodeId,
+    field_name: NodeId,
+    initializer: NodeId,
+) -> NodeId {
+    let target = arena.new_property_access_expression(temp, None, field_name);
+    let equals = arena.new_token(Kind::EqualsToken);
+    arena.new_binary_expression(target, equals, initializer)
 }
 
 /// A class-scoped private environment: maps each private field name (`#x`) to

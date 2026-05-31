@@ -1,0 +1,23 @@
+[package]
+name = "tsgo_ls_lsconv"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tsgo_bundled = { path = "../../bundled" }
+tsgo_core = { path = "../../core" }
+tsgo_lsproto = { path = "../../lsp/lsproto" }
+tsgo_tspath = { path = "../../tspath" }
+# DEFER(phase-7): diagnostic-conversion dependencies intentionally omitted for now.
+# blocked-by: ast::Diagnostic not ported (so tsgo_ast, tsgo_diagnostics,
+# tsgo_locale, tsgo_collections), and diagnosticwriter's
+# write_flattened_ast_diagnostic_message is itself deferred on ast::Diagnostic.
+# Re-add `tsgo_ast`, `tsgo_diagnostics`, `tsgo_diagnosticwriter`, `tsgo_locale`,
+# `tsgo_collections` when DiagnosticToLSP{Pull,Push}/diagnostic_to_lsp land.
+
+[dev-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150" }

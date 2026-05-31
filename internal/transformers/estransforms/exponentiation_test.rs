@@ -46,3 +46,19 @@ fn exponentiation_assignment_to_element_access_hoists_temps() {
         "var _a, _b;\n(_a = a)[_b = x] = Math.pow(_a[_b], b);",
     );
 }
+
+// Go: internal/printer/emitcontext.go:EmitContext.VisitFunctionBody (per-scope variable environment)
+// 6i: a `**=` whose property-access target needs a hoisted temp inside a
+// function body must hoist its `var _a;` INTO that function's body, not at
+// module top. Before 6i this was DEFER'd (left verbatim) because the arena-only
+// descent into non-top-level scopes had no active variable environment.
+//
+// The body prints single-line (synthesized `Block`, no `Block.MultiLine`, as in
+// 6c-1); the behavior under test is that `var _a;` lands inside `f`'s braces.
+#[test]
+fn property_assignment_inside_function_body_hoists_into_body() {
+    check_downlevel(
+        "function f() { a.x **= b; }",
+        "function f() { var _a; (_a = a).x = Math.pow(_a.x, b); }",
+    );
+}

@@ -27,22 +27,24 @@ pub mod types;
 #[path = "test_support.rs"]
 mod test_support;
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tsgo_ast::NodeId;
+use tsgo_ast::{CheckFlags, NodeId};
+use tsgo_core::compileroptions::CompilerOptions;
+use tsgo_core::tristate::Tristate;
 
 use emit_resolver::EmitResolver;
-use program::BoundProgram;
+use program::{default_compiler_options, BoundProgram};
 use relations::RelationCache;
 use signatures::{IndexInfo, IndexInfoArena, IndexInfoId, Signature, SignatureArena, SignatureId};
 use symbols::{
     DeclaredTypeLinks, SymbolLinks, SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
 };
 use types::{
-    IntrinsicType, LiteralType, LiteralValue, ObjectFlags, ObjectType, Type, TypeArena, TypeData,
-    TypeFlags, TypeId, TypeParameter, UnionType,
+    IntersectionType, IntrinsicType, LiteralType, LiteralValue, ObjectFlags, ObjectType, Type,
+    TypeArena, TypeData, TypeFlags, TypeId, TypeParameter, UnionType,
 };
 
 /// The bound program a checker retains (Go's `c.program` pointer field).
@@ -57,6 +59,52 @@ impl std::fmt::Debug for RetainedProgram {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("BoundProgram")
     }
+}
+
+/// High bit set on the [`SymbolId`] of a checker-synthesized symbol, so its id
+/// space never collides with the program's binder symbol ids (those index a
+/// `Vec` and are always small). A program symbol id is recognized by this bit
+/// being clear.
+///
+/// DIVERGENCE(port): Go mints transient symbols from a per-checker `symbolArena`
+/// of `*ast.Symbol` pointers (`newSymbol`), so identity is the pointer and there
+/// is no shared id space with binder symbols. Rust addresses both binder and
+/// synthesized symbols by `SymbolId`; tagging the high bit keeps the two spaces
+/// disjoint while letting one `SymbolId` type flow through the checker.
+// Go: internal/checker/checker.go:Checker.symbolArena / newSymbol
+const SYNTHESIZED_SYMBOL_TAG: u32 = 1 << 31;
+
+/// Reports whether `id` addresses a checker-synthesized (transient) symbol
+/// rather than a binder/program symbol.
+// Go: internal/checker/checker.go:Checker.newSymbol (SymbolFlagsTransient marker)
+pub(crate) fn is_synthesized_symbol(id: symbols::SymbolId) -> bool {
+    id.0 & SYNTHESIZED_SYMBOL_TAG != 0
+}
+
+/// A checker-minted transient property symbol (Go's `newSymbolEx` result plus
+/// the slice of its `valueSymbolLinks` that union/intersection property
+/// synthesis populates: `containingType` and the combined `resolvedType`).
+///
+/// DIVERGENCE(port): Go computes the combined property type *eagerly* inside
+/// `createUnionOrIntersectionProperty` (it has `*Checker`). Here the minting
+/// entry point [`get_property_of_type`](crate::get_property_of_type) is a
+/// `&Checker`, so the symbol is minted via interior mutability and its type is
+/// resolved lazily on the first `get_type_of_symbol` (which has `&mut Checker`
+/// and the program). The result is identical and keyed by the symbol id.
+#[derive(Debug)]
+struct SynthesizedSymbol {
+    /// Symbol meaning flags (always carries `SymbolFlags::TRANSIENT`).
+    flags: symbols::SymbolFlags,
+    /// Checker-time flags (e.g. `CheckFlags::SYNTHETIC_PROPERTY`).
+    #[allow(dead_code)]
+    check_flags: CheckFlags,
+    /// The property name.
+    name: String,
+    /// The union/intersection type this property was synthesized from (Go's
+    /// `valueSymbolLinks.containingType`).
+    containing_type: TypeId,
+    /// The combined property type, computed lazily on first resolution.
+    resolved_type: Option<TypeId>,
 }
 
 /// The TypeScript type checker.
@@ -96,12 +144,26 @@ pub struct Checker {
     /// Interned union types, keyed by their sorted constituent ids (Go uses a
     /// hashed `CacheHashKey`; the sorted id vector is an equivalent stable key).
     union_types: FxHashMap<Vec<TypeId>, TypeId>,
+    /// Interned intersection types, keyed by their sorted constituent ids (Go
+    /// uses a hashed `getIntersectionKey`; the sorted id vector is an equivalent
+    /// stable key, mirroring the union intern map).
+    intersection_types: FxHashMap<Vec<TypeId>, TypeId>,
     /// Lazily-built declared types for interface/class/enum symbols.
     declared_type_links: SymbolLinks<DeclaredTypeLinks>,
     /// Lazily-built declared types for type-alias symbols.
     type_alias_links: SymbolLinks<TypeAliasLinks>,
     /// Lazily-computed types of value/property symbols.
     value_symbol_links: SymbolLinks<ValueSymbolLinks>,
+    /// Checker-owned arena of synthesized (transient) symbols minted during
+    /// union/intersection property synthesis (Go's `symbolArena` + `newSymbol`).
+    /// Wrapped in `RefCell` so the `&Checker` `get_property_of_type` entry point
+    /// can mint without changing its (compiler-relied-upon) shared signature.
+    synthesized_symbols: RefCell<Vec<SynthesizedSymbol>>,
+    /// Per-`(containing type, name)` cache of synthesized properties, so a
+    /// repeated lookup returns the same symbol id (Go's
+    /// `unionOrIntersectionType.propertyCache`). `None` records a definitively
+    /// absent property.
+    synthesized_property_cache: RefCell<FxHashMap<(TypeId, String), Option<symbols::SymbolId>>>,
     /// Owns every [`Signature`] this checker creates.
     signatures: SignatureArena,
     /// Owns every [`IndexInfo`] this checker creates.
@@ -112,9 +174,12 @@ pub struct Checker {
     instantiation_depth: u32,
     /// Total `instantiate_type` calls for the current statement (Go's `instantiationCount`).
     instantiation_count: u32,
-    /// Diagnostics recorded while checking (Go accumulates into a per-file
-    /// `DiagnosticsCollection`; 4g keeps a flat list for the single stub file).
-    diagnostics: Vec<check::Diagnostic>,
+    /// Diagnostics recorded while checking, partitioned by the source-file
+    /// handle (`BoundProgram::file_handle`) they were produced for, so
+    /// [`Checker::get_diagnostics`] returns only one file's diagnostics (Go's
+    /// per-file `DiagnosticsCollection` / `collection.GetDiagnosticsForFile`).
+    /// Each file's `Vec` preserves production order.
+    diagnostics_by_file: FxHashMap<NodeId, Vec<check::Diagnostic>>,
     /// The `JSX.IntrinsicElements` type, used to resolve intrinsic (lowercase)
     /// JSX tags. Resolved from lib globals in Go; until those land (P6) callers
     /// inject it via [`Checker::set_jsx_intrinsic_elements`].
@@ -286,15 +351,18 @@ impl Checker {
             symbol_reference_links: SymbolLinks::default(),
             global_types: FxHashMap::default(),
             union_types,
+            intersection_types: FxHashMap::default(),
             declared_type_links: SymbolLinks::default(),
             type_alias_links: SymbolLinks::default(),
             value_symbol_links: SymbolLinks::default(),
+            synthesized_symbols: RefCell::new(Vec::new()),
+            synthesized_property_cache: RefCell::new(FxHashMap::default()),
             signatures: SignatureArena::new(),
             index_infos: IndexInfoArena::new(),
             relations: RelationCache::default(),
             instantiation_depth: 0,
             instantiation_count: 0,
-            diagnostics: Vec::new(),
+            diagnostics_by_file: FxHashMap::default(),
             jsx_intrinsic_elements: None,
             emit_resolver: OnceCell::new(),
             program: None,
@@ -371,6 +439,72 @@ impl Checker {
         self.program.as_ref().map(|p| p.0.as_ref())
     }
 
+    /// Returns the compiler options the checker was constructed with (Go's
+    /// `c.compilerOptions`, read from `program.Options()` in `NewChecker`).
+    ///
+    /// An intrinsic-only checker (built via [`Checker::new`], no program) and a
+    /// program that does not carry options both report the all-defaults
+    /// [`CompilerOptions`].
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// use tsgo_core::tristate::Tristate;
+    /// // An intrinsic-only checker reports all-defaults options.
+    /// assert_eq!(Checker::new().compiler_options().strict_null_checks, Tristate::Unknown);
+    /// ```
+    ///
+    /// Side effects: none (a read-only view).
+    // Go: internal/checker/checker.go:NewChecker (c.compilerOptions = program.Options())
+    pub fn compiler_options(&self) -> &CompilerOptions {
+        match self.program() {
+            Some(program) => program.compiler_options(),
+            None => default_compiler_options(),
+        }
+    }
+
+    /// Resolves a `strict`-family option: an explicit per-option tri-state wins,
+    /// otherwise the option is enabled iff `strict` is not explicitly false
+    /// (Go's `compilerOptions.GetStrictOptionValue`, the rule `NewChecker` uses
+    /// to derive `c.strictNullChecks`/`c.strictFunctionTypes`/...).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// use tsgo_core::tristate::Tristate;
+    /// let c = Checker::new();
+    /// // An explicit per-option `false` wins even when `strict` is unset.
+    /// assert!(!c.get_strict_option_value(Tristate::False));
+    /// // An explicit per-option `true` wins.
+    /// assert!(c.get_strict_option_value(Tristate::True));
+    /// // With `strict` unset, an unset value follows `strict != false` -> enabled.
+    /// assert!(c.get_strict_option_value(Tristate::Unknown));
+    /// ```
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/core/compileroptions.go:GetStrictOptionValue
+    pub fn get_strict_option_value(&self, value: Tristate) -> bool {
+        self.compiler_options().get_strict_option_value(value)
+    }
+
+    /// Reports whether `strictNullChecks` is in effect (Go's `c.strictNullChecks`,
+    /// `= compilerOptions.GetStrictOptionValue(compilerOptions.StrictNullChecks)`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// // With all-defaults options, the `strict != false` rule enables it
+    /// // (faithful to Go's `GetStrictOptionValue`); a real program resolves
+    /// // `strict`/`strictNullChecks` explicitly.
+    /// assert!(Checker::new().strict_null_checks());
+    /// ```
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/checker.go:NewChecker (c.strictNullChecks)
+    pub fn strict_null_checks(&self) -> bool {
+        self.get_strict_option_value(self.compiler_options().strict_null_checks)
+    }
+
     /// Clones the shared handle to the retained program, if any.
     ///
     /// Returning an owned `Rc` lets a `&mut self` driver (e.g.
@@ -386,6 +520,98 @@ impl Checker {
     // Go: internal/checker/checker.go:Checker.checkSourceFile (links.typeChecked)
     pub(crate) fn mark_file_checked(&mut self, file: NodeId) -> bool {
         self.checked_files.insert(file)
+    }
+
+    /// Resolves `name` in the retained program's global scope, keeping only a
+    /// symbol whose flags intersect `meaning`.
+    ///
+    /// This is the global-only resolution Go performs as
+    /// `getGlobalSymbol(name, meaning)` → `resolveName(nil, name, meaning, ...)`:
+    /// with no `location`, the scope-chain walk is skipped and only the merged
+    /// global table (`c.globals`, exposed here by [`BoundProgram::globals`]) is
+    /// consulted. Returns `None` when there is no retained program, the program
+    /// exposes no globals, the name is absent, or its meaning does not match.
+    ///
+    /// blocked-by: lib.d.ts loading + cross-file global merge (P6). Until then
+    /// the globals come from a script source file's top-level declarations
+    /// (synthetic globals driven through the test harness).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// use tsgo_ast::SymbolFlags;
+    /// // An intrinsic-only checker has no program, hence no globals.
+    /// assert!(Checker::new().get_global_symbol("g", SymbolFlags::VALUE).is_none());
+    /// ```
+    ///
+    /// Side effects: none (a read-only lookup over the bound program).
+    // Go: internal/checker/checker.go:Checker.getGlobalSymbol
+    pub fn get_global_symbol(
+        &self,
+        name: &str,
+        meaning: symbols::SymbolFlags,
+    ) -> Option<symbols::SymbolId> {
+        let program = self.program()?;
+        let globals = program.globals()?;
+        let &symbol = globals.get(name)?;
+        if program.symbol(symbol).flags.intersects(meaning) {
+            Some(symbol)
+        } else {
+            None
+        }
+    }
+
+    /// Resolves the global TYPE named `name` from the retained program's globals
+    /// and builds (and caches) its declared type.
+    ///
+    /// This is the convenience entry standing in for Go's
+    /// `getGlobalType(name, arity, reportErrors)` driven off the retained
+    /// program: it looks `name` up among the program globals (a type-meaning
+    /// symbol) and delegates to [`declared_types::get_global_type`] to build the
+    /// declared type. Returns `None` when there is no program, no globals, or
+    /// the name is not a global type.
+    ///
+    /// blocked-by: lib.d.ts loading (P6). The real `getGlobalType` also performs
+    /// type-parameter arity checking and reports `Cannot_find_global_type_0`,
+    /// returning `emptyObjectType`/`emptyGenericType` fallbacks; those need the
+    /// empty-object/generic types and diagnostics wiring of the full checker.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// // An intrinsic-only checker has no program, hence no global types.
+    /// assert!(Checker::new().get_global_type("Array").is_none());
+    /// ```
+    ///
+    /// Side effects: may build a declared type and populate the global-type
+    /// cache.
+    // Go: internal/checker/checker.go:Checker.getGlobalType
+    pub fn get_global_type(&mut self, name: &str) -> Option<TypeId> {
+        if let Some(&cached) = self.global_types.get(name) {
+            return Some(cached);
+        }
+        let program = self.retained_program()?;
+        // Resolve the global symbol, then build its declared type against the
+        // view of the file that DECLARES it (a multi-file program may declare
+        // `String` in a lib file other than the one being checked). For a
+        // single-file program the owning view is the program itself.
+        let symbol = *program.globals()?.get(name)?;
+        let view = program
+            .view_for_symbol(symbol)
+            .unwrap_or_else(|| Rc::clone(&program));
+        let t = {
+            let globals = view.globals()?;
+            declared_types::get_global_type(self, view.as_ref(), name, globals)?
+        };
+        // Warm the wrapper's member types against the OWNING view, so a later
+        // cross-file property access (resolved while checking a *different*
+        // file's view) hits the per-symbol type cache instead of reading the
+        // member's declaration node through the wrong file's arena.
+        for (_, prop) in declared_types::get_properties_of_type(self, t) {
+            let globals = view.globals();
+            let _ = declared_types::get_type_of_symbol(self, view.as_ref(), prop, globals);
+        }
+        Some(t)
     }
 
     /// Allocates a new type, clearing the cache-only object flags that Go's
@@ -476,6 +702,12 @@ impl Checker {
                 .map(|&member| self.type_to_string(member))
                 .collect::<Vec<_>>()
                 .join(" | "),
+            TypeData::Intersection(d) => d
+                .types
+                .iter()
+                .map(|&member| self.type_to_string(member))
+                .collect::<Vec<_>>()
+                .join(" & "),
             // DEFER(phase-4-checker-4j): named/structural object and type-parameter
             // printing needs the node builder plus access to the symbol's name
             // (which lives in the program, not the checker). 4c/4d emit
@@ -511,6 +743,119 @@ impl Checker {
         )
     }
 
+    /// Mints a synthesized (transient) property symbol carrying `name`,
+    /// `flags`, and `check_flags`, recording the union/intersection
+    /// `containing_type` it was synthesized from, and returns its tagged
+    /// [`SymbolId`].
+    ///
+    /// Callable through a shared `&Checker` (interior mutability) so the
+    /// `get_property_of_type` entry point can mint without a `&mut` signature —
+    /// the analog of Go's `newSymbolEx`, which mutates the checker's symbol
+    /// arena from within `createUnionOrIntersectionProperty`.
+    ///
+    /// Side effects: pushes a symbol into the synthesized-symbol arena.
+    // Go: internal/checker/checker.go:Checker.newSymbolEx
+    pub(crate) fn new_synthesized_property(
+        &self,
+        name: &str,
+        flags: symbols::SymbolFlags,
+        check_flags: CheckFlags,
+        containing_type: TypeId,
+    ) -> symbols::SymbolId {
+        let mut arena = self.synthesized_symbols.borrow_mut();
+        let index = arena.len() as u32;
+        arena.push(SynthesizedSymbol {
+            flags: flags | symbols::SymbolFlags::TRANSIENT,
+            check_flags,
+            name: name.to_string(),
+            containing_type,
+            resolved_type: None,
+        });
+        symbols::SymbolId(SYNTHESIZED_SYMBOL_TAG | index)
+    }
+
+    // Returns the arena index encoded in a synthesized symbol id.
+    fn synthesized_index(id: symbols::SymbolId) -> usize {
+        (id.0 & !SYNTHESIZED_SYMBOL_TAG) as usize
+    }
+
+    /// Returns the cached synthesized property for `(containing, name)`:
+    /// `Some(Some(id))` for a hit, `Some(None)` for a known-absent property, and
+    /// `None` when nothing has been computed yet.
+    // Go: internal/checker/checker.go:Checker.getUnionOrIntersectionProperty (cache read)
+    pub(crate) fn cached_synthesized_property(
+        &self,
+        containing: TypeId,
+        name: &str,
+    ) -> Option<Option<symbols::SymbolId>> {
+        self.synthesized_property_cache
+            .borrow()
+            .get(&(containing, name.to_string()))
+            .copied()
+    }
+
+    /// Records the synthesized-property lookup result for `(containing, name)`.
+    // Go: internal/checker/checker.go:Checker.getUnionOrIntersectionProperty (cache write)
+    pub(crate) fn cache_synthesized_property(
+        &self,
+        containing: TypeId,
+        name: &str,
+        prop: Option<symbols::SymbolId>,
+    ) {
+        self.synthesized_property_cache
+            .borrow_mut()
+            .insert((containing, name.to_string()), prop);
+    }
+
+    /// Returns a synthesized symbol's meaning flags.
+    // Go: internal/ast/symbol.go:Symbol.Flags
+    pub(crate) fn synthesized_symbol_flags(&self, id: symbols::SymbolId) -> symbols::SymbolFlags {
+        self.synthesized_symbols.borrow()[Self::synthesized_index(id)].flags
+    }
+
+    /// Returns a synthesized property's name.
+    pub(crate) fn synthesized_symbol_name(&self, id: symbols::SymbolId) -> String {
+        self.synthesized_symbols.borrow()[Self::synthesized_index(id)]
+            .name
+            .clone()
+    }
+
+    /// Returns the containing union/intersection type a synthesized property was
+    /// minted from (Go's `valueSymbolLinks.containingType`).
+    pub(crate) fn synthesized_symbol_containing_type(&self, id: symbols::SymbolId) -> TypeId {
+        self.synthesized_symbols.borrow()[Self::synthesized_index(id)].containing_type
+    }
+
+    /// Returns a synthesized property's cached combined type, if resolved.
+    pub(crate) fn synthesized_symbol_resolved_type(&self, id: symbols::SymbolId) -> Option<TypeId> {
+        self.synthesized_symbols.borrow()[Self::synthesized_index(id)].resolved_type
+    }
+
+    /// Caches a synthesized property's combined type after lazy resolution.
+    pub(crate) fn set_synthesized_symbol_resolved_type(
+        &mut self,
+        id: symbols::SymbolId,
+        t: TypeId,
+    ) {
+        self.synthesized_symbols.borrow_mut()[Self::synthesized_index(id)].resolved_type = Some(t);
+    }
+
+    /// Returns the meaning flags of `id`, routing synthesized ids to the
+    /// checker's transient arena and program ids to the bound program. This is
+    /// the synthesized-aware analog of `program.symbol(id).flags`.
+    // Go: internal/ast/symbol.go:Symbol.Flags (transient symbols live on the checker)
+    pub(crate) fn resolved_symbol_flags(
+        &self,
+        program: &dyn BoundProgram,
+        id: symbols::SymbolId,
+    ) -> symbols::SymbolFlags {
+        if is_synthesized_symbol(id) {
+            self.synthesized_symbol_flags(id)
+        } else {
+            program.symbol(id).flags
+        }
+    }
+
     /// Creates a generic type reference: the instantiation `target<args>`.
     ///
     /// The reference shares `target`'s members (property *symbols* are the
@@ -541,6 +886,41 @@ impl Checker {
             ..Default::default()
         };
         self.new_object_type(ObjectFlags::REFERENCE, None, object)
+    }
+
+    /// Creates a fixed-arity tuple type (`[A, B]`) carrying its element types by
+    /// position.
+    ///
+    /// Go represents a tuple as a type reference to a generated/global tuple
+    /// target whose type arguments are the element types; the fixed-arity subset
+    /// here stores the positional element types directly on a `TUPLE`-flagged
+    /// object type (`resolved_type_arguments`), which supports element access by
+    /// a literal index without the full generated-target machinery.
+    ///
+    /// DEFER(phase-4-checker-4ae+): the generated tuple target with
+    /// `TupleElementInfo` (variadic/optional/labeled/rest), `length`/`[number]`
+    /// members, and tuple-to-array assignability.
+    /// blocked-by: `createNormalizedTupleType` + `getTupleTargetType` + tuple
+    /// element flags.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{Checker, ObjectFlags};
+    /// let mut c = Checker::new();
+    /// let t = c.create_tuple_type(vec![c.string_type(), c.number_type()]);
+    /// let obj = c.get_type(t).as_object().unwrap();
+    /// assert_eq!(obj.resolved_type_arguments, vec![c.string_type(), c.number_type()]);
+    /// assert!(c.get_type(t).object_flags().contains(ObjectFlags::TUPLE));
+    /// ```
+    ///
+    /// Side effects: mutates the checker's type arena.
+    // Go: internal/checker/checker.go:Checker.createTupleType / createNormalizedTupleType
+    pub fn create_tuple_type(&mut self, element_types: Vec<TypeId>) -> TypeId {
+        let object = ObjectType {
+            resolved_type_arguments: element_types,
+            ..Default::default()
+        };
+        self.new_object_type(ObjectFlags::TUPLE, None, object)
     }
 
     /// Allocates an object/interface/class type with the given object flags and
@@ -664,6 +1044,209 @@ impl Checker {
     pub fn get_union_type(&mut self, members: &[TypeId]) -> TypeId {
         intern_union(&mut self.types, &mut self.union_types, members.to_vec())
             .unwrap_or(self.never_type)
+    }
+
+    /// Returns the intersection of `members`, interned so equal intersections
+    /// share an id.
+    ///
+    /// 4v implements the reachable core of Go's `getIntersectionType`: nested
+    /// intersections are flattened, fresh literals normalized to regular, and
+    /// constituents deduplicated (`addTypeToIntersection`); then the basic
+    /// reductions apply — `never` short-circuits (`A & never` => `never`),
+    /// `unknown` is dropped, `any` short-circuits to `any`, an empty set is
+    /// [`unknown`](Checker::unknown_type), and a single member collapses to
+    /// itself. Otherwise the result is an interned [`TypeData::Intersection`].
+    ///
+    /// A union constituent triggers distribution: `X & (A | B)` normalizes to
+    /// `(X & A) | (X & B)` via the cross-product of all constituents (Go's
+    /// `getCrossProductIntersections`).
+    ///
+    /// Disjoint-domain constituents reduce to [`never`](Checker::never_type)
+    /// (e.g. `string & number`, `object & string`) via the non-strict subset of
+    /// Go's `TypeFlagsDisjointDomains` guard.
+    ///
+    /// DEFER(phase-4-checker-later): the unit-type reduction (two distinct unit
+    /// types => `never`), supertype reduction, the type-variable constraint
+    /// reduction, and the strictNullChecks undefined/null + `Nullable & Object`
+    /// and divide-and-conquer fast paths of the distribution are not yet ported.
+    /// blocked-by: those need apparent-type/constraint machinery, unit/literal
+    /// type construction, and the strictNullChecks-specific reductions beyond
+    /// this round's reach.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// let mut c = Checker::new();
+    /// let a = c.new_type_parameter(None);
+    /// let b = c.new_type_parameter(None);
+    /// // The same constituents intern to one id.
+    /// let ab = c.get_intersection_type(&[a, b]);
+    /// assert_eq!(c.get_intersection_type(&[a, b]), ab);
+    /// // A single member collapses; an empty intersection is `unknown`.
+    /// assert_eq!(c.get_intersection_type(&[a]), a);
+    /// assert_eq!(c.get_intersection_type(&[]), c.unknown_type());
+    /// ```
+    ///
+    /// Side effects: may allocate a new intersection type and update the intern
+    /// cache.
+    // Go: internal/checker/checker.go:Checker.getIntersectionType
+    pub fn get_intersection_type(&mut self, members: &[TypeId]) -> TypeId {
+        let mut type_set: Vec<TypeId> = Vec::new();
+        let mut includes = TypeFlags::empty();
+        for &t in members {
+            includes = self.add_type_to_intersection(&mut type_set, includes, t);
+        }
+        // Go: an intersection that includes `never` is the empty intersection.
+        if includes.contains(TypeFlags::NEVER) {
+            if type_set.contains(&self.silent_never_type) {
+                return self.silent_never_type;
+            }
+            return self.never_type;
+        }
+        // Go: an intersection spanning two disjoint domains is empty (`never`).
+        // A non-primitive (`object`), string-like, number-like, bigint-like,
+        // ES-symbol-like, or void-like type intersected with a member from any
+        // *other* disjoint domain cannot have a value, e.g. `string & number`.
+        // (The strictNullChecks `Nullable & Object` clause and the unit-type
+        // reduction are DEFER'd — see `add_type_to_intersection`.)
+        if is_disjoint_domain_intersection(includes) {
+            return self.never_type;
+        }
+        // Go: `any` short-circuits. The `wildcard` sub-case is unreachable
+        // (no wildcard type is constructed yet); `error` is preserved.
+        if includes.contains(TypeFlags::ANY) {
+            if includes.contains(TypeFlags::INCLUDES_ERROR) {
+                return self.error_type;
+            }
+            return self.any_type;
+        }
+        // Go: an empty intersection is `unknown`; a single member collapses.
+        if type_set.is_empty() {
+            return self.unknown_type;
+        }
+        if type_set.len() == 1 {
+            return type_set[0];
+        }
+        // Go: union distribution. When a constituent is a union, normalize
+        // `X & (A | B)` into `(X & A) | (X & B)` by intersecting every
+        // combination of the union members (the cross-product) and unioning the
+        // non-`never` results. The strictNullChecks undefined/null fast paths
+        // and the divide-and-conquer optimization for 3+ constituents are
+        // DEFER'd; this is the core `default` cross-product branch.
+        if includes.contains(TypeFlags::UNION) {
+            let constituents = self.get_cross_product_intersections(&type_set);
+            return self.get_union_type(&constituents);
+        }
+        intern_intersection(&mut self.types, &mut self.intersection_types, type_set)
+    }
+
+    // Builds the cross-product of intersections for a constituent set in which
+    // at least one member is a union: each combination picks one member from
+    // every union constituent (and keeps the non-union ones), then intersects
+    // that combination. `never` combinations are dropped.
+    // Go: internal/checker/checker.go:Checker.getCrossProductIntersections
+    fn get_cross_product_intersections(&mut self, types: &[TypeId]) -> Vec<TypeId> {
+        let count = self.get_cross_product_union_size(types);
+        let mut intersections: Vec<TypeId> = Vec::new();
+        for i in 0..count {
+            let mut constituents = types.to_vec();
+            let mut n = i;
+            for j in (0..types.len()).rev() {
+                if self.get_type(types[j]).flags().contains(TypeFlags::UNION) {
+                    let source_types = self
+                        .get_type(types[j])
+                        .union_types()
+                        .unwrap_or(&[])
+                        .to_vec();
+                    let length = source_types.len();
+                    constituents[j] = source_types[n % length];
+                    n /= length;
+                }
+            }
+            let t = self.get_intersection_type(&constituents);
+            if !self.get_type(t).flags().contains(TypeFlags::NEVER) {
+                intersections.push(t);
+            }
+        }
+        intersections
+    }
+
+    // Returns the number of constituents the cross-product union would have:
+    // the product of every union constituent's member count, or 0 if any
+    // constituent is `never`.
+    // Go: internal/checker/checker.go:Checker.getCrossProductUnionSize
+    fn get_cross_product_union_size(&self, types: &[TypeId]) -> usize {
+        let mut size = 1usize;
+        for &t in types {
+            let flags = self.get_type(t).flags();
+            if flags.contains(TypeFlags::UNION) {
+                size *= self.get_type(t).union_types().map_or(1, |u| u.len());
+            } else if flags.contains(TypeFlags::NEVER) {
+                return 0;
+            }
+        }
+        size
+    }
+
+    // Adds `t` to an intersection's constituent set, flattening nested
+    // intersections, normalizing fresh literals to their regular form,
+    // dropping duplicates, and accumulating the `includes` flags used by the
+    // reductions in [`Checker::get_intersection_type`].
+    //
+    // DEFER(phase-4-checker-later): the empty-anonymous-object special case,
+    // the `missingType` rewrite, and the distinct-unit-types reduction (Go ORs
+    // in `NonPrimitive` to force an empty intersection).
+    // blocked-by: empty-object/missing-type construction and the disjoint-domain
+    // reductions are out of this round's reach.
+    // Go: internal/checker/checker.go:Checker.addTypeToIntersection
+    fn add_type_to_intersection(
+        &self,
+        type_set: &mut Vec<TypeId>,
+        mut includes: TypeFlags,
+        t: TypeId,
+    ) -> TypeFlags {
+        // Go: getRegularTypeOfLiteralType — a fresh literal joins as its regular
+        // counterpart so `"a" & T` interns identically to a declared `"a"`.
+        let t = self.regular_type_of_literal_type(t);
+        let flags = self.get_type(t).flags();
+        if flags.contains(TypeFlags::INTERSECTION) {
+            let nested = self
+                .get_type(t)
+                .intersection_types()
+                .unwrap_or(&[])
+                .to_vec();
+            for n in nested {
+                includes = self.add_type_to_intersection(type_set, includes, n);
+            }
+            return includes;
+        }
+        if flags.intersects(TypeFlags::ANY_OR_UNKNOWN) {
+            // `any`/`unknown` are not added to the set: `unknown` is the
+            // intersection identity and drops out; `any` short-circuits later.
+            if t == self.error_type {
+                includes |= TypeFlags::INCLUDES_ERROR;
+            }
+        } else if !flags.intersects(TypeFlags::NULLABLE) {
+            // strictNullChecks is not yet wired; under non-strict semantics a
+            // nullable constituent is dropped (Go's `flags&Nullable == 0`).
+            if !type_set.contains(&t) {
+                type_set.push(t);
+            }
+        }
+        includes |= flags & TypeFlags::INCLUDES_MASK;
+        includes
+    }
+
+    // Normalizes a fresh literal type to its regular counterpart (Go's
+    // `getRegularTypeOfLiteralType` for the fresh/regular literal pair).
+    // Go: internal/checker/checker.go:Checker.getRegularTypeOfLiteralType
+    fn regular_type_of_literal_type(&self, t: TypeId) -> TypeId {
+        if let TypeData::Literal(d) = &self.get_type(t).data {
+            if d.fresh_type == Some(t) {
+                return d.regular_type.unwrap_or(t);
+            }
+        }
+        t
     }
 
     /// Sets the `JSX.IntrinsicElements` type used to resolve intrinsic JSX tags.
@@ -978,6 +1561,58 @@ fn intern_union(
             Some(id)
         }
     }
+}
+
+// Reports whether an intersection's accumulated `includes` flags span two
+// disjoint domains, which makes the intersection empty (`never`). Mirrors the
+// non-strictNullChecks subset of Go's guard in `getIntersectionTypeEx`: for
+// each disjoint domain present, if any *other* disjoint domain is also present
+// the intersection is empty (e.g. `string & number`, `object & string`).
+//
+// The strictNullChecks-only `Nullable & (Object | NonPrimitive)` clause is not
+// included (strictNullChecks is not wired), and the unit-type reduction is
+// handled separately (DEFER'd) via `add_type_to_intersection`.
+// Go: internal/checker/checker.go:Checker.getIntersectionTypeEx (TypeFlagsDisjointDomains guard)
+fn is_disjoint_domain_intersection(includes: TypeFlags) -> bool {
+    use TypeFlags as F;
+    let dd = F::DISJOINT_DOMAINS;
+    let spans =
+        |domain: F| includes.intersects(domain) && includes.intersects(dd.difference(domain));
+    spans(F::NON_PRIMITIVE)
+        || spans(F::STRING_LIKE)
+        || spans(F::NUMBER_LIKE)
+        || spans(F::BIG_INT_LIKE)
+        || spans(F::ES_SYMBOL_LIKE)
+        || spans(F::VOID_LIKE)
+}
+
+/// Interns a multi-member intersection: id-sorts the constituents (for a stable
+/// key, mirroring the union sibling) and returns the cached id when present,
+/// else allocates a fresh [`TypeData::Intersection`].
+///
+/// The caller ([`Checker::get_intersection_type`]) has already flattened,
+/// deduplicated, and applied the trivial reductions, so `members` here always
+/// has at least two distinct constituents.
+// Go: internal/checker/checker.go:Checker.getIntersectionType (intern + newIntersectionType)
+fn intern_intersection(
+    types: &mut TypeArena,
+    cache: &mut FxHashMap<Vec<TypeId>, TypeId>,
+    mut members: Vec<TypeId>,
+) -> TypeId {
+    members.sort();
+    if let Some(&id) = cache.get(&members) {
+        return id;
+    }
+    let id = types.alloc(
+        TypeFlags::INTERSECTION,
+        ObjectFlags::empty(),
+        None,
+        TypeData::Intersection(IntersectionType {
+            types: members.clone(),
+        }),
+    );
+    cache.insert(members, id);
+    id
 }
 
 /// Renders a literal value as Go's `typeToString` would for its literal type.

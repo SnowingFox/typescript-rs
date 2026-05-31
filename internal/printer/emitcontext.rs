@@ -206,6 +206,53 @@ impl EmitContext {
         self.auto_generate.get(&name)
     }
 
+    /// Walks the auto-generate entries of `name` to find the root node a
+    /// node-based generated name should be generated from. Returns `name`
+    /// itself when it is not a node-based generated name.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/printer/emitcontext.go:EmitContext.GetNodeForGeneratedName
+    pub fn get_node_for_generated_name(&self, name: NodeId) -> NodeId {
+        if let Some(auto_generate) = self.auto_generate.get(&name) {
+            if auto_generate.flags.is_node() {
+                if let Some(node) = auto_generate.node {
+                    return self.get_node_for_generated_name_worker(node, auto_generate.id);
+                }
+            }
+        }
+        name
+    }
+
+    // Go: internal/printer/emitcontext.go:EmitContext.getNodeForGeneratedNameWorker
+    fn get_node_for_generated_name_worker(
+        &self,
+        mut node: NodeId,
+        auto_generate_id: AutoGenerateId,
+    ) -> NodeId {
+        let mut original = self.original(node);
+        while let Some(orig) = original {
+            node = orig;
+            if crate::printer::is_member_name(self.arena.kind(node)) {
+                // If `node` is a different generated name (a node-based name with
+                // a different id), stop traversing and use it.
+                match self.auto_generate.get(&node) {
+                    None => break,
+                    Some(info) => {
+                        if info.flags.is_node() && info.id != auto_generate_id {
+                            break;
+                        }
+                        if info.flags.is_node() {
+                            original = info.node;
+                            continue;
+                        }
+                    }
+                }
+            }
+            original = self.original(node);
+        }
+        node
+    }
+
     /// Allocates the next auto-generate id.
     ///
     /// Side effects: increments the internal counter.

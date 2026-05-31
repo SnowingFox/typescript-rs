@@ -1,4 +1,5 @@
 use super::*;
+use crate::URI;
 
 // === Union types: IntegerOrString / IntegerOrNull / DocumentUriOrNull ===
 
@@ -504,6 +505,282 @@ fn enum_symbolkind_strings() {
     assert_eq!(SymbolKind::FILE.to_string(), "File");
     assert_eq!(SymbolKind::FUNCTION.to_string(), "Function");
     assert_eq!(SymbolKind::VARIABLE.to_string(), "Variable");
+}
+
+// === String enums: PositionEncodingKind / LanguageKind ===
+
+// Go: lsp_generated.go:PositionEncodingKind (predefined values + JSON string round-trip)
+#[test]
+fn position_encoding_kind_consts_and_round_trip() {
+    assert_eq!(PositionEncodingKind::UTF8.0, "utf-8");
+    assert_eq!(PositionEncodingKind::UTF16.0, "utf-16");
+    assert_eq!(PositionEncodingKind::UTF32.0, "utf-32");
+    assert_eq!(
+        serde_json::to_string(&PositionEncodingKind::UTF16).unwrap(),
+        "\"utf-16\""
+    );
+    let k: PositionEncodingKind = serde_json::from_str("\"utf-8\"").unwrap();
+    assert_eq!(k, PositionEncodingKind::UTF8);
+}
+
+// Go: lsp_generated.go:LanguageKind (predefined values + JSON string round-trip)
+#[test]
+fn language_kind_consts_and_round_trip() {
+    assert_eq!(LanguageKind::TYPE_SCRIPT.0, "typescript");
+    assert_eq!(LanguageKind::TYPE_SCRIPT_REACT.0, "typescriptreact");
+    assert_eq!(LanguageKind::JAVA_SCRIPT.0, "javascript");
+    assert_eq!(LanguageKind::JAVA_SCRIPT_REACT.0, "javascriptreact");
+    assert_eq!(LanguageKind::JSON.0, "json");
+    // Go aliases several names onto a shared value.
+    assert_eq!(LanguageKind::DELPHI.0, "pascal");
+    assert_eq!(LanguageKind::PASCAL.0, "pascal");
+    assert_eq!(LanguageKind::PUG.0, "jade");
+    assert_eq!(LanguageKind::GIT_REBASE.0, "rebase");
+    assert_eq!(LanguageKind::VISUAL_BASIC.0, "vb");
+    // serde round-trips as a plain JSON string, including unknown ids.
+    assert_eq!(
+        serde_json::to_string(&LanguageKind::RUST).unwrap(),
+        "\"rust\""
+    );
+    let k: LanguageKind = serde_json::from_str("\"typescript\"").unwrap();
+    assert_eq!(k, LanguageKind::TYPE_SCRIPT);
+    let other: LanguageKind = serde_json::from_str("\"made-up\"").unwrap();
+    assert_eq!(other.0, "made-up");
+}
+
+// === Text document content changes ===
+
+// Go: lsp_generated.go:TextDocumentContentChangePartial (round-trip with all fields)
+#[test]
+fn text_change_partial_round_trip() {
+    let v = TextDocumentContentChangePartial {
+        range: Range {
+            start: Position {
+                line: 1,
+                character: 2,
+            },
+            end: Position {
+                line: 3,
+                character: 4,
+            },
+        },
+        range_length: Some(7),
+        text: "hi".to_string(),
+    };
+    let data = serde_json::to_vec(&v).unwrap();
+    let got: TextDocumentContentChangePartial = serde_json::from_slice(&data).unwrap();
+    assert_eq!(v, got);
+}
+
+// Go: .../TextDocumentContentChangePartial rejects null rangeLength
+#[test]
+fn text_change_partial_rejects_null_range_length() {
+    assert_null_rejected::<TextDocumentContentChangePartial>(
+        r#"{"range": {"start": {"line":0,"character":0}, "end": {"line":0,"character":0}}, "text": "", "rangeLength": null}"#,
+        "rangeLength",
+    );
+}
+
+// Go: .../TextDocumentContentChangePartial missing required text
+#[test]
+fn text_change_partial_missing_text() {
+    let err = serde_json::from_str::<TextDocumentContentChangePartial>(
+        r#"{"range": {"start": {"line":0,"character":0}, "end": {"line":0,"character":0}}}"#,
+    )
+    .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("missing required properties: text"));
+}
+
+// Go: lsp_generated.go:TextDocumentContentChangeWholeDocument (round-trip)
+#[test]
+fn text_change_whole_round_trip() {
+    let v = TextDocumentContentChangeWholeDocument {
+        text: "whole".to_string(),
+    };
+    let got: TextDocumentContentChangeWholeDocument =
+        serde_json::from_str(r#"{"text":"whole"}"#).unwrap();
+    assert_eq!(v, got);
+    assert_eq!(serde_json::to_string(&v).unwrap(), r#"{"text":"whole"}"#);
+}
+
+// Go: .../TextDocumentContentChangePartialOrWholeDocument (range present -> partial)
+#[test]
+fn text_change_union_partial_via_range() {
+    let v: TextDocumentContentChangePartialOrWholeDocument = serde_json::from_str(
+        r#"{"range": {"start": {"line":0,"character":0}, "end": {"line":0,"character":1}}, "text": "x"}"#,
+    )
+    .unwrap();
+    assert!(v.partial.is_some());
+    assert!(v.whole_document.is_none());
+    assert_eq!(v.partial.unwrap().text, "x");
+}
+
+// Go: .../TextDocumentContentChangePartialOrWholeDocument (no range -> whole document)
+#[test]
+fn text_change_union_whole_without_range() {
+    let v: TextDocumentContentChangePartialOrWholeDocument =
+        serde_json::from_str(r#"{"text": "whole"}"#).unwrap();
+    assert!(v.partial.is_none());
+    assert!(v.whole_document.is_some());
+    assert_eq!(v.whole_document.unwrap().text, "whole");
+}
+
+// Go: .../TextDocumentContentChangePartialOrWholeDocument marshal whole document
+#[test]
+fn text_change_union_marshal_whole() {
+    let v = TextDocumentContentChangePartialOrWholeDocument {
+        partial: None,
+        whole_document: Some(TextDocumentContentChangeWholeDocument {
+            text: "w".to_string(),
+        }),
+    };
+    assert_eq!(serde_json::to_string(&v).unwrap(), r#"{"text":"w"}"#);
+}
+
+// === Diagnostics ===
+
+// Go: lsp_generated.go:DiagnosticSeverity (String() values + JSON integer)
+#[test]
+fn diagnostic_severity_display_and_serde() {
+    assert_eq!(DiagnosticSeverity::ERROR.to_string(), "Error");
+    assert_eq!(DiagnosticSeverity::WARNING.to_string(), "Warning");
+    assert_eq!(DiagnosticSeverity::INFORMATION.to_string(), "Information");
+    assert_eq!(DiagnosticSeverity::HINT.to_string(), "Hint");
+    assert!(DiagnosticSeverity(99).to_string().contains("99"));
+    assert_eq!(
+        serde_json::to_string(&DiagnosticSeverity::WARNING).unwrap(),
+        "2"
+    );
+    let s: DiagnosticSeverity = serde_json::from_str("4").unwrap();
+    assert_eq!(s, DiagnosticSeverity::HINT);
+}
+
+// Go: lsp_generated.go:DiagnosticTag (String() values + JSON integer)
+#[test]
+fn diagnostic_tag_display_and_serde() {
+    assert_eq!(DiagnosticTag::UNNECESSARY.to_string(), "Unnecessary");
+    assert_eq!(DiagnosticTag::DEPRECATED.to_string(), "Deprecated");
+    assert!(DiagnosticTag(0).to_string().contains('0'));
+    assert_eq!(
+        serde_json::to_string(&DiagnosticTag::DEPRECATED).unwrap(),
+        "2"
+    );
+}
+
+// Go: lsp_generated.go:CodeDescription (round-trip)
+#[test]
+fn code_description_round_trip() {
+    let v: CodeDescription = serde_json::from_str(r#"{"href":"https://x/y"}"#).unwrap();
+    assert_eq!(v.href, URI("https://x/y".to_string()));
+    assert_eq!(
+        serde_json::to_string(&v).unwrap(),
+        r#"{"href":"https://x/y"}"#
+    );
+}
+
+// Go: .../CodeDescription missing required href
+#[test]
+fn code_description_missing_href() {
+    let err = serde_json::from_str::<CodeDescription>("{}").unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("missing required properties: href"));
+}
+
+// Go: lsp_generated.go:DiagnosticRelatedInformation (round-trip)
+#[test]
+fn diagnostic_related_information_round_trip() {
+    let v = DiagnosticRelatedInformation {
+        location: Location {
+            uri: DocumentUri("file:///a.ts".to_string()),
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 1,
+                },
+            },
+        },
+        message: "see here".to_string(),
+    };
+    let data = serde_json::to_vec(&v).unwrap();
+    let got: DiagnosticRelatedInformation = serde_json::from_slice(&data).unwrap();
+    assert_eq!(v, got);
+}
+
+// Go: lsp_generated.go:DiagnosticData (empty placeholder object)
+#[test]
+fn diagnostic_data_empty_object() {
+    let _v: DiagnosticData = serde_json::from_str("{}").unwrap();
+    assert_eq!(serde_json::to_string(&DiagnosticData).unwrap(), "{}");
+}
+
+// Go: lsp_generated.go:Diagnostic (round-trip with severity/code/tags/related)
+#[test]
+fn diagnostic_round_trip() {
+    let v = Diagnostic {
+        range: Range {
+            start: Position {
+                line: 1,
+                character: 2,
+            },
+            end: Position {
+                line: 1,
+                character: 6,
+            },
+        },
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: Some(IntegerOrString {
+            integer: Some(2304),
+            string: None,
+        }),
+        source: Some("ts".to_string()),
+        message: "Cannot find name".to_string(),
+        tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+        related_information: Some(vec![DiagnosticRelatedInformation {
+            location: Location {
+                uri: DocumentUri("file:///b.ts".to_string()),
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                },
+            },
+            message: "related".to_string(),
+        }]),
+        ..Default::default()
+    };
+    let data = serde_json::to_vec(&v).unwrap();
+    let got: Diagnostic = serde_json::from_slice(&data).unwrap();
+    assert_eq!(v, got);
+}
+
+// Go: .../Diagnostic missing required range+message
+#[test]
+fn diagnostic_missing_required() {
+    let err = serde_json::from_str::<Diagnostic>("{}").unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("missing required properties: range, message"));
+}
+
+// Go: .../Diagnostic rejects null severity
+#[test]
+fn diagnostic_rejects_null_severity() {
+    assert_null_rejected::<Diagnostic>(
+        r#"{"range": {"start":{"line":0,"character":0},"end":{"line":0,"character":0}}, "message": "", "severity": null}"#,
+        "severity",
+    );
 }
 
 // === Boolean union: BooleanOrHoverOptions ===

@@ -6,11 +6,11 @@
 //! declaration-name helpers).
 
 use tsgo_ast::symbol::{
-    INTERNAL_SYMBOL_NAME_CALL, INTERNAL_SYMBOL_NAME_CLASS, INTERNAL_SYMBOL_NAME_CONSTRUCTOR,
-    INTERNAL_SYMBOL_NAME_DEFAULT, INTERNAL_SYMBOL_NAME_EXPORT_EQUALS,
-    INTERNAL_SYMBOL_NAME_EXPORT_STAR, INTERNAL_SYMBOL_NAME_FUNCTION, INTERNAL_SYMBOL_NAME_GLOBAL,
-    INTERNAL_SYMBOL_NAME_INDEX, INTERNAL_SYMBOL_NAME_MISSING, INTERNAL_SYMBOL_NAME_NEW,
-    INTERNAL_SYMBOL_NAME_TYPE,
+    INTERNAL_SYMBOL_NAME_CALL, INTERNAL_SYMBOL_NAME_CLASS, INTERNAL_SYMBOL_NAME_COMPUTED,
+    INTERNAL_SYMBOL_NAME_CONSTRUCTOR, INTERNAL_SYMBOL_NAME_DEFAULT,
+    INTERNAL_SYMBOL_NAME_EXPORT_EQUALS, INTERNAL_SYMBOL_NAME_EXPORT_STAR,
+    INTERNAL_SYMBOL_NAME_FUNCTION, INTERNAL_SYMBOL_NAME_GLOBAL, INTERNAL_SYMBOL_NAME_INDEX,
+    INTERNAL_SYMBOL_NAME_MISSING, INTERNAL_SYMBOL_NAME_NEW, INTERNAL_SYMBOL_NAME_TYPE,
 };
 use tsgo_ast::{Kind, ModifierFlags, NodeData, NodeId, Symbol, SymbolFlags, SymbolId};
 use tsgo_diagnostics as diagnostics;
@@ -665,9 +665,20 @@ impl Binder<'_> {
         if q::is_object_literal_or_class_expression_method_or_accessor(self.arena, node) {
             self.set_node_flow(node);
         }
-        // Dynamic-name handling (computed names) is deferred; simple names go to
-        // the symbol table directly.
-        self.declare_symbol_and_add_to_symbol_table(node, symbol_flags, symbol_excludes);
+        // Computed, non-literal names (`[Symbol.iterator]`, `[expr]`) are dynamic:
+        // declare them anonymously under `InternalSymbolNameComputed` instead of
+        // routing through `get_declaration_name` (which only handles literal
+        // computed names and otherwise panics). Resolving the well-known-symbol
+        // `__@iterator` form is a checker late-binding concern, not the binder's.
+        if q::has_dynamic_name(self.arena, node) {
+            self.bind_anonymous_declaration(
+                node,
+                symbol_flags,
+                INTERNAL_SYMBOL_NAME_COMPUTED.to_string(),
+            );
+        } else {
+            self.declare_symbol_and_add_to_symbol_table(node, symbol_flags, symbol_excludes);
+        }
     }
 
     // Go: internal/binder/binder.go:bindFunctionOrConstructorType

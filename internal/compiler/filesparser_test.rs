@@ -16,6 +16,7 @@ fn loaded(name: &str, subs: &[&str]) -> ParseTask {
         sub_tasks: subs.iter().map(|s| Path(s.to_string())).collect(),
         file: Some(file),
         loaded: true,
+        is_lib: false,
     }
 }
 
@@ -30,7 +31,8 @@ fn parser_with(roots: &[&str], tasks: &[(&str, &[&str])]) -> FilesParser {
 }
 
 fn collected_names(p: FilesParser) -> Vec<String> {
-    p.collect_files()
+    // These cases register only non-lib tasks, so the lib directory is unused.
+    p.collect_files("")
         .files()
         .iter()
         .map(|f| f.file_name().to_string())

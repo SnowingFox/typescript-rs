@@ -3,6 +3,7 @@
 //! Expected values follow TS semantics and the Go `declareSymbolEx` branches.
 
 use crate::{bind_source_file, BindResult};
+use tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_COMPUTED;
 use tsgo_ast::{NodeArena, NodeData, NodeId, SymbolFlags};
 use tsgo_core::scriptkind::ScriptKind;
 use tsgo_parser::{parse_source_file, SourceFileParseOptions};
@@ -88,6 +89,117 @@ fn bind_enum_namespace_merge() {
     assert!(result.has_diagnostic(
         &tsgo_diagnostics::ENUM_DECLARATIONS_CAN_ONLY_MERGE_WITH_NAMESPACE_OR_OTHER_ENUM_DECLARATIONS
     ));
+}
+
+/// Returns the members of an interface declaration node.
+fn interface_members(arena: &NodeArena, node: NodeId) -> Vec<NodeId> {
+    match arena.data(node) {
+        NodeData::InterfaceDeclaration(d) => d.members.nodes.clone(),
+        _ => unreachable!("expected an interface declaration"),
+    }
+}
+
+// Go: internal/binder/binder.go:bindPropertyOrMethodOrAccessor (HasDynamicName guard)
+// A well-known-symbol computed name (`[Symbol.iterator]`) is a dynamic name, so
+// the member is bound anonymously under `InternalSymbolNameComputed` (via
+// `bindAnonymousDeclaration`) instead of reaching `getDeclarationName` (which
+// only handles literal computed names and otherwise panics). The member's
+// symbol is attached to its node; the `__@iterator` late-binding into the
+// members table is a checker concern, not the binder's.
+#[test]
+fn bind_computed_well_known_symbol_no_panic() {
+    let (arena, sf, result) = bind("interface I { [Symbol.iterator](): void }");
+    let i = result.local(sf, "I").expect("I present");
+    // The well-known-symbol member is NOT registered in the interface's members
+    // table by the binder; only literal-named members are.
+    assert!(result.member(i, INTERNAL_SYMBOL_NAME_COMPUTED).is_none());
+    let method = interface_members(&arena, first_statement(&arena, sf))[0];
+    let method_sym = result
+        .node_symbol
+        .get(&method)
+        .copied()
+        .expect("computed method has a node symbol");
+    assert_eq!(
+        result.symbols[method_sym.index()].name,
+        INTERNAL_SYMBOL_NAME_COMPUTED,
+        "computed method is bound anonymously as InternalSymbolNameComputed"
+    );
+}
+
+/// Returns the members of a class declaration node.
+fn class_members(arena: &NodeArena, node: NodeId) -> Vec<NodeId> {
+    match arena.data(node) {
+        NodeData::ClassDeclaration(d) => d.members.nodes.clone(),
+        _ => unreachable!("expected a class declaration"),
+    }
+}
+
+// Go: internal/binder/binder.go:bindPropertyOrMethodOrAccessor (HasDynamicName guard)
+// An arbitrary non-literal computed name (`[bar]`) is also dynamic, so a class
+// property with one is bound anonymously under `InternalSymbolNameComputed` and
+// does not panic. Exercises the property-declaration binding site (distinct from
+// the interface-method site above).
+#[test]
+fn bind_computed_arbitrary_name_no_panic() {
+    let (arena, sf, result) = bind("class C { [bar] = 1 }");
+    let c = result.local(sf, "C").expect("C present");
+    assert!(result.member(c, INTERNAL_SYMBOL_NAME_COMPUTED).is_none());
+    let prop = class_members(&arena, first_statement(&arena, sf))[0];
+    let prop_sym = result
+        .node_symbol
+        .get(&prop)
+        .copied()
+        .expect("computed property has a node symbol");
+    assert_eq!(
+        result.symbols[prop_sym.index()].name,
+        INTERNAL_SYMBOL_NAME_COMPUTED
+    );
+}
+
+// Go: internal/binder/binder.go:getDeclarationName (literal computed-name branch)
+// A string-literal computed name (`["foo"]`) is NOT dynamic: it keeps its literal
+// text and is registered in the container's members table under that text. The
+// `HasDynamicName` guard must not divert it to `InternalSymbolNameComputed`.
+#[test]
+fn bind_computed_literal_name_preserved() {
+    let (_arena, sf, result) = bind("class C { [\"foo\"]: number }");
+    let c = result.local(sf, "C").expect("C present");
+    assert!(
+        result.member(c, "foo").is_some(),
+        "literal name kept as text"
+    );
+    assert!(result.member(c, INTERNAL_SYMBOL_NAME_COMPUTED).is_none());
+}
+
+// Regression: binding a `lib.dom.d.ts`-style interface that mixes well-known
+// symbol computed names (`[Symbol.iterator]`, `[Symbol.asyncIterator]`) with a
+// regular member must succeed without panicking. The regular member stays
+// reachable by name; the computed members are bound anonymously.
+#[test]
+fn bind_lib_style_well_known_symbols_no_panic() {
+    let (arena, sf, result) = bind(
+        "interface AsyncIterable<T> { \
+            length: number; \
+            [Symbol.iterator](): void; \
+            [Symbol.asyncIterator](): void; \
+        }",
+    );
+    let i = result
+        .local(sf, "AsyncIterable")
+        .expect("interface present");
+    assert!(
+        result.member(i, "length").is_some(),
+        "regular member reachable"
+    );
+    let computed_count = interface_members(&arena, first_statement(&arena, sf))
+        .iter()
+        .filter_map(|m| result.node_symbol.get(m))
+        .filter(|s| result.symbols[s.index()].name == INTERNAL_SYMBOL_NAME_COMPUTED)
+        .count();
+    assert_eq!(
+        computed_count, 2,
+        "both well-known-symbol members are bound"
+    );
 }
 
 // Go: internal/binder/binder.go:getDeclarationName (private identifier name format)

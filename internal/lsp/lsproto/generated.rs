@@ -1,6 +1,7 @@
 //! Port of Go `internal/lsp/lsproto/lsp_generated.go` (the LSP meta-model
 //! generated types).
 
+use std::borrow::Cow;
 use std::fmt;
 
 use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
@@ -504,6 +505,188 @@ impl<'de> Deserialize<'de> for StringOrInlayHintLabelParts {
             }
         }
         deserializer.deserialize_any(V)
+    }
+}
+
+/// A position encoding kind (LSP `PositionEncodingKind`, a string enum).
+///
+/// Mirrors Go `type PositionEncodingKind string`. Modeled as a
+/// [`std::borrow::Cow<'static, str>`] newtype so the predefined values are
+/// `const`-constructible (matching the integer-kind associated-constant style,
+/// e.g. [`SymbolKind::FILE`]) while still (de)serializing as a plain JSON
+/// string.
+// Go: internal/lsp/lsproto/lsp_generated.go:PositionEncodingKind
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct PositionEncodingKind(pub Cow<'static, str>);
+
+impl PositionEncodingKind {
+    /// Character offsets count UTF-8 code units (e.g. bytes).
+    pub const UTF8: PositionEncodingKind = PositionEncodingKind(Cow::Borrowed("utf-8"));
+    /// Character offsets count UTF-16 code units (the LSP default; always
+    /// supported by servers).
+    pub const UTF16: PositionEncodingKind = PositionEncodingKind(Cow::Borrowed("utf-16"));
+    /// Character offsets count UTF-32 code units (i.e. Unicode codepoints).
+    pub const UTF32: PositionEncodingKind = PositionEncodingKind(Cow::Borrowed("utf-32"));
+}
+
+impl Serialize for PositionEncodingKind {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for PositionEncodingKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(PositionEncodingKind(Cow::Owned(String::deserialize(
+            deserializer,
+        )?)))
+    }
+}
+
+/// A predefined language kind (LSP `LanguageKind`, a string enum).
+///
+/// Mirrors Go `type LanguageKind string`. Like [`PositionEncodingKind`] it is a
+/// [`Cow<'static, str>`] newtype so the predefined ids are `const`-constructible
+/// and unknown ids round-trip as their raw string. (De)serializes as a plain
+/// JSON string.
+// Go: internal/lsp/lsproto/lsp_generated.go:LanguageKind
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct LanguageKind(pub Cow<'static, str>);
+
+impl LanguageKind {
+    /// ABAP.
+    pub const ABAP: LanguageKind = LanguageKind(Cow::Borrowed("abap"));
+    /// Windows Bat.
+    pub const WINDOWS_BAT: LanguageKind = LanguageKind(Cow::Borrowed("bat"));
+    /// BibTeX.
+    pub const BIB_TEX: LanguageKind = LanguageKind(Cow::Borrowed("bibtex"));
+    /// Clojure.
+    pub const CLOJURE: LanguageKind = LanguageKind(Cow::Borrowed("clojure"));
+    /// Coffeescript.
+    pub const COFFEESCRIPT: LanguageKind = LanguageKind(Cow::Borrowed("coffeescript"));
+    /// C.
+    pub const C: LanguageKind = LanguageKind(Cow::Borrowed("c"));
+    /// C++.
+    pub const CPP: LanguageKind = LanguageKind(Cow::Borrowed("cpp"));
+    /// C#.
+    pub const C_SHARP: LanguageKind = LanguageKind(Cow::Borrowed("csharp"));
+    /// CSS.
+    pub const CSS: LanguageKind = LanguageKind(Cow::Borrowed("css"));
+    /// D (proposed).
+    pub const D: LanguageKind = LanguageKind(Cow::Borrowed("d"));
+    /// Delphi (proposed; aliased to `pascal`).
+    pub const DELPHI: LanguageKind = LanguageKind(Cow::Borrowed("pascal"));
+    /// Diff.
+    pub const DIFF: LanguageKind = LanguageKind(Cow::Borrowed("diff"));
+    /// Dart.
+    pub const DART: LanguageKind = LanguageKind(Cow::Borrowed("dart"));
+    /// Dockerfile.
+    pub const DOCKERFILE: LanguageKind = LanguageKind(Cow::Borrowed("dockerfile"));
+    /// Elixir.
+    pub const ELIXIR: LanguageKind = LanguageKind(Cow::Borrowed("elixir"));
+    /// Erlang.
+    pub const ERLANG: LanguageKind = LanguageKind(Cow::Borrowed("erlang"));
+    /// F#.
+    pub const F_SHARP: LanguageKind = LanguageKind(Cow::Borrowed("fsharp"));
+    /// Git commit.
+    pub const GIT_COMMIT: LanguageKind = LanguageKind(Cow::Borrowed("git-commit"));
+    /// Git rebase (aliased to `rebase`).
+    pub const GIT_REBASE: LanguageKind = LanguageKind(Cow::Borrowed("rebase"));
+    /// Go.
+    pub const GO: LanguageKind = LanguageKind(Cow::Borrowed("go"));
+    /// Groovy.
+    pub const GROOVY: LanguageKind = LanguageKind(Cow::Borrowed("groovy"));
+    /// Handlebars.
+    pub const HANDLEBARS: LanguageKind = LanguageKind(Cow::Borrowed("handlebars"));
+    /// Haskell.
+    pub const HASKELL: LanguageKind = LanguageKind(Cow::Borrowed("haskell"));
+    /// HTML.
+    pub const HTML: LanguageKind = LanguageKind(Cow::Borrowed("html"));
+    /// Ini.
+    pub const INI: LanguageKind = LanguageKind(Cow::Borrowed("ini"));
+    /// Java.
+    pub const JAVA: LanguageKind = LanguageKind(Cow::Borrowed("java"));
+    /// JavaScript.
+    pub const JAVA_SCRIPT: LanguageKind = LanguageKind(Cow::Borrowed("javascript"));
+    /// JavaScript React (JSX).
+    pub const JAVA_SCRIPT_REACT: LanguageKind = LanguageKind(Cow::Borrowed("javascriptreact"));
+    /// JSON.
+    pub const JSON: LanguageKind = LanguageKind(Cow::Borrowed("json"));
+    /// LaTeX.
+    pub const LA_TEX: LanguageKind = LanguageKind(Cow::Borrowed("latex"));
+    /// Less.
+    pub const LESS: LanguageKind = LanguageKind(Cow::Borrowed("less"));
+    /// Lua.
+    pub const LUA: LanguageKind = LanguageKind(Cow::Borrowed("lua"));
+    /// Makefile.
+    pub const MAKEFILE: LanguageKind = LanguageKind(Cow::Borrowed("makefile"));
+    /// Markdown.
+    pub const MARKDOWN: LanguageKind = LanguageKind(Cow::Borrowed("markdown"));
+    /// Objective-C.
+    pub const OBJECTIVE_C: LanguageKind = LanguageKind(Cow::Borrowed("objective-c"));
+    /// Objective-C++.
+    pub const OBJECTIVE_CPP: LanguageKind = LanguageKind(Cow::Borrowed("objective-cpp"));
+    /// Pascal (proposed).
+    pub const PASCAL: LanguageKind = LanguageKind(Cow::Borrowed("pascal"));
+    /// Perl.
+    pub const PERL: LanguageKind = LanguageKind(Cow::Borrowed("perl"));
+    /// Perl 6.
+    pub const PERL6: LanguageKind = LanguageKind(Cow::Borrowed("perl6"));
+    /// PHP.
+    pub const PHP: LanguageKind = LanguageKind(Cow::Borrowed("php"));
+    /// Powershell.
+    pub const POWERSHELL: LanguageKind = LanguageKind(Cow::Borrowed("powershell"));
+    /// Pug (aliased to `jade`).
+    pub const PUG: LanguageKind = LanguageKind(Cow::Borrowed("jade"));
+    /// Python.
+    pub const PYTHON: LanguageKind = LanguageKind(Cow::Borrowed("python"));
+    /// R.
+    pub const R: LanguageKind = LanguageKind(Cow::Borrowed("r"));
+    /// Razor.
+    pub const RAZOR: LanguageKind = LanguageKind(Cow::Borrowed("razor"));
+    /// Ruby.
+    pub const RUBY: LanguageKind = LanguageKind(Cow::Borrowed("ruby"));
+    /// Rust.
+    pub const RUST: LanguageKind = LanguageKind(Cow::Borrowed("rust"));
+    /// SCSS.
+    pub const SCSS: LanguageKind = LanguageKind(Cow::Borrowed("scss"));
+    /// SASS.
+    pub const SASS: LanguageKind = LanguageKind(Cow::Borrowed("sass"));
+    /// Scala.
+    pub const SCALA: LanguageKind = LanguageKind(Cow::Borrowed("scala"));
+    /// ShaderLab.
+    pub const SHADER_LAB: LanguageKind = LanguageKind(Cow::Borrowed("shaderlab"));
+    /// Shell script.
+    pub const SHELL_SCRIPT: LanguageKind = LanguageKind(Cow::Borrowed("shellscript"));
+    /// SQL.
+    pub const SQL: LanguageKind = LanguageKind(Cow::Borrowed("sql"));
+    /// Swift.
+    pub const SWIFT: LanguageKind = LanguageKind(Cow::Borrowed("swift"));
+    /// TypeScript.
+    pub const TYPE_SCRIPT: LanguageKind = LanguageKind(Cow::Borrowed("typescript"));
+    /// TypeScript React (TSX).
+    pub const TYPE_SCRIPT_REACT: LanguageKind = LanguageKind(Cow::Borrowed("typescriptreact"));
+    /// TeX.
+    pub const TEX: LanguageKind = LanguageKind(Cow::Borrowed("tex"));
+    /// Visual Basic (aliased to `vb`).
+    pub const VISUAL_BASIC: LanguageKind = LanguageKind(Cow::Borrowed("vb"));
+    /// XML.
+    pub const XML: LanguageKind = LanguageKind(Cow::Borrowed("xml"));
+    /// XSL.
+    pub const XSL: LanguageKind = LanguageKind(Cow::Borrowed("xsl"));
+    /// YAML.
+    pub const YAML: LanguageKind = LanguageKind(Cow::Borrowed("yaml"));
+}
+
+impl Serialize for LanguageKind {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for LanguageKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(LanguageKind(Cow::Owned(String::deserialize(deserializer)?)))
     }
 }
 
@@ -1265,6 +1448,201 @@ lsp_object! {
         opt command: serde_json::Value => "command",
         ["Data preserved between request and resolve (deferred: raw JSON)."]
         opt data: serde_json::Value => "data",
+    }
+}
+
+lsp_object! {
+    /// An incremental change to a text document: a range and its replacement.
+    ///
+    /// Since: 3.18.0
+    TextDocumentContentChangePartial {
+        ["The range of the document that changed."]
+        req range: Range => "range",
+        ["The optional length of the range that got replaced (deprecated; use `range`)."]
+        opt range_length: u32 => "rangeLength",
+        ["The new text for the provided range."]
+        req text: String => "text",
+    }
+}
+
+lsp_object! {
+    /// A change that replaces the whole content of a text document.
+    TextDocumentContentChangeWholeDocument {
+        ["The new text of the whole document."]
+        req text: String => "text",
+    }
+}
+
+/// A union of an incremental or whole-document text change
+/// (LSP `TextDocumentContentChangePartial | TextDocumentContentChangeWholeDocument`).
+///
+/// A JSON object with a `range` key is a [`TextDocumentContentChangePartial`];
+/// otherwise it is a [`TextDocumentContentChangeWholeDocument`].
+// Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentContentChangePartialOrWholeDocument
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TextDocumentContentChangePartialOrWholeDocument {
+    /// The incremental-change variant.
+    pub partial: Option<TextDocumentContentChangePartial>,
+    /// The whole-document-replacement variant.
+    pub whole_document: Option<TextDocumentContentChangeWholeDocument>,
+}
+
+impl Serialize for TextDocumentContentChangePartialOrWholeDocument {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.partial, &self.whole_document) {
+            (Some(v), None) => v.serialize(serializer),
+            (None, Some(v)) => v.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of TextDocumentContentChangePartialOrWholeDocument should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TextDocumentContentChangePartialOrWholeDocument {
+    // Go: lsp_generated.go:TextDocumentContentChangePartialOrWholeDocument.UnmarshalJSONFrom
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut out = TextDocumentContentChangePartialOrWholeDocument::default();
+        if value.get("range").is_some() {
+            out.partial = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+        } else {
+            out.whole_document = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+        }
+        Ok(out)
+    }
+}
+
+/// The severity of a diagnostic (LSP `DiagnosticSeverity`, an integer enum).
+// Go: internal/lsp/lsproto/lsp_generated.go:DiagnosticSeverity
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiagnosticSeverity(pub u32);
+
+impl DiagnosticSeverity {
+    /// Reports an error.
+    pub const ERROR: DiagnosticSeverity = DiagnosticSeverity(1);
+    /// Reports a warning.
+    pub const WARNING: DiagnosticSeverity = DiagnosticSeverity(2);
+    /// Reports an information.
+    pub const INFORMATION: DiagnosticSeverity = DiagnosticSeverity(3);
+    /// Reports a hint.
+    pub const HINT: DiagnosticSeverity = DiagnosticSeverity(4);
+}
+
+impl fmt::Display for DiagnosticSeverity {
+    // Go: internal/lsp/lsproto/lsp_generated.go:DiagnosticSeverity.String
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self.0 {
+            1 => "Error",
+            2 => "Warning",
+            3 => "Information",
+            4 => "Hint",
+            n => return write!(f, "DiagnosticSeverity({n})"),
+        };
+        f.write_str(name)
+    }
+}
+
+impl Serialize for DiagnosticSeverity {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for DiagnosticSeverity {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(DiagnosticSeverity(u32::deserialize(deserializer)?))
+    }
+}
+
+/// A diagnostic tag (LSP `DiagnosticTag`, an integer enum).
+// Go: internal/lsp/lsproto/lsp_generated.go:DiagnosticTag
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiagnosticTag(pub u32);
+
+impl DiagnosticTag {
+    /// Unused or unnecessary code (rendered faded).
+    pub const UNNECESSARY: DiagnosticTag = DiagnosticTag(1);
+    /// Deprecated or obsolete code (rendered struck through).
+    pub const DEPRECATED: DiagnosticTag = DiagnosticTag(2);
+}
+
+impl fmt::Display for DiagnosticTag {
+    // Go: internal/lsp/lsproto/lsp_generated.go:DiagnosticTag.String
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self.0 {
+            1 => "Unnecessary",
+            2 => "Deprecated",
+            n => return write!(f, "DiagnosticTag({n})"),
+        };
+        f.write_str(name)
+    }
+}
+
+impl Serialize for DiagnosticTag {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for DiagnosticTag {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(DiagnosticTag(u32::deserialize(deserializer)?))
+    }
+}
+
+lsp_object! {
+    /// A description for an error code (LSP `CodeDescription`).
+    CodeDescription {
+        ["A URI to open with more information about the diagnostic error."]
+        req href: crate::URI => "href",
+    }
+}
+
+lsp_open_object! {
+    /// A placeholder for custom data preserved on a [`Diagnostic`] between a
+    /// `textDocument/publishDiagnostics` notification and a
+    /// `textDocument/codeAction` request.
+    ///
+    /// Deferred: Go models this as an empty struct; this port accepts any
+    /// object and re-serializes to `{}`.
+    // Go: internal/lsp/lsproto/lsp_generated.go:DiagnosticData
+    DiagnosticData
+}
+
+lsp_object! {
+    /// A related message and source-code location for a diagnostic
+    /// (LSP `DiagnosticRelatedInformation`).
+    DiagnosticRelatedInformation {
+        ["The location of this related diagnostic information."]
+        req location: Location => "location",
+        ["The message of this related diagnostic information."]
+        req message: String => "message",
+    }
+}
+
+lsp_object! {
+    /// A diagnostic (e.g. a compiler error or warning) at a [`Range`] in a
+    /// document.
+    Diagnostic {
+        ["The range at which the message applies."]
+        req range: Range => "range",
+        ["The diagnostic's severity."]
+        opt severity: DiagnosticSeverity => "severity",
+        ["The diagnostic's code (appears in the user interface)."]
+        opt code: IntegerOrString => "code",
+        ["An optional description of the error code."]
+        opt code_description: CodeDescription => "codeDescription",
+        ["A human-readable source of this diagnostic, e.g. `typescript`."]
+        opt source: String => "source",
+        ["The diagnostic's message."]
+        req message: String => "message",
+        ["Additional metadata about the diagnostic."]
+        opt tags: Vec<DiagnosticTag> => "tags",
+        ["Related diagnostic information."]
+        opt related_information: Vec<DiagnosticRelatedInformation> => "relatedInformation",
+        ["Data preserved between publishDiagnostics and codeAction."]
+        opt data: DiagnosticData => "data",
     }
 }
 

@@ -103,3 +103,60 @@ fn collects_property_does_not_exist_diagnostic() {
         "Property 'baz' does not exist on type 'Foo'."
     );
 }
+
+/// P6-options: `create_checkers_with_options` threads the program's REAL
+/// compiler options into the shared program, so the checker's option-gated
+/// `2802` for-of gating reads the actual `--target`. With an `es2015` target the
+/// `[Symbol.iterator]` iteration is permitted (no `2802`), whereas the
+/// options-free `create_checkers` (all-defaults, target unset) would gate it.
+// Go: internal/compiler/checkerpool.go:createCheckers (program.Options()) + getIterationDiagnosticDetails
+#[test]
+fn create_checkers_with_options_threads_target_into_gating() {
+    use std::rc::Rc;
+    use tsgo_core::compileroptions::{CompilerOptions, ScriptTarget};
+    let files = vec![bound_file(
+        "/a.ts",
+        "interface SymbolConstructor { readonly iterator: unique symbol; }\ndeclare var Symbol: SymbolConstructor;\ninterface Iterator<T> { next(): { value: T }; }\ninterface It { [Symbol.iterator](): Iterator<string>; }\ndeclare const it: It;\nfor (const x of it) {\n}",
+    )];
+    let options = Rc::new(CompilerOptions {
+        target: ScriptTarget::Es2015,
+        ..CompilerOptions::default()
+    });
+
+    let mut pool = CompilerCheckerPool::new(true, None, files.len());
+    pool.create_checkers_with_options(&files, options);
+    let diags = pool.collect_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2802),
+        "es2015 target must not gate the iteration (no 2802): {diags:?}"
+    );
+}
+
+/// The pool dispatches over *every* file's source-file handle (not just the
+/// first), associating file `i` to checker `i % K`, and concatenates the
+/// per-file diagnostics in input file order (Go's `forEachCheckerGroupDo` over a
+/// multi-file program, deterministic by file order).
+// Go: internal/compiler/checkerpool.go:forEachCheckerGroupDo + program.go:getDiagnostics
+#[test]
+fn dispatches_per_file_in_input_order() {
+    let files = vec![
+        bound_file("/a.ts", "y;"),
+        bound_file(
+            "/b.ts",
+            "interface Foo {\n  bar: string;\n}\ndeclare const foo: Foo;\nfoo.baz;",
+        ),
+    ];
+    let mut pool = CompilerCheckerPool::new(false, None, files.len());
+    pool.create_checkers(&files);
+
+    let diags = pool.collect_diagnostics();
+    assert_eq!(diags.len(), 2, "both files contribute: {diags:?}");
+    // Deterministic by file order: /a.ts (2304) precedes /b.ts (2339).
+    assert_eq!(diags[0].code, 2304);
+    assert_eq!(diags[0].message, "Cannot find name 'y'.");
+    assert_eq!(diags[1].code, 2339);
+    assert_eq!(
+        diags[1].message,
+        "Property 'baz' does not exist on type 'Foo'."
+    );
+}

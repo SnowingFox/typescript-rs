@@ -6,9 +6,35 @@
 **依赖（crate）**：`tsgo_ast` `tsgo_collections` `tsgo_core` `tsgo_diagnostics` `tsgo_glob` `tsgo_jsnum` `tsgo_locale` `tsgo_module` `tsgo_modulespecifiers` `tsgo_outputpaths` `tsgo_parser` `tsgo_scanner` `tsgo_stringutil` `tsgo_tspath` `tsgo_vfs`（含 `vfs/vfsmatch`）`tsgo_debug`。镜像 Go import 边。
 **Go 源**：`internal/tsoptions/`（16 个非测试 `.go` + 子目录 `tsoptionstest/` 2 个 = 18 文件；最大 `tsconfigparsing.go` 1815 行 + `declscompiler.go` 1265 行）
 
-## 本轮实现状态（wave 3 — 已落地 / 已推迟）
+## 本轮实现状态（wave 4 — tsconfigparsing 可达子集）
 
-> 严格 TDD（红→绿垂直切片）逐行为推进。`cargo test -p tsgo_tsoptions` = **73 单测 + 13 doctest 全绿**；`cargo clippy -p tsgo_tsoptions --all-targets -- -D warnings` 干净。
+> 严格 TDD（红→绿垂直切片）逐行为推进。`cargo test -p tsgo_tsoptions` = **105 单测 + 18 doctest 全绿**（wave 3 基线 80+14；本轮 +25 单测 +4 doctest）；`cargo clippy -p tsgo_tsoptions --all-targets -- -D warnings` 干净；`cargo fmt --check` 干净。**仅新增公开 API（additive），未改动任何既有公开签名**——checker/transformers/compiler 对 `tsgo_tsoptions` 的依赖保持可构建。
+
+**本轮落地的 tsconfig 解析链（`tsconfigparsing.rs`，新增文件）：**
+
+| 链路 | 函数 | 状态 |
+|---|---|---|
+| JSON 源文件 → 值对象 | `parse_config_file_text_to_json` / `convert_config_file_to_object` / `convert_to_json` / `convert_property_value_to_json` / `convert_object_literal_expression_to_json` / `convert_array_literal_expression_to_json`（bool/string/number/负数/array/false/null/object + root-must-be-object 恢复 + 注释/空白/转义字符串内容） | ✅（option/notifier-free 形态，对应 `convertToObject`/`ParseJsonConfigFileContent` 用法）|
+| `json any` → `ParsedCommandLine` | `parse_json_config_file_content` + `parse_json_config_file_content_worker`（files/include/exclude/references、空 files 诊断、默认 include `**/*`、默认排除 outDir/declarationDir、no-input 诊断、`${configDir}` 替换接线） | ✅ |
+| 选项转换 | `parse_own_config_of_json` / `convert_compiler_options_from_json_worker` / `convert_type_acquisition_from_json_worker` / `convert_options_from_json`（`OptionParser` trait + Compiler/TypeAcquisition impl）/ `convert_json_option` / `convert_json_option_of_list_type` / `convert_json_option_of_enum_type` / `is_compiler_options_value` / `normalize_non_list_option_value` / `get_default_compiler_options` / `get_default_type_acquisition` | ✅ |
+| 文件展开 | `get_file_names_from_config_specs`（literal/wildcard/json 三 map + `vfsmatch::read_directory` + 扩展名优先级去重）/ `get_supported_extensions` / `get_supported_extensions_with_json_if_resolve_json_module` / `has_file_with_higher_priority_extension` / `remove_wildcard_files_with_lower_priority_extension` / `validate_specs` / `can_json_report_no_input_files` | ✅ |
+| `${configDir}` | `handle_option_config_dir_template_substitution` / `get_substituted_string_array_with_config_dir_template` / `get_substituted_path_with_config_dir_template` / `starts_with_config_dir_template` | ✅ |
+| 源文件路径 | `TsConfigSourceFile` + `new_tsconfig_source_file_from_file_path` + `parse_json_source_file_config_file_content` | ✅（**偏离**：见下）|
+| 结果对象惰性方法 | `ParsedCommandLine::literal_file_names`（+ 新增 `config_file_specs`/`literal_file_names_len` 字段，`ConfigFileSpecs` 类型）| ✅ |
+| **`tsoptionstest::get_parsed_command_line`** | 由 `ParseJsonSourceFileConfigFileContent` + `NewTsconfigSourceFileFromFilePath` 接线 | ✅ **已解除 blocked-by** |
+
+**本轮偏离（divergence）**：`parse_json_source_file_config_file_content` 不走 Go 的 `onPropertySet` notifier（node-anchored 诊断），而是先 `convert_config_file_to_object(sourceFile)` 再走与 `json` API 相同的 worker（worker 接收 `has_source_file` 标志以复刻 sourceFile≠nil 时跳过元素类型校验/`reference.path` 校验的诊断条数）。产出的 compilerOptions / typeAcquisition / fileNames / 诊断 **code** 与 Go 等价，仅诊断 **位置**（compiler-diagnostic 而非 node-anchored）不同。faithful notifier 路径 + node-anchored 诊断 **DEFER**（`// blocked-by: tsoptions tsconfigparsing onPropertySet notifier + node-anchored diagnostics`）。
+
+**本轮 DEFER（blocked-by）：**
+
+- `extends` 解析链（`getExtendsConfigPathOrArray`/`getExtendedConfig`/`ParseExtendedConfig`/`parseConfig` 的 extends 合并 + `${configDir}` 在 extends 中的相对路径重写 + 循环检测 + cache）—— 需 module 解析 / 源文件 notifier；`parse_own_config_of_json` 留 `// DEFER`。
+- `mergeCompilerOptions(existing_options, raw)` 合并（worker 的 `existing_options` 参数，命令行覆盖 tsconfig）—— 可达测试均传 `None`，留 `// DEFER`。
+- `ParsedCommandLine` 其余惰性方法：`PossiblyMatchesFileName`/`FileNamesByPath`/`WildcardDirectoryGlobs`/`WildcardDirectories`/`ReloadFileNamesOfParsedCommandLine`/`GetMatchedFileSpec`/`GetMatchedIncludeSpec`/输出名/locale 等 —— 需 include-globs/path-map/wildcard 缓存，下一 wave。
+- node-anchored 诊断工厂（`CreateDiagnosticForNodeInSourceFile*`）、`showconfig.rs`、project references 的源文件语法诊断 —— DEFER。
+
+### 上一轮（wave 3）状态
+
+> `cargo test -p tsgo_tsoptions` = **80 单测 + 14 doctest 全绿**（wave 3 = 73+13；`tsoptionstest` 收尾 +7 单测 +1 doctest）；`cargo clippy -p tsgo_tsoptions --all-targets -- -D warnings` 干净。
 
 **§2 MEGA-FILE SPLIT（Go 文件 → Rust 文件，本轮落地）：**
 
@@ -27,7 +53,8 @@
 | `wildcarddirectories.go` | `wildcarddirectories.rs` | ✅ 全量 |
 | `parsedcommandline.go` | `parsedcommandline.rs` | ⚠️ 核心数据 + `NewParsedCommandLine` + 访问器；惰性缓存方法（wildcard/输出名/references/`PossiblyMatchesFileName`）**DEFER**（需 module/outputpaths/glob + ConfigFileSpecs）|
 | `parsedbuildcommandline.go` | `parsedbuildcommandline.rs` | ⚠️ 数据完成；`resolvedProjectPaths`/`locale` 缓存 DEFER |
-| `tsoptionstest/vfsparseconfighost.go` | `tsoptionstest/mod.rs` | ✅ `VfsParseConfigHost`；`GetParsedCommandLine` DEFER（依赖 tsconfig 全链）|
+| `tsoptionstest/vfsparseconfighost.go` | `tsoptionstest/vfsparseconfighost.rs`（由 `mod.rs` 声明）| ✅ 全量（`VfsParseConfigHost` + `new` + `ParseConfigHost` impl + `fix_root`）|
+| `tsoptionstest/parsedcommandline.go` | `tsoptionstest/parsedcommandline.rs`（由 `mod.rs` 声明）| ⚠️ `get_parsed_command_line` DEFER（`// blocked-by: tsoptions tsconfigparsing` —— 需 `NewTsconfigSourceFileFromFilePath` + `ParseJsonSourceFileConfigFileContent`）|
 
 **本轮 DEFER（blocked-by 见 README「转交/推迟」）：**
 
@@ -280,10 +307,15 @@ extends / 主路径：
 - [ ] `fn serialize_compiler_options(options, config_path, cpo) -> IndexMap<String,OptionValue>`（**reflect 替代**）　`// Go: showconfig.go:serializeCompilerOptions`
 - [ ] `fn serialize_enum_value(value, enum_map) -> String` / `add_implied_options(...)` / `any_dependency_provided(...)` / `serialize_implied_option_value(...)`　`// Go: showconfig.go`
 
-### `tsoptionstest/`（仅测试用子模块）
+### `tsoptionstest/`（仅测试用 `pub mod` 子模块）
 
-- [ ] `pub struct VfsParseConfigHost { vfs, current_directory }` + impl `ParseConfigHost` + `new_vfs_parse_config_host(files, cwd, ucs)` + `fix_root`　`// Go: tsoptionstest/vfsparseconfighost.go`
+> 子模块拆分：`tsoptionstest/mod.rs` 仅作模块根（`//!` 文档 + `mod vfsparseconfighost; mod parsedcommandline; pub use vfsparseconfighost::*;`），实体落在同名 sibling `.rs`，对齐本文件「文件清单」映射表。
+
+- [x] `pub struct VfsParseConfigHost { vfs, current_directory }` + impl `ParseConfigHost`（`fs`/`get_current_directory`）+ `VfsParseConfigHost::new(files, cwd, ucs)` + `pub fn fix_root(path) -> &str`　`// Go: tsoptionstest/vfsparseconfighost.go`
+  - 偏离：Go `fixRoot` 是包私有；Rust 因 `tsoptionstest` 是外部消费的 `pub mod`，将其导出为 `pub fn`（避免 dead_code lint 且满足 §8.6 单测）。
+  - §8.6 行为级单测（Go 此文件无单测）：`fix_root` 三分支（相对/根本身/剥根）+ 宿主 `file_exists`/`read_file`/`get_current_directory`/大小写敏感。
 - [ ] `pub fn get_parsed_command_line(json_text, files, cwd, ucs) -> ParsedCommandLine`　`// Go: tsoptionstest/parsedcommandline.go`
+  - DEFER `// blocked-by: tsoptions tsconfigparsing`（`NewTsconfigSourceFileFromFilePath` + `ParseJsonSourceFileConfigFileContent` 未移植）。`parsedcommandline.rs` 仅含模块级文档 + blocked-by 注记，无 pub 项。
 
 ### export 等价物（Go: `export_test.go` 暴露内部供 `_test` 包用）
 

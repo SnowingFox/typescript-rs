@@ -1,0 +1,17 @@
+[package]
+name = "tsgo_testutil_baseline"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tsgo_collections = { path = "../../collections" }
+tsgo_repo = { path = "../../repo" }
+tsgo_stringutil = { path = "../../stringutil" }
+regex = "1.12.3"
+similar = "2.7.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"

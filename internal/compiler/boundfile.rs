@@ -29,6 +29,7 @@ use tsgo_ast::flow::{FlowList, FlowListId, FlowNode, FlowNodeId};
 use tsgo_ast::{NodeArena, NodeId, Symbol, SymbolId, SymbolTable};
 use tsgo_binder::BindResult;
 use tsgo_checker::BoundProgram;
+use tsgo_core::compileroptions::CompilerOptions;
 
 use crate::host::ParsedFile;
 
@@ -45,19 +46,46 @@ pub struct BoundFile {
     arena: Rc<NodeArena>,
     root: NodeId,
     bind: Rc<BindResult>,
+    /// The program's real compiler options (see
+    /// [`BoundProgram::compiler_options`]).
+    options: Rc<CompilerOptions>,
 }
 
 impl BoundFile {
-    /// Builds a [`BoundFile`] over `file`, or `None` if `file` has not been bound
-    /// yet (see [`ParsedFile::bind`](crate::ParsedFile::bind)).
+    /// Builds a [`BoundFile`] over `file` with all-defaults compiler options, or
+    /// `None` if `file` has not been bound yet (see
+    /// [`ParsedFile::bind`](crate::ParsedFile::bind)).
+    ///
+    /// This is the additive, options-free overload; the checker then sees
+    /// all-defaults options. To surface a program's REAL options to the
+    /// checker's option-gated diagnostics, use [`Self::for_file_with_options`].
     ///
     /// Side effects: none (clones the file's `Rc` arena/bind handles).
     pub fn for_file(file: &ParsedFile) -> Option<BoundFile> {
+        BoundFile::for_file_with_options(file, Rc::new(CompilerOptions::default()))
+    }
+
+    /// Builds a [`BoundFile`] over `file` carrying the program's real `options`,
+    /// or `None` if `file` has not been bound yet.
+    ///
+    /// The shared `options` are returned by
+    /// [`BoundProgram::compiler_options`], so a checker built over this view
+    /// reads the program's actual `--target`/`--downlevelIteration`/`--strict`
+    /// config (overriding the trait's all-defaults default).
+    ///
+    /// Side effects: none (clones the file's `Rc` arena/bind handles and shares
+    /// the options via `Rc`).
+    // Go: internal/compiler/program.go:Program.Options
+    pub fn for_file_with_options(
+        file: &ParsedFile,
+        options: Rc<CompilerOptions>,
+    ) -> Option<BoundFile> {
         let bind = file.bind_rc()?;
         Some(BoundFile {
             arena: file.arena_rc(),
             root: file.node(),
             bind,
+            options,
         })
     }
 }
@@ -83,6 +111,23 @@ impl BoundProgram for BoundFile {
         self.bind.locals.get(&container)
     }
 
+    fn globals(&self) -> Option<&SymbolTable> {
+        // Go's `Checker.globals` is the merge of every global (script / lib,
+        // i.e. non-module) source file's top-level `Locals`. For a single bound
+        // file, its root `SourceFile` node's `locals` table is that file's
+        // contribution — and, for a `lib.*.d.ts`, the table holding the real
+        // `Array` / `String` / `Object` global declarations the checker's 4z
+        // `get_global_symbol` / `get_global_type` resolve against.
+        //
+        // DEFER(P6): the cross-file MERGE (combining the lib file's globals with
+        // the source files' top-level declarations, and across multiple libs)
+        // needs a multi-file program view; a single `BoundFile` exposes one
+        // file's table.
+        // blocked-by: multi-file `compiler.Program` `BoundProgram` view + the
+        // `/// <reference lib>` graph (P6-8).
+        self.bind.locals.get(&self.root)
+    }
+
     fn flow_node_of(&self, node: NodeId) -> Option<FlowNodeId> {
         self.bind.node_flow.get(&node).copied()
     }
@@ -93,6 +138,10 @@ impl BoundProgram for BoundFile {
 
     fn flow_list(&self, id: FlowListId) -> FlowList {
         self.bind.flow_lists[id.0 as usize]
+    }
+
+    fn compiler_options(&self) -> &CompilerOptions {
+        &self.options
     }
 }
 

@@ -1611,9 +1611,9 @@ impl<'a> Printer<'a> {
         if self.should_emit_on_single_line(body) {
             return true;
         }
-        // TODO(port): Go's `Block.MultiLine` field is not carried by the Rust AST;
-        // freshly-parsed blocks rely on source-position checks below instead.
-        if false {
+        // Go checks `body.MultiLine`; the Rust AST carries that as the
+        // `MULTI_LINE` emit flag (additive port of `Block.MultiLine`).
+        if self.should_emit_on_multiple_lines(body) {
             return false;
         }
         if !node_is_synthesized(self.arena(), body)
@@ -1653,8 +1653,12 @@ impl<'a> Printer<'a> {
     // Go: internal/printer/printer.go:emitBlock
     pub(crate) fn emit_block(&mut self, node: NodeId) {
         self.enter_node(node);
-        let (statements, multi_line) = match self.arena().data(node) {
-            NodeData::Block(d) => (d.list.clone(), false),
+        // Go carries multi-line on the `Block.MultiLine` field; the Rust AST
+        // does not, so a synthesized block requests multi-line via the
+        // `MULTI_LINE` emit flag (additive port of `Block.MultiLine`).
+        let multi_line = self.should_emit_on_multiple_lines(node);
+        let statements = match self.arena().data(node) {
+            NodeData::Block(d) => d.list.clone(),
             other => panic!("expected Block, got {other:?}"),
         };
         let pos = self.arena().loc(node).pos();

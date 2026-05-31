@@ -173,6 +173,114 @@ fn flow_equality_narrows_literal_union() {
     assert_eq!(c.get_flow_type_of_reference(&p, usage, union), a);
 }
 
+// Resolves the expression of a top-level expression statement at `index`.
+fn top_level_expression(p: &StubProgram, index: usize) -> tsgo_ast::NodeId {
+    use tsgo_ast::NodeData;
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("expected a source file"),
+    };
+    match arena.data(stmts[index]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expected an expression statement"),
+    }
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (assignment reduction)
+#[test]
+fn flow_assignment_narrows_union() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare let x: string | number;\nx = \"a\";\nx;");
+    let usage = top_level_expression(&p, 2);
+    let mut c = Checker::new();
+    let declared = c.string_or_number_type();
+    let s = c.string_type();
+    // After `x = "a"` (a string), the `string | number` reference narrows to
+    // `string` (the constituent the assigned type is assignable to).
+    assert_eq!(c.get_flow_type_of_reference(&p, usage, declared), s);
+}
+
+// Resolves the first expression statement inside the `clause_index`-th clause
+// of the top-level `switch` statement at `switch_index`.
+fn switch_clause_usage(
+    p: &StubProgram,
+    switch_index: usize,
+    clause_index: usize,
+) -> tsgo_ast::NodeId {
+    use tsgo_ast::NodeData;
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("expected a source file"),
+    };
+    let case_block = match arena.data(stmts[switch_index]) {
+        NodeData::SwitchStatement(d) => d.case_block,
+        _ => panic!("expected a switch statement"),
+    };
+    let clauses = match arena.data(case_block) {
+        NodeData::CaseBlock(d) => d.clauses.nodes.clone(),
+        _ => panic!("expected a case block"),
+    };
+    let clause_stmts = match arena.data(clauses[clause_index]) {
+        NodeData::CaseOrDefaultClause(d) => d.statements.nodes.clone(),
+        _ => panic!("expected a clause"),
+    };
+    match arena.data(clause_stmts[0]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expected an expression statement"),
+    }
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminant (case)
+#[test]
+fn flow_switch_case_narrows_literal_union() {
+    use crate::core::types::{LiteralValue, TypeFlags};
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string;\nswitch (x) {\n  case \"a\":\n    x;\n}",
+    );
+    let usage = switch_clause_usage(&p, 1, 0);
+    let mut c = Checker::new();
+    let a = c.new_literal_type(
+        TypeFlags::STRING_LITERAL,
+        LiteralValue::String("a".into()),
+        None,
+    );
+    let b = c.new_literal_type(
+        TypeFlags::STRING_LITERAL,
+        LiteralValue::String("b".into()),
+        None,
+    );
+    let union = c.get_union_type(&[a, b]);
+    // Inside `case "a":`, the `"a" | "b"` reference narrows to `"a"`.
+    assert_eq!(c.get_flow_type_of_reference(&p, usage, union), a);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminant (default)
+#[test]
+fn flow_switch_default_narrows_complement() {
+    use crate::core::types::{LiteralValue, TypeFlags};
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string;\nswitch (x) {\n  case \"a\":\n    break;\n  default:\n    x;\n}",
+    );
+    let usage = switch_clause_usage(&p, 1, 1);
+    let mut c = Checker::new();
+    let a = c.new_literal_type(
+        TypeFlags::STRING_LITERAL,
+        LiteralValue::String("a".into()),
+        None,
+    );
+    let b = c.new_literal_type(
+        TypeFlags::STRING_LITERAL,
+        LiteralValue::String("b".into()),
+        None,
+    );
+    let union = c.get_union_type(&[a, b]);
+    // In the `default:` clause, `"a" | "b"` narrows to the complement `"b"`.
+    assert_eq!(c.get_flow_type_of_reference(&p, usage, union), b);
+}
+
 // Go: internal/checker/flow.go:Checker.getFlowTypeOfReference (no guard)
 #[test]
 fn flow_no_condition_returns_declared() {
@@ -214,4 +322,26 @@ fn reachable_flow_node_after_if() {
     let flow = p.flow_node_of(usage).expect("usage has a flow node");
     let c = Checker::new();
     assert!(c.is_reachable_flow_node(&p, flow));
+}
+
+// Go: internal/checker/flow.go:Checker.getPropertyNameForKnownSymbolName
+#[test]
+fn property_name_for_known_symbol_name_uses_at_prefixed_internal_name() {
+    use tsgo_ast::symbol::{escape_all_internal_symbol_names, INTERNAL_SYMBOL_NAME_PREFIX};
+    let c = Checker::new();
+    // Go: with no global `Symbol` constructor providing a `unique symbol`, the
+    // late name falls back to `InternalSymbolNamePrefix + "@" + name`.
+    assert_eq!(
+        c.get_property_name_for_known_symbol_name("iterator"),
+        format!("{INTERNAL_SYMBOL_NAME_PREFIX}@iterator"),
+    );
+    assert_eq!(
+        c.get_property_name_for_known_symbol_name("asyncIterator"),
+        format!("{INTERNAL_SYMBOL_NAME_PREFIX}@asyncIterator"),
+    );
+    // The escaped (display) form matches Go's `"__@iterator"` exactly.
+    assert_eq!(
+        escape_all_internal_symbol_names(&c.get_property_name_for_known_symbol_name("iterator")),
+        "__@iterator",
+    );
 }

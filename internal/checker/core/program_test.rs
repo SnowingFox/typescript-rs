@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::test_support::StubProgram;
+use crate::core::test_support::{MultiFileProgram, StubProgram};
 
 // Go: internal/compiler/program.go:Program (bound-file query surface)
 #[test]
@@ -37,6 +37,24 @@ fn bound_program_exposes_flow_nodes() {
     let flow = p.flow_node_of(usage).expect("usage has a flow node");
     let node = p.flow_node(flow);
     assert!(!node.flags.contains(FlowFlags::UNREACHABLE));
+}
+
+// Go: internal/compiler/program.go:Program.SourceFiles (multi-file view + merged globals)
+#[test]
+fn multi_file_program_exposes_files_and_merged_globals() {
+    let p = MultiFileProgram::build(&[
+        ("/lib.ts", "interface String {\n  length: number;\n}"),
+        ("/b.ts", "declare const s: string;"),
+    ]);
+    // Two source files, each addressable as a distinct (collision-free) handle.
+    let files = p.source_files();
+    assert_eq!(files.len(), 2);
+    assert_ne!(files[0], files[1]);
+    // The merged global table is the union of both files' top-level globals: the
+    // lib file's `String` and the source file's `s` (Go's `Checker.globals`).
+    let globals = p.globals().expect("merged globals");
+    assert!(globals.get("String").is_some());
+    assert!(globals.get("s").is_some());
 }
 
 // Go: internal/compiler/program.go:Program (missing lookups are None)

@@ -11,9 +11,10 @@
 //! (Go's `typeToString` triggers resolution), so it takes `&mut Checker`.
 //!
 //! DEFER(phase-4-checker-4k): function/construct signatures (`(x: T) => U`),
-//! array/tuple types, intersections, mapped/conditional types, alias names, and
+//! array/tuple types, mapped/conditional types, alias names, and
 //! optional/readonly member adornments — those need type kinds not yet
-//! constructed and the full node-builder scope machinery.
+//! constructed and the full node-builder scope machinery. (4v adds intersection
+//! printing: `A & B`.)
 
 use tsgo_ast::SymbolId;
 
@@ -68,6 +69,16 @@ pub fn type_to_string(checker: &mut Checker, program: &dyn BoundProgram, ty: Typ
             .collect();
         return parts.join(" | ");
     }
+    // An intersection prints its constituents (each program-aware) joined by
+    // ` & `, so named members render as `A & B` rather than `{ ... } & { ... }`.
+    if let TypeData::Intersection(i) = &checker.get_type(ty).data {
+        let members = i.types.clone();
+        let parts: Vec<String> = members
+            .iter()
+            .map(|&m| type_to_string(checker, program, m))
+            .collect();
+        return parts.join(" & ");
+    }
     let symbol = checker.get_type(ty).symbol;
     let object_info = match &checker.get_type(ty).data {
         TypeData::Object(o) => Some((o.target, o.resolved_type_arguments.clone())),
@@ -90,9 +101,16 @@ pub fn type_to_string(checker: &mut Checker, program: &dyn BoundProgram, ty: Typ
                 .collect();
             return format!("{name}<{}>", args.join(", "));
         }
-        // A named interface/class type prints as its name.
+        // A named interface/class/enum type prints as its name. An anonymous
+        // type-literal/object-literal symbol carries an internal name (the
+        // `\u{FE}`-prefixed `__type`/`__object`); such a type serializes its
+        // member literal instead (Go's `createAnonymousTypeNode` only emits a
+        // type-reference node for a symbol with a real name).
         if let Some(symbol) = symbol {
-            return symbol_to_string(program, symbol);
+            let name = symbol_to_string(program, symbol);
+            if !name.starts_with(tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_PREFIX) {
+                return name;
+            }
         }
         // An anonymous object type prints its member literal.
         return serialize_members(checker, program, ty);

@@ -14,9 +14,12 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use tsgo_ast::{NodeId, SymbolId};
+use tsgo_checker::{BoundProgram, EmitResolver};
 use tsgo_printer::EmitContext;
 
 pub mod chain;
+pub mod destructuring;
 pub mod estransforms;
 pub mod jsxtransforms;
 pub mod modifiervisitor;
@@ -37,6 +40,176 @@ pub use transformer::{new_transformer, Transformer, VisitFn};
 ///
 /// Side effects: none (a type alias).
 pub type SharedEmitContext = Rc<RefCell<EmitContext>>;
+
+/// A scope-correct reference query the import-elision transform consults to drop
+/// unused imports, the Rust adaptation of Go's `opt.EmitResolver` handle.
+///
+/// It bundles the checker's [`EmitResolver`] with the [`BoundProgram`] it
+/// queries (Go threads the program implicitly through the resolver's checker
+/// back-pointer; this port passes the program explicitly per the crate's
+/// ownership model). [`is_referenced`](Self::is_referenced) is the real,
+/// scope-aware replacement for a textual name-match: a use shadowed by an inner
+/// binding of the same name is correctly *not* counted as a reference to an
+/// outer import.
+///
+/// It is threaded as an *additive* parameter to
+/// [`new_import_elision_transformer`](tstransforms::importelision::new_import_elision_transformer)
+/// rather than as a [`TransformOptions`] field, because the compiler crate
+/// constructs `TransformOptions` with an exhaustive struct literal that adding a
+/// field would break (and the compiler crate is out of this port's edit scope).
+///
+/// # Examples
+/// ```
+/// use tsgo_transformers::EmitReferenceResolver;
+/// # fn demo(r: &EmitReferenceResolver, decl: tsgo_ast::NodeId) -> bool {
+/// r.is_referenced(decl)
+/// # }
+/// ```
+///
+/// Side effects: none (a read-only view over a bound program).
+#[derive(Clone)]
+pub struct EmitReferenceResolver {
+    program: Rc<dyn BoundProgram>,
+    resolver: EmitResolver,
+}
+
+impl EmitReferenceResolver {
+    /// Bundles `resolver` with the `program` it queries.
+    ///
+    /// `program`'s node arena must share node ids with the arena the transform
+    /// reads original (pre-transform) declaration nodes from, so a declaration
+    /// node id from the transform resolves to the same syntactic node in the
+    /// bound program.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// use tsgo_checker::{BoundProgram, EmitResolver};
+    /// use std::rc::Rc;
+    /// # fn demo(program: Rc<dyn BoundProgram>, resolver: EmitResolver) -> EmitReferenceResolver {
+    /// EmitReferenceResolver::new(program, resolver)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (stores the handles).
+    pub fn new(program: Rc<dyn BoundProgram>, resolver: EmitResolver) -> EmitReferenceResolver {
+        EmitReferenceResolver { program, resolver }
+    }
+
+    /// Reports whether the declaration `node` (an import clause / namespace
+    /// import / import specifier) introduces a binding referenced anywhere in
+    /// the file by a value-position use that resolves to it.
+    ///
+    /// Delegates to [`EmitResolver::is_referenced`] against the bound program
+    /// (Go's `emitResolver.IsReferencedAliasDeclaration`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// # fn demo(r: &EmitReferenceResolver, decl: tsgo_ast::NodeId) -> bool {
+    /// r.is_referenced(decl)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/checker/checker.go:Checker.isReferenced (via EmitResolver.IsReferencedAliasDeclaration)
+    pub fn is_referenced(&self, node: NodeId) -> bool {
+        self.resolver.is_referenced(self.program.as_ref(), node)
+    }
+
+    /// Resolves an identifier *use* (`node`, in value position) to the
+    /// declaration symbol it references, walking the scope chain outward so the
+    /// innermost binding of the name wins (shadowing).
+    ///
+    /// The CommonJS module transform consults this to rewrite a use of an
+    /// imported binding into a qualified member access on the require-alias
+    /// (Go's `visitExpressionIdentifier` -> `GetReferencedImportDeclaration`,
+    /// which is itself resolved over the symbol the use refers to). A use
+    /// shadowed by a local of the same name resolves to the local, so it is
+    /// correctly *not* rewritten. Delegates to
+    /// [`EmitResolver::resolve_reference`] against the bound program.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// # fn demo(r: &EmitReferenceResolver, use_node: tsgo_ast::NodeId) -> Option<tsgo_ast::SymbolId> {
+    /// r.resolve_reference(use_node)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/checker/checker.go:Checker.resolveName / getResolvedSymbol
+    pub fn resolve_reference(&self, node: NodeId) -> Option<SymbolId> {
+        self.resolver.resolve_reference(self.program.as_ref(), node)
+    }
+
+    /// Returns the symbol declared by `node` (e.g. an import specifier, import
+    /// clause, or namespace import), or `None` if the node binds no symbol.
+    ///
+    /// The CommonJS transform uses this to map each collected import binding to
+    /// its declaration symbol, then matches a use's
+    /// [`resolve_reference`](Self::resolve_reference) result against that symbol
+    /// (Go's `GetReferencedImportDeclaration` returns the declaration node; the
+    /// port compares declaration symbols instead).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// # fn demo(r: &EmitReferenceResolver, decl: tsgo_ast::NodeId) -> Option<tsgo_ast::SymbolId> {
+    /// r.symbol_of_declaration(decl)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/checker/checker.go:Checker.getSymbolOfDeclaration
+    pub fn symbol_of_declaration(&self, node: NodeId) -> Option<SymbolId> {
+        self.program.symbol_of_node(node)
+    }
+
+    /// Reports whether the alias declaration `node` (e.g. an `export { x }`
+    /// specifier) aliases something that is, transitively, a *value* — the query
+    /// the export-side elision asks to keep value re-exports while dropping
+    /// type-only ones.
+    ///
+    /// Delegates to [`EmitResolver::is_value_alias_declaration`] against the
+    /// bound program (Go's `emitResolver.IsValueAliasDeclaration`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// # fn demo(r: &EmitReferenceResolver, spec: tsgo_ast::NodeId) -> bool {
+    /// r.is_value_alias_declaration(spec)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/transformers/tstransforms/importelision.go:ImportElisionTransformer.isValueAliasDeclaration
+    pub fn is_value_alias_declaration(&self, node: NodeId) -> bool {
+        self.resolver
+            .is_value_alias_declaration(self.program.as_ref(), node)
+    }
+
+    /// Reports whether the alias declaration `node` (e.g. `import x =
+    /// require("m")`) is *referenced* and so must be kept by emit.
+    ///
+    /// Delegates to [`EmitResolver::is_referenced_alias_declaration`] against the
+    /// bound program (Go's `emitResolver.IsReferencedAliasDeclaration`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// # fn demo(r: &EmitReferenceResolver, decl: tsgo_ast::NodeId) -> bool {
+    /// r.is_referenced_alias_declaration(decl)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/transformers/tstransforms/importelision.go:ImportElisionTransformer.isReferencedAliasDeclaration
+    pub fn is_referenced_alias_declaration(&self, node: NodeId) -> bool {
+        self.resolver
+            .is_referenced_alias_declaration(self.program.as_ref(), node)
+    }
+}
 
 #[cfg(test)]
 #[path = "test_support.rs"]

@@ -3,9 +3,25 @@
 **完成列**：`✓`=Rust 已有对应 `#[test]` 且 `cargo test` 通过；留空=未写/未过；`—`=推迟到指定 phase。
 **Go 测试规模**：8 测试文件 / 17 `func Test*`（+`TestMain`+2 Benchmark）/ 共约 100+ 子用例。
 
-## 本轮实现状态（wave 3）
+## 本轮实现状态（wave 4 — tsconfigparsing 可达子集）
 
-`cargo test -p tsgo_tsoptions` = **73 单测 + 13 doctest 全绿**。本轮断言级覆盖的测试（✓）：
+`cargo test -p tsgo_tsoptions` = **105 单测 + 18 doctest 全绿**（wave 3 基线 80+14；本轮 tsconfigparsing +25 单测 +4 doctest）。`clippy --all-targets -D warnings` 干净；`fmt --check` 干净。
+
+本轮新增断言级覆盖（✓，均取 Go 测试字面量/语义；golden 字节级仍归 P10）：
+
+- **`TestParseConfigFileTextToJson`**（`tsconfigparsing_test.rs`，断言级替代 submodule golden）：`text_to_json_nested_object_bool`（tracer）、`..._strips_comments_and_reads_string_array`、`..._keeps_string_content_untouched`、`..._lib_array`、`..._empty_object`、`..._only_whitespace_is_empty`、`..._comments_only_is_empty`、`..._number_value`、`..._negative_number_value`、`..._false_and_null_values`、`..._non_object_root_errors`（root-must-be-object，code 5092）。
+- **`TestParseJsonConfigFileContent`（json api，noSubmoduleBaseline 等价断言）**：`cfg_ignore_dotted_files_and_folders`、`cfg_implicitly_exclude_package_folders`、`cfg_empty_files_list_errors`(18002)、`cfg_empty_files_list_no_refs_errors`、`cfg_empty_files_with_refs_ok`、`cfg_directory_with_no_ts_files_errors`(18003)、`cfg_empty_include_errors`(18003)、`cfg_unknown_compiler_option_errors`(5023)、`cfg_excludes_typo_errors`(6114)、`cfg_commandline_only_option_in_tsconfig_errors`(6001)、`cfg_full_options`（outDir 绝对化/strict/target=ES2017/module=ESNext/moduleResolution=bundler/jsx=react/maxNodeModuleJsDepth + 通配展开 + literalFileNamesLen=2）。
+- **`tsoptionstest::get_parsed_command_line`**（已解除 blocked-by）：`literal_files_are_resolved_relative_to_config`、`literal_file_names_are_deduplicated`（`LiteralFileNames` 去重）、`default_include_expands_wildcards` + 1 doctest。
+
+DEFER（下一 wave / P10）：`extends` 相关用例（`cfg_extends_*`/`cfg_null_override_*`/`TestExtendedConfigErrorsAppearOnCacheHit`）、`TestParseTypeAcquisition`（reachable，但本轮未移植到断言）、`TestParsedCommandLine/PossiblyMatchesFileName`（需 path-map/wildcard-globs 缓存）、`cfg_wrong_type_and_enum_err`/`cfg_wrong_case_options`（顶层 enum 静默忽略路径 + 大小写 did-you-mean）、所有 golden 字节级 + submodule 行。
+
+### 上一轮（wave 3 + tsoptionstest 收尾）状态
+
+`cargo test -p tsgo_tsoptions` = **80 单测 + 14 doctest 全绿**（wave 3 = 73+13；`tsoptionstest` 收尾追加 7 单测 + 1 doctest）。
+
+**`tsoptionstest` 收尾（本轮）**：`vfsparseconfighost.go` 全量移植完成——补 `fix_root`（Go 无单测，行为级红→绿：相对路径原样 / 根本身→`.` / 剥根三分支）+ `VfsParseConfigHost` 宿主行为级单测（`file_exists` / `read_file` / `get_current_directory` / 大小写敏感）。`parsedcommandline.go:GetParsedCommandLine` 仍 DEFER（`// blocked-by: tsoptions tsconfigparsing`）。
+
+本轮断言级覆盖的测试（✓）：
 
 - **一致性 gate**：`TestParseCompilerOptionNoMissingFields`（`parsinghelpers_test.rs:parse_compiler_option_no_missing_fields`，遍历字段表）✓；`TestCompilerOptionsDeclaration`（`optionsfields_test.rs:compiler_options_declaration_bijection`，双向 + json 名核对）✓。
 - **`TestAffectsBuildInfo`**（`declscompiler_test.rs:affects_buildinfo_superset_of_semantic`）✓。
@@ -42,13 +58,14 @@
 
 | Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `text_to_json_only_whitespace` | 纯空白 → 空配置无错 | `""` / `" "` → 空对象, 0 errors | `...:TestParseConfigFileTextToJson/returns empty config for file with only whitespaces` | — (P10 golden) |
-| `text_to_json_comments_only` | 仅注释 → 空配置 | `"// Comment"` / `"/* Comment*/"` → 空对象 | `.../returns empty config for file with comments only` | — |
-| `text_to_json_empty_object` | `{}` → 空配置 | `{}` → 空对象 | `.../returns empty config when config is empty object` | — |
-| `text_to_json_strips_comments` | 带行/块注释的 exclude 数组 | 含 `// Exclude` 注释 → `exclude:["file.d.ts"]` | `.../returns config object without comments` | — |
-| `text_to_json_keeps_string_content` | 字符串内 `//`、`/*` 不当注释 | `"xx//file.d.ts"` / `"xx/*file.d.ts*/"` 原样保留 | `.../keeps string content untouched` | — |
-| `text_to_json_escaped_chars` | 字符串转义正确处理 | `"xx\"//files"` / `"xx\\"` 行尾注释 | `.../handles escaped characters in strings correctly` | — |
-| `text_to_json_lib_array` | lib 数组正确解析 | `lib:["es5"]` / `lib:["es5","es6"]` | `.../returns object when users correctly specify library` | — |
+| `text_to_json_only_whitespace_is_empty` | 纯空白 → 空配置无错 | `""` / `" "` → 空对象, 0 errors | `...:TestParseConfigFileTextToJson/returns empty config for file with only whitespaces` | ✓（断言级；golden — P10）|
+| `text_to_json_comments_only_is_empty` | 仅注释 → 空配置 | `"// Comment"` / `"/* Comment*/"` → 空对象 | `.../returns empty config for file with comments only` | ✓ |
+| `text_to_json_empty_object` | `{}` → 空配置 | `{}` → 空对象 | `.../returns empty config when config is empty object` | ✓ |
+| `text_to_json_strips_comments_and_reads_string_array` | 带行/块注释的 exclude 数组 | 含 `// Exclude` 注释 → `exclude:["file.d.ts"]` | `.../returns config object without comments` | ✓ |
+| `text_to_json_keeps_string_content_untouched` | 字符串内 `//`、`/*` 不当注释 | `"xx//file.d.ts"` 原样保留 | `.../keeps string content untouched` | ✓ |
+| `text_to_json_escaped_chars` | 字符串转义正确处理 | `"xx\"//files"` / `"xx\\"` 行尾注释 | `.../handles escaped characters in strings correctly` | — (P10 golden) |
+| `text_to_json_lib_array` | lib 数组正确解析 | `lib:["es5"]` / `lib:["es5","es6"]` | `.../returns object when users correctly specify library` | ✓ |
+| `text_to_json_number_value` / `..._negative_number_value` / `..._false_and_null_values` / `..._non_object_root_errors` | number / 负数(前缀一元) / false+null / 非 object 根(code 5092) | 见 `convertPropertyValueToJson` 各分支 | `convertPropertyValueToJson` / `convertConfigFileToObject` | ✓ |
 
 ### TestParseJsonConfigFileContent / TestParseJsonSourceFileConfigFileContent（表 `parseJsonConfigFileTests`）
 
@@ -56,16 +73,16 @@
 
 | Rust 测试（×2 api） | 验证内容 | input → expected（关键断言） | Go 对照 | 完成 |
 |---|---|---|---|---|
-| `cfg_ignore_dotted` | 忽略点开头文件/目录 | `{}` + 含 `.git/`/`.b.ts`/`..c.ts` → fileNames 仅 `test.ts` | `parseJsonConfigFileTests/ignore dotted files and folders` | — |
+| `cfg_ignore_dotted_files_and_folders` | 忽略点开头文件/目录 | `{}` + 含 `.git/`/`.b.ts`/`..c.ts` → fileNames 仅 `test.ts` | `parseJsonConfigFileTests/ignore dotted files and folders` | ✓（json api 断言）|
 | `cfg_allow_dotted_explicit` | `files` 显式列出点文件被收 | `files:[.git/a.ts,.b.ts,..c.ts]` → 这三个入列 | `.../allow dotted files and folders when explicitly requested` | — |
-| `cfg_exclude_pkg_folders` | 隐式排除 node_modules/bower/jspm | `{}` → 仅 `/d.ts`,`/folder/e.ts` | `.../implicitly exclude common package folders` | — |
-| `cfg_empty_files_err` | 空 `files` 报错 | `files:[]` → 含 `The_files_list_in_config_file_0_is_empty` | `.../generates errors for empty files list` | — |
-| `cfg_empty_files_no_refs_err` | 空 files + 空 references 报错 | `files:[],references:[]` → 同上错误 | `.../generates errors for empty files list when no references are provided` | — |
-| `cfg_dir_no_ts_err` | 目录无 .ts | `{}` + 仅 `a.js` → No_inputs_were_found | `.../generates errors for directory with no .ts files` | — |
-| `cfg_empty_include_err` | 空 include | `include:[]` → No_inputs_were_found | `.../generates errors for empty include` | — |
-| `cfg_full_options` | 完整选项解析（noSubmoduleBaseline） | outDir/strict/target=ES2017/module=ESNext/moduleResolution=bundler/jsx=react/maxNodeModuleJsDepth=1/paths/files/include/exclude → 对应字段 + fileNames | `.../parses tsconfig with compilerOptions, files, include, and exclude` | |
-| `cfg_cmdline_only_in_tsconfig_err` | tsconfig 里写命令行专属选项 | `help:true` → Option_0_can_only_be_specified_on_command_line | `.../generates errors when commandline option is in tsconfig` | |
-| `cfg_empty_files_with_refs_ok` | 空 files + 有 references 不报错 | `files:[],references:[{path:/apath}]` → 0 该类 error | `.../does not generate errors for empty files list when one or more references are provided` | |
+| `cfg_implicitly_exclude_package_folders` | 隐式排除 node_modules/bower/jspm | `{}` → 仅 `/d.ts`,`/folder/e.ts` | `.../implicitly exclude common package folders` | ✓ |
+| `cfg_empty_files_list_errors` | 空 `files` 报错 | `files:[]` → 含 `The_files_list_in_config_file_0_is_empty`(18002) | `.../generates errors for empty files list` | ✓ |
+| `cfg_empty_files_list_no_refs_errors` | 空 files + 空 references 报错 | `files:[],references:[]` → 同上错误 | `.../generates errors for empty files list when no references are provided` | ✓ |
+| `cfg_directory_with_no_ts_files_errors` | 目录无 .ts | `{}` + 仅 `a.js` → No_inputs_were_found(18003) | `.../generates errors for directory with no .ts files` | ✓ |
+| `cfg_empty_include_errors` | 空 include | `include:[]` → No_inputs_were_found(18003) | `.../generates errors for empty include` | ✓ |
+| `cfg_full_options` | 完整选项解析（noSubmoduleBaseline） | outDir(绝对化)/strict/target=ES2017/module=ESNext/moduleResolution=bundler/jsx=react/maxNodeModuleJsDepth=1/paths/files/include/exclude → 对应字段 + fileNames + literalFileNamesLen=2 | `.../parses tsconfig with compilerOptions, files, include, and exclude` | ✓ |
+| `cfg_commandline_only_option_in_tsconfig_errors` | tsconfig 里写命令行专属选项 | `help:true` → Option_0_can_only_be_specified_on_command_line(6001) | `.../generates errors when commandline option is in tsconfig` | ✓ |
+| `cfg_empty_files_with_refs_ok` | 空 files + 有 references 不报错 | `files:[],references:[{path:/apath}]` → 0 该类 error | `.../does not generate errors for empty files list when one or more references are provided` | ✓ |
 | `cfg_exclude_outdir` | 默认排除 outDir（2 inputs） | outDir=bin → 排除 `/bin/a.ts`；exclude=[obj] 覆盖 → 不排除 bin | `.../exclude outDir unless overridden` | — |
 | `cfg_exclude_decldir` | 默认排除 declarationDir（2 inputs） | declarationDir=declarations → 排除；exclude=[types] 覆盖 | `.../exclude declarationDir unless overridden` | — |
 | `cfg_empty_dir_err` | 空目录 | allowJs:true + 无文件 → No_inputs_were_found | `.../generates errors for empty directory` | |
@@ -73,10 +90,10 @@
 | `cfg_include_not_string_err` | include 元素非字符串 | `include:[["./**/*.ts"]]` → Compiler_option_0_requires_a_value_of_type_1 | `.../generates errors when include is not string` | |
 | `cfg_files_not_string_err` | files 元素非字符串 | `files:[{compilerOptions:...}]` → 类型错误 | `.../generates errors when files is not string` | |
 | `cfg_outdir_from_base` | 从 base 继承 outDir（2 inputs，configDir） | extends tsconfigWithoutConfigDir / tsconfigWithConfigDir → outDir 继承/`${configDir}` 替换 | `.../with outDir from base tsconfig` | — |
-| `cfg_excludes_typo_err` | `excludes`（拼写）报错 | `excludes:[foge.ts]` → Unknown_option_excludes_Did_you_mean_exclude | `.../returns error when tsconfig have excludes` | — |
+| `cfg_excludes_typo_errors` | `excludes`（拼写）报错 | `excludes:[foge.ts]` → Unknown_option_excludes_Did_you_mean_exclude(6114) | `.../returns error when tsconfig have excludes` | ✓ |
 | `cfg_extends_options` | extends + 本地选项合并（noSubmoduleBaseline） | extends tsconfigWithExtends + outDir/strict/noImplicitAny/baseUrl → 合并后字段 + 继承 files/include | `.../parses tsconfig with extends, files, include and other options` | |
 | `cfg_extends_configdir` | extends + `${configDir}`（noSubmoduleBaseline） | extends tsconfig.base（含 6 个 `${configDir}/...`）→ 全部替换为绝对路径 | `.../parses tsconfig with extends and configDir` | |
-| `cfg_unknown_option_err` | 未知 compiler 选项 | `unknown:true` → Unknown_compiler_option_0 | `.../reports error for an unknown option` | |
+| `cfg_unknown_compiler_option_errors` | 未知 compiler 选项 | `unknown:true` → Unknown_compiler_option_0(5023) | `.../reports error for an unknown option` | ✓ |
 | `cfg_wrong_type_and_enum_err` | 类型错 + 无效枚举 | target="invalid"/removeComments="should be boolean"/moduleResolution="invalid" → 各诊断 | `.../reports errors for wrong type option and invalid enum value` | |
 | `cfg_wrong_case_options` | 大小写错（noSubmoduleBaseline） | sourcemap/declarationmap/... → did-you-mean 大小写诊断 | `.../reports errors for incorrectly cased option names` | |
 | `cfg_empty_types_array` | 空 types 数组（noSubmoduleBaseline） | `types:[]` → `Types==[]`（保留空数组） | `.../handles empty types array` | |
@@ -280,7 +297,7 @@
 |---|---|---|---|---|
 | `pcl_literal_files_no_exclude` | files 列表匹配 | `files:[a.ts,b.ts]` → 仅 `/dev/a.ts`,`/dev/b.ts` 匹配 | `TestParsedCommandLine/PossiblyMatchesFileName/with literal file list/without exclude` | |
 | `pcl_literal_files_not_removed_by_exclude` | exclude 不移除 files 列出项 | files:[a,b] + exclude:[b.ts] → a,b 仍匹配；reload(空FS) 后仍匹配 | `.../with literal file list/are not removed due to excludes` | |
-| `pcl_literal_files_dedup` | files 去重 | files:[a,a,b] → `LiteralFileNames()==[a,b]` | `.../with literal file list/duplicates` | |
+| `literal_file_names_are_deduplicated`（在 `tsoptionstest/parsedcommandline_test`）| files 去重 | files:[a,a,b] → `literal_file_names()==[a,b]` | `.../with literal file list/duplicates` | ✓ |
 | `pcl_literal_include_no_exclude` | include 列表匹配 | include:[a.ts,b.ts] → a,b 匹配；reload(空FS) 后仍匹配 | `.../with literal include list/without exclude` | |
 
 ---
@@ -296,6 +313,23 @@
 > internalOptions：`allowNonTsExtensions`/`build`/`configFilePath`/`noDtsResolution`/`noEmitForJsFiles`/`pathsBasePath`/`suppressOutputPathCheck`。skipped：`plugins`。
 
 ---
+
+## `tsoptionstest/`（测试帮手子模块，Go 无 `_test.go`）
+
+§8.6 行为级单测（Go 此子目录无测试文件，expected 取自 Go 实现的确定性语义）：
+
+| Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
+|---|---|---|---|---|
+| `fix_root_returns_relative_path_unchanged` | 无根路径原样返回 | `a/b/c.ts`,`./a` → 同值 | `vfsparseconfighost.go:fixRoot`（rootLength==0） | ✓ |
+| `fix_root_of_root_only_path_is_dot` | 路径恰为其根 → `.` | `/`,`c:/` → `.` | `vfsparseconfighost.go:fixRoot`（len==rootLength） | ✓ |
+| `fix_root_strips_root_prefix` | 剥掉根前缀 | `/a/b.ts`→`a/b.ts`,`c:/a/b.ts`→`a/b.ts` | `vfsparseconfighost.go:fixRoot`（path[rootLength:]） | ✓ |
+| `host_fs_reports_file_existence` | vfs 宿主回答存在性 | `/p/a.ts` 存在、`/p/missing.ts` 不存在 | `vfsparseconfighost.go:FS` | ✓ |
+| `host_fs_reads_file_contents` | vfs 宿主读取内容 | `/p/a.ts`→`"let x = 1;"`、缺失→`None` | `vfsparseconfighost.go:FS` | ✓ |
+| `host_reports_current_directory` | 返回 cwd | `new(_, "/some/dir", _)` → `/some/dir` | `vfsparseconfighost.go:GetCurrentDirectory` | ✓ |
+| `host_honors_case_sensitivity_flag` | 大小写敏感开关 | 敏感: `/p/a.ts` 未命中 `/p/A.ts`；不敏感: 命中 | `vfsparseconfighost.go:NewVFSParseConfigHost` | ✓ |
+| `VfsParseConfigHost::new`（doctest） | 构造 + cwd | doctest 断言 `get_current_directory()=="/p"` | `vfsparseconfighost.go:NewVFSParseConfigHost` | ✓ |
+| `fix_root`（doctest） | 三分支示例 | `a/b`,`/`,`/a/b` | `vfsparseconfighost.go:fixRoot` | ✓ |
+| `get_parsed_command_line`（`literal_files_are_resolved_relative_to_config` / `literal_file_names_are_deduplicated` / `default_include_expands_wildcards` + doctest）| tsconfig 全链端到端 | `{files:[a,b]}`→[/dev/a.ts,/dev/b.ts]；`{}`→默认 include 展开 | `parsedcommandline.go:GetParsedCommandLine` | ✓ **已解除 blocked-by** |
 
 ## 与 impl.md 的对齐核对
 

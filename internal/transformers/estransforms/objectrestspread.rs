@@ -23,6 +23,9 @@
 //! `for-of` / `catch` / assignment-destructuring patterns (need the parameter /
 //! assignment flatteners and `FlattenDestructuringAssignment`).
 
+use crate::destructuring::{
+    flatten_destructuring_assignment, is_destructuring_assignment, skip_parentheses, FlattenLevel,
+};
 use crate::{new_transformer, TransformOptions, Transformer};
 use tsgo_ast::{Kind, NodeArena, NodeData, NodeFlags, NodeId, NodeList, TokenFlags, VisitOptions};
 use tsgo_printer::emithelpers::REST_HELPER;
@@ -65,8 +68,106 @@ fn object_rest_spread_visit(ec: &mut EmitContext, node: NodeId) -> NodeId {
                 object_spread_visit(ec.arena_mut(), node)
             }
         }
+        Kind::ExpressionStatement => {
+            if let Some(lowered) = try_lower_object_rest_assignment_statement(ec, node) {
+                lowered
+            } else {
+                object_spread_visit(ec.arena_mut(), node)
+            }
+        }
         _ => object_spread_visit(ec.arena_mut(), node),
     }
+}
+
+/// Lowers an expression statement whose expression is an object-rest
+/// destructuring **assignment** (`({ a, ...r } = o);`) by routing it through the
+/// generic destructuring flattener at [`FlattenLevel::ObjectRest`], which keeps
+/// the non-rest bindings as an object assignment pattern and lowers the rest
+/// with the shared `__rest` helper. Returns `None` when the statement is not a
+/// reachable object-rest assignment (so the caller falls back to the arena-only
+/// object-literal lowering / leaves it unchanged — DEFER).
+///
+/// The statement's wrapping parentheses are preserved so the rebuilt leading
+/// `{` is not parsed as a block.
+///
+/// Side effects: may push rebuilt nodes; requests the `__rest` helper on success.
+// Go: internal/transformers/estransforms/objectrestspread.go:visitBinaryExpression (destructuring-assignment arm)
+fn try_lower_object_rest_assignment_statement(
+    ec: &mut EmitContext,
+    node: NodeId,
+) -> Option<NodeId> {
+    let expression = match ec.arena().data(node) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => return None,
+    };
+    let inner = skip_parentheses(ec.arena(), expression);
+    if !reachable_object_rest_assignment(ec.arena(), inner) {
+        return None;
+    }
+    let lowered = flatten_destructuring_assignment(ec, inner, false, FlattenLevel::ObjectRest);
+    let new_expression = if ec.arena().kind(expression) == Kind::ParenthesizedExpression {
+        ec.arena_mut().new_parenthesized_expression(lowered)
+    } else {
+        lowered
+    };
+    Some(ec.arena_mut().new_expression_statement(new_expression))
+}
+
+/// Reports whether `node` is an object-rest destructuring assignment within the
+/// reachable subset: `{ <kept>, ...r } = value` where `r` is an identifier, each
+/// kept element is a simple shorthand (no default), and `value` is
+/// simple-copiable (so no hoisted temp is needed at statement level). Mirrors
+/// Go's `IsDestructuringAssignment(node) && ContainsObjectRestOrSpread(left)`
+/// guard, narrowed to the no-checker / no-temp-hoist reachable subset.
+///
+/// Side effects: none (reads the arena).
+// Go: internal/transformers/estransforms/objectrestspread.go:visitBinaryExpression (guard)
+fn reachable_object_rest_assignment(arena: &NodeArena, node: NodeId) -> bool {
+    if !is_destructuring_assignment(arena, node) {
+        return false;
+    }
+    let (left, right) = match arena.data(node) {
+        NodeData::BinaryExpression(d) => (d.left, d.right),
+        _ => return false,
+    };
+    let properties = match arena.data(left) {
+        NodeData::ObjectLiteralExpression(d) => &d.list.nodes,
+        _ => return false,
+    };
+    let Some((rest, leading)) = properties.split_last() else {
+        return false;
+    };
+    let rest_is_identifier = matches!(
+        arena.data(*rest),
+        NodeData::SpreadAssignment(d) if arena.kind(d.expression) == Kind::Identifier
+    );
+    if !rest_is_identifier {
+        return false;
+    }
+    if !leading
+        .iter()
+        .all(|&p| is_reachable_kept_property(arena, p))
+    {
+        return false;
+    }
+    // With kept bindings, `value` is referenced more than once (the kept pattern
+    // and `__rest`), so it must be duplicable without a hoisted temp (the
+    // statement path has no variable environment to receive one).
+    is_simple_copiable(arena, right)
+}
+
+/// Reports whether a leading object-literal property is a kept binding within
+/// the reachable subset: a shorthand property with an identifier name and no
+/// default. Renames / defaults / nested patterns / computed keys are DEFER.
+///
+/// Side effects: none (reads the arena).
+fn is_reachable_kept_property(arena: &NodeArena, property: NodeId) -> bool {
+    matches!(
+        arena.data(property),
+        NodeData::ShorthandPropertyAssignment(d)
+            if d.object_assignment_initializer.is_none()
+                && arena.kind(d.name) == Kind::Identifier
+    )
 }
 
 /// Visits the source file's top-level statements with the emit-context-threaded
@@ -325,7 +426,11 @@ fn is_simple_copiable(arena: &NodeArena, node: NodeId) -> bool {
 ///
 /// Side effects: pushes the call/array nodes; requests the `__rest` helper.
 // Go: internal/printer/factory.go:NodeFactory.NewRestHelper
-fn new_rest_helper(ec: &mut EmitContext, value: NodeId, property_names: Vec<NodeId>) -> NodeId {
+pub(crate) fn new_rest_helper(
+    ec: &mut EmitContext,
+    value: NodeId,
+    property_names: Vec<NodeId>,
+) -> NodeId {
     ec.request_emit_helper(&REST_HELPER);
     let rest_name = ec.factory().new_unscoped_helper_name("__rest");
     let prop_array = ec

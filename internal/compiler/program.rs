@@ -159,14 +159,38 @@ impl Program {
     /// Binds every loaded source file (idempotently), so the binder's symbol and
     /// flow graphs are available for type-checking.
     ///
-    /// Side effects: binds each file via `tsgo_binder`, mutating per-file arenas.
+    /// A file the *partial* binder cannot handle is skipped (left unbound) rather
+    /// than aborting the whole program; the checker's multi-file view only
+    /// includes bound files (see [`MultiFileBoundProgram::new`](crate::MultiFileBoundProgram)),
+    /// so a skipped lib simply does not contribute globals. This matters once the
+    /// default lib's `/// <reference lib>` graph is expanded: the ES5 aggregator
+    /// pulls in `lib.dom.d.ts`, whose `[Symbol.x]` computed property names the
+    /// binder cannot name yet — `lib.es5.d.ts` (the `String`/`Array` globals)
+    /// still binds, so real globals stay resolvable.
+    ///
+    /// DEFER(P6): bind every lib (so the `dom`/`webworker` globals are
+    /// checkable, not just parsed).
+    /// blocked-by: the binder's computed-property-name handling
+    /// (`internal/binder/symbols.rs:getDeclarationName` `panic!`s on a
+    /// non-literal computed name), which this crate must not edit.
+    ///
+    /// Side effects: binds each bindable file via `tsgo_binder`, mutating
+    /// per-file arenas; a file that panics mid-bind is left unbound (its arena
+    /// may be partially mutated but is never read, as it is excluded from the
+    /// checker view).
     // Go: internal/compiler/program.go:BindSourceFiles
     pub fn bind_source_files(&mut self) {
         // PERF(port): Go binds unbound files on a `core.WorkGroup`; this round
         // binds sequentially. Each file owns its own arena, so binding is
         // embarrassingly parallel and can be switched to `rayon` later.
         for file in self.processed.files_mut() {
-            file.bind();
+            // The binder is a partial port that `panic!`s on some real lib
+            // constructs; tolerate that here (see the doc note) instead of
+            // aborting. `catch_unwind` is sound because each file owns its arena
+            // and a skipped file is never read.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                file.bind();
+            }));
         }
     }
 
@@ -207,8 +231,16 @@ impl Program {
     // Go: internal/compiler/program.go:initCheckerPool + checkerpool.go:createCheckers
     pub fn create_checkers(&mut self) {
         self.bind_source_files();
+        // Share the program's REAL compiler options with the checker pool so the
+        // checker's option-gated diagnostics (round 4al's `2802` for-of
+        // downlevel-iteration / `--target` gating, `strictNullChecks`, ...) read
+        // the program's actual config rather than all-defaults. Go: the pool's
+        // checkers are built over the `*Program`, and `c.compilerOptions =
+        // program.Options()`.
+        let options = std::rc::Rc::new(self.options().clone());
         let files = self.processed.files();
-        self.checker_pool.create_checkers(files);
+        self.checker_pool
+            .create_checkers_with_options(files, options);
     }
 
     /// The built-in checker pool (sized; call [`Self::create_checkers`] to build
@@ -261,6 +293,19 @@ impl Program {
         // checking through the pool.
         self.create_checkers();
         self.checker_pool.collect_diagnostics()
+    }
+
+    /// The loaded default library file (the lib included automatically from the
+    /// target, or the first `--lib` entry), if one was included and read.
+    ///
+    /// This is the file whose top-level declarations form the program's global
+    /// scope (see [`BoundFile::globals`](crate::BoundFile)); a checker built over
+    /// its bound view resolves the real `Array`/`String`/`Object` globals.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/compiler/program.go:Program.GetDefaultLibFile
+    pub fn default_lib_file(&self) -> Option<&ParsedFile> {
+        self.processed.default_lib_file()
     }
 
     /// The normalized names of root/referenced files that could not be read.

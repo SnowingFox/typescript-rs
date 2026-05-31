@@ -13,11 +13,12 @@
 //! alias/reference/host-dependent queries are deferred (see the per-method
 //! `// blocked-by:` notes).
 
-use tsgo_ast::{ModifierFlags, NodeData, NodeId};
+use tsgo_ast::{Kind, ModifierFlags, NodeData, NodeId, SymbolFlags, SymbolId};
 
 use super::declared_types::get_type_of_symbol;
 use super::nodebuilder::type_to_string;
 use super::program::BoundProgram;
+use super::symbols::resolve_name;
 use super::symbols_query::get_symbol_of_declaration;
 use super::Checker;
 
@@ -98,6 +99,322 @@ impl EmitResolver {
         type_to_string(checker, program, ty)
     }
 
+    /// Resolves an identifier *use* (`node`, in value position) to the
+    /// declaration symbol it references, walking the scope chain from `node`
+    /// outward through enclosing block/function/module scopes to the program's
+    /// globals (Go's `resolveName` for an expression identifier, via
+    /// `getResolvedSymbol`/`checkIdentifier`).
+    ///
+    /// The innermost matching declaration wins (shadowing): a use inside a
+    /// function resolves to that function's local before an outer/global of the
+    /// same name. Resolution keeps any symbol whose flags intersect
+    /// `Value | Alias`, so an imported binding (an `Alias` symbol) is found in
+    /// value position — exactly what [`is_referenced`](Self::is_referenced)
+    /// needs.
+    ///
+    /// DEFER(phase-4-checker-post): the alias's value-ness is approximated by
+    /// matching the `Alias` flag directly rather than following the alias to its
+    /// target and testing the target's flags (Go's `getSymbolFlags` /
+    /// `getSymbol`); full meaning-by-target plus the resolver's special-name and
+    /// type-only rules need cross-file alias resolution.
+    /// blocked-by: module import/export resolution (`exports.go`) + `MarkLinked`
+    /// references (type-vs-value meaning).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, EmitResolver};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, p: &P, n: tsgo_ast::NodeId) -> Option<tsgo_ast::SymbolId> {
+    /// r.resolve_reference(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/checker/checker.go:Checker.resolveName / getResolvedSymbol
+    pub fn resolve_reference(&self, program: &dyn BoundProgram, node: NodeId) -> Option<SymbolId> {
+        if program.arena().kind(node) != Kind::Identifier {
+            return None;
+        }
+        let name = program.arena().text(node);
+        resolve_name(
+            program,
+            node,
+            name,
+            SymbolFlags::VALUE | SymbolFlags::ALIAS,
+            false,
+            program.globals(),
+        )
+    }
+
+    /// Returns the *export container* a value-position identifier `node`
+    /// resolves to, i.e. the node a use of a top-level exported binding must be
+    /// qualified against during emit (Go's `GetReferencedExportContainer`). For
+    /// a use of a top-level export of the current module this is the
+    /// `SourceFile` node, which the CommonJS transform rewrites into an
+    /// `exports.<name>` access.
+    ///
+    /// 4as ports the reachable single-file subset: resolve the use (with the
+    /// `ExportValue | Value | Alias` meaning Go's `getReferencedValueSymbol`
+    /// uses), and if it resolves to a top-level *exported* binding of the
+    /// current module, return that module's `SourceFile` node. A use of a
+    /// non-exported local, or of an inner binding that shadows an export,
+    /// resolves to a non-exported symbol and yields `None`. Per Go, an exported
+    /// binding that owns a *local* declaration of a non-variable kind
+    /// (`ExportHasLocal`: function/class/enum/namespace) is **not** prefixed
+    /// (returns `None`) unless `prefix_locals` is set — only exported variables
+    /// become `exports.x` use-sites.
+    ///
+    /// DEFER(phase-4-checker-post): the namespace/enum export containers (Go's
+    /// `FindAncestor` over the matching `ModuleDeclaration`/`EnumDeclaration`),
+    /// the cross-module UMD-export case (`symbolFile != referenceFile` returns
+    /// `None`), the `startInDeclarationContainer` start-point shift for a
+    /// module/enum declaration *name*, and merged-symbol canonicalization.
+    /// blocked-by: namespace/enum container resolution + cross-module
+    /// (`compiler.Program`, P6) + `getMergedSymbol`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, EmitResolver};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, p: &P, n: tsgo_ast::NodeId) -> Option<tsgo_ast::NodeId> {
+    /// r.get_referenced_export_container(p, n, false)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/binder/referenceresolver.go:referenceResolver.GetReferencedExportContainer
+    pub fn get_referenced_export_container(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        prefix_locals: bool,
+    ) -> Option<NodeId> {
+        let arena = program.arena();
+        // Go: GetReferencedExportContainer takes an `IdentifierNode`; a
+        // non-identifier never resolves to a value reference.
+        if arena.kind(node) != Kind::Identifier {
+            return None;
+        }
+        // Go: getReferencedValueSymbol resolves with meaning
+        // `ExportValue | Value | Alias`. ExportValue is required because a
+        // top-level *exported* binding leaves only an `ExportValue` "phantom"
+        // local in the module's `locals` (the real symbol lives in the module
+        // `exports`, reached via `export_symbol`).
+        let name = arena.text(node);
+        let mut symbol = resolve_name(
+            program,
+            node,
+            name,
+            SymbolFlags::EXPORT_VALUE | SymbolFlags::VALUE | SymbolFlags::ALIAS,
+            false,
+            program.globals(),
+        )?;
+        // Go: if symbol.Flags & ExportValue != 0 { symbol = getMergedSymbol(symbol.ExportSymbol) }
+        // (getMergedSymbol is identity in the single-file subset).
+        if program.symbol(symbol).flags.contains(SymbolFlags::EXPORT_VALUE) {
+            let export_symbol = program.symbol(symbol).export_symbol?;
+            // Go: if !prefixLocals && exportSymbol.Flags&ExportHasLocal != 0 &&
+            // exportSymbol.Flags&Variable == 0 { return nil }. `ExportHasLocal`
+            // (function/class/enum/namespace) names a runtime local binding that
+            // is referenced unqualified; only exported *variables* are rewritten
+            // into `exports.x` use-sites.
+            let export_flags = program.symbol(export_symbol).flags;
+            if !prefix_locals
+                && export_flags.intersects(SymbolFlags::EXPORT_HAS_LOCAL)
+                && !export_flags.intersects(SymbolFlags::VARIABLE)
+            {
+                return None;
+            }
+            symbol = export_symbol;
+        }
+        // Go: parentSymbol := getParentOfSymbol(symbol). When the parent is the
+        // module (a `ValueModule` whose `ValueDeclaration` is the `SourceFile`),
+        // the export container is that source file.
+        let parent_symbol = program.symbol(symbol).parent?;
+        let parent = program.symbol(parent_symbol);
+        if parent.flags.contains(SymbolFlags::VALUE_MODULE) {
+            if let Some(value_declaration) = parent.value_declaration {
+                if arena.kind(value_declaration) == Kind::SourceFile {
+                    return Some(value_declaration);
+                }
+            }
+        }
+        None
+    }
+
+    /// Reports whether the declaration `node` (e.g. an import specifier / import
+    /// clause) is *referenced* anywhere in the file by a value-position
+    /// identifier use that resolves to it (Go's `isReferenced` primitive, the
+    /// query importElision asks to elide unused imports).
+    ///
+    /// Scans every identifier in the file, skipping the declaration's own name
+    /// node(s), and reports `true` as soon as one resolves (via
+    /// [`resolve_reference`](Self::resolve_reference), scope-correct) to the
+    /// declaration's symbol. This is the scope-aware replacement for a textual
+    /// name-match stand-in: a use shadowed by an inner binding of the same name
+    /// is correctly *not* counted as a reference to the outer declaration.
+    ///
+    /// DEFER(phase-4-checker-post): Go records reference kinds eagerly during
+    /// checking (`markLinkedReferences` -> `symbolReferenceLinks.referenceKinds`)
+    /// and `isReferenced` is then an O(1) flag read; the type-only-ness split
+    /// (a *type*-only use does not keep a value import alive) needs the
+    /// type-vs-value meaning of each use site.
+    /// blocked-by: `markLinkedReferencesRecursively` + full type-vs-value
+    /// meaning resolution.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, EmitResolver};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, p: &P, decl: tsgo_ast::NodeId) -> bool {
+    /// r.is_referenced(p, decl)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/checker/checker.go:Checker.isReferenced(7041)
+    pub fn is_referenced(&self, program: &dyn BoundProgram, node: NodeId) -> bool {
+        let arena = program.arena();
+        let Some(symbol) = get_symbol_of_declaration(program, node) else {
+            return false;
+        };
+        // The declaration's own name node(s) resolve to `symbol` too; exclude
+        // them so a binding is not counted as a reference to itself.
+        let name_nodes: Vec<NodeId> = program
+            .symbol(symbol)
+            .declarations
+            .iter()
+            .filter_map(|&decl| declaration_name(arena, decl))
+            .collect();
+        for raw in 0..arena.node_count() as u32 {
+            let id = NodeId(raw);
+            if arena.kind(id) != Kind::Identifier || name_nodes.contains(&id) {
+                continue;
+            }
+            if self.resolve_reference(program, id) == Some(symbol) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Reports whether the alias declaration `node` (e.g. an `export { x }`
+    /// specifier) aliases something that is, transitively, a *value* — the
+    /// query declaration emit asks to keep value re-exports while eliding
+    /// type-only ones (Go's `IsValueAliasDeclaration` /
+    /// `isValueAliasDeclarationWorker` + `isAliasResolvedToValue`).
+    ///
+    /// 4ao ports the reachable single-file subset: for an export specifier the
+    /// (property) name is resolved in the local module scope with *value*
+    /// meaning, and the specifier is a value alias iff that resolves to a value
+    /// symbol. So `function f() {}; export { f }` is a value alias, while
+    /// `interface I {}; export { I }` is not. 4ap adds the `export =`
+    /// (`ExportAssignment`) arm: an `export = <identifier>` is a value alias iff
+    /// the identifier resolves to a value (so `function f() {}; export = f` is,
+    /// `interface I {}; export = I` is not), and any non-identifier expression
+    /// (e.g. `export = {}`) is kept (Go returns `true`).
+    ///
+    /// DEFER(phase-4-checker-post): the other alias forms (`import =`/import
+    /// clause/namespace import/`export *`) and, crucially, transitive
+    /// *cross-module* target value-ness (an export specifier or `export =` that
+    /// re-exports an imported binding / entity-name target, `import { x } from
+    /// "m"; export { x }`), plus const-enum/`preserveConstEnums` and
+    /// type-only-ness.
+    /// blocked-by: module import/export resolution (`exports.go`,
+    /// `resolveExternalModuleSymbol`, `getExportSymbolOfValueSymbolIfExported`)
+    /// + type-only meaning (`markLinkedReferences`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, EmitResolver};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// r.is_value_alias_declaration(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/checker/emitresolver.go:EmitResolver.isValueAliasDeclarationWorker(718)
+    pub fn is_value_alias_declaration(&self, program: &dyn BoundProgram, node: NodeId) -> bool {
+        let arena = program.arena();
+        match arena.data(node) {
+            // Go: isValueAliasDeclarationWorker -> ExportSpecifier branch ->
+            // isAliasResolvedToValue. Reachable subset: the alias resolves to a
+            // value iff the (property) name resolves to a value symbol in the
+            // local module scope.
+            NodeData::ImportSpecifier(d) | NodeData::ExportSpecifier(d) => {
+                let name = d.property_name.unwrap_or(d.name);
+                resolve_name(
+                    program,
+                    name,
+                    arena.text(name),
+                    SymbolFlags::VALUE,
+                    false,
+                    program.globals(),
+                )
+                .is_some()
+            }
+            // Go: isValueAliasDeclarationWorker -> ExportAssignment branch. When
+            // the exported expression is an identifier, the assignment is a
+            // value alias iff that identifier resolves to a value; any other
+            // expression (e.g. `export = {}`) is kept (returns true). Reachable
+            // subset: resolve the expression name with *value* meaning in the
+            // local module scope (same single-file stand-in as the specifier
+            // arm above).
+            NodeData::ExportAssignment(d) => {
+                if arena.kind(d.expression) == Kind::Identifier {
+                    resolve_name(
+                        program,
+                        d.expression,
+                        arena.text(d.expression),
+                        SymbolFlags::VALUE,
+                        false,
+                        program.globals(),
+                    )
+                    .is_some()
+                } else {
+                    true
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Reports whether the alias declaration `node` (e.g. an import specifier,
+    /// `import =` / `export =`) is *referenced* and so must be kept by emit
+    /// (Go's `IsReferencedAliasDeclaration`).
+    ///
+    /// 4ao ports the reachable referenced-check: `node` must be an alias symbol
+    /// declaration, and it is referenced iff some value-position use resolves to
+    /// it (reusing 4an's [`is_referenced`](Self::is_referenced), the scope-aware
+    /// stand-in for Go's eagerly-recorded `aliasSymbolLinks.referenced`).
+    ///
+    /// DEFER(phase-4-checker-post): Go's "exported alias whose target is a
+    /// value" branch (`target != nil && export modifier && getSymbolFlags(target)
+    /// & Value`) keeps an unreferenced *exported* alias alive; plus the eager
+    /// `referenced` flag and the const-enum/`preserveConstEnums` carve-out.
+    /// blocked-by: alias target resolution (`resolveAlias` cross-module) +
+    /// `getSymbolFlags` + `markLinkedReferences`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, EmitResolver};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// r.is_referenced_alias_declaration(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/checker/emitresolver.go:EmitResolver.IsReferencedAliasDeclaration(680)
+    pub fn is_referenced_alias_declaration(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        // Go: IsReferencedAliasDeclaration only considers alias symbol
+        // declarations; anything else is not.
+        if !is_alias_symbol_declaration(program.arena(), node) {
+            return false;
+        }
+        self.is_referenced(program, node)
+    }
+
     /// Reports whether `node` is the implementation of a set of overloads
     /// (Go's `IsImplementationOfOverload`): a body-bearing function whose symbol
     /// has more than one declaration.
@@ -129,6 +446,48 @@ impl EmitResolver {
             Some(symbol) => program.symbol(symbol).declarations.len() > 1,
             None => false,
         }
+    }
+}
+
+// Returns the "name" identifier node of declaration `node`, for the declaration
+// kinds whose name must be excluded when scanning for references to it.
+// Go: internal/ast/utilities.go:getNameOfDeclaration (subset)
+fn declaration_name(arena: &tsgo_ast::NodeArena, node: NodeId) -> Option<NodeId> {
+    match arena.data(node) {
+        NodeData::ImportSpecifier(d) | NodeData::ExportSpecifier(d) => Some(d.name),
+        NodeData::NamespaceImport(d) => Some(d.name),
+        NodeData::ImportClause(d) => d.name,
+        // Go: an `import x = require("m")` / `import x = ns` binds the identifier
+        // `x`; its own name must be excluded so the import-equals is not counted
+        // as a reference to itself (`node.Name()` for an import-equals).
+        NodeData::ImportEqualsDeclaration(d) => Some(d.name),
+        NodeData::VariableDeclaration(d) => Some(d.name),
+        NodeData::FunctionDeclaration(d) => d.name,
+        NodeData::ClassDeclaration(d)
+        | NodeData::ClassExpression(d)
+        | NodeData::InterfaceDeclaration(d) => d.name,
+        _ => None,
+    }
+}
+
+// Reports whether `node` is a declaration that introduces an alias symbol
+// (import/export specifier, namespace import/export, `import =`, an import
+// clause with a default-binding name, etc.).
+//
+// 4ao ports the reachable structural kinds; the JS-only require-initialized
+// variable/binding-element and CommonJS `module.exports =` binary-expression
+// forms, plus the `export =` `ExpressionIsAlias` discrimination, are deferred.
+// Go: internal/ast/utilities.go:IsAliasSymbolDeclaration
+fn is_alias_symbol_declaration(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    match arena.data(node) {
+        NodeData::ImportEqualsDeclaration(_)
+        | NodeData::NamespaceExportDeclaration(_)
+        | NodeData::NamespaceImport(_)
+        | NodeData::NamespaceExport(_)
+        | NodeData::ImportSpecifier(_)
+        | NodeData::ExportSpecifier(_) => true,
+        NodeData::ImportClause(d) => d.name.is_some(),
+        _ => false,
     }
 }
 
