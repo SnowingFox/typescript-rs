@@ -1110,6 +1110,439 @@ fn empty_server_capabilities() {
     let _v: ServerCapabilities = serde_json::from_str("{}").unwrap();
 }
 
+// Go: lsp_generated.go:ServerCapabilities
+// A default (server-produced) capabilities value omits every absent provider,
+// matching the Go `json:",omitzero"` pointer fields.
+#[test]
+fn server_capabilities_default_serializes_empty() {
+    let v = ServerCapabilities::default();
+    assert_eq!(serde_json::to_string(&v).unwrap(), "{}");
+}
+
+// Tracer (real RED -> GREEN): the typed tree replaces the open object, so a set
+// `hoverProvider` boolean variant is serialized instead of being dropped to `{}`.
+// Go: lsp_generated.go:ServerCapabilities (hoverProvider *BooleanOrHoverOptions)
+#[test]
+fn server_capabilities_hover_provider_bool_serializes() {
+    let v = ServerCapabilities {
+        hover_provider: Some(BooleanOrHoverOptions {
+            boolean: Some(true),
+            hover_options: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        serde_json::to_string(&v).unwrap(),
+        r#"{"hoverProvider":true}"#
+    );
+}
+
+// === textDocumentSync provider group ===
+
+// `textDocumentSync` is a `TextDocumentSyncOptions | TextDocumentSyncKind` union;
+// the bare-number variant serializes as the integer kind.
+// Go: lsp_generated.go:ServerCapabilities (textDocumentSync) / TextDocumentSyncOptionsOrKind
+#[test]
+fn server_capabilities_text_document_sync_kind() {
+    let v = ServerCapabilities {
+        text_document_sync: Some(TextDocumentSyncOptionsOrKind {
+            kind: Some(TextDocumentSyncKind::INCREMENTAL),
+            options: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        serde_json::to_string(&v).unwrap(),
+        r#"{"textDocumentSync":2}"#
+    );
+}
+
+// The detailed-options variant serializes the nested object and round-trips,
+// including the `save` boolean union and the `change` kind.
+// Go: lsp_generated.go:TextDocumentSyncOptions
+#[test]
+fn text_document_sync_options_round_trip() {
+    let v = TextDocumentSyncOptions {
+        open_close: Some(true),
+        change: Some(TextDocumentSyncKind::FULL),
+        save: Some(BooleanOrSaveOptions {
+            boolean: Some(true),
+            save_options: None,
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"openClose":true,"change":1,"save":true}"#);
+    let back: TextDocumentSyncOptions = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `SaveOptions` carries an optional `includeText` flag (object variant of the
+// `boolean | SaveOptions` save union).
+// Go: lsp_generated.go:SaveOptions / BooleanOrSaveOptions
+#[test]
+fn save_options_object_variant_serde() {
+    let v = BooleanOrSaveOptions {
+        boolean: None,
+        save_options: Some(SaveOptions {
+            include_text: Some(true),
+        }),
+    };
+    assert_eq!(
+        serde_json::to_string(&v).unwrap(),
+        r#"{"includeText":true}"#
+    );
+    let back: BooleanOrSaveOptions = serde_json::from_str(r#"{"includeText":true}"#).unwrap();
+    assert_eq!(v, back);
+}
+
+// === completion provider group ===
+
+// `completionProvider` is a plain `CompletionOptions` object (no boolean union);
+// trigger characters, resolve support and nested completion-item options all
+// round-trip.
+// Go: lsp_generated.go:ServerCapabilities (completionProvider) / CompletionOptions
+#[test]
+fn server_capabilities_completion_provider_round_trip() {
+    let v = ServerCapabilities {
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![".".to_string(), "\"".to_string()]),
+            resolve_provider: Some(true),
+            completion_item: Some(ServerCompletionItemOptions {
+                label_details_support: Some(true),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"completionProvider":{"triggerCharacters":[".","\""],"resolveProvider":true,"completionItem":{"labelDetailsSupport":true}}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// === signatureHelp / definition / references provider groups ===
+
+// `signatureHelpProvider` is a plain `SignatureHelpOptions` object.
+// Go: lsp_generated.go:ServerCapabilities (signatureHelpProvider) / SignatureHelpOptions
+#[test]
+fn server_capabilities_signature_help_provider() {
+    let v = ServerCapabilities {
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"signatureHelpProvider":{"triggerCharacters":["(",","]}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `definitionProvider` is a `boolean | DefinitionOptions` union; the boolean
+// variant serializes as a bare `true`.
+// Go: lsp_generated.go:ServerCapabilities (definitionProvider) / BooleanOrDefinitionOptions
+#[test]
+fn server_capabilities_definition_provider_bool() {
+    let v = ServerCapabilities {
+        definition_provider: Some(BooleanOrDefinitionOptions {
+            boolean: Some(true),
+            definition_options: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        serde_json::to_string(&v).unwrap(),
+        r#"{"definitionProvider":true}"#
+    );
+}
+
+// `referencesProvider`'s object variant decodes into `ReferenceOptions`.
+// Go: lsp_generated.go:ServerCapabilities (referencesProvider) / BooleanOrReferenceOptions
+#[test]
+fn server_capabilities_references_provider_options() {
+    let v = ServerCapabilities {
+        references_provider: Some(BooleanOrReferenceOptions {
+            boolean: None,
+            reference_options: Some(ReferenceOptions {
+                work_done_progress: Some(true),
+            }),
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"referencesProvider":{"workDoneProgress":true}}"#);
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// === documentSymbol / codeAction provider groups ===
+
+// `documentSymbolProvider`'s object variant carries an optional outline `label`.
+// Go: lsp_generated.go:ServerCapabilities (documentSymbolProvider) / BooleanOrDocumentSymbolOptions
+#[test]
+fn server_capabilities_document_symbol_provider_options() {
+    let v = ServerCapabilities {
+        document_symbol_provider: Some(BooleanOrDocumentSymbolOptions {
+            boolean: None,
+            document_symbol_options: Some(DocumentSymbolOptions {
+                label: Some("TS".to_string()),
+                ..Default::default()
+            }),
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"documentSymbolProvider":{"label":"TS"}}"#);
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `codeActionProvider`'s object variant carries the supported `codeActionKinds`
+// (a `Vec<CodeActionKind>`) and `resolveProvider`.
+// Go: lsp_generated.go:ServerCapabilities (codeActionProvider) / BooleanOrCodeActionOptions
+#[test]
+fn server_capabilities_code_action_provider_options() {
+    let v = ServerCapabilities {
+        code_action_provider: Some(BooleanOrCodeActionOptions {
+            boolean: None,
+            code_action_options: Some(CodeActionOptions {
+                code_action_kinds: Some(vec![CodeActionKind::QUICK_FIX, CodeActionKind::REFACTOR]),
+                resolve_provider: Some(true),
+                ..Default::default()
+            }),
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"codeActionProvider":{"codeActionKinds":["quickfix","refactor"],"resolveProvider":true}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// === documentFormatting / rename / workspaceSymbol provider groups ===
+
+// `documentFormattingProvider` boolean shorthand.
+// Go: lsp_generated.go:ServerCapabilities (documentFormattingProvider) / BooleanOrDocumentFormattingOptions
+#[test]
+fn server_capabilities_document_formatting_provider_bool() {
+    let v = ServerCapabilities {
+        document_formatting_provider: Some(BooleanOrDocumentFormattingOptions {
+            boolean: Some(true),
+            document_formatting_options: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        serde_json::to_string(&v).unwrap(),
+        r#"{"documentFormattingProvider":true}"#
+    );
+}
+
+// `renameProvider`'s object variant carries `prepareProvider`.
+// Go: lsp_generated.go:ServerCapabilities (renameProvider) / BooleanOrRenameOptions
+#[test]
+fn server_capabilities_rename_provider_options() {
+    let v = ServerCapabilities {
+        rename_provider: Some(BooleanOrRenameOptions {
+            boolean: None,
+            rename_options: Some(RenameOptions {
+                prepare_provider: Some(true),
+                ..Default::default()
+            }),
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"renameProvider":{"prepareProvider":true}}"#);
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `workspaceSymbolProvider`'s object variant carries `resolveProvider`.
+// Go: lsp_generated.go:ServerCapabilities (workspaceSymbolProvider) / BooleanOrWorkspaceSymbolOptions
+#[test]
+fn server_capabilities_workspace_symbol_provider_options() {
+    let v = ServerCapabilities {
+        workspace_symbol_provider: Some(BooleanOrWorkspaceSymbolOptions {
+            boolean: None,
+            workspace_symbol_options: Some(WorkspaceSymbolOptions {
+                resolve_provider: Some(true),
+                ..Default::default()
+            }),
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"workspaceSymbolProvider":{"resolveProvider":true}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// === semanticTokens provider group ===
+
+// `semanticTokensProvider`'s options variant serializes the required `legend`
+// plus the `range` (boolean) and `full` (delta) sub-unions, and round-trips.
+// Go: lsp_generated.go:ServerCapabilities (semanticTokensProvider)
+//     / SemanticTokensOptionsOrRegistrationOptions / SemanticTokensOptions
+#[test]
+fn server_capabilities_semantic_tokens_provider_options() {
+    let v = ServerCapabilities {
+        semantic_tokens_provider: Some(SemanticTokensOptionsOrRegistrationOptions {
+            options: Some(SemanticTokensOptions {
+                legend: SemanticTokensLegend {
+                    token_types: vec!["namespace".to_string()],
+                    token_modifiers: vec![],
+                },
+                range: Some(BooleanOrEmptyObject {
+                    boolean: Some(true),
+                    empty_object: None,
+                }),
+                full: Some(BooleanOrSemanticTokensFullDelta {
+                    boolean: None,
+                    semantic_tokens_full_delta: Some(SemanticTokensFullDelta { delta: Some(true) }),
+                }),
+                ..Default::default()
+            }),
+            registration_options: None,
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"semanticTokensProvider":{"legend":{"tokenTypes":["namespace"],"tokenModifiers":[]},"range":true,"full":{"delta":true}}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `legend.tokenTypes` is a required property; decoding without it reports the
+// Go `errMissing` text.
+// Go: lsp_generated.go:SemanticTokensLegend (missingTokenTypes)
+#[test]
+fn semantic_tokens_legend_requires_token_types() {
+    let err = serde_json::from_str::<SemanticTokensLegend>(r#"{"tokenModifiers":[]}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("missing required properties: tokenTypes"),
+        "unexpected error: {err}"
+    );
+}
+
+// The registration-options variant (object carrying `documentSelector`) is
+// dispatched into the deferred raw-JSON variant.
+// Go: lsp_generated.go:SemanticTokensOptionsOrRegistrationOptions (documentSelector key)
+#[test]
+fn semantic_tokens_provider_registration_variant() {
+    let parsed: SemanticTokensOptionsOrRegistrationOptions = serde_json::from_str(
+        r#"{"documentSelector":[{"language":"typescript"}],"legend":{"tokenTypes":[],"tokenModifiers":[]}}"#,
+    )
+    .unwrap();
+    assert!(parsed.options.is_none());
+    assert!(parsed.registration_options.is_some());
+}
+
+// === positionEncoding + remaining (deferred / boolean) provider fields ===
+
+// `positionEncoding` is a `PositionEncodingKind` string enum.
+// Go: lsp_generated.go:ServerCapabilities (positionEncoding *PositionEncodingKind)
+#[test]
+fn server_capabilities_position_encoding() {
+    let v = ServerCapabilities {
+        position_encoding: Some(PositionEncodingKind::UTF16),
+        ..Default::default()
+    };
+    assert_eq!(
+        serde_json::to_string(&v).unwrap(),
+        r#"{"positionEncoding":"utf-16"}"#
+    );
+}
+
+// Deferred provider fields (raw JSON) and the typescript-go boolean providers
+// round-trip and serialize in the Go field-declaration order.
+// Go: lsp_generated.go:ServerCapabilities
+//     (executeCommandProvider / customSourceDefinitionProvider / _vs_referencesProvider)
+#[test]
+fn server_capabilities_deferred_and_bool_fields_round_trip() {
+    let v = ServerCapabilities {
+        execute_command_provider: Some(serde_json::json!({"commands": ["foo.bar"]})),
+        custom_source_definition_provider: Some(true),
+        vs_references_provider: Some(true),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"executeCommandProvider":{"commands":["foo.bar"]},"customSourceDefinitionProvider":true,"_vs_referencesProvider":true}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// A fully populated mix serializes provider keys in Go declaration order
+// (positionEncoding first, then the provider groups in order).
+// Go: lsp_generated.go:ServerCapabilities (field order)
+#[test]
+fn server_capabilities_field_order() {
+    let v = ServerCapabilities {
+        position_encoding: Some(PositionEncodingKind::UTF8),
+        completion_provider: Some(CompletionOptions::default()),
+        hover_provider: Some(BooleanOrHoverOptions {
+            boolean: Some(true),
+            hover_options: None,
+        }),
+        definition_provider: Some(BooleanOrDefinitionOptions {
+            boolean: Some(true),
+            definition_options: None,
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"positionEncoding":"utf-8","completionProvider":{},"hoverProvider":true,"definitionProvider":true}"#
+    );
+}
+
+// Per-type omit coverage (PORTING §8.6): every all-optional server-capability
+// option struct serializes its default value to `{}`.
+// Go: lsp_generated.go (the corresponding `*Options` structs, all `,omitzero`).
+#[test]
+fn every_simple_server_option_default_serializes_empty() {
+    fn assert_empty<T: Default + Serialize>() {
+        assert_eq!(serde_json::to_string(&T::default()).unwrap(), "{}");
+    }
+    assert_empty::<ServerCapabilities>();
+    assert_empty::<TextDocumentSyncOptions>();
+    assert_empty::<SaveOptions>();
+    assert_empty::<CompletionOptions>();
+    assert_empty::<ServerCompletionItemOptions>();
+    assert_empty::<SignatureHelpOptions>();
+    assert_empty::<DefinitionOptions>();
+    assert_empty::<ReferenceOptions>();
+    assert_empty::<DocumentSymbolOptions>();
+    assert_empty::<CodeActionOptions>();
+    assert_empty::<DocumentFormattingOptions>();
+    assert_empty::<RenameOptions>();
+    assert_empty::<WorkspaceSymbolOptions>();
+    assert_empty::<SemanticTokensFullDelta>();
+}
+
 // Go: .../TestMarshalUnmarshalRoundTrip/InitializeParams with null processId
 #[test]
 fn roundtrip_initialize_params_null_process_id() {

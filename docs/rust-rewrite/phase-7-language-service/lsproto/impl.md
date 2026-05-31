@@ -115,10 +115,61 @@
 - [x] Workspace 组（`WorkspaceClientCapabilities` + 17 叶子/嵌套结构）
 - [x] TextDocument 组（`TextDocumentClientCapabilities` + 31 子能力，含 completion/signatureHelp/codeAction/foldingRange/semanticTokens(union 字段) 家族）
 
+## 续轮：服务端 `ServerCapabilities` typed 树（本轮落地）
+
+> 上一轮维持的 `ServerCapabilities` open-object **本轮退役**，替换为 typed 结构树（与 Go 一致；`ServerCapabilities` 是服务端**产出**值，建成 skip-none 序列化的 typed struct）。全部编辑在 `generated.rs`（+ `generated_test.rs`），无新模块/无新第三方 crate。
+
+**open-object 处置（retired）**：原 `ServerCapabilities` open-object（`lsp_open_object!` 生成的 unit struct，吃任意对象、重序列化成 `{}`）**退役**，替换为 `lsp_object!` 生成的 typed struct（38 个字段，1:1 对齐 Go 声明序）。公共 API 影响：crate 外无任何 Rust 使用者（P8 `lsp`/`project`/`api` 未移植，已 grep 确认）；crate 内仅 `InitializeResult.capabilities`（`reqnn`，仍拒 null）与既有 `empty_server_capabilities`（`from_str("{}")`）测试引用——typed struct 全字段可选，`{}` 仍解码为默认、`InitializeResult capabilities null` 仍报错，既有测试不变即过。其余既有公共类型签名未改，**纯新增**。`InitializationOptions` 仍维持 open-object（用户自定义初始化项，非本轮范围）。
+
+**为什么用 `lsp_object!`（`opt` 字段）而非 `request_object!`**：Go `ServerCapabilities` 每个字段都是 `*T json:",omitzero"` + `UnmarshalJSONFrom` 里逐字段 `if PeekKind()=='n' { errNull }`。这正是 `lsp_object!` 的 `opt` 语义（`Option<T>`、`Some` 才序列化、缺键→`None`、显式 `null` 拒绝、未知键忽略）。`request_object!` 多带一个 `resolve()`（ServerCapabilities 不需要），故复用 `generated.rs` 既有的 `lsp_object!` + 既有 `BooleanOrHoverOptions` 风格最贴合。
+
+**类型/所有权映射（本子树关键决策）**：
+
+| Go 构造 | Rust 表示 | 说明 |
+|---|---|---|
+| `ServerCapabilities` 各 `*T json:",omitzero"` 字段 | `lsp_object!` 的 `opt T`（`Option<T>`） | skip-none 序列化、缺→`None`、`null` 拒绝、未知键忽略；逐字段 `// Go:` 不另标（整 struct 一个锚）。 |
+| `BooleanOr<XxxOptions>`（bool 对 options 指针 union） | `boolean_or_options!` 宏生成 `{ boolean: Option<bool>, <field>: Option<T> }` + 手写 serde（`visit_bool`/`visit_map` peek dispatch） | 复刻既有 `BooleanOrHoverOptions` 风格；恰一个被设置。 |
+| `TextDocumentSyncOptionsOrKind`（options 对 number kind） | 手写 union（`visit_map`→options、`visit_u64/i64`→kind） | 标量/对象 peek dispatch。 |
+| `SemanticTokensOptionsOrRegistrationOptions`（按 `documentSelector` 键判别） | union `{ options: Option<SemanticTokensOptions>, registration_options: Option<serde_json::Value> }` | 保留 Go union 形状；**仅 registration 变体 DEFER 为 raw JSON**（`SemanticTokensRegistrationOptions` 深类型）。 |
+| `type TextDocumentSyncKind uint32`（iota 0/1/2 + `String()`） | 手写 `struct TextDocumentSyncKind(pub u32)` + `const NONE/FULL/INCREMENTAL` + `Display`（复刻 Go stringer） | 复刻 `generated.rs` 既有 int-enum 风格（`SymbolKind`/`DiagnosticSeverity`）。 |
+| 必填 `legend *SemanticTokensLegend json:"legend"`（无 omitzero，decode 必填+拒 null） | `lsp_object!` 的 `reqnn`（始终序列化、缺→`missing required properties`、拒 null） | 同 `tokenTypes`/`tokenModifiers`（必填 `[]string`）。 |
+| 深/稀有 provider（declaration/typeDefinition/implementation/documentHighlight/codeLens/documentLink/color/documentRangeFormatting/documentOnTypeFormatting/foldingRange/selectionRange/executeCommand/callHierarchy/linkedEditing/moniker/typeHierarchy/inlineValue/inlayHint/diagnostic/inlineCompletion/workspace/_vs_onAutoInsert） | `opt serde_json::Value`（raw JSON，带 `// DEFER … blocked-by:` 注释） | **保留 Go 字段名 + optionality**，仅延后精确嵌套类型；缺→`None`、`null` 拒绝、round-trip 原值。 |
+| `*bool` 标量 provider（`customSourceDefinitionProvider`/`_vs_referencesProvider`/`customMultiDocumentHighlightProvider`） | `opt bool`（`Option<bool>`） | omitzero。 |
+| `positionEncoding *PositionEncodingKind` | `opt PositionEncodingKind`（复用既有字符串枚举） | 直接 typed。 |
+
+**新增宏**：`boolean_or_options!`（`generated.rs`）——生成 `boolean | <Options>` union（serde：`visit_bool`/`visit_map`），DRY 掉 7 个同形 union（Definition/Reference/DocumentSymbol/CodeAction/DocumentFormatting/Rename/WorkspaceSymbol）。既有手写 `BooleanOrHoverOptions`/新手写 `BooleanOrSaveOptions`/`BooleanOrSemanticTokensFullDelta`（变体字段名不同）保持手写。
+
+**落地的 provider option 组（全 typed + 各带行为测试）**：
+- `textDocumentSync`：`TextDocumentSyncOptions`/`TextDocumentSyncKind`/`SaveOptions`/`BooleanOrSaveOptions`/`TextDocumentSyncOptionsOrKind`
+- `completionProvider`：`CompletionOptions` + `ServerCompletionItemOptions`
+- `hoverProvider`：复用既有 `HoverOptions`/`BooleanOrHoverOptions`
+- `signatureHelpProvider`：`SignatureHelpOptions`
+- `definitionProvider`/`referencesProvider`：`DefinitionOptions`/`ReferenceOptions` + `BooleanOr*`
+- `documentSymbolProvider`/`codeActionProvider`：`DocumentSymbolOptions`/`CodeActionOptions`（含 `Vec<CodeActionKind>`；`documentation` DEFER raw JSON）+ `BooleanOr*`
+- `documentFormattingProvider`/`renameProvider`/`workspaceSymbolProvider`：对应 options + `BooleanOr*`
+- `semanticTokensProvider`：`SemanticTokensOptions`/`SemanticTokensLegend`/`SemanticTokensFullDelta`/`BooleanOrSemanticTokensFullDelta`/`SemanticTokensOptionsOrRegistrationOptions`（复用既有 `BooleanOrEmptyObject`）
+- `positionEncoding`：复用既有 `PositionEncodingKind`
+
+**实现 TODO（本轮，可勾选）**：
+
+- [x] 退役 open-object `ServerCapabilities` → typed `lsp_object!` struct（38 字段，Go 声明序）　`// Go: lsp_generated.go:ServerCapabilities`
+- [x] `boolean_or_options!` 宏（`boolean | <Options>` union serde）　`// Go: lsp_generated.go:BooleanOr<...>Options.UnmarshalJSONFrom`
+- [x] textDocumentSync 组（含 `TextDocumentSyncKind` int-enum + `OrKind`/`BooleanOrSaveOptions` union）
+- [x] completion 组（`CompletionOptions`/`ServerCompletionItemOptions`）
+- [x] signatureHelp/definition/references 组
+- [x] documentSymbol/codeAction 组（`CodeActionKind` 复用 resolved.rs）
+- [x] documentFormatting/rename/workspaceSymbol 组
+- [x] semanticTokens 组（options/legend/fullDelta + `OrRegistrationOptions` union，registration 变体 DEFER）
+- [x] 其余 22 个深/稀有 provider 字段建成 `opt serde_json::Value`（DEFER）+ 3 个 `*bool` provider + `positionEncoding`
+
 ## 转交 / 推迟（DEFER）
 
-- ✅ 上一轮的 `(*ClientCapabilities).Resolve()` DEFER **已解除**（本轮落地于 `capabilities.rs`，4 组全树）。
-- `// DEFER`：新枚举 `String()` stringer（同生成器 pass）。
-- `// DEFER`：请求树字段的 Go `errNull` 精确文案（与 resolved 树一致的低优先偏差；`null` 仍被拒绝，仅文案不同）。
-- `// DEFER`：Go 个别非指针字段（`support`/`tokenTypes` 等）建成 `Option<T>` 的统一化偏离——若后续生成器 pass 要求精确反序列化严格度，再区分 `Option<T>` vs 直接 `T`/`Vec<T>`。
-- 维持 `ServerCapabilities`/`InitializationOptions` open-object 现状（不在本轮 `Resolve()` 闭包内；公共 API 仅**新增**）。
+- ✅ 上一轮的 `(*ClientCapabilities).Resolve()` DEFER **已解除**（落地于 `capabilities.rs`，4 组全树）。
+- ✅ 上一轮维持的 `ServerCapabilities` open-object **本轮退役**，落地 typed 树（高价值 11 组 provider 全 typed）。
+- `// DEFER`：`ServerCapabilities` 深/稀有 provider 的精确嵌套类型——22 个字段当前为 `serde_json::Value`（保留 Go 字段名 + optionality），含全部 triple-union（`*OrRegistrationOptions`）、`WorkspaceOptions`、`ExecuteCommandOptions`、`VsOnAutoInsertOptions` 等。`blocked-by:` 生成器 pass 落地完整 options/registration 树。
+- `// DEFER`：`SemanticTokensRegistrationOptions`（`semanticTokensProvider` 的 registration 变体，深 registration 类型）保持 raw JSON。`blocked-by:` 生成器 pass。
+- `// DEFER`：`CodeActionKindDocumentation`（`CodeActionOptions.documentation` 的 `[]*` 元素，proposed/稀有）保持 raw JSON。`blocked-by:` 生成器 pass。
+- `// DEFER`：新枚举 `String()` stringer（同生成器 pass；本轮 `TextDocumentSyncKind` 已含 `Display` 复刻 stringer）。
+- `// DEFER`：请求/resolved 树字段的 Go `errNull` 精确文案（低优先偏差；`null` 仍被拒绝，仅文案不同）。
+- `// DEFER`：Go 个别非指针字段（`support`/`tokenTypes` 等）建成 `Option<T>` 的统一化偏离。
+- 维持 `InitializationOptions` open-object 现状（用户自定义初始化项，非本轮范围；公共 API 仅**新增**）。

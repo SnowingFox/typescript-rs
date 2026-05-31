@@ -75,11 +75,44 @@
 
 > 既有 `generated_test.rs` 的 `empty_client_capabilities`（`from_str("{}")`）/`roundtrip_initialize_params_null_process_id` 在 open-object 退役后仍绿（后者字面量改 `ClientCapabilities::default()`）。
 
+## 续轮：服务端 `ServerCapabilities` typed 树（`generated_test.rs`）
+
+> Go 侧 `lsp_json_test.go` 对 `ServerCapabilities` 仅有两条覆盖：`ServerCapabilities empty`（`{}`→ok）与 `InitializeResult capabilities null`（拒 null）——**无任何 populated `ServerCapabilities` 的 serde 测试**（它是服务端产出值，测试少）。故按 PORTING §8.6 自写行为级测试，expected 取 Go `json:",omitzero"` 标签语义 + LSP spec 字面量。本轮测试加在既有 `generated_test.rs`（兄弟文件，`use super::*;`）。
+> red→green：**tracer（首条）是真 RED→GREEN**——open-object 退役前 `ServerCapabilities` 是无字段 unit struct，引用 `hover_provider` 字段**编译失败**（观察到 RED）；typed 后变绿。后续每个 provider 组的字段同样是"先引用不存在的字段/类型→编译失败 RED→加类型+字段→GREEN"，逐组推进（诚实：每组首条 RED 真实，组内 round-trip/默认覆盖类为 green-on-arrival）。
+
+| Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
+|---|---|---|---|---|
+| `server_capabilities_default_serializes_empty` | 全 None → `{}`（omitzero 不变式） | `default` → `"{}"` | `lsp_generated.go:ServerCapabilities` | ✓ |
+| `server_capabilities_hover_provider_bool_serializes` | **tracer（真 RED→GREEN）**：typed 树替换 open-object，置位 `hoverProvider` bool 被写出而非丢成 `{}` | `{hover_provider: bool(true)}` → `{"hoverProvider":true}` | 同上 / `BooleanOrHoverOptions` | ✓ |
+| `server_capabilities_text_document_sync_kind` | `OrKind` union 的 number 变体序列化为整数 | `kind=INCREMENTAL` → `{"textDocumentSync":2}` | `TextDocumentSyncOptionsOrKind`/`TextDocumentSyncKind` | ✓ |
+| `text_document_sync_options_round_trip` | 详细 options（openClose/change/save bool）round-trip | 置位 → `{"openClose":true,"change":1,"save":true}` | `TextDocumentSyncOptions` | ✓ |
+| `save_options_object_variant_serde` | `boolean\|SaveOptions` union 对象变体 | `{includeText:true}` → 同字面量 + round-trip | `SaveOptions`/`BooleanOrSaveOptions` | ✓ |
+| `server_capabilities_completion_provider_round_trip` | 直接 `CompletionOptions`（triggerCharacters/resolveProvider/嵌套 completionItem）round-trip | 置位 → 嵌套 JSON | `CompletionOptions`/`ServerCompletionItemOptions` | ✓ |
+| `server_capabilities_signature_help_provider` | 直接 `SignatureHelpOptions`（triggerCharacters）round-trip | 置位 → `{"signatureHelpProvider":{"triggerCharacters":["(",","]}}` | `SignatureHelpOptions` | ✓ |
+| `server_capabilities_definition_provider_bool` | `BooleanOrDefinitionOptions` bool 变体 | `bool(true)` → `{"definitionProvider":true}` | `BooleanOrDefinitionOptions` | ✓ |
+| `server_capabilities_references_provider_options` | `BooleanOrReferenceOptions` 对象变体 round-trip | 置位 → `{"referencesProvider":{"workDoneProgress":true}}` | `ReferenceOptions`/`BooleanOrReferenceOptions` | ✓ |
+| `server_capabilities_document_symbol_provider_options` | `BooleanOrDocumentSymbolOptions` 对象变体（label）round-trip | 置位 → `{"documentSymbolProvider":{"label":"TS"}}` | `DocumentSymbolOptions` | ✓ |
+| `server_capabilities_code_action_provider_options` | `Vec<CodeActionKind>` + resolveProvider round-trip | 置位 → `{"codeActionProvider":{"codeActionKinds":["quickfix","refactor"],"resolveProvider":true}}` | `CodeActionOptions`（复用 resolved `CodeActionKind`） | ✓ |
+| `server_capabilities_document_formatting_provider_bool` | `BooleanOrDocumentFormattingOptions` bool 变体 | `bool(true)` → `{"documentFormattingProvider":true}` | `BooleanOrDocumentFormattingOptions` | ✓ |
+| `server_capabilities_rename_provider_options` | `BooleanOrRenameOptions` 对象变体（prepareProvider）round-trip | 置位 → `{"renameProvider":{"prepareProvider":true}}` | `RenameOptions` | ✓ |
+| `server_capabilities_workspace_symbol_provider_options` | `BooleanOrWorkspaceSymbolOptions` 对象变体（resolveProvider）round-trip | 置位 → `{"workspaceSymbolProvider":{"resolveProvider":true}}` | `WorkspaceSymbolOptions` | ✓ |
+| `server_capabilities_semantic_tokens_provider_options` | options 变体：必填 legend + range(bool) + full(delta) round-trip | 置位 → `{"semanticTokensProvider":{"legend":{"tokenTypes":["namespace"],"tokenModifiers":[]},"range":true,"full":{"delta":true}}}` | `SemanticTokensOptions`/`Legend`/`FullDelta` | ✓ |
+| `semantic_tokens_legend_requires_token_types` | 必填字段缺失 → Go `errMissing` 文案 | `{"tokenModifiers":[]}` → `missing required properties: tokenTypes` | `SemanticTokensLegend`（`reqnn`） | ✓ |
+| `semantic_tokens_provider_registration_variant` | `OrRegistrationOptions` 按 `documentSelector` 键判别 → registration 变体（raw JSON） | `{"documentSelector":[...],...}` → `registration_options=Some` | `SemanticTokensOptionsOrRegistrationOptions` | ✓ |
+| `server_capabilities_position_encoding` | `positionEncoding` 字符串枚举 | `UTF16` → `{"positionEncoding":"utf-16"}` | `PositionEncodingKind` | ✓ |
+| `server_capabilities_deferred_and_bool_fields_round_trip` | 深 provider 建 raw JSON + `*bool` provider round-trip + Go 字段序 | `{executeCommandProvider, customSourceDefinitionProvider, _vs_referencesProvider}` → 同序字面量 | `ServerCapabilities`（DEFER 字段） | ✓ |
+| `server_capabilities_field_order` | 多字段序列化按 Go 声明序（positionEncoding 在前） | 4 字段 → 有序字面量 | `lsp_generated.go:ServerCapabilities`（字段序） | ✓ |
+| `every_simple_server_option_default_serializes_empty` | §8.6 每类型覆盖：全可选 option struct `default → {}` | `T::default()` → `"{}"`（14 类型） | omitzero 不变式 | ✓ |
+
+> 既有 `empty_server_capabilities`（`from_str("{}")`）与 `InitializeResult capabilities null`（拒 null）在 open-object 退役后仍绿（typed struct 全字段可选、`InitializeResult.capabilities` 仍 `reqnn`）。
+
 ## 推迟到后续 phase 的测试
 
 | 测试 / 行为 | 原因 | 目标 phase |
 |---|---|---|
-| ~~`(*ClientCapabilities).Resolve()` 转换正确性~~ | ✅ 本轮已落地（见上表，4 组全树 red→green） | 完成 |
-| 新枚举 `String()` stringer | resolved 树不使用；生成器 pass 落地完整枚举集时补 | P8 |
+| ~~`(*ClientCapabilities).Resolve()` 转换正确性~~ | ✅ 已落地（4 组全树 red→green） | 完成 |
+| ~~`ServerCapabilities` typed serde~~ | ✅ 本轮已落地（见上表，11 组高价值 provider red→green；22 深字段 DEFER raw JSON） | 完成 |
+| `ServerCapabilities` 深/稀有 provider 的精确嵌套类型 serde（triple-union/registration/workspace/executeCommand/onAutoInsert 等） | 本轮建成 `serde_json::Value`（保字段名+optionality）；精确类型待生成器 pass | — blocked-by 生成器 pass |
+| 新枚举 `String()` stringer（`TextDocumentSyncKind` 已含；其余） | resolved/server 树不全用；生成器 pass 落地完整枚举集时补 | P8 |
 | resolved / 请求类型显式 `null` 字段的 Go `errNull` 精度 | 非线上收报关键路径，低优先 | — blocked-by 生成器 pass |
 | Go 非指针字段（`support`/`tokenTypes` 等）的精确反序列化严格度 | 本轮统一建成 `Option<T>`；对 `resolve()` 等价 | — blocked-by 生成器 pass |

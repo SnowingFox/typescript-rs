@@ -9,8 +9,10 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 // `ClientCapabilities` is the pointer-based request tree defined in
-// `capabilities.rs`; `InitializeParams` embeds it.
-use crate::ClientCapabilities;
+// `capabilities.rs`; `InitializeParams` embeds it. `CodeActionKind` and
+// `BooleanOrEmptyObject` live in `resolved.rs` and are reused by the
+// `ServerCapabilities` code-action and semantic-tokens options.
+use crate::{BooleanOrEmptyObject, ClientCapabilities, CodeActionKind};
 
 /// Builds the Go `errMissing` error: `missing required properties: a, b`.
 // Go: internal/lsp/lsproto/lsp.go:errMissing
@@ -183,6 +185,63 @@ macro_rules! lsp_open_object {
                     }
                 }
                 deserializer.deserialize_map(__V)
+            }
+        }
+    };
+}
+
+/// Generates a `boolean | <Options>` union type, the shape Go emits for the
+/// many `BooleanOr<Options>` provider unions in `ServerCapabilities`.
+///
+/// Serialization writes the single set variant (a bare JSON boolean or the
+/// nested options object). Deserialization dispatches a JSON boolean to the
+/// `boolean` field and a JSON object to the options field, mirroring the Go
+/// `UnmarshalJSONFrom` `PeekKind` switch (`'t'`/`'f'` vs `'{'`).
+macro_rules! boolean_or_options {
+    (
+        $(#[$smeta:meta])*
+        $name:ident, $field:ident : $ty:ty, $expecting:literal
+    ) => {
+        $(#[$smeta])*
+        #[derive(Debug, Clone, Default, PartialEq)]
+        pub struct $name {
+            /// The boolean variant.
+            pub boolean: Option<bool>,
+            /// The options-object variant.
+            pub $field: Option<$ty>,
+        }
+
+        impl Serialize for $name {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                match (self.boolean, &self.$field) {
+                    (Some(b), None) => serializer.serialize_bool(b),
+                    (None, Some(o)) => o.serialize(serializer),
+                    _ => Err(serde::ser::Error::custom(concat!(
+                        "exactly one element of ",
+                        stringify!($name),
+                        " should be set"
+                    ))),
+                }
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct __V;
+                impl<'de> Visitor<'de> for __V {
+                    type Value = $name;
+                    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        f.write_str($expecting)
+                    }
+                    fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                        Ok($name { boolean: Some(v), $field: None })
+                    }
+                    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                        let o = <$ty>::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                        Ok($name { boolean: None, $field: Some(o) })
+                    }
+                }
+                deserializer.deserialize_any(__V)
             }
         }
     };
@@ -1251,13 +1310,594 @@ impl<'de> Deserialize<'de> for TextDocumentEditOrCreateFileOrRenameFileOrDeleteF
 // live in `capabilities.rs`; `InitializeParams` references it via `crate::`.
 // Go: internal/lsp/lsproto/lsp_generated.go:ClientCapabilities
 
-lsp_open_object! {
-    /// The capabilities the server provides.
+/// Defines how the host (editor) should sync document changes to the server
+/// (LSP `TextDocumentSyncKind`, an integer enum).
+// Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentSyncKind
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextDocumentSyncKind(pub u32);
+
+impl TextDocumentSyncKind {
+    /// Documents should not be synced at all.
+    pub const NONE: TextDocumentSyncKind = TextDocumentSyncKind(0);
+    /// Documents are synced by always sending the full content of the document.
+    pub const FULL: TextDocumentSyncKind = TextDocumentSyncKind(1);
+    /// Documents are synced by sending the full content on open; after that
+    /// only incremental updates are sent.
+    pub const INCREMENTAL: TextDocumentSyncKind = TextDocumentSyncKind(2);
+}
+
+impl fmt::Display for TextDocumentSyncKind {
+    // Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentSyncKind.String
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self.0 {
+            0 => "None",
+            1 => "Full",
+            2 => "Incremental",
+            n => return write!(f, "TextDocumentSyncKind({n})"),
+        };
+        f.write_str(name)
+    }
+}
+
+impl Serialize for TextDocumentSyncKind {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for TextDocumentSyncKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(TextDocumentSyncKind(u32::deserialize(deserializer)?))
+    }
+}
+
+lsp_object! {
+    /// Options to control whether the client includes text content on save.
+    SaveOptions {
+        ["The client is supposed to include the content on save."]
+        opt include_text: bool => "includeText",
+    }
+}
+
+/// A union of a boolean or [`SaveOptions`] (LSP `boolean | SaveOptions`).
+// Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrSaveOptions
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BooleanOrSaveOptions {
+    /// The boolean variant.
+    pub boolean: Option<bool>,
+    /// The options-object variant.
+    pub save_options: Option<SaveOptions>,
+}
+
+impl Serialize for BooleanOrSaveOptions {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (self.boolean, &self.save_options) {
+            (Some(b), None) => serializer.serialize_bool(b),
+            (None, Some(o)) => o.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of BooleanOrSaveOptions should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BooleanOrSaveOptions {
+    // Go: lsp_generated.go:BooleanOrSaveOptions.UnmarshalJSONFrom
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = BooleanOrSaveOptions;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a boolean or a save-options object")
+            }
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(BooleanOrSaveOptions {
+                    boolean: Some(v),
+                    save_options: None,
+                })
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                let opts = SaveOptions::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(BooleanOrSaveOptions {
+                    boolean: None,
+                    save_options: Some(opts),
+                })
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+lsp_object! {
+    /// Detailed text-document sync options.
+    TextDocumentSyncOptions {
+        ["Open and close notifications are sent to the server."]
+        opt open_close: bool => "openClose",
+        ["How change notifications are sent to the server."]
+        opt change: TextDocumentSyncKind => "change",
+        ["Whether `willSave` notifications are sent to the server."]
+        opt will_save: bool => "willSave",
+        ["Whether `willSaveWaitUntil` requests are sent to the server."]
+        opt will_save_wait_until: bool => "willSaveWaitUntil",
+        ["Whether save notifications are sent to the server."]
+        opt save: BooleanOrSaveOptions => "save",
+    }
+}
+
+/// A union of [`TextDocumentSyncOptions`] or a bare [`TextDocumentSyncKind`]
+/// (LSP `TextDocumentSyncOptions | TextDocumentSyncKind`).
+// Go: internal/lsp/lsproto/lsp_generated.go:TextDocumentSyncOptionsOrKind
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TextDocumentSyncOptionsOrKind {
+    /// The detailed-options variant.
+    pub options: Option<TextDocumentSyncOptions>,
+    /// The bare-kind variant.
+    pub kind: Option<TextDocumentSyncKind>,
+}
+
+impl Serialize for TextDocumentSyncOptionsOrKind {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.options, &self.kind) {
+            (Some(o), None) => o.serialize(serializer),
+            (None, Some(k)) => k.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of TextDocumentSyncOptionsOrKind should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TextDocumentSyncOptionsOrKind {
+    // Go: lsp_generated.go:TextDocumentSyncOptionsOrKind.UnmarshalJSONFrom
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = TextDocumentSyncOptionsOrKind;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a text-document-sync options object or an integer kind")
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(TextDocumentSyncOptionsOrKind {
+                    options: None,
+                    kind: Some(TextDocumentSyncKind(v as u32)),
+                })
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(TextDocumentSyncOptionsOrKind {
+                    options: None,
+                    kind: Some(TextDocumentSyncKind(v as u32)),
+                })
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                let opts = TextDocumentSyncOptions::deserialize(
+                    de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(TextDocumentSyncOptionsOrKind {
+                    options: Some(opts),
+                    kind: None,
+                })
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+lsp_object! {
+    /// Server support for resolving completion-item label details.
+    ServerCompletionItemOptions {
+        ["Whether the server resolves `CompletionItemLabelDetails` on resolve."]
+        opt label_details_support: bool => "labelDetailsSupport",
+    }
+}
+
+lsp_object! {
+    /// Completion request options.
+    CompletionOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["Characters that automatically trigger completion."]
+        opt trigger_characters: Vec<String> => "triggerCharacters",
+        ["Characters that commit a completion when no per-item set is given."]
+        opt all_commit_characters: Vec<String> => "allCommitCharacters",
+        ["Whether the server resolves additional completion-item information."]
+        opt resolve_provider: bool => "resolveProvider",
+        ["Server support for `CompletionItem`-specific capabilities."]
+        opt completion_item: ServerCompletionItemOptions => "completionItem",
+    }
+}
+
+lsp_object! {
+    /// Signature-help request options.
+    SignatureHelpOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["Characters that automatically trigger signature help."]
+        opt trigger_characters: Vec<String> => "triggerCharacters",
+        ["Characters that re-trigger signature help while it is showing."]
+        opt retrigger_characters: Vec<String> => "retriggerCharacters",
+    }
+}
+
+lsp_object! {
+    /// Goto-definition request options.
+    DefinitionOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options! {
+    /// A union of a boolean or [`DefinitionOptions`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrDefinitionOptions
+    BooleanOrDefinitionOptions,
+    definition_options: DefinitionOptions,
+    "a boolean or a definition-options object"
+}
+
+lsp_object! {
+    /// Find-references request options.
+    ReferenceOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options! {
+    /// A union of a boolean or [`ReferenceOptions`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrReferenceOptions
+    BooleanOrReferenceOptions,
+    reference_options: ReferenceOptions,
+    "a boolean or a reference-options object"
+}
+
+lsp_object! {
+    /// Document-symbol request options.
+    DocumentSymbolOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["A human-readable label shown when multiple outlines exist."]
+        opt label: String => "label",
+    }
+}
+
+boolean_or_options! {
+    /// A union of a boolean or [`DocumentSymbolOptions`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrDocumentSymbolOptions
+    BooleanOrDocumentSymbolOptions,
+    document_symbol_options: DocumentSymbolOptions,
+    "a boolean or a document-symbol-options object"
+}
+
+lsp_object! {
+    /// Code-action request options.
+    CodeActionOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["The `CodeActionKind`s this server may return."]
+        opt code_action_kinds: Vec<CodeActionKind> => "codeActionKinds",
+        ["Static documentation for a class of code actions (deferred: raw JSON)."]
+        // DEFER: `[]*CodeActionKindDocumentation` is a proposed/rare nested type;
+        // kept as raw JSON. blocked-by: generator pass landing CodeActionKindDocumentation.
+        opt documentation: serde_json::Value => "documentation",
+        ["Whether the server resolves additional code-action information."]
+        opt resolve_provider: bool => "resolveProvider",
+    }
+}
+
+boolean_or_options! {
+    /// A union of a boolean or [`CodeActionOptions`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrCodeActionOptions
+    BooleanOrCodeActionOptions,
+    code_action_options: CodeActionOptions,
+    "a boolean or a code-action-options object"
+}
+
+lsp_object! {
+    /// Document-formatting request options.
+    DocumentFormattingOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options! {
+    /// A union of a boolean or [`DocumentFormattingOptions`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrDocumentFormattingOptions
+    BooleanOrDocumentFormattingOptions,
+    document_formatting_options: DocumentFormattingOptions,
+    "a boolean or a document-formatting-options object"
+}
+
+lsp_object! {
+    /// Rename request options.
+    RenameOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["Whether renames are checked/tested via a prepare step before execution."]
+        opt prepare_provider: bool => "prepareProvider",
+    }
+}
+
+boolean_or_options! {
+    /// A union of a boolean or [`RenameOptions`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrRenameOptions
+    BooleanOrRenameOptions,
+    rename_options: RenameOptions,
+    "a boolean or a rename-options object"
+}
+
+lsp_object! {
+    /// Workspace-symbol request options.
+    WorkspaceSymbolOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["Whether the server resolves additional workspace-symbol information."]
+        opt resolve_provider: bool => "resolveProvider",
+    }
+}
+
+boolean_or_options! {
+    /// A union of a boolean or [`WorkspaceSymbolOptions`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrWorkspaceSymbolOptions
+    BooleanOrWorkspaceSymbolOptions,
+    workspace_symbol_options: WorkspaceSymbolOptions,
+    "a boolean or a workspace-symbol-options object"
+}
+
+lsp_object! {
+    /// The legend a server uses to encode semantic tokens.
+    SemanticTokensLegend {
+        ["The token types a server uses."]
+        reqnn token_types: Vec<String> => "tokenTypes",
+        ["The token modifiers a server uses."]
+        reqnn token_modifiers: Vec<String> => "tokenModifiers",
+    }
+}
+
+lsp_object! {
+    /// Semantic-tokens options supporting deltas for full documents.
+    SemanticTokensFullDelta {
+        ["Whether the server supports deltas for full documents."]
+        opt delta: bool => "delta",
+    }
+}
+
+/// A union of a boolean or [`SemanticTokensFullDelta`]
+/// (LSP `boolean | SemanticTokensFullDelta`).
+// Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrSemanticTokensFullDelta
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BooleanOrSemanticTokensFullDelta {
+    /// The boolean variant.
+    pub boolean: Option<bool>,
+    /// The full-delta options variant.
+    pub semantic_tokens_full_delta: Option<SemanticTokensFullDelta>,
+}
+
+impl Serialize for BooleanOrSemanticTokensFullDelta {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (self.boolean, &self.semantic_tokens_full_delta) {
+            (Some(b), None) => serializer.serialize_bool(b),
+            (None, Some(o)) => o.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of BooleanOrSemanticTokensFullDelta should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BooleanOrSemanticTokensFullDelta {
+    // Go: lsp_generated.go:BooleanOrSemanticTokensFullDelta.UnmarshalJSONFrom
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = BooleanOrSemanticTokensFullDelta;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a boolean or a semantic-tokens full-delta object")
+            }
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(BooleanOrSemanticTokensFullDelta {
+                    boolean: Some(v),
+                    semantic_tokens_full_delta: None,
+                })
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                let opts = SemanticTokensFullDelta::deserialize(
+                    de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(BooleanOrSemanticTokensFullDelta {
+                    boolean: None,
+                    semantic_tokens_full_delta: Some(opts),
+                })
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+lsp_object! {
+    /// Semantic-tokens request options.
+    SemanticTokensOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["The legend used by the server."]
+        reqnn legend: SemanticTokensLegend => "legend",
+        ["Whether the server provides range semantic tokens."]
+        opt range: BooleanOrEmptyObject => "range",
+        ["Whether the server provides full-document semantic tokens."]
+        opt full: BooleanOrSemanticTokensFullDelta => "full",
+    }
+}
+
+/// A union of [`SemanticTokensOptions`] or registration options
+/// (LSP `SemanticTokensOptions | SemanticTokensRegistrationOptions`).
+///
+/// The registration-options variant (an object carrying a `documentSelector`)
+/// is deferred to raw JSON; the server produces the plain options variant.
+// DEFER: SemanticTokensRegistrationOptions is a deep registration type; kept as
+// raw JSON. blocked-by: generator pass landing the registration-options tree.
+// Go: internal/lsp/lsproto/lsp_generated.go:SemanticTokensOptionsOrRegistrationOptions
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SemanticTokensOptionsOrRegistrationOptions {
+    /// The plain options variant.
+    pub options: Option<SemanticTokensOptions>,
+    /// The registration-options variant (deferred: raw JSON).
+    pub registration_options: Option<serde_json::Value>,
+}
+
+impl Serialize for SemanticTokensOptionsOrRegistrationOptions {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.options, &self.registration_options) {
+            (Some(o), None) => o.serialize(serializer),
+            (None, Some(r)) => r.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of SemanticTokensOptionsOrRegistrationOptions should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SemanticTokensOptionsOrRegistrationOptions {
+    // Go: lsp_generated.go:SemanticTokensOptionsOrRegistrationOptions.UnmarshalJSONFrom
+    //
+    // Go dispatches on the presence of a `documentSelector` key: present means
+    // the registration-options variant, otherwise the plain options variant.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut out = SemanticTokensOptionsOrRegistrationOptions::default();
+        if value.get("documentSelector").is_some() {
+            out.registration_options = Some(value);
+        } else {
+            out.options = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+        }
+        Ok(out)
+    }
+}
+
+lsp_object! {
+    /// The capabilities the server provides (LSP `ServerCapabilities`).
     ///
-    /// Deferred: the full LSP server-capability field tree is large and
-    /// generated later; this port accepts any object and re-serializes to `{}`.
+    /// This is a *server-produced* value: every provider field is an optional
+    /// pointer in Go (`json:",omitzero"`), so an absent provider is omitted on
+    /// serialize and a `null` value is rejected on decode. Fields whose nested
+    /// option type is not yet ported are modeled as raw JSON
+    /// ([`serde_json::Value`]) with a `// DEFER` note, preserving the Go field
+    /// name and optionality.
     // Go: internal/lsp/lsproto/lsp_generated.go:ServerCapabilities
-    ServerCapabilities
+    //
+    // Field order mirrors the Go struct declaration so multi-field serialization
+    // matches Go byte-for-byte. Providers whose nested option tree is not yet
+    // ported keep the Go field name and optionality but carry a deferred raw
+    // JSON ([`serde_json::Value`]) value (see the per-field `// DEFER` notes).
+    ServerCapabilities {
+        ["The position encoding the server picked (defaults to `utf-16`)."]
+        opt position_encoding: PositionEncodingKind => "positionEncoding",
+        ["Defines how text documents are synced (detailed options or a sync kind)."]
+        opt text_document_sync: TextDocumentSyncOptionsOrKind => "textDocumentSync",
+        ["The server provides completion support."]
+        opt completion_provider: CompletionOptions => "completionProvider",
+        ["The server provides hover support."]
+        opt hover_provider: BooleanOrHoverOptions => "hoverProvider",
+        ["The server provides signature-help support."]
+        opt signature_help_provider: SignatureHelpOptions => "signatureHelpProvider",
+        ["The server provides goto-declaration support (deferred: raw JSON)."]
+        // DEFER: BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions (triple union
+        // with registration options). blocked-by: generator pass landing the declaration tree.
+        opt declaration_provider: serde_json::Value => "declarationProvider",
+        ["The server provides goto-definition support."]
+        opt definition_provider: BooleanOrDefinitionOptions => "definitionProvider",
+        ["The server provides goto-type-definition support (deferred: raw JSON)."]
+        // DEFER: BooleanOrTypeDefinitionOptionsOrTypeDefinitionRegistrationOptions.
+        // blocked-by: generator pass landing the type-definition tree.
+        opt type_definition_provider: serde_json::Value => "typeDefinitionProvider",
+        ["The server provides goto-implementation support (deferred: raw JSON)."]
+        // DEFER: BooleanOrImplementationOptionsOrImplementationRegistrationOptions.
+        // blocked-by: generator pass landing the implementation tree.
+        opt implementation_provider: serde_json::Value => "implementationProvider",
+        ["The server provides find-references support."]
+        opt references_provider: BooleanOrReferenceOptions => "referencesProvider",
+        ["The server provides document-highlight support (deferred: raw JSON)."]
+        // DEFER: BooleanOrDocumentHighlightOptions. blocked-by: generator pass.
+        opt document_highlight_provider: serde_json::Value => "documentHighlightProvider",
+        ["The server provides document-symbol support."]
+        opt document_symbol_provider: BooleanOrDocumentSymbolOptions => "documentSymbolProvider",
+        ["The server provides code actions."]
+        opt code_action_provider: BooleanOrCodeActionOptions => "codeActionProvider",
+        ["The server provides code lens (deferred: raw JSON)."]
+        // DEFER: CodeLensOptions. blocked-by: generator pass.
+        opt code_lens_provider: serde_json::Value => "codeLensProvider",
+        ["The server provides document-link support (deferred: raw JSON)."]
+        // DEFER: DocumentLinkOptions. blocked-by: generator pass.
+        opt document_link_provider: serde_json::Value => "documentLinkProvider",
+        ["The server provides color support (deferred: raw JSON)."]
+        // DEFER: BooleanOrDocumentColorOptionsOrDocumentColorRegistrationOptions.
+        // blocked-by: generator pass.
+        opt color_provider: serde_json::Value => "colorProvider",
+        ["The server provides workspace-symbol support."]
+        opt workspace_symbol_provider: BooleanOrWorkspaceSymbolOptions => "workspaceSymbolProvider",
+        ["The server provides document formatting."]
+        opt document_formatting_provider: BooleanOrDocumentFormattingOptions => "documentFormattingProvider",
+        ["The server provides document-range formatting (deferred: raw JSON)."]
+        // DEFER: BooleanOrDocumentRangeFormattingOptions. blocked-by: generator pass.
+        opt document_range_formatting_provider: serde_json::Value => "documentRangeFormattingProvider",
+        ["The server provides on-type formatting (deferred: raw JSON)."]
+        // DEFER: DocumentOnTypeFormattingOptions. blocked-by: generator pass.
+        opt document_on_type_formatting_provider: serde_json::Value => "documentOnTypeFormattingProvider",
+        ["The server provides rename support."]
+        opt rename_provider: BooleanOrRenameOptions => "renameProvider",
+        ["The server provides folding-range support (deferred: raw JSON)."]
+        // DEFER: BooleanOrFoldingRangeOptionsOrFoldingRangeRegistrationOptions.
+        // blocked-by: generator pass.
+        opt folding_range_provider: serde_json::Value => "foldingRangeProvider",
+        ["The server provides selection-range support (deferred: raw JSON)."]
+        // DEFER: BooleanOrSelectionRangeOptionsOrSelectionRangeRegistrationOptions.
+        // blocked-by: generator pass.
+        opt selection_range_provider: serde_json::Value => "selectionRangeProvider",
+        ["The server provides execute-command support (deferred: raw JSON)."]
+        // DEFER: ExecuteCommandOptions. blocked-by: generator pass.
+        opt execute_command_provider: serde_json::Value => "executeCommandProvider",
+        ["The server provides call-hierarchy support (deferred: raw JSON)."]
+        // DEFER: BooleanOrCallHierarchyOptionsOrCallHierarchyRegistrationOptions.
+        // blocked-by: generator pass.
+        opt call_hierarchy_provider: serde_json::Value => "callHierarchyProvider",
+        ["The server provides linked-editing-range support (deferred: raw JSON)."]
+        // DEFER: BooleanOrLinkedEditingRangeOptionsOrLinkedEditingRangeRegistrationOptions.
+        // blocked-by: generator pass.
+        opt linked_editing_range_provider: serde_json::Value => "linkedEditingRangeProvider",
+        ["The server provides semantic-tokens support."]
+        opt semantic_tokens_provider: SemanticTokensOptionsOrRegistrationOptions => "semanticTokensProvider",
+        ["The server provides moniker support (deferred: raw JSON)."]
+        // DEFER: BooleanOrMonikerOptionsOrMonikerRegistrationOptions. blocked-by: generator pass.
+        opt moniker_provider: serde_json::Value => "monikerProvider",
+        ["The server provides type-hierarchy support (deferred: raw JSON)."]
+        // DEFER: BooleanOrTypeHierarchyOptionsOrTypeHierarchyRegistrationOptions.
+        // blocked-by: generator pass.
+        opt type_hierarchy_provider: serde_json::Value => "typeHierarchyProvider",
+        ["The server provides inline values (deferred: raw JSON)."]
+        // DEFER: BooleanOrInlineValueOptionsOrInlineValueRegistrationOptions. blocked-by: generator pass.
+        opt inline_value_provider: serde_json::Value => "inlineValueProvider",
+        ["The server provides inlay hints (deferred: raw JSON)."]
+        // DEFER: BooleanOrInlayHintOptionsOrInlayHintRegistrationOptions. blocked-by: generator pass.
+        opt inlay_hint_provider: serde_json::Value => "inlayHintProvider",
+        ["The server has support for pull-model diagnostics (deferred: raw JSON)."]
+        // DEFER: DiagnosticOptionsOrRegistrationOptions. blocked-by: generator pass.
+        opt diagnostic_provider: serde_json::Value => "diagnosticProvider",
+        ["Inline-completion options (deferred: raw JSON)."]
+        // DEFER: BooleanOrInlineCompletionOptions. blocked-by: generator pass.
+        opt inline_completion_provider: serde_json::Value => "inlineCompletionProvider",
+        ["Workspace-specific server capabilities (deferred: raw JSON)."]
+        // DEFER: WorkspaceOptions (workspaceFolders / fileOperations / textDocumentContent).
+        // blocked-by: generator pass.
+        opt workspace: serde_json::Value => "workspace",
+        ["Source-definition support via `custom/textDocument/sourceDefinition`."]
+        opt custom_source_definition_provider: bool => "customSourceDefinitionProvider",
+        ["VS auto-insert provider options (deferred: raw JSON)."]
+        // DEFER: VsOnAutoInsertOptions. blocked-by: generator pass.
+        opt vs_on_auto_insert_provider: serde_json::Value => "_vs_onAutoInsertProvider",
+        ["VS-specific grouped references via `textDocument/_vs_references`."]
+        opt vs_references_provider: bool => "_vs_referencesProvider",
+        ["Multi-document highlight support via `custom/textDocument/multiDocumentHighlight`."]
+        opt custom_multi_document_highlight_provider: bool => "customMultiDocumentHighlightProvider",
+    }
 }
 
 lsp_open_object! {
