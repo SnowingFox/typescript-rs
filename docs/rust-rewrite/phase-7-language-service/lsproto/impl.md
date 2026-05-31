@@ -292,6 +292,78 @@
 - [x] `WorkspaceOptions` 组装 + 把 `ServerCapabilities.workspace` 从 raw JSON 换成 `Option<WorkspaceOptions>`（清空 ServerCapabilities 最后一个 raw 槽）　`// Go: lsp_generated.go:WorkspaceOptions / ServerCapabilities`
 - [x] `WorkspaceFolder`/`WorkspaceFolderOrURI`/`RelativePattern` + 把 `PatternOrRelativePattern.relative_pattern` 升级为 typed `RelativePattern`　`// Go: lsp_generated.go:WorkspaceFolder/WorkspaceFolderOrURI/RelativePattern/PatternOrRelativePattern`
 
+## 续轮：请求/结果参数 + 通知类型里剩余的 concrete-typed raw-JSON 槽（本轮落地）
+
+> 上一轮把 `ServerCapabilities` 整棵树（含 `WorkspaceOptions`/`RelativePattern`）落成 typed。**本轮**收紧**请求/结果参数 + 通知类型**里仍是 `serde_json::Value` 的 concrete-typed 槽（Go 给了具体 struct/union/枚举，而非 `LSPAny`）。全部编辑在 `generated.rs`(+`generated_test.rs`)，无新模块、无新第三方 crate。
+
+**枚举 raw-JSON 槽分类（开工前枚举 `generated.rs` 全部 `serde_json::Value` 字段）**：
+
+| 字段 | Go 类型 | 处置 |
+|---|---|---|
+| `Hover.contents` | `MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings` | **typed 本轮**（4 臂 union） |
+| `CompletionItem.documentation` | `*StringOrMarkupContent` | **typed 本轮** |
+| `InlayHintLabelPart.tooltip` / `InlayHint.tooltip` | `*StringOrMarkupContent` | **typed 本轮** |
+| `InitializeParams.clientInfo` | `*ClientInfo` | **typed 本轮** |
+| `InitializeParams.trace` | `*TraceValue` | **typed 本轮**（string 枚举） |
+| `InitializeParams.rootPath` | `*StringOrNull` | **typed 本轮** |
+| `InitializeParams.workspaceFolders` | `*WorkspaceFoldersOrNull` | **typed 本轮** |
+| `InitializeResult.serverInfo` | `*ServerInfo` | **typed 本轮** |
+| `CompletionItem.labelDetails` | `*CompletionItemLabelDetails` | **typed 本轮** |
+| `CompletionItem.tags` | `*[]CompletionItemTag` | **typed 本轮**（复用 resolved 的 `CompletionItemTag`） |
+| `CompletionItem.insertTextMode` | `*InsertTextMode` | **typed 本轮**（复用 resolved 的 `InsertTextMode`） |
+| `CompletionItem.command` / `InlayHintLabelPart.command` | `*Command` | **typed 本轮**（`arguments` 元素保留 `LSPAny`） |
+| `CallHierarchyIncomingCallsParams.item` / `CallHierarchyIncomingCall.from` | `CallHierarchyItem` | **typed 本轮** |
+| `CreateFile.options` / `RenameFile.options` / `DeleteFile.options` | `*CreateFile/RenameFile/DeleteFileOptions` | **typed 本轮** |
+| `Command.arguments` | `*[]any`（LSPAny） | **intentionally-any，保留 raw**（Go-faithful） |
+| `InitializeParams.initializationOptions` | `*InitializationOptions`（open-object） | **intentionally-any，保留 open-object** |
+| `CompletionItem.data` / `InlayHint.data` / `CallHierarchyItem.data` | `*CompletionItemData`/`*InlayHintData`(`struct{}`)/`*CallHierarchyItemData` | **DEFER**（typescript-go `*Data` carrier cookie，低价值；blocked-by 生成器 pass） |
+| `TextDocumentEdit.edits` | `[]TextEditOrAnnotatedTextEditOrSnippetTextEdit` | **DEFER**（深 3 臂 union；blocked-by `AnnotatedTextEdit`/`SnippetTextEdit`） |
+| `CodeActionOptions.documentation` | `[]*CodeActionKindDocumentation` | **DEFER**（ServerCapabilities 树，非本轮范围，沿用上一轮 DEFER） |
+
+**新增类型（`generated.rs`）**：`MarkupContent`/`MarkedStringWithLanguage`/`StringOrMarkedStringWithLanguage`/`MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings`（Hover 4 臂 union）、`StringOrMarkupContent`、`TraceValue`(string 枚举)、`ClientInfo`、`ServerInfo`、`StringOrNull`、`WorkspaceFoldersOrNull`、`CompletionItemLabelDetails`、`Command`、`CallHierarchyItem`、`CreateFileOptions`/`RenameFileOptions`/`DeleteFileOptions`。复用 resolved 的 `MarkupKind`/`CompletionItemTag`/`InsertTextMode`/`SymbolTag`。
+
+**类型/所有权映射（本子树关键决策）**：
+
+| Go 构造 | Rust 表示 | 说明 |
+|---|---|---|
+| `Contents MarkupContentOrString...`（4 臂，`{`→按 `jsonObjectHasKey(kind,language)`、`"`→string、`[`→`[]StringOrMarkedStringWithLanguage`） | 手写 4 字段 union（`serde_json::Value` peek 派发，`kind` 先于 `language`） | 复刻 Go `PeekKind`/`jsonObjectHasKey`；`req contents`。 |
+| `*StringOrMarkupContent`（`"`→string、`{`→MarkupContent） | 手写 2 字段 union（`visit_str`/`visit_map`） | 复用于 documentation/tooltip 三处。 |
+| `Kind MarkupKind json:"kind"`（值类型必填） | `req kind: MarkupKind`（复用 resolved 字符串枚举） | 缺→`errMissing`；不拒 null（值类型）。 |
+| `type TraceValue string`（off/messages/verbose） | 手写 `Cow<'static,str>` newtype + `const OFF/MESSAGES/VERBOSE` | 复刻 `MarkupKind` 风格；未知值原样 round-trip。 |
+| `Name string` / `Version *string json:",omitzero"`（ClientInfo/ServerInfo） | `req name` / `opt version`（`lsp_object!`） | version 拒 null（errNull guard）。 |
+| `RootPath *StringOrNull json:",omitzero"`（无字段级 null 守卫） | `optn root_path: StringOrNull`（union 自身接收 null→`None`） | `null` 被接受（既有 `null_accepted_*` 测试）。 |
+| `WorkspaceFolders *WorkspaceFoldersOrNull json:",omitzero"`（`[]*WorkspaceFolder \| null`） | `optn workspace_folders: WorkspaceFoldersOrNull`（`[`→Vec、`n`→None） | 同上；复用既有 `WorkspaceFolder`。 |
+| `Tags *[]CompletionItemTag` / `InsertTextMode *InsertTextMode`（errNull guard） | `opt Vec<CompletionItemTag>` / `opt InsertTextMode`（复用 resolved int 枚举） | 拒 null；缺→`None`。 |
+| `Arguments *[]any json:",omitzero"`（LSPAny 数组） | `opt arguments: Vec<serde_json::Value>` | **intentionally-any**：元素保留任意 JSON，与 Go `[]any` 一致。 |
+| `Kind SymbolKind json:"kind"`（CallHierarchyItem，值类型必填） | `req kind: SymbolKind`；给 `SymbolKind` 补 `Default`（零值 `0`，Go-faithful，纯新增） | `lsp_object!` 派生 `Default` 需所有字段 `Default`。 |
+| `*CreateFile/Rename/DeleteFileOptions`（`*bool` 字段，errNull guard） | `opt T`（`lsp_object!`，全 `opt bool`） | `default → {}`（§8.6 覆盖）。 |
+| `*CompletionItemData`/`*InlayHintData`/`*CallHierarchyItemData`（carrier） | 保留 `opt serde_json::Value`（带 `// DEFER … blocked-by:`） | typescript-go 内部 cookie，低价值；缺→`None`、拒 null、round-trip 原值。 |
+
+**红→绿推进序（slice，逐行为 tracer）**：
+1. `MarkupContent` + Hover 4 臂 union → swap `Hover.contents`（真 RED→GREEN：`v.contents.markup_content` 在 raw-`Value` 态编译失败 → 加类型 + 换字段 → GREEN）；其余 3 臂（string/markedString/array）+ `errMissing` 为 green-on-arrival。
+2. `StringOrMarkupContent` → swap `CompletionItem.documentation`（真 RED→GREEN）；`InlayHint.tooltip`/`InlayHintLabelPart.tooltip`/string 臂 green-on-arrival。
+3. `ClientInfo`/`TraceValue` → swap `InitializeParams.clientInfo`/`trace`（真 RED→GREEN）；`ServerInfo`/`InitializeResult.serverInfo`/const 值/null 守卫 green-on-arrival。
+4. `StringOrNull`/`WorkspaceFoldersOrNull` → swap `InitializeParams.rootPath`/`workspaceFolders`（真 RED→GREEN）；null/array 派发 green-on-arrival（既有 `null_accepted_*` 仍绿）。
+5. `CompletionItemLabelDetails` + `tags`/`insertTextMode` 复用 → swap 三字段（真 RED→GREEN）；default/null 守卫 green-on-arrival。
+6. `Command` → swap `CompletionItem.command`/`InlayHintLabelPart.command`（真 RED→GREEN）；required/另一字段 green-on-arrival。
+7. `CallHierarchyItem` → swap `item`/`from`（真 RED→GREEN）；required/`item` 臂 green-on-arrival（既有 `null_rejected_callhierarchy_*` 仍绿）。
+8. `Create/Rename/DeleteFileOptions` → swap 三 `options` 字段（真 RED→GREEN：`create_file_options_typed`）；rename/delete/`default→{}` green-on-arrival。
+
+> 诚实记录：每个新类型的首个引用测试（swap）均为真 RED（字段在 raw-`Value` 态无 typed 子字段→编译失败），实现后 GREEN；同类型的另一 union 臂 / round-trip / `default→{}` / required-missing / null 守卫多为 green-on-arrival（手写 union/宏一旦成立即过）。
+
+**公共 API 影响（additive / 非破坏）**：所有改动都是把字段**内层类型**从 `serde_json::Value` 收紧为 typed `Option<T>`/`req T`，**字段名 + optionality（`req`/`reqnn`/`opt`/`optn`）不变**，serde 行为（缺/null/未知键/omit）保持。crate 外无 Rust 使用者（P8 未移植）；crate 内既有测试（`unmarshal_completion_item`/`roundtrip_initialize_params_null_process_id`/各 `null_rejected_*`/`null_accepted_*`）**全部不改即过**（它们用 `..Default::default()` 或 `reqnn`/`optn` 语义，收紧内层类型对其透明）。给 `SymbolKind` 补 `Default`（零值 `0`）是纯新增。
+
+**实现 TODO（本轮，可勾选）**：
+
+- [x] `MarkupContent` + `MarkedStringWithLanguage` + `StringOrMarkedStringWithLanguage` + Hover 4 臂 union；swap `Hover.contents`　`// Go: lsp_generated.go:MarkupContent / Hover`
+- [x] `StringOrMarkupContent`；swap `CompletionItem.documentation` / `InlayHint.tooltip` / `InlayHintLabelPart.tooltip`　`// Go: lsp_generated.go:StringOrMarkupContent`
+- [x] `TraceValue`(string 枚举) + `ClientInfo` + `ServerInfo`；swap `InitializeParams.clientInfo`/`trace` / `InitializeResult.serverInfo`　`// Go: lsp_generated.go:TraceValue/ClientInfo/ServerInfo`
+- [x] `StringOrNull` + `WorkspaceFoldersOrNull`；swap `InitializeParams.rootPath`/`workspaceFolders`　`// Go: lsp_generated.go:StringOrNull/WorkspaceFoldersOrNull`
+- [x] `CompletionItemLabelDetails`；swap `labelDetails`/`tags`(`Vec<CompletionItemTag>`)/`insertTextMode`(`InsertTextMode`)　`// Go: lsp_generated.go:CompletionItemLabelDetails`
+- [x] `Command`；swap `CompletionItem.command`/`InlayHintLabelPart.command`（`arguments` 保留 `LSPAny`）　`// Go: lsp_generated.go:Command`
+- [x] `CallHierarchyItem`（+ `SymbolKind` 补 `Default`）；swap `CallHierarchyIncomingCallsParams.item`/`CallHierarchyIncomingCall.from`　`// Go: lsp_generated.go:CallHierarchyItem`
+- [x] `CreateFileOptions`/`RenameFileOptions`/`DeleteFileOptions`；swap 三 `options` 字段　`// Go: lsp_generated.go:CreateFileOptions/RenameFileOptions/DeleteFileOptions`
+
 ## 转交 / 推迟（DEFER）
 
 - ✅ 上一轮的 `(*ClientCapabilities).Resolve()` DEFER **已解除**（落地于 `capabilities.rs`，4 组全树）。
@@ -300,8 +372,11 @@
 - ✅ 上一轮移植 registration-options base tree（`StaticRegistrationOptions`/`DocumentSelectorOrNull`/`DocumentFilter` union/`TextDocumentRegistrationOptions`），并把全部 **14 个** raw-JSON registration 槽（12 triple-union + diagnostic + semanticTokens）升级为 typed `*RegistrationOptions`。triple-union / `*OrRegistrationOptions` 的 registration 变体 **DEFER 已全部解除**。
 - ✅ **本轮**移植 `WorkspaceOptions` 子树（`WorkspaceFoldersServerCapabilities`/`StringOrBoolean`/`FileOperation*` 链/`TextDocumentContent*` + union），把 `ServerCapabilities.workspace` 从 `serde_json::Value` 升级为 `Option<WorkspaceOptions>`——**`ServerCapabilities` 的最后一个 raw-JSON DEFER 槽已清空**。
 - ✅ **本轮**移植 `RelativePattern` 对象变体（`WorkspaceFolder`/`WorkspaceFolderOrURI`/`RelativePattern`），把 `PatternOrRelativePattern.relative_pattern` 从 `serde_json::Value` 升级为 `Option<RelativePattern>`——**`PatternOrRelativePattern` 两个变体现已全 typed**。
+- ✅ **本轮**收紧请求/结果参数 + 通知类型里 **17 处** concrete-typed raw-JSON 槽（Hover.contents 4 臂 union / StringOrMarkupContent×3 / clientInfo / trace / rootPath / workspaceFolders / serverInfo / labelDetails / tags / insertTextMode / command×2 / callHierarchy item+from / 三个 file options）。
 - `// DEFER`：`CodeActionKindDocumentation`（`CodeActionOptions.documentation` 的 `[]*` 元素，proposed/稀有）保持 raw JSON。`blocked-by:` 生成器 pass。这是 `ServerCapabilities` provider 树里**唯一**剩余的 raw-JSON DEFER（不在本轮范围）。
-- `// DEFER`：新枚举 `String()` stringer（同生成器 pass；本轮 `TextDocumentSyncKind` 已含 `Display` 复刻 stringer）。
+- `// DEFER`：`TextDocumentEdit.edits`（`[]TextEditOrAnnotatedTextEditOrSnippetTextEdit`，深 3 臂 union）保持 `Vec<serde_json::Value>`。`blocked-by:` `AnnotatedTextEdit`/`SnippetTextEdit` 类型未移植。`reqnn` 语义（拒 null）已正确（既有 `null_rejected_textdocumentedit_edits` 仍绿）。
+- `// DEFER`：`*Data` carrier（`CompletionItem.data`/`InlayHint.data`/`CallHierarchyItem.data` → `*CompletionItemData`/`*InlayHintData`(`struct{}`)/`*CallHierarchyItemData`）保持 raw JSON。`blocked-by:` 生成器 pass。typescript-go 内部 cookie，低价值；缺→`None`、拒 null、round-trip 原值。
+- **intentionally-any（保留 raw，Go-faithful）**：`Command.arguments`（`[]any`/LSPAny 数组，元素任意 JSON）、`InitializationOptions`（open-object，用户自定义初始化项）。Go 把它们建成 `any`/`LSPAny`，over-type 会偏离 Go。
+- `// DEFER`：新枚举 `String()` stringer（同生成器 pass；本轮 `TextDocumentSyncKind` 已含 `Display` 复刻 stringer；`TraceValue` 无 Go stringer）。
 - `// DEFER`：请求/resolved 树字段的 Go `errNull` 精确文案（低优先偏差；`null` 仍被拒绝，仅文案不同）。
 - `// DEFER`：Go 个别非指针字段（`support`/`tokenTypes` 等）建成 `Option<T>` 的统一化偏离。
-- 维持 `InitializationOptions` open-object 现状（用户自定义初始化项，非本轮范围；公共 API 仅**新增**）。

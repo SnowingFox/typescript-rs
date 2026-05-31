@@ -3023,3 +3023,486 @@ fn pattern_or_relative_pattern_relative_variant_typed() {
     assert_eq!(rel.base_uri.uri.as_ref().unwrap().0, "file:///ws");
     assert_eq!(serde_json::to_string(&v).unwrap(), input);
 }
+
+// === request/result param + notification raw-JSON tightening ===
+//
+// This round tightens the remaining concrete-typed `serde_json::Value` slots in
+// the request/result param + notification types. Go models these fields with a
+// concrete struct/union/enum (not `LSPAny`), so the port replaces the raw value
+// with the typed shape while preserving the serde behavior (field name /
+// optionality). Genuinely-`any` fields (`LSPAny`, `initializationOptions`,
+// `Command.arguments`, the `*Data` carriers) stay raw.
+
+// === Slice 1: MarkupContent + Hover.contents union ===
+
+// tracer (real RED->GREEN): `Hover.contents` is now the typed union
+// `MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings` (was raw
+// `serde_json::Value`). Decoding an object with a `kind` key reaches the typed
+// `MarkupContent` arm, and the round-trip is byte-for-byte.
+// Go: lsp_generated.go:Hover (Contents MarkupContentOrString...) / MarkupContent
+#[test]
+fn hover_contents_markup_content_variant() {
+    let input = r##"{"contents":{"kind":"markdown","value":"# hi"}}"##;
+    let v: Hover = serde_json::from_str(input).unwrap();
+    let mc = v.contents.markup_content.as_ref().unwrap();
+    assert_eq!(mc.kind, MarkupKind::MARKDOWN);
+    assert_eq!(mc.value, "# hi");
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: the bare-string arm of the hover-content union. A JSON
+// string is dispatched to the `string` field; round-trip is byte-for-byte.
+// Go: lsp_generated.go:MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings (string case)
+#[test]
+fn hover_contents_string_variant() {
+    let input = r#"{"contents":"plain hover text"}"#;
+    let v: Hover = serde_json::from_str(input).unwrap();
+    assert_eq!(v.contents.string.as_deref(), Some("plain hover text"));
+    assert!(v.contents.markup_content.is_none());
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: the `MarkedStringWithLanguage` arm. An object with a
+// `language` key (and no `kind`) dispatches to that arm.
+// Go: lsp_generated.go:...MarkedStrings (jsonObjectHasKey "language")
+#[test]
+fn hover_contents_marked_string_with_language_variant() {
+    let input = r#"{"contents":{"language":"typescript","value":"const x = 1"}}"#;
+    let v: Hover = serde_json::from_str(input).unwrap();
+    let ms = v.contents.marked_string_with_language.as_ref().unwrap();
+    assert_eq!(ms.language, "typescript");
+    assert_eq!(ms.value, "const x = 1");
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: the `MarkedString[]` arm. A JSON array dispatches to
+// `marked_strings`, whose elements are themselves the `string | object` union.
+// Go: lsp_generated.go:...MarkedStrings (array case) / StringOrMarkedStringWithLanguage
+#[test]
+fn hover_contents_marked_strings_array_variant() {
+    let input = r#"{"contents":["text one",{"language":"ts","value":"x"}]}"#;
+    let v: Hover = serde_json::from_str(input).unwrap();
+    let arr = v.contents.marked_strings.as_ref().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0].string.as_deref(), Some("text one"));
+    assert_eq!(
+        arr[1]
+            .marked_string_with_language
+            .as_ref()
+            .unwrap()
+            .language,
+        "ts"
+    );
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: `MarkupContent` reports missing required `value` with Go's
+// `errMissing` wording.
+// Go: lsp_generated.go:MarkupContent.UnmarshalJSONFrom (missingValue)
+#[test]
+fn markup_content_requires_value() {
+    let err = serde_json::from_str::<MarkupContent>(r#"{"kind":"markdown"}"#).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("missing required properties: value"),
+        "got: {err}"
+    );
+}
+
+// === Slice 2: StringOrMarkupContent for *.documentation / tooltip ===
+
+// tracer (real RED->GREEN): `CompletionItem.documentation` is now the typed
+// union `StringOrMarkupContent` (was raw `serde_json::Value`). The
+// `MarkupContent` object arm is reachable and round-trips byte-for-byte.
+// Go: lsp_generated.go:CompletionItem (Documentation *StringOrMarkupContent)
+#[test]
+fn completion_item_documentation_markup_content_variant() {
+    let input = r#"{"label":"x","documentation":{"kind":"plaintext","value":"docs"}}"#;
+    let v: CompletionItem = serde_json::from_str(input).unwrap();
+    let doc = v.documentation.as_ref().unwrap();
+    let mc = doc.markup_content.as_ref().unwrap();
+    assert_eq!(mc.kind, MarkupKind::PLAIN_TEXT);
+    assert_eq!(mc.value, "docs");
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: the bare-string arm of `StringOrMarkupContent` on
+// `CompletionItem.documentation`.
+// Go: lsp_generated.go:StringOrMarkupContent.UnmarshalJSONFrom (string case)
+#[test]
+fn completion_item_documentation_string_variant() {
+    let input = r#"{"label":"x","documentation":"plain docs"}"#;
+    let v: CompletionItem = serde_json::from_str(input).unwrap();
+    assert_eq!(
+        v.documentation.as_ref().unwrap().string.as_deref(),
+        Some("plain docs")
+    );
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: `InlayHint.tooltip` shares the `StringOrMarkupContent` shape
+// and round-trips with a markup object.
+// Go: lsp_generated.go:InlayHint (Tooltip *StringOrMarkupContent)
+#[test]
+fn inlay_hint_tooltip_markup_variant() {
+    let input = r#"{"position":{"line":0,"character":0},"label":"x","tooltip":{"kind":"markdown","value":"t"}}"#;
+    let v: InlayHint = serde_json::from_str(input).unwrap();
+    assert_eq!(
+        v.tooltip
+            .as_ref()
+            .unwrap()
+            .markup_content
+            .as_ref()
+            .unwrap()
+            .value,
+        "t"
+    );
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: `InlayHintLabelPart.tooltip` shares the same union and
+// round-trips with a plain string.
+// Go: lsp_generated.go:InlayHintLabelPart (Tooltip *StringOrMarkupContent)
+#[test]
+fn inlay_hint_label_part_tooltip_string_variant() {
+    let input = r#"{"value":"lp","tooltip":"hello"}"#;
+    let v: InlayHintLabelPart = serde_json::from_str(input).unwrap();
+    assert_eq!(v.tooltip.as_ref().unwrap().string.as_deref(), Some("hello"));
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// === Slice 3: ClientInfo + TraceValue + ServerInfo ===
+
+// tracer (real RED->GREEN): `InitializeParams.client_info` is now the typed
+// `ClientInfo { name, version? }` and `trace` is the `TraceValue` string enum
+// (was raw `serde_json::Value`). Both decode to typed fields and round-trip.
+// Go: lsp_generated.go:InitializeParams (ClientInfo *ClientInfo, Trace *TraceValue)
+#[test]
+fn initialize_params_client_info_and_trace_typed() {
+    let input = r#"{"processId":null,"clientInfo":{"name":"vscode","version":"1.9"},"rootUri":null,"capabilities":{},"trace":"verbose"}"#;
+    let v: InitializeParams = serde_json::from_str(input).unwrap();
+    let ci = v.client_info.as_ref().unwrap();
+    assert_eq!(ci.name, "vscode");
+    assert_eq!(ci.version.as_deref(), Some("1.9"));
+    assert_eq!(v.trace, Some(TraceValue::VERBOSE));
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: `TraceValue` const values match the LSP spec literals and
+// (de)serialize as a plain JSON string; unknown values round-trip raw.
+// Go: lsp_generated.go:TraceValue (TraceValueOff/Messages/Verbose)
+#[test]
+fn trace_value_const_values_and_serde() {
+    assert_eq!(TraceValue::OFF.0, "off");
+    assert_eq!(TraceValue::MESSAGES.0, "messages");
+    assert_eq!(TraceValue::VERBOSE.0, "verbose");
+    assert_eq!(
+        serde_json::to_string(&TraceValue::MESSAGES).unwrap(),
+        r#""messages""#
+    );
+    let v: TraceValue = serde_json::from_str(r#""future""#).unwrap();
+    assert_eq!(v.0, "future");
+}
+
+// green-on-arrival: `ClientInfo` rejects an explicit `null` version (Go's
+// `errNull` guard) and reports a missing required `name`.
+// Go: lsp_generated.go:ClientInfo.UnmarshalJSONFrom (version errNull / missingName)
+#[test]
+fn client_info_version_null_rejected_and_name_required() {
+    let err = serde_json::from_str::<ClientInfo>(r#"{"name":"c","version":null}"#).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("null value is not allowed for field \"version\""),
+        "got: {err}"
+    );
+    let err2 = serde_json::from_str::<ClientInfo>(r#"{"version":"1"}"#).unwrap_err();
+    assert!(
+        err2.to_string()
+            .contains("missing required properties: name"),
+        "got: {err2}"
+    );
+}
+
+// green-on-arrival: `InitializeResult.server_info` is the typed `ServerInfo`;
+// a populated value round-trips byte-for-byte and the field is omitted by
+// default.
+// Go: lsp_generated.go:InitializeResult (ServerInfo *ServerInfo)
+#[test]
+fn initialize_result_server_info_typed() {
+    let input = r#"{"capabilities":{},"serverInfo":{"name":"tsgo","version":"0.1"}}"#;
+    let v: InitializeResult = serde_json::from_str(input).unwrap();
+    let si = v.server_info.as_ref().unwrap();
+    assert_eq!(si.name, "tsgo");
+    assert_eq!(si.version.as_deref(), Some("0.1"));
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+
+    let bare = r#"{"capabilities":{}}"#;
+    let v2: InitializeResult = serde_json::from_str(bare).unwrap();
+    assert!(v2.server_info.is_none());
+    assert_eq!(serde_json::to_string(&v2).unwrap(), bare);
+}
+
+// green-on-arrival: `InitializeParams.trace` rejects an explicit `null`
+// (Go's `errNull` guard).
+// Go: lsp_generated.go:InitializeParams.UnmarshalJSONFrom (trace errNull)
+#[test]
+fn initialize_params_trace_null_rejected() {
+    assert_null_rejected::<InitializeParams>(
+        r#"{"processId":null,"rootUri":null,"capabilities":{},"trace":null}"#,
+        "trace",
+    );
+}
+
+// === Slice 4: StringOrNull (rootPath) + WorkspaceFoldersOrNull ===
+
+// tracer (real RED->GREEN): `InitializeParams.root_path` is now the typed
+// `StringOrNull` and `workspace_folders` is `WorkspaceFoldersOrNull`
+// (`[]WorkspaceFolder | null`); both were raw `serde_json::Value`. The
+// populated arms decode to typed fields and round-trip byte-for-byte.
+// Go: lsp_generated.go:InitializeParams (RootPath *StringOrNull, WorkspaceFolders *WorkspaceFoldersOrNull)
+#[test]
+fn initialize_params_root_path_and_workspace_folders_typed() {
+    let input = r#"{"processId":null,"rootPath":"/ws","rootUri":null,"capabilities":{},"workspaceFolders":[{"uri":"file:///a","name":"a"}]}"#;
+    let v: InitializeParams = serde_json::from_str(input).unwrap();
+    assert_eq!(v.root_path.as_ref().unwrap().string.as_deref(), Some("/ws"));
+    let folders = v
+        .workspace_folders
+        .as_ref()
+        .unwrap()
+        .workspace_folders
+        .as_ref()
+        .unwrap();
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0].uri.0, "file:///a");
+    assert_eq!(folders[0].name, "a");
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: `StringOrNull` accepts `null` (-> `None`) and a string, and
+// rejects any other JSON kind; both arms round-trip.
+// Go: lsp_generated.go:StringOrNull.UnmarshalJSONFrom
+#[test]
+fn string_or_null_dispatch() {
+    let n: StringOrNull = serde_json::from_str("null").unwrap();
+    assert!(n.string.is_none());
+    assert_eq!(serde_json::to_string(&n).unwrap(), "null");
+    let s: StringOrNull = serde_json::from_str(r#""abc""#).unwrap();
+    assert_eq!(s.string.as_deref(), Some("abc"));
+    assert_eq!(serde_json::to_string(&s).unwrap(), r#""abc""#);
+    assert!(serde_json::from_str::<StringOrNull>("42").is_err());
+}
+
+// green-on-arrival: `WorkspaceFoldersOrNull` accepts `null` (-> `None`) and an
+// array; the `null` form is what `workspaceFolders: null` decodes to and it
+// re-serializes as `null`.
+// Go: lsp_generated.go:WorkspaceFoldersOrNull.UnmarshalJSONFrom
+#[test]
+fn workspace_folders_or_null_dispatch() {
+    let n: WorkspaceFoldersOrNull = serde_json::from_str("null").unwrap();
+    assert!(n.workspace_folders.is_none());
+    assert_eq!(serde_json::to_string(&n).unwrap(), "null");
+    let a: WorkspaceFoldersOrNull =
+        serde_json::from_str(r#"[{"uri":"file:///a","name":"a"}]"#).unwrap();
+    assert_eq!(a.workspace_folders.as_ref().unwrap().len(), 1);
+    assert!(serde_json::from_str::<WorkspaceFoldersOrNull>("42").is_err());
+}
+
+// === Slice 5: CompletionItem labelDetails / tags / insertTextMode ===
+
+// tracer (real RED->GREEN): `CompletionItem.label_details`,
+// `tags` (`Vec<CompletionItemTag>`) and `insert_text_mode` (`InsertTextMode`)
+// are now typed (were raw `serde_json::Value`). All decode to typed fields and
+// round-trip byte-for-byte.
+// Go: lsp_generated.go:CompletionItem (LabelDetails/Tags/InsertTextMode)
+#[test]
+fn completion_item_label_details_tags_insert_text_mode_typed() {
+    let input = r#"{"label":"x","labelDetails":{"detail":" detail","description":"desc"},"tags":[1],"insertTextMode":2}"#;
+    let v: CompletionItem = serde_json::from_str(input).unwrap();
+    let ld = v.label_details.as_ref().unwrap();
+    assert_eq!(ld.detail.as_deref(), Some(" detail"));
+    assert_eq!(ld.description.as_deref(), Some("desc"));
+    assert_eq!(
+        v.tags.as_ref().unwrap(),
+        &vec![CompletionItemTag::DEPRECATED]
+    );
+    assert_eq!(v.insert_text_mode, Some(InsertTextMode::ADJUST_INDENTATION));
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: `CompletionItemLabelDetails` omits both fields by default
+// and rejects an explicit `null` detail (Go's `errNull` guard).
+// Go: lsp_generated.go:CompletionItemLabelDetails
+#[test]
+fn completion_item_label_details_default_and_null() {
+    assert_eq!(
+        serde_json::to_string(&CompletionItemLabelDetails::default()).unwrap(),
+        "{}"
+    );
+    let err = serde_json::from_str::<CompletionItemLabelDetails>(r#"{"detail":null}"#).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("null value is not allowed for field \"detail\""),
+        "got: {err}"
+    );
+}
+
+// green-on-arrival: `CompletionItem.tags` rejects an explicit `null` (Go's
+// `errNull` guard) on the now-typed `Vec<CompletionItemTag>`.
+// Go: lsp_generated.go:CompletionItem.UnmarshalJSONFrom (tags errNull)
+#[test]
+fn completion_item_tags_null_rejected() {
+    assert_null_rejected::<CompletionItem>(r#"{"label":"x","tags":null}"#, "tags");
+}
+
+// === Slice 6: Command for CompletionItem.command + InlayHintLabelPart.command ===
+
+// tracer (real RED->GREEN): `CompletionItem.command` is now the typed
+// `Command { title, tooltip?, command, arguments? }` (was raw
+// `serde_json::Value`). The `arguments` element type stays `LSPAny`
+// (`serde_json::Value`), faithful to Go's `*[]any`. Round-trip is byte-for-byte
+// in Go declaration order (title, tooltip, command, arguments).
+// Go: lsp_generated.go:CompletionItem (Command *Command) / Command
+#[test]
+fn completion_item_command_typed() {
+    let input =
+        r#"{"label":"x","command":{"title":"Save","command":"ts.save","arguments":[1,"a"]}}"#;
+    let v: CompletionItem = serde_json::from_str(input).unwrap();
+    let cmd = v.command.as_ref().unwrap();
+    assert_eq!(cmd.title, "Save");
+    assert_eq!(cmd.command, "ts.save");
+    assert_eq!(
+        cmd.arguments.as_ref().unwrap(),
+        &vec![serde_json::json!(1), serde_json::json!("a")]
+    );
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: `Command` reports missing required `title`/`command`.
+// Go: lsp_generated.go:Command.UnmarshalJSONFrom (missingTitle/missingCommand)
+#[test]
+fn command_requires_title_and_command() {
+    let err = serde_json::from_str::<Command>(r#"{"title":"t"}"#).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("missing required properties: command"),
+        "got: {err}"
+    );
+}
+
+// green-on-arrival: `InlayHintLabelPart.command` shares the typed `Command` and
+// round-trips (no `arguments` is omitted).
+// Go: lsp_generated.go:InlayHintLabelPart (Command *Command)
+#[test]
+fn inlay_hint_label_part_command_typed() {
+    let input = r#"{"value":"lp","command":{"title":"Go","command":"ts.go"}}"#;
+    let v: InlayHintLabelPart = serde_json::from_str(input).unwrap();
+    let cmd = v.command.as_ref().unwrap();
+    assert_eq!(cmd.title, "Go");
+    assert_eq!(cmd.command, "ts.go");
+    assert!(cmd.arguments.is_none());
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// === Slice 7: CallHierarchyItem for incoming-call item / from ===
+
+// tracer (real RED->GREEN): `CallHierarchyIncomingCall.from` is now the typed
+// `CallHierarchyItem` (was raw `serde_json::Value`). Decoding reaches the typed
+// name/kind/uri/selectionRange and the round-trip is byte-for-byte in Go field
+// order. The `data` carrier stays raw (`CallHierarchyItemData` deferred).
+// Go: lsp_generated.go:CallHierarchyIncomingCall (From CallHierarchyItem) / CallHierarchyItem
+#[test]
+fn call_hierarchy_incoming_call_from_typed() {
+    let input = r#"{"from":{"name":"f","kind":12,"uri":"file:///a.ts","range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}}},"fromRanges":[]}"#;
+    let v: CallHierarchyIncomingCall = serde_json::from_str(input).unwrap();
+    assert_eq!(v.from.name, "f");
+    assert_eq!(v.from.kind, SymbolKind::FUNCTION);
+    assert_eq!(v.from.uri.0, "file:///a.ts");
+    assert_eq!(v.from.selection_range.end.character, 1);
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: `CallHierarchyItem` reports a missing required `name`/`kind`
+// with Go's `errMissing` wording.
+// Go: lsp_generated.go:CallHierarchyItem.UnmarshalJSONFrom (missingName)
+#[test]
+fn call_hierarchy_item_requires_name() {
+    let err = serde_json::from_str::<CallHierarchyItem>(
+        r#"{"kind":12,"uri":"file:///a","range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("missing required properties: name"),
+        "got: {err}"
+    );
+}
+
+// green-on-arrival: `CallHierarchyIncomingCallsParams.item` is the typed
+// `CallHierarchyItem` and decodes a populated value (still rejecting `null`,
+// covered by `null_rejected_callhierarchy_incoming_params_item`).
+// Go: lsp_generated.go:CallHierarchyIncomingCallsParams (Item CallHierarchyItem)
+#[test]
+fn call_hierarchy_incoming_params_item_typed() {
+    let input = r#"{"item":{"name":"f","kind":12,"uri":"file:///a","range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}}"#;
+    let v: CallHierarchyIncomingCallsParams = serde_json::from_str(input).unwrap();
+    assert_eq!(v.item.name, "f");
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// === Slice 8: Create/Rename/DeleteFileOptions for resource-op options ===
+
+// tracer (real RED->GREEN): `CreateFile.options` is now the typed
+// `CreateFileOptions { overwrite?, ignoreIfExists? }` (was raw
+// `serde_json::Value`). It decodes to typed fields and round-trips.
+// Go: lsp_generated.go:CreateFile (Options *CreateFileOptions) / CreateFileOptions
+#[test]
+fn create_file_options_typed() {
+    let input = r#"{"kind":"create","uri":"file:///a","options":{"overwrite":true,"ignoreIfExists":false}}"#;
+    let v: CreateFile = serde_json::from_str(input).unwrap();
+    let o = v.options.as_ref().unwrap();
+    assert_eq!(o.overwrite, Some(true));
+    assert_eq!(o.ignore_if_exists, Some(false));
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: `RenameFile.options` is the typed `RenameFileOptions`.
+// Go: lsp_generated.go:RenameFile (Options *RenameFileOptions)
+#[test]
+fn rename_file_options_typed() {
+    let input = r#"{"kind":"rename","oldUri":"file:///a","newUri":"file:///b","options":{"overwrite":true}}"#;
+    let v: RenameFile = serde_json::from_str(input).unwrap();
+    assert_eq!(v.options.as_ref().unwrap().overwrite, Some(true));
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: `DeleteFile.options` is the typed `DeleteFileOptions`
+// (distinct field names `recursive`/`ignoreIfNotExists`).
+// Go: lsp_generated.go:DeleteFile (Options *DeleteFileOptions) / DeleteFileOptions
+#[test]
+fn delete_file_options_typed() {
+    let input = r#"{"kind":"delete","uri":"file:///a","options":{"recursive":true,"ignoreIfNotExists":true}}"#;
+    let v: DeleteFile = serde_json::from_str(input).unwrap();
+    let o = v.options.as_ref().unwrap();
+    assert_eq!(o.recursive, Some(true));
+    assert_eq!(o.ignore_if_not_exists, Some(true));
+    assert_eq!(serde_json::to_string(&v).unwrap(), input);
+}
+
+// green-on-arrival: the file-options structs omit every field by default
+// (omitzero invariant).
+// Go: lsp_generated.go:CreateFileOptions/RenameFileOptions/DeleteFileOptions
+#[test]
+fn file_options_default_serialize_empty() {
+    assert_eq!(
+        serde_json::to_string(&CreateFileOptions::default()).unwrap(),
+        "{}"
+    );
+    assert_eq!(
+        serde_json::to_string(&RenameFileOptions::default()).unwrap(),
+        "{}"
+    );
+    assert_eq!(
+        serde_json::to_string(&DeleteFileOptions::default()).unwrap(),
+        "{}"
+    );
+}

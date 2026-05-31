@@ -12,7 +12,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 // `capabilities.rs`; `InitializeParams` embeds it. `CodeActionKind` and
 // `BooleanOrEmptyObject` live in `resolved.rs` and are reused by the
 // `ServerCapabilities` code-action and semantic-tokens options.
-use crate::{BooleanOrEmptyObject, ClientCapabilities, CodeActionKind};
+use crate::{
+    BooleanOrEmptyObject, ClientCapabilities, CodeActionKind, CompletionItemTag, InsertTextMode,
+    MarkupKind, SymbolTag,
+};
 
 /// Builds the Go `errMissing` error: `missing required properties: a, b`.
 // Go: internal/lsp/lsproto/lsp.go:errMissing
@@ -505,6 +508,50 @@ impl<'de> Deserialize<'de> for DocumentUriOrNull {
     }
 }
 
+/// A union of a string or `null` (LSP `string | null`), used for the deprecated
+/// [`InitializeParams`] `rootPath`. `None` represents JSON `null`.
+// Go: internal/lsp/lsproto/lsp_generated.go:StringOrNull
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StringOrNull {
+    /// The string variant; `None` represents JSON `null`.
+    pub string: Option<String>,
+}
+
+impl Serialize for StringOrNull {
+    // Go: internal/lsp/lsproto/lsp_generated.go:StringOrNull.MarshalJSONTo
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match &self.string {
+            Some(s) => serializer.serialize_str(s),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StringOrNull {
+    // Go: internal/lsp/lsproto/lsp_generated.go:StringOrNull.UnmarshalJSONFrom
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = StringOrNull;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string or null")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(StringOrNull {
+                    string: Some(v.to_string()),
+                })
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(StringOrNull { string: None })
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(StringOrNull { string: None })
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
 /// Inlay hint kinds (LSP `InlayHintKind`, an integer enum).
 ///
 /// # Examples
@@ -861,16 +908,35 @@ lsp_object! {
 }
 
 lsp_object! {
+    /// A command reference (LSP `Command`): a title plus the command identifier
+    /// and its arguments.
+    ///
+    /// `arguments` keeps the Go `*[]any` shape (`LSPAny`): each element is
+    /// arbitrary JSON ([`serde_json::Value`]), intentionally untyped.
+    // Go: internal/lsp/lsproto/lsp_generated.go:Command
+    Command {
+        ["Title of the command, e.g. `save`."]
+        req title: String => "title",
+        ["An optional tooltip."]
+        opt tooltip: String => "tooltip",
+        ["The identifier of the actual command handler."]
+        req command: String => "command",
+        ["Arguments the command handler is invoked with (arbitrary JSON, `LSPAny`)."]
+        opt arguments: Vec<serde_json::Value> => "arguments",
+    }
+}
+
+lsp_object! {
     /// An inlay-hint label part (LSP `InlayHintLabelPart`).
     InlayHintLabelPart {
         ["The value of this label part."]
         req value: String => "value",
-        ["The tooltip text (deferred: raw JSON)."]
-        opt tooltip: serde_json::Value => "tooltip",
+        ["The tooltip text shown for this label part (string or markup)."]
+        opt tooltip: StringOrMarkupContent => "tooltip",
         ["An optional source-code location for this label part."]
         opt location: Location => "location",
-        ["An optional command (deferred: raw JSON)."]
-        opt command: serde_json::Value => "command",
+        ["An optional command executed when the label part is activated."]
+        opt command: Command => "command",
     }
 }
 
@@ -885,8 +951,8 @@ lsp_object! {
         opt kind: InlayHintKind => "kind",
         ["Text edits performed when accepting this hint."]
         opt text_edits: Vec<TextEdit> => "textEdits",
-        ["The tooltip text (deferred: raw JSON)."]
-        opt tooltip: serde_json::Value => "tooltip",
+        ["The tooltip text shown for this hint (string or markup)."]
+        opt tooltip: StringOrMarkupContent => "tooltip",
         ["Render padding before the hint."]
         opt padding_left: bool => "paddingLeft",
         ["Render padding after the hint."]
@@ -971,7 +1037,7 @@ string_literal! {
 
 /// A symbol kind (LSP `SymbolKind`, an integer enum).
 // Go: internal/lsp/lsproto/lsp_generated.go:SymbolKind
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SymbolKind(pub u32);
 
 impl SymbolKind {
@@ -1112,6 +1178,17 @@ lsp_object! {
 }
 
 lsp_object! {
+    /// Options for a create-file resource operation (LSP `CreateFileOptions`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:CreateFileOptions
+    CreateFileOptions {
+        ["Overwrite an existing file (wins over `ignoreIfExists`)."]
+        opt overwrite: bool => "overwrite",
+        ["Ignore the operation if the file already exists."]
+        opt ignore_if_exists: bool => "ignoreIfExists",
+    }
+}
+
+lsp_object! {
     /// A create-file resource operation.
     CreateFile {
         ["The discriminator (`\"create\"`)."]
@@ -1120,8 +1197,19 @@ lsp_object! {
         opt annotation_id: String => "annotationId",
         ["The resource to create."]
         req uri: DocumentUri => "uri",
-        ["Additional options (deferred: raw JSON)."]
-        opt options: serde_json::Value => "options",
+        ["Additional create options."]
+        opt options: CreateFileOptions => "options",
+    }
+}
+
+lsp_object! {
+    /// Options for a rename-file resource operation (LSP `RenameFileOptions`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:RenameFileOptions
+    RenameFileOptions {
+        ["Overwrite the target if it exists (wins over `ignoreIfExists`)."]
+        opt overwrite: bool => "overwrite",
+        ["Ignore the operation if the target already exists."]
+        opt ignore_if_exists: bool => "ignoreIfExists",
     }
 }
 
@@ -1136,8 +1224,19 @@ lsp_object! {
         req old_uri: DocumentUri => "oldUri",
         ["The new location."]
         req new_uri: DocumentUri => "newUri",
-        ["Rename options (deferred: raw JSON)."]
-        opt options: serde_json::Value => "options",
+        ["Rename options."]
+        opt options: RenameFileOptions => "options",
+    }
+}
+
+lsp_object! {
+    /// Options for a delete-file resource operation (LSP `DeleteFileOptions`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:DeleteFileOptions
+    DeleteFileOptions {
+        ["Delete the content recursively if a folder is denoted."]
+        opt recursive: bool => "recursive",
+        ["Ignore the operation if the file does not exist."]
+        opt ignore_if_not_exists: bool => "ignoreIfNotExists",
     }
 }
 
@@ -1150,8 +1249,8 @@ lsp_object! {
         opt annotation_id: String => "annotationId",
         ["The file to delete."]
         req uri: DocumentUri => "uri",
-        ["Delete options (deferred: raw JSON)."]
-        opt options: serde_json::Value => "options",
+        ["Delete options."]
+        opt options: DeleteFileOptions => "options",
     }
 }
 
@@ -1979,6 +2078,58 @@ lsp_object! {
         req uri: crate::URI => "uri",
         ["The name of the workspace folder, used to refer to it in the UI."]
         req name: String => "name",
+    }
+}
+
+/// A union of an array of [`WorkspaceFolder`] or `null`
+/// (LSP `WorkspaceFolder[] | null`), the type of the [`InitializeParams`]
+/// `workspaceFolders`. `None` represents JSON `null`.
+// Go: internal/lsp/lsproto/lsp_generated.go:WorkspaceFoldersOrNull
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WorkspaceFoldersOrNull {
+    /// The folder-array variant; `None` represents JSON `null`.
+    pub workspace_folders: Option<Vec<WorkspaceFolder>>,
+}
+
+impl Serialize for WorkspaceFoldersOrNull {
+    // Go: internal/lsp/lsproto/lsp_generated.go:WorkspaceFoldersOrNull.MarshalJSONTo
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match &self.workspace_folders {
+            Some(folders) => folders.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkspaceFoldersOrNull {
+    // Go: internal/lsp/lsproto/lsp_generated.go:WorkspaceFoldersOrNull.UnmarshalJSONFrom
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = WorkspaceFoldersOrNull;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an array of workspace folders or null")
+            }
+            fn visit_seq<A: de::SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+                let folders = Vec::<WorkspaceFolder>::deserialize(
+                    de::value::SeqAccessDeserializer::new(seq),
+                )?;
+                Ok(WorkspaceFoldersOrNull {
+                    workspace_folders: Some(folders),
+                })
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(WorkspaceFoldersOrNull {
+                    workspace_folders: None,
+                })
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(WorkspaceFoldersOrNull {
+                    workspace_folders: None,
+                })
+            }
+        }
+        deserializer.deserialize_any(V)
     }
 }
 
@@ -3086,14 +3237,260 @@ lsp_object! {
 }
 
 lsp_object! {
+    /// A `kind`-tagged markup-content string (LSP `MarkupContent`): a
+    /// `markdown`/`plaintext` `kind` plus the rendered `value`.
+    // Go: internal/lsp/lsproto/lsp_generated.go:MarkupContent
+    MarkupContent {
+        ["The type of the markup."]
+        req kind: MarkupKind => "kind",
+        ["The content itself."]
+        req value: String => "value",
+    }
+}
+
+lsp_object! {
+    /// A code block tagged with a language (LSP `MarkedStringWithLanguage`); the
+    /// object arm of a marked string and the legacy `Hover` content shape.
+    // Go: internal/lsp/lsproto/lsp_generated.go:MarkedStringWithLanguage
+    MarkedStringWithLanguage {
+        ["The language the `value` is written in (for syntax highlighting)."]
+        req language: String => "language",
+        ["The code block contents."]
+        req value: String => "value",
+    }
+}
+
+/// A union of a plain string or a [`MarkedStringWithLanguage`]
+/// (LSP `string | MarkedStringWithLanguage`), the element type of the
+/// `MarkedString[]` arm of [`Hover`] contents.
+///
+/// Exactly one field is set. On deserialize a JSON string yields
+/// [`StringOrMarkedStringWithLanguage::string`] and a JSON object yields
+/// [`StringOrMarkedStringWithLanguage::marked_string_with_language`]; any other
+/// kind is an error.
+// Go: internal/lsp/lsproto/lsp_generated.go:StringOrMarkedStringWithLanguage
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StringOrMarkedStringWithLanguage {
+    /// The plain-string variant.
+    pub string: Option<String>,
+    /// The language-tagged marked-string variant.
+    pub marked_string_with_language: Option<MarkedStringWithLanguage>,
+}
+
+impl Serialize for StringOrMarkedStringWithLanguage {
+    // Go: lsp_generated.go:StringOrMarkedStringWithLanguage.MarshalJSONTo
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.string, &self.marked_string_with_language) {
+            (Some(s), None) => serializer.serialize_str(s),
+            (None, Some(o)) => o.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of StringOrMarkedStringWithLanguage should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StringOrMarkedStringWithLanguage {
+    // Go: lsp_generated.go:StringOrMarkedStringWithLanguage.UnmarshalJSONFrom
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = StringOrMarkedStringWithLanguage;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string or a language-tagged marked-string object")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(StringOrMarkedStringWithLanguage {
+                    string: Some(v.to_string()),
+                    marked_string_with_language: None,
+                })
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                let o = MarkedStringWithLanguage::deserialize(
+                    de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(StringOrMarkedStringWithLanguage {
+                    string: None,
+                    marked_string_with_language: Some(o),
+                })
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+/// The hover-content union (LSP
+/// `MarkupContent | string | MarkedStringWithLanguage | MarkedString[]`).
+///
+/// Exactly one field is set. Deserialization mirrors Go's `PeekKind`/
+/// `jsonObjectHasKey` dispatch: an object with a `kind` key is a
+/// [`MarkupContent`]; an object with a `language` key is a
+/// [`MarkedStringWithLanguage`]; a JSON string is the bare `string` arm; a JSON
+/// array is the `MarkedString[]` arm; anything else is an error.
+// Go: internal/lsp/lsproto/lsp_generated.go:MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings {
+    /// The [`MarkupContent`] variant (object with a `kind` key).
+    pub markup_content: Option<MarkupContent>,
+    /// The bare-string variant.
+    pub string: Option<String>,
+    /// The [`MarkedStringWithLanguage`] variant (object with a `language` key).
+    pub marked_string_with_language: Option<MarkedStringWithLanguage>,
+    /// The `MarkedString[]` variant.
+    pub marked_strings: Option<Vec<StringOrMarkedStringWithLanguage>>,
+}
+
+impl Serialize for MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings {
+    // Go: lsp_generated.go:MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings.MarshalJSONTo
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let Some(v) = &self.markup_content {
+            v.serialize(serializer)
+        } else if let Some(v) = &self.string {
+            serializer.serialize_str(v)
+        } else if let Some(v) = &self.marked_string_with_language {
+            v.serialize(serializer)
+        } else if let Some(v) = &self.marked_strings {
+            v.serialize(serializer)
+        } else {
+            Err(serde::ser::Error::custom(
+                "exactly one element of MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings should be set",
+            ))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings {
+    // Go: lsp_generated.go:MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings.UnmarshalJSONFrom
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut out = MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings::default();
+        match &value {
+            serde_json::Value::Object(_) => {
+                // Go dispatches on the first present key in `kind`, `language`
+                // order (`jsonObjectHasKey`); `kind` wins when both are present.
+                if value.get("kind").is_some() {
+                    out.markup_content =
+                        Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+                } else if value.get("language").is_some() {
+                    out.marked_string_with_language =
+                        Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+                } else {
+                    return Err(de::Error::custom(
+                        "invalid MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings",
+                    ));
+                }
+            }
+            serde_json::Value::String(_) => {
+                out.string = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+            }
+            serde_json::Value::Array(_) => {
+                out.marked_strings =
+                    Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+            }
+            _ => {
+                return Err(de::Error::custom(
+                    "invalid MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings",
+                ))
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// A union of a plain string or a [`MarkupContent`]
+/// (LSP `string | MarkupContent`), the shape of the various `*.documentation`
+/// and inlay-hint `tooltip` fields.
+///
+/// Exactly one field is set. On deserialize a JSON string yields
+/// [`StringOrMarkupContent::string`] and a JSON object yields
+/// [`StringOrMarkupContent::markup_content`]; any other kind is an error.
+// Go: internal/lsp/lsproto/lsp_generated.go:StringOrMarkupContent
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StringOrMarkupContent {
+    /// The plain-string variant.
+    pub string: Option<String>,
+    /// The [`MarkupContent`] object variant.
+    pub markup_content: Option<MarkupContent>,
+}
+
+impl Serialize for StringOrMarkupContent {
+    // Go: lsp_generated.go:StringOrMarkupContent.MarshalJSONTo
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.string, &self.markup_content) {
+            (Some(s), None) => serializer.serialize_str(s),
+            (None, Some(o)) => o.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of StringOrMarkupContent should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StringOrMarkupContent {
+    // Go: lsp_generated.go:StringOrMarkupContent.UnmarshalJSONFrom
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = StringOrMarkupContent;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string or a markup-content object")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(StringOrMarkupContent {
+                    string: Some(v.to_string()),
+                    markup_content: None,
+                })
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                let o = MarkupContent::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(StringOrMarkupContent {
+                    string: None,
+                    markup_content: Some(o),
+                })
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+lsp_object! {
     /// The result of a hover request.
     Hover {
-        ["The hover's content (deferred union: raw JSON)."]
-        req contents: serde_json::Value => "contents",
+        ["The hover's content."]
+        req contents: MarkupContentOrStringOrMarkedStringWithLanguageOrMarkedStrings => "contents",
         ["An optional range to visualize the hover."]
         opt range: Range => "range",
         ["Whether the verbosity level can be increased."]
         opt can_increase_verbosity: bool => "canIncreaseVerbosity",
+    }
+}
+
+lsp_object! {
+    /// An item of a call hierarchy (LSP `CallHierarchyItem`): a named symbol
+    /// with its location and selection range.
+    ///
+    /// `data` keeps the Go `*CallHierarchyItemData` carrier as raw JSON; that
+    /// nested type is deferred to the generator pass.
+    // Go: internal/lsp/lsproto/lsp_generated.go:CallHierarchyItem
+    CallHierarchyItem {
+        ["The name of this item."]
+        req name: String => "name",
+        ["The kind of this item."]
+        req kind: SymbolKind => "kind",
+        ["Tags for this item."]
+        opt tags: Vec<SymbolTag> => "tags",
+        ["More detail for this item, e.g. the signature of a function."]
+        opt detail: String => "detail",
+        ["The resource identifier of this item."]
+        req uri: DocumentUri => "uri",
+        ["The range enclosing this symbol (including comments/code)."]
+        req range: Range => "range",
+        ["The range that should be selected and revealed (contained by `range`)."]
+        req selection_range: Range => "selectionRange",
+        // DEFER: `*CallHierarchyItemData` is a typescript-go carrier cookie; kept
+        // as raw JSON. blocked-by: generator pass landing CallHierarchyItemData.
+        ["A data entry preserved between prepare and incoming/outgoing calls (raw JSON)."]
+        opt data: serde_json::Value => "data",
     }
 }
 
@@ -3104,16 +3501,16 @@ lsp_object! {
         opt work_done_token: IntegerOrString => "workDoneToken",
         ["A partial-result token."]
         opt partial_result_token: IntegerOrString => "partialResultToken",
-        ["The call-hierarchy item (deferred: raw JSON)."]
-        reqnn item: serde_json::Value => "item",
+        ["The call-hierarchy item to compute incoming calls for."]
+        reqnn item: CallHierarchyItem => "item",
     }
 }
 
 lsp_object! {
     /// An incoming call in a call hierarchy.
     CallHierarchyIncomingCall {
-        ["The item that makes the call (deferred: raw JSON)."]
-        reqnn from: serde_json::Value => "from",
+        ["The item that makes the call."]
+        reqnn from: CallHierarchyItem => "from",
         ["The ranges at which the calls appear."]
         reqnn from_ranges: Vec<Range> => "fromRanges",
     }
@@ -3129,6 +3526,57 @@ lsp_object! {
     }
 }
 
+/// The initial trace setting requested by the client (LSP `TraceValue`, a
+/// string enum). Unknown values round-trip as their raw string.
+// Go: internal/lsp/lsproto/lsp_generated.go:TraceValue
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TraceValue(pub Cow<'static, str>);
+
+impl TraceValue {
+    /// Turn tracing off.
+    pub const OFF: TraceValue = TraceValue(Cow::Borrowed("off"));
+    /// Trace messages only.
+    pub const MESSAGES: TraceValue = TraceValue(Cow::Borrowed("messages"));
+    /// Verbose message tracing.
+    pub const VERBOSE: TraceValue = TraceValue(Cow::Borrowed("verbose"));
+}
+
+impl Serialize for TraceValue {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for TraceValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(TraceValue(Cow::Owned(String::deserialize(deserializer)?)))
+    }
+}
+
+lsp_object! {
+    /// Information about the client as provided in [`InitializeParams`]
+    /// (LSP `ClientInfo`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:ClientInfo
+    ClientInfo {
+        ["The name of the client as defined by the client."]
+        req name: String => "name",
+        ["The client's version as defined by the client."]
+        opt version: String => "version",
+    }
+}
+
+lsp_object! {
+    /// Information about the server as returned in [`InitializeResult`]
+    /// (LSP `ServerInfo`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:ServerInfo
+    ServerInfo {
+        ["The name of the server as defined by the server."]
+        req name: String => "name",
+        ["The server's version as defined by the server."]
+        opt version: String => "version",
+    }
+}
+
 lsp_object! {
     /// Parameters of the `initialize` request.
     InitializeParams {
@@ -3136,22 +3584,22 @@ lsp_object! {
         opt work_done_token: IntegerOrString => "workDoneToken",
         ["The parent process id, or `null`."]
         req process_id: IntegerOrNull => "processId",
-        ["Information about the client (deferred: raw JSON)."]
-        opt client_info: serde_json::Value => "clientInfo",
+        ["Information about the client."]
+        opt client_info: ClientInfo => "clientInfo",
         ["The locale the client is showing the UI in."]
         opt locale: String => "locale",
-        ["The deprecated root path, or `null` (deferred: raw JSON)."]
-        optn root_path: serde_json::Value => "rootPath",
+        ["The deprecated root path, or `null`."]
+        optn root_path: StringOrNull => "rootPath",
         ["The root URI of the workspace, or `null`."]
         req root_uri: DocumentUriOrNull => "rootUri",
         ["The capabilities provided by the client."]
         reqnn capabilities: ClientCapabilities => "capabilities",
         ["User-provided initialization options."]
         opt initialization_options: InitializationOptions => "initializationOptions",
-        ["The initial trace setting (deferred: raw JSON)."]
-        opt trace: serde_json::Value => "trace",
-        ["The configured workspace folders, or `null` (deferred: raw JSON)."]
-        optn workspace_folders: serde_json::Value => "workspaceFolders",
+        ["The initial trace setting (defaults to `off` when omitted)."]
+        opt trace: TraceValue => "trace",
+        ["The configured workspace folders, or `null`."]
+        optn workspace_folders: WorkspaceFoldersOrNull => "workspaceFolders",
     }
 }
 
@@ -3160,8 +3608,8 @@ lsp_object! {
     InitializeResult {
         ["The capabilities the server provides."]
         reqnn capabilities: ServerCapabilities => "capabilities",
-        ["Information about the server (deferred: raw JSON)."]
-        opt server_info: serde_json::Value => "serverInfo",
+        ["Information about the server."]
+        opt server_info: ServerInfo => "serverInfo",
     }
 }
 
@@ -3213,6 +3661,18 @@ impl<'de> Deserialize<'de> for InsertTextFormat {
 }
 
 lsp_object! {
+    /// Additional details for a completion-item label
+    /// (LSP `CompletionItemLabelDetails`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:CompletionItemLabelDetails
+    CompletionItemLabelDetails {
+        ["A string rendered less prominently right after the label (e.g. a signature)."]
+        opt detail: String => "detail",
+        ["A string rendered less prominently after `detail` (e.g. a fully qualified name)."]
+        opt description: String => "description",
+    }
+}
+
+lsp_object! {
     /// A completion item presented in the editor.
     ///
     /// Fields whose precise nested types are deferred to the generator pass are
@@ -3221,16 +3681,16 @@ lsp_object! {
     CompletionItem {
         ["The label of this completion item."]
         req label: String => "label",
-        ["Additional label details (deferred: raw JSON)."]
-        opt label_details: serde_json::Value => "labelDetails",
+        ["Additional details for the label."]
+        opt label_details: CompletionItemLabelDetails => "labelDetails",
         ["The kind of this completion item."]
         opt kind: CompletionItemKind => "kind",
-        ["Tags for this completion item (deferred: raw JSON)."]
-        opt tags: serde_json::Value => "tags",
+        ["Tags for this completion item."]
+        opt tags: Vec<CompletionItemTag> => "tags",
         ["Additional human-readable detail."]
         opt detail: String => "detail",
-        ["A doc-comment string (deferred: raw JSON)."]
-        opt documentation: serde_json::Value => "documentation",
+        ["A doc-comment string or markup."]
+        opt documentation: StringOrMarkupContent => "documentation",
         ["Whether this item is deprecated."]
         opt deprecated: bool => "deprecated",
         ["Whether to preselect this item."]
@@ -3243,8 +3703,8 @@ lsp_object! {
         opt insert_text: String => "insertText",
         ["The format of the insert text."]
         opt insert_text_format: InsertTextFormat => "insertTextFormat",
-        ["The whitespace/indentation insert mode (deferred: raw JSON)."]
-        opt insert_text_mode: serde_json::Value => "insertTextMode",
+        ["The whitespace/indentation insert mode."]
+        opt insert_text_mode: InsertTextMode => "insertTextMode",
         ["An edit applied when selecting this item."]
         opt text_edit: TextEditOrInsertReplaceEdit => "textEdit",
         ["The edit text used with completion-list defaults."]
@@ -3253,8 +3713,8 @@ lsp_object! {
         opt additional_text_edits: Vec<TextEdit> => "additionalTextEdits",
         ["Characters that commit this completion."]
         opt commit_characters: Vec<String> => "commitCharacters",
-        ["A command run after inserting (deferred: raw JSON)."]
-        opt command: serde_json::Value => "command",
+        ["A command run after inserting this completion."]
+        opt command: Command => "command",
         ["Data preserved between request and resolve (deferred: raw JSON)."]
         opt data: serde_json::Value => "data",
     }

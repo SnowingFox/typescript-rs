@@ -197,6 +197,46 @@
 
 > 既有 `pattern_or_relative_pattern_relative_variant_raw`（断言 `.relative_pattern.is_some()` + round-trip）在 `relative_pattern` 字段类型从 `Option<serde_json::Value>` 升级为 typed `Option<RelativePattern>` 后**仍绿**（`.is_some()` 与 byte-for-byte round-trip 不变）；公共 API 仅字段**内层类型**收紧，既有测试字面量无需改动。`every_simple_server_option_default_serializes_empty` 扩展加入 `WorkspaceOptions`/`WorkspaceFoldersServerCapabilities`/`FileOperationOptions`/`FileOperationPatternOptions`（全可选 → `{}`）。
 
+## 续轮：请求/结果参数 + 通知类型 concrete-typed raw-JSON 收紧（`generated_test.rs`）
+
+> 本轮把请求/结果参数 + 通知类型里 17 处 concrete-typed `serde_json::Value` 收紧为 typed `Option<T>`/`req T`。Go 侧 `lsp_json_test.go`/`lsp_test.go` 对这些类型只有零散覆盖（多为服务端/客户端产出值），按 PORTING §8.6 自写行为级 serde 测试，expected 取 Go `json` 标签语义 + LSP spec 字面量，测试加在既有 `generated_test.rs`。
+> red→green：每个新类型的**首个引用/swap 测试**为**真 RED→GREEN**（字段在 raw-`Value` 态无 typed 子字段 → 编译失败 RED → 加类型 + 换字段 → GREEN）；同类型的另一 union 臂 / round-trip / `default→{}` / required-missing / null 守卫多为 **green-on-arrival**（诚实标注）。本轮 +30 单测（260 → 290），doctest 不变（15）。
+
+| Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
+|---|---|---|---|---|
+| `hover_contents_markup_content_variant` | **tracer（真 RED→GREEN）**：`Hover.contents` typed union，`kind` 对象臂 → `MarkupContent` + byte-for-byte round-trip | `{"contents":{"kind":"markdown","value":"# hi"}}` → `markup_content` | `lsp_generated.go:Hover / MarkupContent` | ✓ |
+| `hover_contents_string_variant` | string 臂（green-on-arrival） | `{"contents":"plain hover text"}` → `string=Some` | `...MarkedStrings`(string case) | ✓ |
+| `hover_contents_marked_string_with_language_variant` | `language` 对象臂（green-on-arrival） | `{"contents":{"language":"typescript","value":...}}` → `marked_string_with_language` | 同上(language) | ✓ |
+| `hover_contents_marked_strings_array_variant` | `MarkedString[]` 臂（元素 union；green-on-arrival） | `{"contents":["text one",{"language":"ts","value":"x"}]}` → vec 2 | 同上(array) / `StringOrMarkedStringWithLanguage` | ✓ |
+| `markup_content_requires_value` | `MarkupContent` 缺 `value` → `errMissing`（green-on-arrival） | `{"kind":"markdown"}` → `missing required properties: value` | `lsp_generated.go:MarkupContent` | ✓ |
+| `completion_item_documentation_markup_content_variant` | **tracer（真 RED→GREEN）**：`CompletionItem.documentation` typed `StringOrMarkupContent` 对象臂 + round-trip | `{"label":"x","documentation":{"kind":"plaintext","value":"docs"}}` → `markup_content` | `lsp_generated.go:CompletionItem / StringOrMarkupContent` | ✓ |
+| `completion_item_documentation_string_variant` | string 臂（green-on-arrival） | `{"label":"x","documentation":"plain docs"}` → `string=Some` | `StringOrMarkupContent`(string) | ✓ |
+| `inlay_hint_tooltip_markup_variant` | `InlayHint.tooltip` 共享 union 对象臂（green-on-arrival） | tooltip markdown 对象 → `markup_content.value` | `lsp_generated.go:InlayHint` | ✓ |
+| `inlay_hint_label_part_tooltip_string_variant` | `InlayHintLabelPart.tooltip` string 臂（green-on-arrival） | `{"value":"lp","tooltip":"hello"}` → `string=Some` | `lsp_generated.go:InlayHintLabelPart` | ✓ |
+| `initialize_params_client_info_and_trace_typed` | **tracer（真 RED→GREEN）**：`clientInfo` typed `ClientInfo` + `trace` typed `TraceValue` + round-trip | `{...,"clientInfo":{"name":"vscode","version":"1.9"},...,"trace":"verbose"}` → name/version/`TraceValue::VERBOSE` | `lsp_generated.go:InitializeParams` | ✓ |
+| `trace_value_const_values_and_serde` | `TraceValue` const 值 + JSON round-trip + 未知值（green-on-arrival） | spec 字面量 off/messages/verbose | `lsp_generated.go:TraceValue` | ✓ |
+| `client_info_version_null_rejected_and_name_required` | `version` 拒 null + 缺 `name`→`errMissing`（green-on-arrival） | `{"name":"c","version":null}`→errNull；`{"version":"1"}`→missing name | `lsp_generated.go:ClientInfo` | ✓ |
+| `initialize_result_server_info_typed` | `InitializeResult.serverInfo` typed `ServerInfo` round-trip + 默认省略（green-on-arrival） | `{"capabilities":{},"serverInfo":{"name":"tsgo","version":"0.1"}}` ↔ 同字面量 | `lsp_generated.go:InitializeResult/ServerInfo` | ✓ |
+| `initialize_params_trace_null_rejected` | `trace` 拒 null（errNull guard；green-on-arrival） | `{...,"trace":null}` → errNull | `lsp_generated.go:InitializeParams`(trace) | ✓ |
+| `initialize_params_root_path_and_workspace_folders_typed` | **tracer（真 RED→GREEN）**：`rootPath` typed `StringOrNull` + `workspaceFolders` typed `WorkspaceFoldersOrNull` + round-trip | `{...,"rootPath":"/ws",...,"workspaceFolders":[{"uri":...,"name":"a"}]}` → string/folders | `lsp_generated.go:InitializeParams` | ✓ |
+| `string_or_null_dispatch` | `StringOrNull` null→None / string / 拒其他 kind（green-on-arrival） | `null`/`"abc"`/`42` → None/Some/err | `lsp_generated.go:StringOrNull` | ✓ |
+| `workspace_folders_or_null_dispatch` | `WorkspaceFoldersOrNull` null→None / array / 拒其他 kind（green-on-arrival） | `null`/`[{...}]`/`42` → None/Some/err | `lsp_generated.go:WorkspaceFoldersOrNull` | ✓ |
+| `completion_item_label_details_tags_insert_text_mode_typed` | **tracer（真 RED→GREEN）**：`labelDetails`/`tags`(`Vec<CompletionItemTag>`)/`insertTextMode`(`InsertTextMode`) typed + round-trip | `{...,"labelDetails":{...},"tags":[1],"insertTextMode":2}` → 三字段 | `lsp_generated.go:CompletionItem` | ✓ |
+| `completion_item_label_details_default_and_null` | `CompletionItemLabelDetails` `default→{}` + `detail` 拒 null（green-on-arrival） | `default`→`{}`；`{"detail":null}`→errNull | `lsp_generated.go:CompletionItemLabelDetails` | ✓ |
+| `completion_item_tags_null_rejected` | `tags` 拒 null（errNull guard；green-on-arrival） | `{"label":"x","tags":null}` → errNull | `lsp_generated.go:CompletionItem`(tags) | ✓ |
+| `completion_item_command_typed` | **tracer（真 RED→GREEN）**：`CompletionItem.command` typed `Command`，`arguments` 元素保留 `LSPAny` + Go 字段序 round-trip | `{...,"command":{"title":"Save","command":"ts.save","arguments":[1,"a"]}}` → title/command/arguments | `lsp_generated.go:CompletionItem/Command` | ✓ |
+| `command_requires_title_and_command` | `Command` 缺 `command`→`errMissing`（green-on-arrival） | `{"title":"t"}` → `missing required properties: command` | `lsp_generated.go:Command` | ✓ |
+| `inlay_hint_label_part_command_typed` | `InlayHintLabelPart.command` 共享 `Command` round-trip（green-on-arrival） | `{"value":"lp","command":{"title":"Go","command":"ts.go"}}` ↔ 同字面量 | `lsp_generated.go:InlayHintLabelPart` | ✓ |
+| `call_hierarchy_incoming_call_from_typed` | **tracer（真 RED→GREEN）**：`CallHierarchyIncomingCall.from` typed `CallHierarchyItem` + Go 字段序 round-trip（`data` carrier 保留 raw） | 注册 JSON → name/kind(`FUNCTION`)/uri/selectionRange | `lsp_generated.go:CallHierarchyIncomingCall/CallHierarchyItem` | ✓ |
+| `call_hierarchy_item_requires_name` | `CallHierarchyItem` 缺 `name`→`errMissing`（green-on-arrival） | 缺 name 对象 → `missing required properties: name` | `lsp_generated.go:CallHierarchyItem` | ✓ |
+| `call_hierarchy_incoming_params_item_typed` | `CallHierarchyIncomingCallsParams.item` typed round-trip（green-on-arrival） | `{"item":{...}}` → `item.name` | `lsp_generated.go:CallHierarchyIncomingCallsParams` | ✓ |
+| `create_file_options_typed` | **tracer（真 RED→GREEN）**：`CreateFile.options` typed `CreateFileOptions` + round-trip | `{"kind":"create","uri":...,"options":{"overwrite":true,"ignoreIfExists":false}}` → overwrite/ignoreIfExists | `lsp_generated.go:CreateFile/CreateFileOptions` | ✓ |
+| `rename_file_options_typed` | `RenameFile.options` typed（green-on-arrival） | `{"kind":"rename",...,"options":{"overwrite":true}}` → overwrite | `lsp_generated.go:RenameFile` | ✓ |
+| `delete_file_options_typed` | `DeleteFile.options` typed（`recursive`/`ignoreIfNotExists`；green-on-arrival） | `{"kind":"delete",...,"options":{"recursive":true,"ignoreIfNotExists":true}}` → 两字段 | `lsp_generated.go:DeleteFile/DeleteFileOptions` | ✓ |
+| `file_options_default_serialize_empty` | §8.6：三个 file options `default→{}`（green-on-arrival） | `T::default()` → `"{}"`（3 类型） | omitzero 不变式 | ✓ |
+
+> 既有 `null_rejected_hover_range` / `null_rejected_callhierarchy_incoming_params_item` / `null_rejected_callhierarchy_incoming_call_from` / `null_rejected_completionitem_insert_text_format` / `unmarshal_completion_item` / `roundtrip_initialize_params_null_process_id` / `null_accepted_initialize_root_uri` / `null_accepted_initialize_workspace_folders` / `null_accepted_initialize_process_id` / `null_rejected_textdocumentedit_edits` 在字段内层类型从 `serde_json::Value` 收紧为 typed `Option<T>`/`req T`/`reqnn` 后**全部不改即过**（`reqnn`/`optn` 语义 + `..Default::default()` 对内层类型透明）。给 `SymbolKind` 补 `Default` 是纯新增。
+
 ## 推迟到后续 phase 的测试
 
 | 测试 / 行为 | 原因 | 目标 phase |
@@ -207,6 +247,10 @@
 | ~~triple-union / `*OrRegistrationOptions` 的 **registration 变体** typed serde（`*RegistrationOptions`）~~ | ✅ 本轮已落地（registration-options base tree + 14 个 typed `*RegistrationOptions`，red→green） | 完成 |
 | ~~`ServerCapabilities.workspace`（`WorkspaceOptions`）typed serde~~ | ✅ 本轮已落地（`WorkspaceOptions` 子树 red→green，清空 ServerCapabilities 最后一个 raw 槽） | 完成 |
 | ~~`PatternOrRelativePattern` 的 **`RelativePattern` 对象变体** typed serde~~ | ✅ 本轮已落地（`WorkspaceFolder`/`WorkspaceFolderOrURI`/`RelativePattern` red→green；两变体全 typed） | 完成 |
+| ~~请求/结果参数 + 通知类型的 concrete-typed raw-JSON 槽（Hover.contents / *.documentation / clientInfo / trace / rootPath / workspaceFolders / serverInfo / labelDetails / tags / insertTextMode / command / callHierarchy item / file options）~~ | ✅ **本轮**已落地（17 处收紧，red→green，+30 单测） | 完成 |
+| `TextDocumentEdit.edits`（`[]TextEditOrAnnotatedTextEditOrSnippetTextEdit`）typed serde | 深 3 臂 union；`reqnn`（拒 null）已正确 | — blocked-by `AnnotatedTextEdit`/`SnippetTextEdit` 类型 |
+| `*Data` carrier（`CompletionItem.data`/`InlayHint.data`/`CallHierarchyItem.data`）typed serde | typescript-go 内部 cookie carrier，低价值；缺/null/round-trip 已正确 | — blocked-by 生成器 pass |
+| `Command.arguments` / `InitializationOptions` typed serde | **intentionally-any**（Go `[]any`/`LSPAny`）：保留 raw 才是 Go-faithful，不 over-type | — N/A（设计如此） |
 | `CodeActionKindDocumentation`（`CodeActionOptions.documentation`）typed serde | proposed/稀有嵌套类型，`ServerCapabilities` provider 树里唯一剩余 raw-JSON DEFER | — blocked-by 生成器 pass |
 | 新枚举 `String()` stringer（`TextDocumentSyncKind` 已含；其余） | resolved/server 树不全用；生成器 pass 落地完整枚举集时补 | P8 |
 | resolved / 请求类型显式 `null` 字段的 Go `errNull` 精度 | 非线上收报关键路径，低优先 | — blocked-by 生成器 pass |
