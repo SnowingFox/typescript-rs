@@ -2397,6 +2397,64 @@ impl EmitResolver {
 
 **推荐下一轮（4bc）**：(a) 字面量 interning（`getLiteralType` 按值唯一）——为 union dedup/discriminant non-uniform 提供 Go 一致的 id 语义，消除本轮三处按值绕过；(b) `getDiscriminantPropertyAccess` 的 const-alias / 解构候选（`const k = obj.kind` 别名）；(c) `checkNullishCoalesceOperandLeft` 的 always-/never-nullish 操作数诊断。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
 
+## 4bc 落地记录（worklog 摘要）—— 字面量类型按值 interning（`getStringLiteralType`/`getNumberLiteralType` 值键缓存）+ union dedup by id + 退役 relations 按值绕过（`literals_equal_by_value`）
+
+**目标**：在 4bb（字面量类型节点 + 三处按值比较绕过）之上，落地 Go 的 `getLiteralType` 值唯一语义：等值字面量（处处的 `"a"`、`1`、`true`）intern 到**同一个 `TypeId`**，给 union dedup / discriminant 一致的 Go id 语义，并退役 4bb 在 relations 层的按值绕过 `literals_equal_by_value`（识别 `"a" === "a"` 改走 `source==target` 身份）。逐行为红→绿，一次一个。单 lane（无其它 lane）。cargo 仅 `-p tsgo_checker`（未 `--workspace`）。未 `git commit`。
+
+**Go 真值（ground truth，已逐一核对）**：
+- `internal/checker/checker.go:Checker.getStringLiteralType(25164)`：`t := c.stringLiteralTypes[value]; if t==nil { t = c.newLiteralType(StringLiteral, value, nil); c.stringLiteralTypes[value]=t }; return t`——per-checker `map[string]*Type` 值键缓存。
+- `internal/checker/checker.go:Checker.getNumberLiteralType(25173)`：同构 `map[jsnum.Number]*Type`，但 **`NaN` 单独缓存到 `c.nanType`**（因 `NaN != NaN` 使 float map-key 永不命中）。
+- `internal/checker/checker.go:checkExpressionWorker(7711/7717)`：`KindStringLiteral`→`getFreshTypeOfLiteralType(getStringLiteralType(text))`；`KindNumericLiteral`→`getFreshTypeOfLiteralType(getNumberLiteralType(jsnum.FromString(text)))`——**fresh** 套在 interned **regular** 之外（fresh/regular widening 本轮 DEFER）。
+- `internal/checker/checker.go:NewChecker(615/926)`：`stringLiteralTypes`/`numberLiteralTypes` 在构造期 `make`；`trueType`/`falseType` 是构造期单例（布尔字面量天然 interned）。
+- `internal/checker/checker.go:createTupleTargetType`：tuple `length` 成员用 `getNumberLiteralType`（与其它 `N` 同缓存）。
+- `internal/checker/relater.go:Checker.isTypeRelatedTo`：`source==target` 经字面量 interning 已覆盖等值字面量身份——本港 4bc 后 string/number 也 intern（布尔早是单例），故身份检查直接覆盖 `"a" === "a"`，4bb 的 `literals_equal_by_value` 值 shim 退役。
+
+**可达裁剪（faithful-but-reachable）**：`check_expression` 的 `StringLiteral`/`NumericLiteral` 臂从 `new_literal_type(..., None)`（每次新 id）改走新 `pub(crate)` `get_string_literal_type`/`get_number_literal_type`（值键缓存，返回 interned regular literal）。**fresh-vs-regular 配对（可变上下文的字面量 widening）DEFER**：本港 `check_expression` 返回 interned regular（其自身即 regular，`fresh_type=None`），不套 `getFreshTypeOfLiteralType` 的 fresh 包装——对本轮全部可观察行为（id 身份 / union dedup / 关系 / 判别）一致。number 键用 `f64::to_bits()`，但 **`NaN` 规约到单一键、`+0/-0` 规约到 `0`**（镜像 Go 的 `nanType` 单例 + float map-key 的 `0==-0`）。布尔已是构造期单例（`true_type`/`false_type`），无新缓存。
+
+**严格 TDD（逐行为 red→green，一次一个；每片单独 `cargo test -p tsgo_checker <name>` 看红/绿）**：
+
+| # | 切片 | 最小 input → observable（实测红/绿） | 实现触点 |
+|---|---|---|---|
+| 1 tracer（genuine RED）| `string_literal_expressions_intern_to_one_type_id` | `"a";\n"a";` 两个 `check_expression` → **同一 `TypeId`**（红：`new_literal_type` 每次新 id，实测 `TypeId(22) != TypeId(23)`）| `mod.rs`：加 `string_literal_types` 缓存 + `pub(crate) get_string_literal_type`；`check.rs` `StringLiteral` 臂改走它 |
+| 1 distinct（green-on-arrival）| `distinct_string_literal_values_get_distinct_type_ids` | `"a";\n"b";` → 两个不同 id（值键缓存不串）| 无 |
+| 2 tracer（genuine RED）| `number_literal_expressions_intern_to_one_type_id` | `1;\n1;` → **同一 `TypeId`**（红：实测 `TypeId(22) != TypeId(23)`，临时回退 numeric 臂观察）| `mod.rs`：加 `number_literal_types` 缓存 + `number_literal_key`（NaN/±0 规约）+ `pub(crate) get_number_literal_type`；`check.rs` `NumericLiteral` 臂改走它 |
+| 2 distinct（green-on-arrival）| `distinct_number_literal_values_get_distinct_type_ids` | `1;\n2;` → 两个不同 id | 无 |
+| 3（green-on-arrival 守卫）| `boolean_literal_expressions_intern_to_one_type_id` | `true;\ntrue;\nfalse;` → 两 `true` 同 id、`true`≠`false`（布尔早是构造期单例 `true_type`/`false_type`）| 无 |
+| 4（genuine RED）| `union_of_equal_string_literals_collapses_to_single_literal` | `declare const x: "a" \| "a";` → `type_to_string=="\"a\""` 且 `union_types().is_none()`（红：临时回退 string 臂观察，两 `"a"` 不同 id → union 留 `"a" \| "a"`）| 无（slice 1 interning 落地后 `get_union_type` 的 id-dedup 自动塌缩）|
+| 5（faithfulness）| `get_number_literal_type_interns_by_value_with_nan_and_zero_canonicalization`（单测）| tuple `length` 字面量 + 一般 `N` 共缓存；NaN/±0 规约 | `declared_types.rs` `get_tuple_length_type` 改走 `get_number_literal_type`（Go `createTupleTargetType`）|
+| 6（退役 shim，refactor-green）| `equality_literal_in_its_union_reports_no_overlap_diagnostic`（4bb 既有）| `declare const k: "a" \| "b";\nk === "a";` → 0 诊断，**经身份**（interning 后 union 成员 `"a"` 与操作数 `"a"` 同 id，`source==target` 命中）| `relations.rs`：删 `literals_equal_by_value` 调用 + 定义；`is_type_related_to` 保留 `regular_literal_type` 归一 + `source==target` 身份 |
+
+> 红→绿证据：slice 1 / slice 2 / slice 4 **genuine RED**（1：`TypeId(22)!=TypeId(23)`；2：临时回退 numeric 臂见 `TypeId(22)!=TypeId(23)`；4：临时回退 string 臂见 `"a" \| "a" != "a"`）→ 最小触点转绿。slice 3 / distinct 守卫为 **green-on-arrival**（布尔早是单例；值键缓存天然分离不同值）——**如实记录非伪造红**（同 4ay/4az/4bb 口径）。slice 6 是 **refactor-绿**（interning 落地后 shim 变冗余；删后既有 2367-FP 测试经身份保持绿，relations 模块 13 测全绿）。
+
+**本轮交付**：
+- `core/mod.rs`：`Checker` 加 `string_literal_types: FxHashMap<String, TypeId>` / `number_literal_types: FxHashMap<u64, TypeId>` 字段 + 构造期 `default()` 初始化；新 `pub(crate)` `get_string_literal_type`/`get_number_literal_type`（值键 intern，`//` 行注释 + Go 锚）；新自由 fn `number_literal_key`（NaN/±0 规约）。
+- `core/check.rs`：`check_expression` 的 `StringLiteral`/`NumericLiteral` 臂改走 interning（`get_string_literal_type`/`get_number_literal_type`）。
+- `core/declared_types.rs`：`get_tuple_length_type` 改走 `get_number_literal_type`（faithful + 使全部程序驱动字面量 interned，令 shim 退役安全）。
+- `core/relations.rs`：删 `literals_equal_by_value`（调用 + 定义）；`is_type_related_to` 头部改为 `regular_literal_type` 归一 + `source==target` 身份（注释更新说明 4bc interning 后 shim 退役）。
+- 测试：`check_test.rs` +5（slice1×2 + slice2×2 + slice3×1）、`declared_types_test.rs` +1（slice4）、`mod_test.rs` +2（`get_string_literal_type`/`get_number_literal_type` 单测，含 NaN/±0 边界）。
+- **未改任何既有 pub fn 签名、无新 pub 项、无 `lib.rs` 改动、无新依赖。** 新缓存方法为 `pub(crate)`（additive 内部，不入公开 API）；删除的 `literals_equal_by_value` 是 4bb 新增的私有 fn（删私有不破 API）。
+
+**新公开 API 形状**：本轮**无新 pub 项**——`get_string_literal_type`/`get_number_literal_type` 为 `pub(crate)`（内部），`check_expression` 臂内部改写。公开 API 形状与 4bb 完全一致。`cargo build -p tsgo_compiler` 绿（实测）。
+
+**测试增量**：**399 单测**（+8，相对 4bb 基线 391）+ **134 doctest**（**±0**：新缓存方法为 `pub(crate)` 用 `//` 行注释、不挂 doctest；删除的私有 fn 无 doctest）。
+
+**公开 API 仅加法（compiler + transformers 保持绿）**：未改任何既有 `pub fn` 签名，未加任何 pub 项。interning 改变的是 `check_expression` 对字面量返回的 id（同值→同 id），下游消费者（关系/union/判别）行为只更 Go-faithful（身份替代按值）。`cargo build -p tsgo_compiler` 绿（实测）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker`（`--lib` 399 单测 + `--doc` 134 doctest）绿；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。未 `--workspace`（无其它 lane）。未 `git commit`。
+
+**本轮 DEFER（带 blocked-by）**：
+- **fresh-vs-regular 字面量配对（可变上下文 widening）**：`check_expression` 返回 interned regular，不套 `getFreshTypeOfLiteralType` 的 fresh 包装；`const x = "a"`（widen 到 `string`）vs `const x: "a"`（保 literal）的 fresh/regular 区分未建。blocked-by: `getFreshTypeOfLiteralType` 的按-regular 缓存 fresh 单例 + widening 上下文（`getWidenedLiteralType`/可变 binding 推断）。
+- **flow 层两处按值绕过仍保留**（`types_same_literal_value`@判别 non-uniform、`equality_overlap`@4az flow 相等）：程序驱动路径现已主要走 interned 身份（等值字面量同 id），但单测里经 `new_literal_type` 手工建的字面量仍是不同 id，故保留这两处作 safety net（任务 item 2 仅要求退役 **relations** 的 `literals_equal_by_value`，已完成）。blocked-by: 全面以 interning 取代——需把所有手工 `new_literal_type` 单测改走 `get_*_literal_type` 后才能安全删（跨多测试文件，单独立项）。
+- **bigint 字面量 interning**（`getBigIntLiteralType` + `bigintLiteralTypes`）：`LiteralValue` 无 BigInt 变体，bigint 字面量表达式未类型化。blocked-by: `PseudoBigInt` 值类型 + bigint 字面量表达式类型化。
+- **负数 / 一元字面量**（`-1` 在类型/值位经 `PrefixUnaryExpression`）：`check_expression` 未类型化前缀一元。blocked-by: 前缀一元表达式类型化（Go `getFreshTypeOfLiteralType(getNumberLiteralType(-jsnum.FromString(...)))`）。
+- **`getDiscriminantPropertyAccess` 的 const-alias / 解构候选**（`const k = obj.kind; if (k==="a")`）：探查后**未落地**（需 alias/binding-element reference 匹配 + `getReferenceCandidate`），保持 DEFER。blocked-by: const-alias reference 匹配（`getCandidateDiscriminantPropertyAccess` 的 const-variable 分支）。
+- **`getRegularTypeOfLiteralType` 的 union 分支记忆化**（`u.regularType = mapType(t, getRegularTypeOfLiteralType)`）：本港 `regular_type_of_literal_type` 只处理 freshable 单体，union 分支未建。blocked-by: union `regularType` 链 + `mapType`。
+- **always-/never-nullish 操作数诊断 / 泛型判别排除**：未做（任务 DEFER 列表）。blocked-by: 语法 nullishness 分析 / generic-type 检测。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/types/literal/`（字面量类型 identity / union dedup）+ `tests/cases/conformance/types/typeRelationships/typeGuards/`（判别 narrowing 经 interned 字面量身份）+ `tests/cases/compiler/literalTypes*`（等值字面量 union 塌缩）。
+
+**推荐下一轮（4bd）**：(a) fresh-vs-regular 字面量配对（`getFreshTypeOfLiteralType` 按-regular 缓存 fresh + `getWidenedLiteralType` 在 `const`/可变 binding 推断的 widening）——解锁 `let x = "a"` widen 到 `string` 的可观察行为；(b) `getDiscriminantPropertyAccess` 的 const-alias 候选（`const k = obj.kind`）；(c) bigint 字面量 interning（需 `LiteralValue::BigInt` + bigint 表达式类型化）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

@@ -46,6 +46,27 @@ fn array_type_reference_index_signature_instantiates_element() {
     );
 }
 
+// 4bc slice 4 (genuine RED): a union of two equal string-literal type nodes
+// (`"a" | "a"`) collapses to the single literal `"a"`. With value-keyed
+// interning the two `"a"` constituents resolve to one `TypeId`, so the union's
+// id-dedup leaves a single member and `getUnionType` returns that member (no
+// 2-member union). Before interning the two `"a"` were distinct ids, so the
+// union was kept as `"a" | "a"`.
+// Go: internal/checker/checker.go:Checker.getUnionType (constituent dedup by id) +
+//     Checker.getStringLiteralType(25164)
+#[test]
+fn union_of_equal_string_literals_collapses_to_single_literal() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: \"a\" | \"a\";");
+    let mut c = Checker::new();
+    let x = local(&p, "x");
+    let t = get_type_of_symbol(&mut c, &p, x, None);
+    assert_eq!(c.type_to_string(t), "\"a\"");
+    assert!(
+        c.get_type(t).union_types().is_none(),
+        "equal literals must dedup to a single non-union literal"
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.getDeclaredTypeOfClassOrInterface
 #[test]
 fn declared_interface_type_exposes_members() {

@@ -96,6 +96,46 @@ fn get_union_type_dedups_collapses_and_interns() {
     );
 }
 
+// 4bc: `get_string_literal_type` interns by value — equal strings share one id,
+// distinct strings get distinct ids, and the result prints as the quoted value.
+// Go: internal/checker/checker.go:Checker.getStringLiteralType(25164)
+#[test]
+fn get_string_literal_type_interns_by_value() {
+    let mut c = Checker::new();
+    let a1 = c.get_string_literal_type("a");
+    let a2 = c.get_string_literal_type("a");
+    assert_eq!(a1, a2, "equal string literals must intern to one id");
+    assert_ne!(a1, c.get_string_literal_type("b"));
+    assert_eq!(c.type_to_string(a1), "\"a\"");
+    assert_eq!(c.get_type(a1).flags(), TypeFlags::STRING_LITERAL);
+    // The interned literal is its own regular type (no fresh/regular widening
+    // is modeled yet), so the relation/normalization paths treat it as regular.
+    assert_eq!(c.regular_type_of_literal_type(a1), a1);
+}
+
+// 4bc: `get_number_literal_type` interns by value, with Go-faithful
+// canonicalization — all `NaN`s collapse to one type and `+0`/`-0` collapse.
+// Go: internal/checker/checker.go:Checker.getNumberLiteralType(25173)
+#[test]
+fn get_number_literal_type_interns_by_value_with_nan_and_zero_canonicalization() {
+    use tsgo_jsnum::Number;
+    let mut c = Checker::new();
+    let one = c.get_number_literal_type(Number::from(1.0));
+    assert_eq!(one, c.get_number_literal_type(Number::from(1.0)));
+    assert_ne!(one, c.get_number_literal_type(Number::from(2.0)));
+    assert_eq!(c.type_to_string(one), "1");
+    assert_eq!(c.get_type(one).flags(), TypeFlags::NUMBER_LITERAL);
+    // Signed zeros collapse (Go's float map-key treats `0 == -0`).
+    let pos_zero = c.get_number_literal_type(Number::from(0.0));
+    let neg_zero = c.get_number_literal_type(Number::from(-0.0));
+    assert_eq!(pos_zero, neg_zero, "+0 and -0 must intern to one id");
+    // All NaNs collapse to one type (Go caches `nanType` separately because a
+    // float NaN map-key never matches itself).
+    let nan1 = c.get_number_literal_type(Number::nan());
+    let nan2 = c.get_number_literal_type(Number::nan());
+    assert_eq!(nan1, nan2, "every NaN literal must intern to one id");
+}
+
 // Go: internal/checker/checker.go:Checker.getIntersectionType (intern by members)
 #[test]
 fn get_intersection_type_interns_by_members() {

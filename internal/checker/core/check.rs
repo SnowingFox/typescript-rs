@@ -137,12 +137,16 @@ impl Checker {
         match program.arena().kind(node) {
             Kind::Identifier => self.check_identifier(program, node),
             Kind::StringLiteral => {
+                // Go: getFreshTypeOfLiteralType(getStringLiteralType(text)). The
+                // fresh/regular pairing (widening in mutable contexts) is DEFER'd;
+                // the value-keyed intern is what gives every `"a"` one TypeId.
                 let text = program.arena().text(node).to_string();
-                self.new_literal_type(TypeFlags::STRING_LITERAL, LiteralValue::String(text), None)
+                self.get_string_literal_type(&text)
             }
             Kind::NumericLiteral => {
+                // Go: getFreshTypeOfLiteralType(getNumberLiteralType(value)).
                 let value = tsgo_jsnum::from_string(program.arena().text(node));
-                self.new_literal_type(TypeFlags::NUMBER_LITERAL, LiteralValue::Number(value), None)
+                self.get_number_literal_type(value)
             }
             Kind::TrueKeyword => self.true_type,
             Kind::FalseKeyword => self.false_type,

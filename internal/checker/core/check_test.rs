@@ -126,6 +126,92 @@ fn check_literal_expressions() {
     assert_eq!(c.check_expression(&p, null_lit), null_ty);
 }
 
+// 4bc slice 1 tracer (genuine RED): two occurrences of the same string-literal
+// expression intern to ONE `TypeId`. Go's `getStringLiteralType` keeps a
+// per-checker `stringLiteralTypes[value]` cache, so every `"a"` literal is the
+// same `*Type`; the port previously allocated a fresh literal per occurrence,
+// so the two ids differed. Value-keyed interning recovers Go's id semantics.
+// Go: internal/checker/checker.go:Checker.getStringLiteralType(25164)
+#[test]
+fn string_literal_expressions_intern_to_one_type_id() {
+    let p = StubProgram::parse_and_bind("/a.ts", "\"a\";\n\"a\";");
+    let mut c = Checker::new();
+    let first = expr_stmt_expression(&p, 0);
+    let second = expr_stmt_expression(&p, 1);
+    let t1 = c.check_expression(&p, first);
+    let t2 = c.check_expression(&p, second);
+    assert_eq!(
+        t1, t2,
+        "two `\"a\"` literals must share one interned TypeId"
+    );
+}
+
+// 4bc slice 1 guard (green-on-arrival): distinct string-literal values get
+// distinct interned ids (the cache is keyed by value, so `"a"` and `"b"` never
+// collide).
+// Go: internal/checker/checker.go:Checker.getStringLiteralType(25164)
+#[test]
+fn distinct_string_literal_values_get_distinct_type_ids() {
+    let p = StubProgram::parse_and_bind("/a.ts", "\"a\";\n\"b\";");
+    let mut c = Checker::new();
+    let first = expr_stmt_expression(&p, 0);
+    let second = expr_stmt_expression(&p, 1);
+    let t1 = c.check_expression(&p, first);
+    let t2 = c.check_expression(&p, second);
+    assert_ne!(t1, t2, "`\"a\"` and `\"b\"` must be distinct interned ids");
+}
+
+// 4bc slice 2 tracer (genuine RED): two occurrences of the same numeric-literal
+// expression intern to ONE `TypeId` (Go's `getNumberLiteralType` cache).
+// Go: internal/checker/checker.go:Checker.getNumberLiteralType(25173)
+#[test]
+fn number_literal_expressions_intern_to_one_type_id() {
+    let p = StubProgram::parse_and_bind("/a.ts", "1;\n1;");
+    let mut c = Checker::new();
+    let first = expr_stmt_expression(&p, 0);
+    let second = expr_stmt_expression(&p, 1);
+    let t1 = c.check_expression(&p, first);
+    let t2 = c.check_expression(&p, second);
+    assert_eq!(t1, t2, "two `1` literals must share one interned TypeId");
+}
+
+// 4bc slice 2 guard (green-on-arrival): distinct numeric-literal values get
+// distinct interned ids.
+// Go: internal/checker/checker.go:Checker.getNumberLiteralType(25173)
+#[test]
+fn distinct_number_literal_values_get_distinct_type_ids() {
+    let p = StubProgram::parse_and_bind("/a.ts", "1;\n2;");
+    let mut c = Checker::new();
+    let first = expr_stmt_expression(&p, 0);
+    let second = expr_stmt_expression(&p, 1);
+    let t1 = c.check_expression(&p, first);
+    let t2 = c.check_expression(&p, second);
+    assert_ne!(t1, t2, "`1` and `2` must be distinct interned ids");
+}
+
+// 4bc slice 3 guard (green-on-arrival): boolean-literal types are already
+// interned (the checker holds one `true_type`/`false_type` singleton minted in
+// `NewChecker`), so two `true` expressions share one `TypeId` without any new
+// cache. Mirrors Go's `getBooleanLiteralType` returning the pre-allocated
+// `trueType`/`falseType`.
+// Go: internal/checker/checker.go:NewChecker (trueType/falseType singletons)
+#[test]
+fn boolean_literal_expressions_intern_to_one_type_id() {
+    let p = StubProgram::parse_and_bind("/a.ts", "true;\ntrue;\nfalse;");
+    let mut c = Checker::new();
+    let first = expr_stmt_expression(&p, 0);
+    let second = expr_stmt_expression(&p, 1);
+    let third = expr_stmt_expression(&p, 2);
+    let t_true_1 = c.check_expression(&p, first);
+    let t_true_2 = c.check_expression(&p, second);
+    let t_false = c.check_expression(&p, third);
+    assert_eq!(
+        t_true_1, t_true_2,
+        "two `true` literals must share one TypeId"
+    );
+    assert_ne!(t_true_1, t_false, "`true` and `false` are distinct ids");
+}
+
 // Go: internal/checker/checker.go:Checker.checkPropertyAccessExpression
 #[test]
 fn check_property_access_yields_member_type() {

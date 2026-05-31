@@ -1591,11 +1591,9 @@ fn get_tuple_length_type(checker: &mut Checker, object_type: TypeId) -> Option<T
         }
         obj.resolved_type_arguments.len()
     };
-    Some(checker.new_literal_type(
-        TypeFlags::NUMBER_LITERAL,
-        LiteralValue::Number(tsgo_jsnum::Number::from(arity as f64)),
-        None,
-    ))
+    // Go uses `getNumberLiteralType` here (createTupleTargetType), so the
+    // tuple's `length` literal is interned by value like every other `N`.
+    Some(checker.get_number_literal_type(tsgo_jsnum::Number::from(arity as f64)))
 }
 
 /// Looks up the property named `name` on type `t`, returning its symbol.

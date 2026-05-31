@@ -148,6 +148,14 @@ pub struct Checker {
     /// uses a hashed `getIntersectionKey`; the sorted id vector is an equivalent
     /// stable key, mirroring the union intern map).
     intersection_types: FxHashMap<Vec<TypeId>, TypeId>,
+    /// Interned string-literal types, keyed by the literal value (Go's
+    /// `stringLiteralTypes map[string]*Type`), so every `"a"` is one [`TypeId`].
+    string_literal_types: FxHashMap<String, TypeId>,
+    /// Interned number-literal types, keyed by the literal value's canonical
+    /// bit pattern (Go's `numberLiteralTypes map[jsnum.Number]*Type`); `NaN` and
+    /// `+0`/`-0` are canonicalized so all `NaN`s share one type and `0`/`-0`
+    /// collapse, matching Go's float map-key semantics + separate `nanType`.
+    number_literal_types: FxHashMap<u64, TypeId>,
     /// Lazily-built declared types for interface/class/enum symbols.
     declared_type_links: SymbolLinks<DeclaredTypeLinks>,
     /// Lazily-built declared types for type-alias symbols.
@@ -352,6 +360,8 @@ impl Checker {
             global_types: FxHashMap::default(),
             union_types,
             intersection_types: FxHashMap::default(),
+            string_literal_types: FxHashMap::default(),
+            number_literal_types: FxHashMap::default(),
             declared_type_links: SymbolLinks::default(),
             type_alias_links: SymbolLinks::default(),
             value_symbol_links: SymbolLinks::default(),
@@ -1017,6 +1027,54 @@ impl Checker {
         new_literal_type_in(&mut self.types, flags, value, regular_type)
     }
 
+    // Returns the interned string-literal type for `value`, allocating it once
+    // and caching it by value so every `"a"` shares one `TypeId`. This is Go's
+    // `getStringLiteralType`: a value-keyed cache giving equal literals id
+    // identity, which the union/relation/discriminant machinery relies on for
+    // dedup and uniformity.
+    //
+    // Side effects: allocates a literal type and updates the intern cache on a
+    // first-seen value.
+    // Go: internal/checker/checker.go:Checker.getStringLiteralType(25164)
+    pub(crate) fn get_string_literal_type(&mut self, value: &str) -> TypeId {
+        if let Some(&id) = self.string_literal_types.get(value) {
+            return id;
+        }
+        let id = new_literal_type_in(
+            &mut self.types,
+            TypeFlags::STRING_LITERAL,
+            LiteralValue::String(value.to_string()),
+            None,
+        );
+        self.string_literal_types.insert(value.to_string(), id);
+        id
+    }
+
+    // Returns the interned number-literal type for `value`, allocating it once
+    // and caching it by value so every `1` shares one `TypeId`. This is Go's
+    // `getNumberLiteralType`: a value-keyed cache. `NaN` and the two signed
+    // zeros are canonicalized (Go caches `NaN` separately and its float map-key
+    // treats `0`/`-0` as equal), so all `NaN`s share one type and `0`/`-0`
+    // collapse.
+    //
+    // Side effects: allocates a literal type and updates the intern cache on a
+    // first-seen value.
+    // Go: internal/checker/checker.go:Checker.getNumberLiteralType(25173)
+    pub(crate) fn get_number_literal_type(&mut self, value: tsgo_jsnum::Number) -> TypeId {
+        let key = number_literal_key(value);
+        if let Some(&id) = self.number_literal_types.get(&key) {
+            return id;
+        }
+        let id = new_literal_type_in(
+            &mut self.types,
+            TypeFlags::NUMBER_LITERAL,
+            LiteralValue::Number(value),
+            None,
+        );
+        self.number_literal_types.insert(key, id);
+        id
+    }
+
     /// Returns the union of `members`, interned so equal unions share an id.
     ///
     /// 4b implements the structural core: constituents are deduplicated and
@@ -1521,6 +1579,25 @@ fn new_literal_type_in(
         d.regular_type = Some(regular);
     }
     id
+}
+
+/// Returns the canonical map key for a number-literal value.
+///
+/// `NaN` maps to a single fixed key (Go caches `NaN` in a separate `nanType`
+/// because `NaN != NaN` makes a float map-key always miss) and `+0`/`-0` both
+/// map to `0` (Go's float map-key treats them as equal), so the resulting cache
+/// has Go-identical value-uniqueness for the reachable literal values.
+// Go: internal/checker/checker.go:Checker.getNumberLiteralType (NaN special-case + map key)
+fn number_literal_key(value: tsgo_jsnum::Number) -> u64 {
+    let f = f64::from(value);
+    if f.is_nan() {
+        f64::NAN.to_bits()
+    } else if f == 0.0 {
+        // Collapse +0.0 and -0.0 to one key.
+        0
+    } else {
+        f.to_bits()
+    }
 }
 
 /// Sets the `fresh_type` link of a literal type (a no-op for non-literals).

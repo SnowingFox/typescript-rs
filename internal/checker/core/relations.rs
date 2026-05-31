@@ -179,18 +179,14 @@ impl Checker {
     ) -> bool {
         let source = self.regular_literal_type(source);
         let target = self.regular_literal_type(target);
-        if source == target {
-            return true;
-        }
-        // Go interns literal types by `(flags, value, regularType)`, so two
-        // occurrences of `"a"` are the same `*Type` and the `source == target`
-        // check above already relates them. The port does not intern literals,
-        // so equal-valued literals are distinct ids; relate them here by their
-        // literal kind + value to recover the same observable behavior (this
-        // makes e.g. the `"a"` member of `"a" | "b"` comparable to a separate
-        // `"a"` operand). Holds for every relation kind.
+        // Go interns literal types by value (`getStringLiteralType` /
+        // `getNumberLiteralType`), so two occurrences of `"a"` are the same
+        // `*Type` and identity already relates them. As of 4bc the port interns
+        // string/number literals the same way (booleans were already singletons),
+        // so equal-valued literals share one id and this identity check covers
+        // `"a" === "a"` — the 4bb `literals_equal_by_value` value shim is retired.
         // Go: internal/checker/relater.go:Checker.isTypeRelatedTo (interned literal identity)
-        if self.literals_equal_by_value(source, target) {
+        if source == target {
             return true;
         }
         if relation != RelationKind::Identity {
@@ -234,27 +230,6 @@ impl Checker {
             }
         }
         t
-    }
-
-    // Reports whether `a` and `b` are two literal types of the same literal kind
-    // carrying equal values. This stands in for Go's literal interning: there,
-    // equal-valued literals are the same `*Type`, so identity already relates
-    // them; the port allocates literals per occurrence, so equal-valued literals
-    // are distinct ids and need this value comparison.
-    // Go: internal/checker/checker.go:Checker.getLiteralType (interning)
-    fn literals_equal_by_value(&self, a: TypeId, b: TypeId) -> bool {
-        let fa = self.get_type(a).flags() & TypeFlags::LITERAL;
-        let fb = self.get_type(b).flags() & TypeFlags::LITERAL;
-        if fa.is_empty() || fa != fb {
-            return false;
-        }
-        match (
-            self.get_type(a).literal_value(),
-            self.get_type(b).literal_value(),
-        ) {
-            (Some(va), Some(vb)) => va == vb,
-            _ => false,
-        }
     }
 
     // The primitive/literal/any/unknown/never rules (no structural recursion).
