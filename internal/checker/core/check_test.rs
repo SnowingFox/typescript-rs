@@ -4202,3 +4202,201 @@ fn empty_object_target_suppresses_excess_property() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// 4bh slice 1 tracer (genuine RED): a shorthand property `{ a }` is equivalent to
+// `{ a: a }` — the property's type is the type of the referenced identifier `a`,
+// typed through `checkExpressionForMutableLocation` (widening a fresh literal).
+// `const a = 1` infers the fresh literal `1`, which widens to `number` in the
+// shorthand position, so reading `o.a` resolves to `number`. Before the
+// shorthand arm, the member loop only handled `PropertyAssignment`, so `{ a }`
+// produced an empty object type and `o.a` resolved to the `error` type.
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13153) / checkShorthandPropertyAssignment(13603)
+#[test]
+fn object_literal_shorthand_property_reads_referenced_var_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const a = 1;\nconst o = { a };\no.a;");
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let number = c.number_type();
+    assert_eq!(c.check_expression(&p, access), number);
+}
+
+// 4bh slice 2 (genuine RED before slice 1; green-on-arrival after): a shorthand
+// property carries the referenced variable's type into the synthesized object
+// type, so a type mismatch against the annotation flows as 2322. `const a = 1`
+// widens to `number` in the shorthand, so `{ a }` is `{ a: number; }`, which is
+// not assignable to `{ a: string; }`. Before the shorthand arm `{ a }` was an
+// empty object type missing `a`, which reported a *different* diagnostic
+// (missing property) rather than this number/string mismatch.
+// Go: internal/checker/checker.go:Checker.checkShorthandPropertyAssignment(13603) + relater
+#[test]
+fn object_literal_shorthand_property_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const a = 1;\nconst o: { a: string } = { a };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '{ a: number; }' is not assignable to type '{ a: string; }'."
+    );
+}
+
+// 4bh slice 2 positive control (green-on-arrival): a shorthand property whose
+// referenced type matches the annotation reports nothing. `const a = 1` widens
+// to `number`, so `{ a }` (`{ a: number; }`) is assignable to `{ a: number }`.
+// Go: internal/checker/checker.go:Checker.checkShorthandPropertyAssignment(13603) + relater
+#[test]
+fn object_literal_shorthand_property_assignable_to_matching_annotation() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const a = 1;\nconst o: { a: number } = { a };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bh slice 3 tracer (genuine RED): a computed property name whose expression is
+// a non-literal `string` (`const k: string`) contributes a *string index
+// signature* to the object literal type rather than a named property (Go's
+// `checkObjectLiteral` -> `getObjectLiteralIndexInfo`). The index signature's
+// value type is the (widened) member value type `number`, so element access via
+// any string key (`o["anything"]`) resolves to `number`. Before the
+// computed-name arm, the member was skipped (no name, no index signature), so
+// `o` was an empty object type and `o["anything"]` resolved to the `error` type.
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13125) / getObjectLiteralIndexInfo(19576)
+#[test]
+fn object_literal_computed_string_name_synthesizes_string_index() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "const k: string = \"x\";\nconst o = { [k]: 1 };\no[\"anything\"];",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let number = c.number_type();
+    assert_eq!(c.check_expression(&p, access), number);
+}
+
+// 4bh slice 3 positive control (green-on-arrival): a non-computed named property
+// declared alongside a computed-name member is still a regular named property
+// (it is NOT swallowed by the index signature). `{ b: 2, [k]: 1 }` keeps `b` as
+// a named `number` property, readable through `o.b`.
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13257)
+#[test]
+fn object_literal_named_property_coexists_with_computed_name() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "const k: string = \"x\";\nconst o = { b: 2, [k]: 1 };\no.b;",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let number = c.number_type();
+    assert_eq!(c.check_expression(&p, access), number);
+}
+
+// 4bh slice 3b tracer (genuine RED): a computed property name whose expression
+// is a non-literal `number` (`const k: number`) contributes a *number index
+// signature*, so element access by a number key (`o[0]`) resolves to the index
+// signature's value type `number`. Before the computed-name arm there was no
+// index signature and `o[0]` resolved to the `error` type. (Go's
+// `hasComputedNumberProperty` branch -> `getObjectLiteralIndexInfo(_, _,
+// numberType)`.)
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13128) / getObjectLiteralIndexInfo(19576)
+#[test]
+fn object_literal_computed_number_name_synthesizes_number_index() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "const k: number = 0;\nconst o = { [k]: 1 };\no[0];",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let number = c.number_type();
+    assert_eq!(c.check_expression(&p, access), number);
+}
+
+// 4bh slice 3c (genuine RED before the 2464 emission): a computed property name
+// whose expression is not assignable to `string | number | symbol` (and is not
+// `any`) reports 2464. `const k: boolean` is neither string/number/symbol nor
+// assignable to their union, so `{ [k]: 1 }` reports the diagnostic. Before
+// `checkComputedPropertyName` emitted 2464, no diagnostic was reported.
+// Go: internal/checker/checker.go:Checker.checkComputedPropertyName(26619)
+#[test]
+fn object_literal_computed_name_non_indexable_reports_2464() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const k: boolean = true;\nconst o = { [k]: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2464);
+    assert_eq!(
+        diags[0].message,
+        "A computed property name must be of type 'string', 'number', 'symbol', or 'any'."
+    );
+}
+
+// 4bh slice 3 end-to-end (green-on-arrival, unlocked by slice 3): the synthesized
+// string index signature flows through assignability. The index value type is
+// `number`, so `const n: number = o["foo"]` reports nothing, while a `string`
+// annotation mismatches and reports 2322. This exercises the index signature via
+// `getApplicableIndexInfoForName`/`getIndexedAccessType` from the variable path.
+// Go: internal/checker/checker.go:Checker.getObjectLiteralIndexInfo(19576) + relater
+#[test]
+fn object_literal_string_index_value_is_assignable_to_number() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const k: string = \"x\";\nconst o = { [k]: 1 };\nconst n: number = o[\"foo\"];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bh slice 3 end-to-end (genuine RED before slice 3): the synthesized string
+// index value type `number` is not assignable to a `string` annotation, so
+// `const s: string = o["foo"]` reports 2322. Before slice 3 there was no index
+// signature and `o["foo"]` was the `error` type (assignable to anything), so
+// nothing was reported.
+// Go: internal/checker/checker.go:Checker.getObjectLiteralIndexInfo(19576) + relater
+#[test]
+fn object_literal_string_index_value_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const k: string = \"x\";\nconst o = { [k]: 1 };\nconst s: string = o[\"foo\"];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// 4bh unit test: `is_numeric_literal_name` mirrors Go's `isNumericLiteralName`
+// (the JS-number round-trip of the text equals the text). Numeric-form names are
+// numeric; hex/leading-zero/non-numeric names are not. Used by
+// `getObjectLiteralIndexInfo` to decide which statically-named members feed a
+// number index signature.
+// Go: internal/checker/utilities.go:isNumericLiteralName(860)
+#[test]
+fn is_numeric_literal_name_matches_round_trip() {
+    assert!(super::is_numeric_literal_name("0"));
+    assert!(super::is_numeric_literal_name("123"));
+    assert!(super::is_numeric_literal_name("1.5"));
+    assert!(!super::is_numeric_literal_name("0xF00D"));
+    assert!(!super::is_numeric_literal_name("01"));
+    assert!(!super::is_numeric_literal_name("a"));
+    assert!(!super::is_numeric_literal_name(""));
+    assert!(!super::is_numeric_literal_name("\u{FE}computed"));
+}

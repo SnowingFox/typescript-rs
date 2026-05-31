@@ -2676,6 +2676,68 @@ impl EmitResolver {
 
 **推荐下一轮（4bh）**：(a) **`2561` 建议变体**（`getSuggestionForNonexistentProperty` 拼写建议）；(b) **shorthand 属性 `{ a }`** + 计算属性名索引签名（`getObjectLiteralIndexInfo`）；(c) **`indexSignaturesRelatedTo`**（source 结构 vs target 索引签名的完整关系 elaboration）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
 
+## 4bh 落地记录（worklog 摘要）—— 对象字面量 shorthand 属性 `{ a }` + 非字面量计算属性名索引签名 `{ [k]: v }`
+
+> 承接 4bf（对象字面量 `PropertyAssignment` 类型化）/ 4bg（excess-property 2353 + `getApplicableIndexInfoForName` + reserved-名过滤）。本轮把 Go `checkObjectLiteral` 的成员循环再镜像两类 `ObjectLiteralElement`：**ShorthandPropertyAssignment**（`{ a }`）+ **非字面量 ComputedPropertyName**（`{ [k]: v }` 贡献索引签名）。逐行为红→绿，一次一个。单 lane（无其它 lane）。cargo 仅 `-p tsgo_checker`（未 `--workspace`）。未 `git commit`。
+
+**Go 真值（ground truth，已逐一核对）**：
+- `internal/checker/checker.go:Checker.checkObjectLiteral(13076)`：成员 switch（13153）对 `PropertyAssignment`/`ShorthandPropertyAssignment`/`ObjectLiteralMethod` 分别 `checkPropertyAssignment`/`checkShorthandPropertyAssignment`/`checkObjectLiteralMethod`；计算名先 `computedNameType = checkComputedPropertyName(memberDecl.Name())`（13150）；`hasComputed*Property` 块（13244）：`computedNameType != nil && flags&StringOrNumberLiteralOrUnique == 0` 且 `isTypeAssignableTo(computedNameType, stringNumberSymbolType)` → 按 `number`/`esSymbol`/else 置 `hasComputed{Number,Symbol,String}Property`，否则（字面量/unique 名）入 `propertiesTable`；`createObjectLiteralType`（13122）按三 flag 各 `append(getObjectLiteralIndexInfo(isReadonly, propertiesArray[offset:], {string,number,esSymbol}Type))`。
+- `internal/checker/checker.go:Checker.checkShorthandPropertyAssignment(13603)`：非解构 → `expr = ObjectAssignmentInitializer`，nil 则 `expr = node.Name()`；`expressionType = checkExpressionForMutableLocation(expr, checkMode)`；有 `node.Type()` → `getTypeFromTypeNode` + `checkTypeAssignableToAndOptionallyElaborate` 返回注解（DEFER）；否则返回 `expressionType`。
+- `internal/checker/checker.go:Checker.checkComputedPropertyName(26619)`：`links.resolvedType = checkExpression(node.Expression())`；若 `flags&Nullable != 0 || !isTypeAssignableToKind(t, StringLike|NumberLike|ESSymbolLike) && !isTypeAssignableTo(t, stringNumberSymbolType)` → 报 `A_computed_property_name_must_be_of_type_string_number_symbol_or_any`（2464）。`in`-name 特例 + `typeNodeLinks` 缓存 DEFER。
+- `internal/checker/checker.go:Checker.getObjectLiteralIndexInfo(19576)`：逐 prop 按 `keyType==stringType && !isSymbolWithSymbolName` / `keyType==numberType && isSymbolWithNumericName` / `keyType==esSymbolType && isSymbolWithSymbolName` 收 `getTypeOfSymbol(prop)`；`unionType = undefinedType` 或 `getUnionTypeEx(propTypes, Subtype)`；`newIndexInfo(keyType, unionType, isReadonly, nil, components)`。
+- `internal/checker/checker.go:isSymbolWithSymbolName(19596)` / `isSymbolWithNumericName(19607)` / `isNumericName(19626)`+`isNumericComputedName(19636)`（`isTypeAssignableToKind(checkComputedPropertyName(name), NumberLike/ESSymbol)`）；`utilities.go:isNumericLiteralName(860)`（`jsnum.FromString(name).String()==name`）；`isTypeUsableAsPropertyName(841)`（`flags&StringOrNumberLiteralOrUnique != 0`）。
+
+**可达裁剪（faithful-but-reachable）**：
+- 成员循环新增 `ShorthandPropertyAssignment` 臂（dispatch 到新私有 `check_shorthand_property_assignment`）；新增计算名预处理（`check_computed_property_name`）。
+- **shorthand**：`expr = object_assignment_initializer.unwrap_or(name)` → `check_expression_for_mutable_location`（fresh 字面量 widen；`const a = 1` 的 fresh `1` widen 到 `number`）。解构-pattern 路径（optional 化）/ 显式类型注解 DEFER。
+- **计算名**：非字面量（`flags & STRING_OR_NUMBER_LITERAL_OR_UNIQUE == 0`）且可赋 `string|number|symbol`（经 `is_type_assignable_to`，union 目标关系 4u 已支持）→ 按 number/esSymbol/else 置 `has_computed_{number,symbol,string}_property`，成员以 `\u{FE}computed` 名（`INTERNAL_SYMBOL_NAME_COMPUTED`）合成进 `all_members`（用于索引值 union），**不入** `members`/`properties` 命名表。字面量/unique 计算名 → 晚绑定**命名**成员 DEFER（跳过）。
+- `get_object_literal_index_info`：镜像 Go `getObjectLiteralIndexInfo` 的成员筛选 + `getUnionType` 合值（Go `UnionReductionSubtype` 对本轮 widen 后基元值观察等价）；`is_readonly = false`（`as const` 索引 readonly DEFER）。
+- **端口偏离（必要）**：Go `getObjectLiteralIndexInfo` 经 `prop.Declarations[0].Name()` 读计算名做 `isSymbolWithNumericName`/`isSymbolWithSymbolName`；本港合成属性符号无 declarations，故把计算名表达式类型随符号存入 `ObjectLiteralMember`，谓词 `is_object_literal_member_with_{symbol,numeric}_name` 据此判（计算名经 `flags.intersects(ES_SYMBOL_LIKE/NUMBER_LIKE)`，静态名经 `is_numeric_literal_name`）。
+- **记忆化偏离**：Go `checkComputedPropertyName` 经 `typeNodeLinks` 缓存且有 spread 预扫双跑；本港无表达式缓存，故**跳过 spread 预扫**（spread DEFER），每计算名只检查一次，避免 2464 双报。
+
+**严格 TDD（逐行为 red→green，一次一个；每片单独 `cargo test -p tsgo_checker <name>` 看红/绿）**：
+
+| # | 切片 | 最小 input → observable（实测红/绿） | 实现触点 |
+|---|---|---|---|
+| 1 tracer（genuine RED）| `object_literal_shorthand_property_reads_referenced_var_type` | `const a = 1;\nconst o = { a };\no.a;` → `number`（红：shorthand 跳过 → `o` 空 → `o.a`=`error`，实测 `TypeId(3)≠TypeId(8)`）| `check.rs` 成员循环加 `ShorthandPropertyAssignment` 臂 + 新私有 `check_shorthand_property_assignment` |
+| 2（slice 1 前 genuine RED；正控 green-on-arrival）| `object_literal_shorthand_property_mismatch_reports_2322` / `..._assignable_to_matching_annotation` | `const a = 1;\nconst o: { a: string } = { a };` → 1×2322；`= { a: number }` → 0（红：临时禁用 shorthand 臂实测源印为 `{}`，`Type '{}' is not assignable to type '{ a: string; }'.`）| 无（slice 1 解锁结构赋值）|
+| 3 tracer（genuine RED）| `object_literal_computed_string_name_synthesizes_string_index` | `const k: string = "x";\nconst o = { [k]: 1 };\no["anything"];` → `number`（红：计算名跳过 → 无索引 → `error`，`TypeId(3)≠TypeId(8)`）| `check.rs` 计算名预处理 + `has_computed_*` 块 + 索引合成 + 新私有 `check_computed_property_name`/`get_object_literal_index_info`/`is_object_literal_member_with_{symbol,numeric}_name` + 自由 fn `is_numeric_literal_name` + 私有 struct `ObjectLiteralMember` |
+| 3 正控（green-on-arrival）| `object_literal_named_property_coexists_with_computed_name` | `const k: string = "x";\nconst o = { b: 2, [k]: 1 };\no.b;` → `number`（命名属性不被索引吞）| 无 |
+| 3b tracer（genuine RED）| `object_literal_computed_number_name_synthesizes_number_index` | `const k: number = 0;\nconst o = { [k]: 1 };\no[0];` → `number`（红：同 slice 3）| 无（slice 3 的 number 臂一并落地）|
+| 3c（genuine RED）| `object_literal_computed_name_non_indexable_reports_2464` | `const k: boolean = true;\nconst o = { [k]: 1 };` → 1×2464（红：临时 `if false &&` 禁用 emission 实测 0 诊断）| `check.rs` `check_computed_property_name` 的 2464 emission |
+| 3 端到端（slice 3 前 genuine RED；正控 green-on-arrival）| `object_literal_string_index_value_mismatch_reports_2322` / `..._is_assignable_to_number` | `const k: string="x";\nconst o={[k]:1};\nconst s: string = o["foo"];` → 1×2322；`const n: number = ...` → 0（红：slice 3 前无索引 → `o["foo"]`=`error` 可赋任意 0 诊断）| 无（经 4bg `getApplicableIndexInfoForName` + 4ad `getIndexedAccessType`）|
+| 附加（单测）| `is_numeric_literal_name_matches_round_trip` | `"0"/"123"/"1.5"` 真；`"0xF00D"/"01"/"a"/""/"\u{FE}computed"` 假 | `is_numeric_literal_name` |
+
+> 红→绿证据：slice 1 / 3 / 3b tracer **均 genuine RED**（`o.a`/`o["anything"]`/`o[0]`=`error`，`TypeId(3)≠TypeId(8)`）；slice 2 经**临时禁用 shorthand 臂**实测红（源印 `{}` 非 `{ a: number; }`）；slice 3c 经**临时 `if false &&` 禁用 emission**实测红（0 诊断）；端到端 mismatch 在 slice 3 前 genuine red（无索引 → `error` 0 诊断）。正控为 **green-on-arrival 守卫**（slice 1 / slice 3 impl 一并解锁）——**如实记录非伪造红**（同 4bc/4bd/4be/4bf/4bg 口径）。
+
+**本轮交付**：
+- `core/check.rs`：成员循环加 `ShorthandPropertyAssignment` 臂 + 计算名预处理 + `has_computed_{string,number,symbol}_property` 块 + 索引签名合成；新私有 `check_shorthand_property_assignment`、`check_computed_property_name`（含 2464）、`get_object_literal_index_info`、`is_object_literal_member_with_symbol_name`、`is_object_literal_member_with_numeric_name`；新私有自由 fn `is_numeric_literal_name`；新私有 struct `ObjectLiteralMember`；imports 加 `IndexInfo`/`IndexInfoId`、`INTERNAL_SYMBOL_NAME_COMPUTED`。
+- 测试：`check_test.rs` +10（shorthand×3 + 计算名 string/number/coexist×3 + 2464×1 + 索引端到端×2 + `is_numeric_literal_name`×1）。
+- **未改任何既有 pub fn 签名、无新 pub 项、无 `lib.rs` 改动、无新依赖。** 全部新方法/fn/struct 私有；复用 4bg 既有 `pub(crate)`（`get_applicable_index_info_for_name` 等）+ 4ad `getIndexedAccessType`。
+
+**新公开 API 形状**：本轮**无新 pub 项**——公开 API 形状与 4bg 完全一致。`cargo build -p tsgo_compiler` 绿（实测）。
+
+**测试增量**：**450 单测**（+10，相对 4bg 基线 440）+ **134 doctest**（**±0**：新方法/fn 私有、不挂 doctest）。
+
+**公开 API 仅加法（compiler 保持绿）**：未改任何既有 `pub fn` 签名、未加任何 pub 项。`check_object_literal` 对 shorthand 从「跳过」改为典型成员；对非字面量计算名从「跳过」改为合成索引签名（下游属性/元素访问 + 赋值性更精确，无既有测试回归）。`cargo build -p tsgo_compiler` 绿（实测）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker`（`--lib` 450 单测 + `--doc` 134 doctest）绿；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。未 `--workspace`（无其它 lane）。未 `git commit`。
+
+**本轮 DEFER（带 blocked-by）**：
+- **`{ a = 1 }` shorthand 默认值**（解构-assignment-only，使属性 optional + 检查默认值）：本轮 `check_shorthand_property_assignment` 走非解构路径（`object_assignment_initializer.unwrap_or(name)`，对纯 `{ a }` 取 name）。blocked-by: 解构-assignment 目标类型化（`inDestructuringPattern` + `hasDefaultValue` + optional 化）。
+- **shorthand 显式类型注解 `{ a }: T`**（grammar-error 形）：未做。blocked-by: `checkTypeAssignableToAndOptionallyElaborate` elaboration。
+- **字面量 / unique-symbol 计算名 → 晚绑定命名成员**（`{ ["a"]: 1 }`/`{ [SYM]: 1 }`，`isTypeUsableAsPropertyName` → `getPropertyNameFromType` → 命名 late-bound 属性）：本轮**跳过**（计算名为字面量/unique 时不入命名表也不入索引）。blocked-by: late binding（`hasLateBindableName`/`getPropertyNameFromType` + `CheckFlagsLate` + `nameType` links）。
+- **spread 成员 `{...o}`**（+ spread 触发的 `propertiesArray` offset 分段 / `getObjectLiteralIndexInfo(propertiesArray[offset:])`）：未做。blocked-by: `getSpreadType` + 多段 offset。
+- **get/set/方法成员**（`checkObjectLiteralMethod` / accessor `checkNodeDeferred`）：未做。blocked-by: 访问器/方法签名收集。
+- **上下文类型（类型流入字面量）**：`checkExpressionForMutableLocation` 仅无上下文 widen；`contextualTypeHasPattern` 的 implied-prop optional / 2353 binding-pattern 分支未做。blocked-by: `getApparentTypeOfContextualType` + `getContextualType` + pattern-for-type。
+- **`as const` 索引 readonly**（`isConstContext` → index info `readonly`）：本轮 `is_readonly=false`（`{...} as const` 字面量本身仍 4bf/4be DEFER）。blocked-by: 对象字面量 const-context 类型化（`getRegularTypeOfObjectLiteral`）。
+- **`checkComputedPropertyName` 的 `n in obj`-name 特例 + `typeNodeLinks` 缓存 + spread 预扫双跑**：未做（无表达式缓存，跳过预扫避免双报）。blocked-by: in-operator 计算名 + 表达式类型记忆化。
+- **`isSymbolWithSymbolName` 的 `IsKnownSymbol` 臂 + `getObjectLiteralIndexInfo` 的 `components`（冲突计算名声明）**：未做。blocked-by: 已知符号（P6）+ 声明-carrying 合成符号。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/es6/shorthandPropertyAssignment/`（shorthand 属性基础形态）+ `tests/cases/conformance/types/members/objectTypeWithStringNamedNumericProperty*` / `tests/cases/conformance/expressions/objectLiterals/`（计算名索引签名）+ `tests/cases/conformance/types/computedPropertyNames/`（2464 计算名类型约束）最基础形态——无 spread/method/accessor/late-bound/contextual/const-readonly。
+
+**推荐下一轮（4bi）**：(a) **字面量/unique 计算名 → 晚绑定命名成员**（`{ ["a"]: 1 }` 成命名属性 `a`，`getPropertyNameFromType` + late binding，承接本轮 DEFER）；(b) **`2561`「Did you mean to write」建议变体**（`getSuggestionForNonexistentProperty` 拼写建议，承接 4bg）；(c) **get/set/方法成员**（`checkObjectLiteralMethod` 收集签名）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

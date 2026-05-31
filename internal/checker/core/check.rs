@@ -21,6 +21,7 @@
 
 use std::rc::Rc;
 
+use tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_COMPUTED;
 use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags, SymbolTable};
 use tsgo_core::compileroptions::ScriptTarget;
 use tsgo_diagnostics::{Category, Message};
@@ -31,7 +32,7 @@ use super::declared_types::{
 };
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
-use super::signatures::SignatureId;
+use super::signatures::{IndexInfo, IndexInfoId, SignatureId};
 use super::symbols::resolve_name;
 use super::type_facts::TypeFacts;
 use super::types::{LiteralValue, ObjectFlags, ObjectType, TypeFlags, TypeId};
@@ -116,6 +117,18 @@ enum NonNullReporter {
     Access,
     /// A call callee (`reportCannotInvokePossiblyNullOrUndefinedError`).
     Invocation,
+}
+
+// A typed object-literal member, recorded in declaration order to compute index
+// signatures (Go's `propertiesArray` entries). The port's synthesized property
+// symbols carry no declarations, so the computed-name expression's type is kept
+// alongside the symbol (Go reads it from `prop.Declarations[0].Name()`).
+struct ObjectLiteralMember {
+    // The synthesized property symbol carrying the member's value type.
+    symbol: tsgo_ast::SymbolId,
+    // The computed property name's expression type, or `None` for a
+    // statically-named member.
+    computed_name_type: Option<TypeId>,
 }
 
 impl Checker {
@@ -209,14 +222,21 @@ impl Checker {
     // member initializer's (widened) type (Go's `checkObjectLiteral` ->
     // `createObjectLiteralType` over `newAnonymousType`).
     //
-    // DEFER(phase-4-checker-4bg+): spread members (`{...o}`), computed property
-    // names, get/set/method members, shorthand properties, contextual typing
-    // (the type flowing INTO the literal), the excess-property `2353` check, the
-    // `as const` readonly freeze (`getRegularTypeOfObjectLiteral`), and the
-    // string/number/symbol index-signature synthesis for computed-name members.
-    // blocked-by: spread-type merge (`getSpreadType`), computed-name typing,
-    // accessor/method signature collection, shorthand resolution, contextual
-    // type propagation, and the relation engine's excess-property elaboration.
+    // A member whose name is a non-literal computed property name (`[k]: v`
+    // where `k: string`) does NOT become a named property; instead it
+    // contributes its value type to a string/number/symbol index signature on
+    // the object type (Go's `hasComputed*Property` flags feeding
+    // `getObjectLiteralIndexInfo`).
+    //
+    // DEFER(phase-4-checker-4bh+): spread members (`{...o}`), get/set/method
+    // members, contextual typing (the type flowing INTO the literal), the
+    // `as const` readonly freeze (`getRegularTypeOfObjectLiteral`), the
+    // late-bound *named* member for a string/number-literal or unique-symbol
+    // computed name (`isTypeUsableAsPropertyName` -> `getPropertyNameFromType`),
+    // and the destructuring-pattern member optionality. blocked-by: spread-type
+    // merge (`getSpreadType`), accessor/method signature collection, contextual
+    // type propagation, const-context freeze, late binding, and
+    // destructuring-assignment typing.
     // Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076)
     fn check_object_literal(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let members_nodes = match program.arena().data(node) {
@@ -225,28 +245,122 @@ impl Checker {
         };
         let mut members = SymbolTable::default();
         let mut properties: Vec<tsgo_ast::SymbolId> = Vec::new();
+        // Every typed member (named AND computed) in declaration order, used to
+        // compute index-signature value types (Go's `propertiesArray`).
+        let mut all_members: Vec<ObjectLiteralMember> = Vec::new();
+        let mut has_computed_string_property = false;
+        let mut has_computed_number_property = false;
+        let mut has_computed_symbol_property = false;
         for member_decl in members_nodes {
-            // DEFER(phase-4-checker-4bg+): only `name: value` property
-            // assignments with a non-computed name are typed; shorthand, spread,
-            // accessor, method, and computed-name members are skipped.
+            // DEFER(phase-4-checker-4bh+): spread (`{...o}`), accessor
+            // (`get`/`set`), and method (`m(){}`) members are skipped; only
+            // property assignments and shorthand properties are typed.
             let name_node = match program.arena().data(member_decl) {
                 NodeData::PropertyAssignment(d) => d.name,
+                NodeData::ShorthandPropertyAssignment(d) => d.name,
                 _ => continue,
             };
+            // A computed property name (`[expr]: v`) types its bracket
+            // expression first (Go: `computedNameType =
+            // checkComputedPropertyName(memberDecl.Name())`).
+            let computed_name_type =
+                if program.arena().kind(name_node) == Kind::ComputedPropertyName {
+                    Some(self.check_computed_property_name(program, name_node))
+                } else {
+                    None
+                };
+            // Go's member loop dispatches on the member kind: a property
+            // assignment types its initializer, a shorthand property types the
+            // referenced identifier (Go's `checkObjectLiteral` switch).
+            let member_type = match program.arena().kind(member_decl) {
+                Kind::PropertyAssignment => self.check_property_assignment(program, member_decl),
+                Kind::ShorthandPropertyAssignment => {
+                    self.check_shorthand_property_assignment(program, member_decl)
+                }
+                _ => continue,
+            };
+            // A non-literal computed name assignable to `string | number |
+            // symbol` contributes to an index signature of the matching key
+            // kind, not a named property (Go's `hasComputed*Property` block).
+            // DEFER(phase-4-checker-4bh+): a string/number-literal or
+            // unique-symbol computed name becomes a late-bound NAMED member
+            // (`isTypeUsableAsPropertyName`); the reachable subset skips it.
+            if let Some(name_type) = computed_name_type {
+                if !self
+                    .get_type(name_type)
+                    .flags()
+                    .intersects(TypeFlags::STRING_OR_NUMBER_LITERAL_OR_UNIQUE)
+                {
+                    let string = self.string_type;
+                    let number = self.number_type;
+                    let es_symbol = self.es_symbol_type;
+                    let string_number_symbol = self.get_union_type(&[string, number, es_symbol]);
+                    if self.is_type_assignable_to(program, name_type, string_number_symbol) {
+                        if self.is_type_assignable_to(program, name_type, number) {
+                            has_computed_number_property = true;
+                        } else if self.is_type_assignable_to(program, name_type, es_symbol) {
+                            has_computed_symbol_property = true;
+                        } else {
+                            has_computed_string_property = true;
+                        }
+                        // Go: `newSymbolEx(SymbolFlagsProperty | member.Flags,
+                        // member.Name, ...)` with the binder's `__computed` name;
+                        // the symbol carries the member value type for the index
+                        // signature's value-type union.
+                        let prop = self.new_object_literal_property(
+                            INTERNAL_SYMBOL_NAME_COMPUTED,
+                            SymbolFlags::PROPERTY,
+                            member_type,
+                        );
+                        all_members.push(ObjectLiteralMember {
+                            symbol: prop,
+                            computed_name_type: Some(name_type),
+                        });
+                    }
+                    continue;
+                }
+                // Literal/unique computed name -> late-bound named member: DEFER.
+                continue;
+            }
             let Some(name) = property_name_text(program, name_node) else {
                 continue;
             };
-            let member_type = self.check_property_assignment(program, member_decl);
             // Go: `newSymbolEx(SymbolFlagsProperty | member.Flags, member.Name, checkFlags)`
             // then `links.resolvedType = t`. Object-literal properties are never
             // optional in the reachable subset, so only `Property` is carried.
             let prop = self.new_object_literal_property(&name, SymbolFlags::PROPERTY, member_type);
             members.insert(name, prop);
             properties.push(prop);
+            all_members.push(ObjectLiteralMember {
+                symbol: prop,
+                computed_name_type: None,
+            });
+        }
+        // Go's `createObjectLiteralType` synthesizes one index signature per
+        // present computed-name kind, unioning the value types of all members
+        // whose names match that key kind (`getObjectLiteralIndexInfo`).
+        // DEFER(phase-4-checker-4bh+): the `isConstContext` readonly flag (an
+        // `as const` object literal is not yet typed); index infos are mutable.
+        let mut index_infos: Vec<IndexInfoId> = Vec::new();
+        if has_computed_string_property {
+            let string = self.string_type;
+            let info = self.get_object_literal_index_info(program, &all_members, string);
+            index_infos.push(info);
+        }
+        if has_computed_number_property {
+            let number = self.number_type;
+            let info = self.get_object_literal_index_info(program, &all_members, number);
+            index_infos.push(info);
+        }
+        if has_computed_symbol_property {
+            let es_symbol = self.es_symbol_type;
+            let info = self.get_object_literal_index_info(program, &all_members, es_symbol);
+            index_infos.push(info);
         }
         let object = ObjectType {
             members,
             properties,
+            index_infos,
             ..Default::default()
         };
         // Go's `createObjectLiteralType` sets `ObjectFlagsFreshLiteral |
@@ -262,6 +376,132 @@ impl Checker {
             symbol,
             super::types::TypeData::Object(object),
         )
+    }
+
+    // Builds the index signature of kind `key_type` (`string`/`number`/`symbol`)
+    // for an object literal, unioning the value types of every member whose name
+    // matches that key kind (Go's `getObjectLiteralIndexInfo`): a string index
+    // unions all non-symbol-named members; a number index unions numeric-named
+    // members; a symbol index unions symbol-named members. An empty union is
+    // `undefined`.
+    //
+    // The reachable subset reads each member's computed-name kind from the
+    // `ObjectLiteralMember` record (the port's synthesized symbols carry no
+    // declarations, unlike Go's `prop.Declarations[0].Name()`), and uses
+    // `getUnionType` (Go's `UnionReductionSubtype` is observably equivalent for
+    // the widened primitive value types built here).
+    //
+    // DEFER(phase-4-checker-4bh+): the `components` slice (conflicting
+    // computed-name declarations) and known-symbol membership. blocked-by:
+    // declaration-carrying synthesized symbols + well-known symbols.
+    // Go: internal/checker/checker.go:Checker.getObjectLiteralIndexInfo(19576)
+    fn get_object_literal_index_info(
+        &mut self,
+        program: &dyn BoundProgram,
+        members: &[ObjectLiteralMember],
+        key_type: TypeId,
+    ) -> IndexInfoId {
+        let string = self.string_type;
+        let number = self.number_type;
+        let mut prop_types: Vec<TypeId> = Vec::new();
+        for member in members {
+            let matches = if key_type == string {
+                !self.is_object_literal_member_with_symbol_name(member)
+            } else if key_type == number {
+                self.is_object_literal_member_with_numeric_name(program, member)
+            } else {
+                self.is_object_literal_member_with_symbol_name(member)
+            };
+            if matches {
+                let globals = program.globals();
+                prop_types.push(get_type_of_symbol(self, program, member.symbol, globals));
+            }
+        }
+        let value_type = if prop_types.is_empty() {
+            self.undefined_type()
+        } else {
+            self.get_union_type(&prop_types)
+        };
+        self.new_index_info(IndexInfo::new(key_type, value_type, false))
+    }
+
+    // Reports whether an object-literal member's name is symbol-typed (Go's
+    // `isSymbolWithSymbolName` reachable subset): a computed name whose
+    // expression is assignable to the ES-symbol kind. A statically-named member
+    // is never symbol-named here.
+    // DEFER(phase-4-checker-4bh+): `IsKnownSymbol` (well-known-symbol props).
+    // blocked-by: well-known symbols (P6).
+    // Go: internal/checker/checker.go:Checker.isSymbolWithSymbolName(19596)
+    fn is_object_literal_member_with_symbol_name(&self, member: &ObjectLiteralMember) -> bool {
+        match member.computed_name_type {
+            Some(t) => self
+                .get_type(t)
+                .flags()
+                .intersects(TypeFlags::ES_SYMBOL_LIKE),
+            None => false,
+        }
+    }
+
+    // Reports whether an object-literal member's name is numeric (Go's
+    // `isSymbolWithNumericName`): a statically-named member with a numeric-literal
+    // name, or a computed name whose expression is assignable to the number kind
+    // (Go's `isNumericComputedName`).
+    // Go: internal/checker/checker.go:Checker.isSymbolWithNumericName(19607)
+    fn is_object_literal_member_with_numeric_name(
+        &self,
+        program: &dyn BoundProgram,
+        member: &ObjectLiteralMember,
+    ) -> bool {
+        match member.computed_name_type {
+            Some(t) => self.get_type(t).flags().intersects(TypeFlags::NUMBER_LIKE),
+            None => is_numeric_literal_name(&self.property_symbol_name(program, member.symbol)),
+        }
+    }
+
+    // Types a computed property name `[expr]` (Go's `checkComputedPropertyName`):
+    // its bracket expression is type-checked and that type is returned (used by
+    // `checkObjectLiteral` to decide whether the member is late-bound named or
+    // contributes to an index signature). When the expression's type is neither a
+    // `string`/`number`/`symbol`-like type nor assignable to `string | number |
+    // symbol` (or is nullable), `2464` is reported.
+    //
+    // DEFER(phase-4-checker-4bh+): the `n in obj`-name special case for
+    // type-literal/class/interface parents, and the `typeNodeLinks` caching (the
+    // port has no expression-type cache; the spread pre-pass that would re-check
+    // computed names is deferred, so each name is checked once). blocked-by:
+    // in-operator computed names + expression-type memoization.
+    // Go: internal/checker/checker.go:Checker.checkComputedPropertyName(26619)
+    fn check_computed_property_name(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let expression = match program.arena().data(node) {
+            NodeData::ComputedPropertyName(d) => d.expression,
+            _ => return self.error_type,
+        };
+        let t = self.check_expression(program, expression);
+        let flags = self.get_type(t).flags();
+        // Go: `isTypeAssignableToKind(t, StringLike|NumberLike|ESSymbolLike)`. The
+        // `any`/error type is permitted (it behaves as `any`).
+        let kind_ok = flags.intersects(
+            TypeFlags::STRING_LIKE
+                | TypeFlags::NUMBER_LIKE
+                | TypeFlags::ES_SYMBOL_LIKE
+                | TypeFlags::ANY,
+        );
+        let usable_as_index_key = kind_ok || {
+            let string = self.string_type;
+            let number = self.number_type;
+            let es_symbol = self.es_symbol_type;
+            let string_number_symbol = self.get_union_type(&[string, number, es_symbol]);
+            self.is_type_assignable_to(program, t, string_number_symbol)
+        };
+        if flags.intersects(TypeFlags::NULLABLE) || !usable_as_index_key {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::A_COMPUTED_PROPERTY_NAME_MUST_BE_OF_TYPE_STRING_NUMBER_SYMBOL_OR_ANY,
+                &[],
+            );
+        }
+        t
     }
 
     // Types an object-literal `name: value` member (Go's
@@ -283,6 +523,37 @@ impl Checker {
             return self.error_type;
         };
         self.check_expression_for_mutable_location(program, initializer)
+    }
+
+    // Types an object-literal shorthand property `{ a }` (Go's
+    // `checkShorthandPropertyAssignment`): `{ a }` is equivalent to `{ a: a }`,
+    // so the member's type is the type of the referenced identifier `a`, typed
+    // through `checkExpressionForMutableLocation` (a fresh literal widens to its
+    // primitive, exactly as a normal property value would).
+    //
+    // Outside a destructuring pattern, Go uses the cover-initialized-name
+    // expression (`{ a = 1 }`'s `ObjectAssignmentInitializer`) when present and
+    // otherwise the name identifier; we mirror that reachable path.
+    //
+    // DEFER(phase-4-checker-4bh+): the destructuring-assignment-pattern path
+    // (`inDestructuringPattern`), where `{ a = 1 }` makes the property optional
+    // and the default value is checked, and the (grammar-error) explicit type
+    // annotation on a shorthand (`{ a }: T`), whose Go path runs
+    // `checkTypeAssignableToAndOptionallyElaborate` and returns the annotated
+    // type. blocked-by: destructuring-assignment typing + shorthand annotation
+    // elaboration.
+    // Go: internal/checker/checker.go:Checker.checkShorthandPropertyAssignment(13603)
+    fn check_shorthand_property_assignment(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
+        let (name, initializer) = match program.arena().data(node) {
+            NodeData::ShorthandPropertyAssignment(d) => (d.name, d.object_assignment_initializer),
+            _ => return self.error_type,
+        };
+        let expr = initializer.unwrap_or(name);
+        self.check_expression_for_mutable_location(program, expr)
     }
 
     // Types an expression occupying a mutable location (an object-literal
@@ -3433,18 +3704,26 @@ fn is_const_type_reference(arena: &tsgo_ast::NodeArena, type_node: NodeId) -> bo
 
 // Returns the property name text of a non-computed object-literal member name
 // node (an identifier, string literal, or numeric literal). A computed property
-// name (`[expr]: v`) yields `None` (deferred). Mirrors reading `member.Name`
-// off the binder's property symbol, where a numeric name is its decimal text.
+// name (`[expr]: v`) yields `None` (handled separately as an index signature or
+// late-bound member). Mirrors reading `member.Name` off the binder's property
+// symbol, where a numeric name is its decimal text.
 // Go: internal/checker/checker.go:Checker.checkObjectLiteral (member.Name)
 fn property_name_text(program: &dyn BoundProgram, name_node: NodeId) -> Option<String> {
     match program.arena().kind(name_node) {
         Kind::Identifier | Kind::StringLiteral | Kind::NumericLiteral => {
             Some(program.arena().text(name_node).to_string())
         }
-        // DEFER(phase-4-checker-4bg+): computed property names (`[expr]: v`).
-        // blocked-by: `checkComputedPropertyName` + late binding.
         _ => None,
     }
+}
+
+// Reports whether `name` is a numeric literal name (Go's `isNumericLiteralName`):
+// the name is a numeric name iff `ToString(ToNumber(name)) == name`, i.e. the
+// JS-number round-trip of its text is exactly the text (so `"0"`/`"1.5"` are
+// numeric but `"0xF00D"`/`"01"` are not).
+// Go: internal/checker/utilities.go:isNumericLiteralName(860)
+fn is_numeric_literal_name(name: &str) -> bool {
+    tsgo_jsnum::from_string(name).to_string() == name
 }
 
 // Locates the name node of the object-literal property assignment named `name`
