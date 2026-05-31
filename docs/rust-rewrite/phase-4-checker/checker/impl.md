@@ -2455,6 +2455,74 @@ impl EmitResolver {
 
 **推荐下一轮（4bd）**：(a) fresh-vs-regular 字面量配对（`getFreshTypeOfLiteralType` 按-regular 缓存 fresh + `getWidenedLiteralType` 在 `const`/可变 binding 推断的 widening）——解锁 `let x = "a"` widen 到 `string` 的可观察行为；(b) `getDiscriminantPropertyAccess` 的 const-alias 候选（`const k = obj.kind`）；(c) bigint 字面量 interning（需 `LiteralValue::BigInt` + bigint 表达式类型化）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
 
+## 4bd 落地记录（worklog 摘要）—— fresh-vs-regular 字面量配对（`getFreshTypeOfLiteralType`）+ `getWidenedLiteralType` + `let`/`var` 未注解初始化器 widening（const-gated）
+
+**目标**：在 4bc（值键 interning 的 regular 字面量）之上，落地 Go 的 fresh/regular 字面量配对 + widening：字面量**表达式**产出 FRESH 字面量（配对到 4bc 的 interned regular）；未注解 `let x = "a"` 的声明类型 widen 到 `string`（可变 binding），而 `const x = "a"` 保留字面量 `"a"`。逐行为红→绿，一次一个。单 lane（无其它 lane）。cargo 仅 `-p tsgo_checker`（未 `--workspace`）。未 `git commit`。
+
+**Go 真值（ground truth，已逐一核对）**：
+- `internal/checker/checker.go:Checker.getFreshTypeOfLiteralType(25146)`：freshable（`TypeFlagsFreshable`=`ENUM|LITERAL`）类型若 `d.freshType==nil` 则 `f := newLiteralType(t.flags, d.value, t)`（fresh 的 `regularType=t`）、`f.symbol=t.symbol`、`f.freshType=f`（自指）、`d.freshType=f`；返回 `d.freshType`。非 freshable 恒等。
+- `internal/checker/checker.go:Checker.getRegularTypeOfLiteralType(25132)`：freshable → 返回 `regularType`（regular 自身的 `regularType` 即自己；fresh 的指回 regular）；union → `mapType`（DEFER）。
+- `internal/checker/checker.go:isFreshLiteralType(25160)`：freshable 且 `freshType==t`（自指）。
+- `internal/checker/checker.go:checkExpressionWorker(7711/7717)`：`KindStringLiteral`→`getFreshTypeOfLiteralType(getStringLiteralType(text))`；`KindNumericLiteral` 同构；布尔 `true`/`false` 直接返回构造期 `trueType`/`falseType`（本就是 fresh 单例）。
+- `internal/checker/checker.go:Checker.getWidenedLiteralType(25346)`：`StringLiteral&fresh`→`stringType`；`NumberLiteral&fresh`→`numberType`；`BigIntLiteral&fresh`→`bigintType`；`BooleanLiteral&fresh`→`booleanType`；`EnumLike&fresh`→`getBaseTypeOfEnumLikeType`（DEFER）；`Union`→`mapType`（DEFER）；否则恒等。
+- `internal/checker/checker.go:getTypeForVariableLikeDeclaration(16607)`：无注解且有初始化器 → `widenTypeInferredFromInitializer(decl, checkDeclarationInitializer(decl,...))`；`checkDeclarationInitializer(16656)` 核心 = `checkExpressionCached(initializer)`。
+- `internal/checker/checker.go:widenTypeInferredFromInitializer(16741)`→`getWidenedLiteralTypeForInitializer(16756)`：`getCombinedNodeFlagsCached(decl)&NodeFlagsConstant!=0 || isDeclarationReadonly(decl)` → 返回 `t`（保留字面量）；否则 `getWidenedLiteralType(t)`。`NodeFlagsConstant`=`Const|Using`。
+- `internal/checker/checker.go:getWidenedType(18214)`：仅对 `ObjectFlagsRequiresWidening` 的类型生效（object-literal/widening-type），对字面量是恒等——故本港只跑 `getWidenedLiteralType`、跳过 object-literal widening（DEFER）。
+- `internal/checker/checker.go:checkVariableLikeDeclaration(5863)`：`t = getTypeOfSymbol(symbol)`；主声明且有初始化器 → `initializerType = checkExpressionCached(initializer)` + `checkTypeAssignableToAndOptionallyElaborate(initializerType, t, ...)`。**关键**：`checkExpressionCached` 记忆化使初始化器只检查一次、诊断只报一次。
+
+**可达裁剪（faithful-but-reachable）**：`LiteralType` 已有 `fresh_type`/`regular_type` 字段（4bb 起），布尔早在构造期建好 fresh/regular 对。本轮新增 `get_fresh_type_of_literal_type`/`is_fresh_literal_type`/`get_widened_literal_type`（均 `pub(crate)`），`check_expression` 的 `StringLiteral`/`NumericLiteral` 臂包 fresh。未注解变量推断：`get_type_of_variable_or_property` 的 `None`（无注解）分支对 **VariableDeclaration + 有初始化器** 走 `check_expression(init)` → `getWidenedLiteralTypeForInitializer`（const-gated）；property/parameter 初始化器推断、binding-pattern、循环初始化器、circular-initializer 解析栈 DEFER。`getWidenedType` 的 object-literal widening 跳过（对字面量恒等）。`getWidenedLiteralType` 的 bigint/enum/union 臂 DEFER（无可达驱动）。
+
+**记忆化偏离（port-divergence，必要）**：本港无 `checkExpressionCached`（表达式类型不缓存、`check_expression` 重跑会重报诊断）。Go 靠缓存使初始化器只检查/报一次。本港在 `check_variable_declaration` 改为：未注解声明的初始化器**已在 `get_type_of_symbol` 推断时检查并报诊断**，故不再二次 `check_expression`（仅在**有显式注解**时二次检查初始化器做赋值性校验）——可观察等价于 Go（初始化器内层诊断只报一次；无注解时无赋值性误报，因 `t` 是初始化器自身的 widened 类型，恒可赋）。
+
+**严格 TDD（逐行为 red→green，一次一个；每片单独 `cargo test -p tsgo_checker <name>` 看红/绿）**：
+
+| # | 切片 | 最小 input → observable（实测红/绿） | 实现触点 |
+|---|---|---|---|
+| 1 tracer（genuine RED）| `string_literal_expression_is_fresh_paired_to_interned_regular` | `"a";` 的 `check_expression` → **fresh（≠ interned regular）且 `regular_type_of_literal_type(fresh)==get_string_literal_type("a")`**（红：旧返回 interned regular 自身，`TypeId(22)==TypeId(22)`）| `mod.rs` 新 `pub(crate) get_fresh_type_of_literal_type`/`is_fresh_literal_type`；`check.rs` `StringLiteral`/`NumericLiteral` 臂包 `get_fresh_type_of_literal_type(get_*_literal_type(...))` |
+| 1 guard（green-on-arrival）| `fresh_string_literal_expressions_still_intern_to_one_type_id` | `"a";\n"a";` → 同 id（fresh 缓存在 regular 上）| 无 |
+| 2 tracer（genuine RED）| `let_binding_widens_string_literal_initializer_to_string` | `let x = "a";\nconst y: "a" = x;` → **1×2322「Type 'string' is not assignable to type '"a"'.」**（红：未注解→`any`，0≠1）| `mod.rs` 新 `pub(crate) get_widened_literal_type`（仅 string 臂）；`declared_types.rs` `get_type_of_variable_or_property` 无注解分支推断初始化器 + 新私有 `variable_declaration_initializer`/`get_widened_literal_type_for_initializer`/`combined_node_flags`；`check.rs` `check_variable_declaration` 改为「无注解不二次检查」（避免重报）|
+| 2 guard（green-on-arrival）| `let_binding_widened_string_is_assignable_to_string` | `let x = "a";\nvar s: string = x;` → 0 诊断 | 无 |
+| 2 guard（green-on-arrival）| `const_binding_keeps_string_literal_assignable_to_literal_target` | `const x = "a";\nconst y: "a" = x;` → 0 诊断（const 保留字面量）| 无 |
+| 3a tracer（genuine RED）| `let_binding_widens_number_literal_initializer_to_number` | `let n = 1;\nconst m: 1 = n;` → **1×2322「Type 'number' is not assignable to type '1'.」**（红：slice 2 仅 string 臂，`1` 未 widen → 0≠1）| `mod.rs` `get_widened_literal_type` 加 number 臂 |
+| 3a guard（green-on-arrival）| `let_binding_widened_number_is_assignable_to_number` | `let n = 1;\nvar x: number = n;` → 0 诊断 | 无 |
+| 3b tracer（genuine RED）| `let_binding_widens_boolean_literal_initializer_to_boolean` | `let b = true;\nconst c: true = b;` → **1×2322「Type 'false \| true' is not assignable to type 'true'.」**（红：无 boolean 臂，`true` 未 widen → 0≠1）| `mod.rs` `get_widened_literal_type` 加 boolean 臂 |
+| 3b guard（green-on-arrival）| `let_binding_widened_boolean_is_assignable_to_boolean` | `let b = true;\nvar x: boolean = b;` → 0 诊断 | 无 |
+| 3b guard（green-on-arrival）| `const_binding_keeps_boolean_literal_assignable_to_literal_target` | `const b = true;\nconst c: true = b;` → 0 诊断 | 无 |
+
+> 红→绿证据：slice 1 / 2 / 3a / 3b **均 genuine RED**（1：`TypeId(22)==TypeId(22)`；2：未注解→`any` 0≠1；3a：仅 string 臂 number 未 widen 0≠1；3b：仅 string+number 臂 boolean 未 widen 0≠1）→ 最小触点转绿。guard 为 **green-on-arrival**（fresh 缓存天然分享 id；widened 可赋基元；const 保留字面量经身份）——**如实记录非伪造红**（同 4bc 口径）。**踩坑修正**：slice 2 初版在 `get_type_of_variable_or_property` 加初始化器检查后，函数/箭头表达式初始化器被检查两次（推断 1 次 + `check_variable_declaration` 1 次）→ 4 个既有 return-type 测试报双诊断（2≠1）；改为「无注解不二次检查」（镜像 Go `checkExpressionCached` 记忆化）后转绿。**踩坑修正 2**：boolean widening 源类型 `boolean`（=`false \| true` union）印为 `'false \| true'`——`false\|true`⇒`boolean` 的 `typeToString` 塌缩（Go `formatUnionTypes`）DEFER 到 4j 印刷器（与既有 `check_element_access_boolean_index_reports_2538` 同口径），故 expected 取 `'false \| true'`。
+
+**本轮交付**：
+- `core/mod.rs`：新 `pub(crate)` `get_fresh_type_of_literal_type`（创建并链接 fresh/regular 对，`fresh.symbol=t.symbol`）、`is_fresh_literal_type`、`get_widened_literal_type`（string/number/boolean fresh 臂）。
+- `core/check.rs`：`check_expression` 的 `StringLiteral`/`NumericLiteral` 臂包 `get_fresh_type_of_literal_type`；`check_variable_declaration` 改为「无注解声明不二次 `check_expression`」（避免重报，镜像 Go 记忆化）。
+- `core/declared_types.rs`：`get_type_of_variable_or_property` 无注解 + VariableDeclaration + 有初始化器 → 推断 widened 类型；新私有 `variable_declaration_initializer`/`get_widened_literal_type_for_initializer`（const-gated）/`combined_node_flags`（`getCombinedNodeFlags`：node→VariableDeclarationList→VariableStatement OR-fold）；`use tsgo_ast::NodeFlags`。
+- 测试：`check_test.rs` +10（slice1×2 + slice2×3 + slice3a×2 + slice3b×3）。
+- **未改任何既有 pub fn 签名、无新 pub 项、无 `lib.rs` 改动、无新依赖。** 新方法均 `pub(crate)`/私有（additive 内部，不入公开 API）。
+
+**新公开 API 形状**：本轮**无新 pub 项**——`get_fresh_type_of_literal_type`/`is_fresh_literal_type`/`get_widened_literal_type` 为 `pub(crate)`，`check_expression` 臂内部改写，var-decl 推断为私有自由 fn。公开 API 形状与 4bc 完全一致。`cargo build -p tsgo_compiler` 绿（实测）。
+
+**测试增量**：**409 单测**（+10，相对 4bc 基线 399）+ **134 doctest**（**±0**：新方法均 `pub(crate)` 用 `//` 行注释、不挂 doctest）。
+
+**公开 API 仅加法（compiler + transformers 保持绿）**：未改任何既有 `pub fn` 签名，未加任何 pub 项。`check_expression` 对字面量改返回 fresh（下游关系/union/flow 均经 `regular_*` 归一或按值比较，行为只更 Go-faithful）；未注解变量类型从 `any` 变为推断 widened 类型（下游赋值性更精确，无既有测试回归）。`cargo build -p tsgo_compiler` 绿（实测）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker`（`--lib` 409 单测 + `--doc` 134 doctest）绿；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。未 `--workspace`（无其它 lane）。未 `git commit`。
+
+**flow 按值绕过 shim：保留（非 clean 退役）**：4bc 已退役 relations 层 `literals_equal_by_value`。flow 层两处按值 shim（`equality_overlap`@4az 相等 narrowing、`types_same_literal_value`@判别 non-uniform）**本轮保留**。原因：本轮引入 fresh 后，**值位**字面量是 fresh、**类型/属性位**字面量是 regular（不同 id），`equality_overlap` 靠比较 `literal_value()`（fresh/regular 同值）正确关联，是必需的；更关键的是 `flow_test.rs` 多处用 `new_literal_type` 手工建字面量（不经 interning，等值仍异 id），直接依赖按值比较 —— 退役需先把这些手工单测迁到 `get_*_literal_type` interning（跨多测试文件，单独立项）。故按任务「retire if clean, else keep + note」判定为**非 clean → 保留 + 记录**。blocked-by: 手工 `new_literal_type` flow 单测迁移到 interning。
+
+**本轮 DEFER（带 blocked-by）**：
+- **`getWidenedLiteralType` 的 bigint / enum-like / union 臂**：bigint 无可达字面量表达式（item 4 见下）；enum-like 需 `getBaseTypeOfEnumLikeType`；union 需 `mapType(getWidenedLiteralType)`。blocked-by: bigint 字面量类型化 + enum 基类型 + union `mapType`。
+- **bigint 字面量 interning（item 4）**：探查后**未落地**——`LiteralValue` 无 `BigInt` 变体，bigint 字面量表达式（`1n`）未被 `check_expression` 类型化（`BigIntLiteral` 臂缺失），且 `getBigIntLiteralType` 用 `jsnum.PseudoBigInt` 值键。落地需先建 `PseudoBigInt` 值类型 + `LiteralValue::BigInt` + bigint 字面量表达式臂，跨多触点，干净裁不出最小可达 RED。保持 DEFER。blocked-by: `PseudoBigInt` 值类型 + bigint 字面量表达式类型化。
+- **contextual/return 位 widening**（`getWidenedLiteralLikeTypeForContextualType`/`isLiteralOfContextualType`）：未做。blocked-by: 上下文类型传递 + `isLiteralOfContextualType`。
+- **`as const`（`getRegularTypeOfLiteralType` 的 const-assertion 抑制 widening）**：未做。blocked-by: `TypeAssertion`/`as const` 表达式类型化 + freshness 保留。
+- **property/parameter 初始化器推断 + binding-pattern + 循环初始化器 + circular-initializer 解析栈（`pushTypeResolution`）**：本轮仅 VariableDeclaration identifier。blocked-by: 类成员/参数推断 + binding-element 类型化 + 循环解析栈。
+- **`getWidenedType` 的 object-literal/widening-type 通道**（`getWidenedTypeOfObjectLiteral` + `RequiresWidening`/`CONTAINS_WIDENING_TYPE`）：本轮仅 `getWidenedLiteralType`（对字面量已足）。blocked-by: object-literal 类型构造 + widening-type 标记。
+- **`isDeclarationReadonly`（readonly property / parameter property 保留字面量）**：本轮 const-gate 仅读 `NodeFlags::CONSTANT`（const/using）。blocked-by: readonly 修饰符解析。
+- **`getRegularTypeOfLiteralType` 的 union 分支记忆化**（`u.regularType = mapType`）：本港仍只处理 freshable 单体（4bc 既有 DEFER）。blocked-by: union `regularType` 链 + `mapType`。
+- **const-alias 判别候选 / 负数一元字面量 / typeof 全位 / always-nullish 操作数诊断**：未做（任务 DEFER 列表 + 4bc 既有 DEFER）。blocked-by: alias reference 匹配 / 前缀一元类型化 / typeof 位建模 / nullishness 分析。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/types/literal/`（fresh/regular 字面量 widening）+ `tests/cases/compiler/`（`let`/`var` vs `const` 字面量推断：`let x = "a"` → `string`、`const x = "a"` → `"a"`）+ `tests/cases/conformance/types/typeWidening/`（字面量 widening 基础形态）。
+
+**推荐下一轮（4be）**：(a) `as const`（const-assertion 抑制 widening + freshness 保留，`getRegularTypeOfLiteralType` 的 const-context 分支）——解锁 `const x = "a" as const` 保 literal 与数组/对象 readonly 化的起步；(b) bigint 字面量 interning（需 `LiteralValue::BigInt` + `PseudoBigInt` + `BigIntLiteral` 表达式臂 + `getBigIntLiteralType`/`getWidenedLiteralType` bigint 臂）；(c) contextual-type 位的字面量保留（`isLiteralOfContextualType`/`getWidenedLiteralLikeTypeForContextualType`，须上下文类型传递）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

@@ -138,15 +138,18 @@ impl Checker {
             Kind::Identifier => self.check_identifier(program, node),
             Kind::StringLiteral => {
                 // Go: getFreshTypeOfLiteralType(getStringLiteralType(text)). The
-                // fresh/regular pairing (widening in mutable contexts) is DEFER'd;
-                // the value-keyed intern is what gives every `"a"` one TypeId.
+                // value-keyed intern gives every `"a"` one regular TypeId; the
+                // fresh wrapping makes the *expression* carry the fresh form,
+                // which `getWidenedLiteralType` widens in a mutable binding.
                 let text = program.arena().text(node).to_string();
-                self.get_string_literal_type(&text)
+                let regular = self.get_string_literal_type(&text);
+                self.get_fresh_type_of_literal_type(regular)
             }
             Kind::NumericLiteral => {
                 // Go: getFreshTypeOfLiteralType(getNumberLiteralType(value)).
                 let value = tsgo_jsnum::from_string(program.arena().text(node));
-                self.get_number_literal_type(value)
+                let regular = self.get_number_literal_type(value);
+                self.get_fresh_type_of_literal_type(regular)
             }
             Kind::TrueKeyword => self.true_type,
             Kind::FalseKeyword => self.false_type,
@@ -2218,8 +2221,8 @@ impl Checker {
     // Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration(5760)
     fn check_variable_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
         self.check_grammar_variable_declaration(program, node);
-        let (name, initializer) = match program.arena().data(node) {
-            NodeData::VariableDeclaration(d) => (d.name, d.initializer),
+        let (name, initializer, type_node) = match program.arena().data(node) {
+            NodeData::VariableDeclaration(d) => (d.name, d.initializer, d.type_node),
             _ => return,
         };
         // DEFER(phase-4-checker-4m+): binding patterns (destructuring).
@@ -2240,7 +2243,19 @@ impl Checker {
             return;
         }
         let globals = program.globals();
+        // `getTypeOfSymbol` resolves the declared type; for an un-annotated
+        // declaration it infers (and type-checks) the initializer, so the
+        // initializer's own diagnostics are emitted there. Go then re-checks the
+        // initializer via the memoized `checkExpressionCached` (a cache hit, no
+        // re-report) against that widened type, which trivially holds. The port
+        // has no expression-type cache, so a second `check_expression` here
+        // would duplicate the initializer's inner diagnostics; only re-check the
+        // initializer when there is an explicit annotation to validate against.
+        // Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration(5863)
         let declared = get_type_of_symbol(self, program, symbol, globals);
+        if type_node.is_none() {
+            return;
+        }
         let initializer_type = self.check_expression(program, initializer);
         if !self.is_type_assignable_to(program, initializer_type, declared) {
             let generalized = self.generalized_source_for_error(initializer_type, declared);

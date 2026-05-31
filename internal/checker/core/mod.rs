@@ -1307,6 +1307,70 @@ impl Checker {
         t
     }
 
+    // Returns the fresh form of a freshable (literal/enum) type, allocating and
+    // linking it on first use. A literal expression carries the FRESH literal
+    // type, paired to the interned regular one via `freshType`/`regularType`:
+    // the fresh's `regularType` is the source `t` and its `freshType` is itself,
+    // while `t`'s `freshType` is the new fresh type, so `regularType` of the
+    // fresh resolves back to `t`. Non-freshable types are returned unchanged.
+    //
+    // Side effects: on first use for `t`, allocates the fresh literal type and
+    // links the fresh/regular pair.
+    // Go: internal/checker/checker.go:Checker.getFreshTypeOfLiteralType(25146)
+    pub(crate) fn get_fresh_type_of_literal_type(&mut self, t: TypeId) -> TypeId {
+        let (value, flags, symbol, existing_fresh) = {
+            let ty = self.get_type(t);
+            if !ty.flags().intersects(TypeFlags::FRESHABLE) {
+                return t;
+            }
+            match &ty.data {
+                TypeData::Literal(d) => (d.value.clone(), ty.flags, ty.symbol, d.fresh_type),
+                _ => return t,
+            }
+        };
+        if let Some(fresh) = existing_fresh {
+            return fresh;
+        }
+        let fresh = self.new_literal_type(flags, value, Some(t));
+        self.types.get_mut(fresh).symbol = symbol;
+        set_literal_fresh_type(&mut self.types, fresh, fresh);
+        set_literal_fresh_type(&mut self.types, t, fresh);
+        fresh
+    }
+
+    // Reports whether `t` is a fresh literal type (Go's `isFreshLiteralType`): a
+    // freshable type whose `freshType` link points back at itself.
+    // Go: internal/checker/checker.go:isFreshLiteralType(25160)
+    pub(crate) fn is_fresh_literal_type(&self, t: TypeId) -> bool {
+        let ty = self.get_type(t);
+        ty.flags().intersects(TypeFlags::FRESHABLE)
+            && matches!(&ty.data, TypeData::Literal(d) if d.fresh_type == Some(t))
+    }
+
+    // Widens a fresh literal type to its base primitive: a fresh string literal
+    // (`"a"`) widens to `string`. A regular (non-fresh) literal, or a non-literal
+    // type, is returned unchanged, so a literal in a `const`/readonly position
+    // (which carries the regular form) keeps its literal type.
+    //
+    // DEFER(phase-4-checker-later): the bigint fresh-literal arm (no bigint
+    // literal expression is typed yet), the enum-like base type, and the union
+    // `mapType` arm are deferred. blocked-by: bigint literal typing, enum base
+    // types, and union `mapType` over `getWidenedLiteralType`.
+    // Go: internal/checker/checker.go:Checker.getWidenedLiteralType(25346)
+    pub(crate) fn get_widened_literal_type(&mut self, t: TypeId) -> TypeId {
+        let flags = self.get_type(t).flags();
+        if flags.intersects(TypeFlags::STRING_LITERAL) && self.is_fresh_literal_type(t) {
+            return self.string_type;
+        }
+        if flags.intersects(TypeFlags::NUMBER_LITERAL) && self.is_fresh_literal_type(t) {
+            return self.number_type;
+        }
+        if flags.intersects(TypeFlags::BOOLEAN_LITERAL) && self.is_fresh_literal_type(t) {
+            return self.boolean_type;
+        }
+        t
+    }
+
     /// Sets the `JSX.IntrinsicElements` type used to resolve intrinsic JSX tags.
     ///
     /// This is the injection point standing in for lib-global resolution until

@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 
 use tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_INDEX;
 use tsgo_ast::{
-    CheckFlags, Kind, ModifierFlags, NodeArena, NodeData, NodeId, SymbolFlags, SymbolId,
+    CheckFlags, Kind, ModifierFlags, NodeArena, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId,
     SymbolTable,
 };
 
@@ -921,14 +921,84 @@ fn get_type_of_variable_or_property(
         NodeData::ParameterDeclaration(d) => d.type_node,
         _ => None,
     });
-    let t = match type_node {
-        Some(node) => get_type_from_type_node(checker, program, node, globals),
-        // DEFER(phase-4-checker-4g): infer from initializer when un-annotated.
-        // blocked-by: expression checking (4g).
-        None => checker.any_type(),
+    let t = if let Some(node) = type_node {
+        get_type_from_type_node(checker, program, node, globals)
+    } else if let Some((decl, initializer)) = declaration
+        .and_then(|decl| variable_declaration_initializer(program, decl).map(|i| (decl, i)))
+    {
+        // Un-annotated variable with an initializer: the declared type is the
+        // initializer's type, widened in a mutable (`let`/`var`) binding (Go's
+        // `getTypeForVariableLikeDeclaration` ->
+        // `widenTypeInferredFromInitializer` -> `getWidenedLiteralTypeForInitializer`).
+        //
+        // DEFER(phase-4-checker-later): the object-literal/widening-type pass of
+        // `getWidenedType` (only `getWidenedLiteralType` is applied here, which
+        // is a no-op for non-literal types), parameter/property initializer
+        // inference, binding patterns, and the circular-initializer resolution
+        // stack. blocked-by: object-literal widening + binding-element typing +
+        // `pushTypeResolution`.
+        let initializer_type = checker.check_expression(program, initializer);
+        get_widened_literal_type_for_initializer(checker, program, decl, initializer_type)
+    } else {
+        // No annotation and nothing to infer from (Go falls back to `any`).
+        checker.any_type()
     };
     checker.value_symbol_links.get(symbol).resolved_type = Some(t);
     t
+}
+
+// Returns the initializer node of a variable declaration, if it has one (the
+// reachable subset of Go's variable-like initializer handling). Property and
+// parameter initializer inference is deferred.
+//
+// DEFER(phase-4-checker-later): property/parameter initializer inference.
+// blocked-by: contextual typing + class member initializer inference.
+fn variable_declaration_initializer(program: &dyn BoundProgram, decl: NodeId) -> Option<NodeId> {
+    match program.arena().data(decl) {
+        NodeData::VariableDeclaration(d) => d.initializer,
+        _ => None,
+    }
+}
+
+// Keeps a literal initializer's type for a `const`/`using`/readonly binding, or
+// widens its fresh literal to the base primitive for a mutable (`let`/`var`)
+// binding (Go's `getWidenedLiteralTypeForInitializer`). Const-ness is read from
+// the declaration's combined node flags (Go's `getCombinedNodeFlagsCached &
+// NodeFlagsConstant`).
+//
+// DEFER(phase-4-checker-later): `isDeclarationReadonly` (readonly property /
+// parameter properties). blocked-by: readonly modifier resolution on
+// properties.
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralTypeForInitializer(16756)
+fn get_widened_literal_type_for_initializer(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    declaration: NodeId,
+    t: TypeId,
+) -> TypeId {
+    if combined_node_flags(program, declaration).intersects(NodeFlags::CONSTANT) {
+        return t;
+    }
+    checker.get_widened_literal_type(t)
+}
+
+// Computes the combined node flags of a variable declaration (Go's
+// `getCombinedNodeFlags`): a declaration's `let`/`const`/`using` bits live on
+// the enclosing `VariableDeclarationList`, with ambient/export bits on the
+// `VariableStatement`, so the flags are OR-folded up that chain.
+// Go: internal/ast/utilities.go:getCombinedNodeFlags / getCombinedFlags
+fn combined_node_flags(program: &dyn BoundProgram, node: NodeId) -> NodeFlags {
+    let arena = program.arena();
+    let mut combined = arena.flags(node);
+    if let Some(list) = arena.parent(node) {
+        if arena.kind(list) == Kind::VariableDeclarationList {
+            combined |= arena.flags(list);
+            if let Some(statement) = arena.parent(list) {
+                combined |= arena.flags(statement);
+            }
+        }
+    }
+    combined
 }
 
 /// Maps a type node to a type.

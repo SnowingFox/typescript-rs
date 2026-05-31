@@ -212,6 +212,48 @@ fn boolean_literal_expressions_intern_to_one_type_id() {
     assert_ne!(t_true_1, t_false, "`true` and `false` are distinct ids");
 }
 
+// 4bd slice 1 tracer (genuine RED): a literal expression produces a FRESH
+// literal type paired to the interned regular one. Go's `checkExpressionWorker`
+// wraps the value-keyed `getStringLiteralType` in `getFreshTypeOfLiteralType`,
+// so the expression's type is the fresh form (distinct id) whose
+// `getRegularTypeOfLiteralType` is the interned regular literal. Before this
+// round the port returned the interned regular directly (no fresh form), so the
+// expression id equalled the regular id.
+// Go: internal/checker/checker.go:Checker.getFreshTypeOfLiteralType(25146)
+#[test]
+fn string_literal_expression_is_fresh_paired_to_interned_regular() {
+    let p = StubProgram::parse_and_bind("/a.ts", "\"a\";");
+    let mut c = Checker::new();
+    let lit = expr_stmt_expression(&p, 0);
+    let fresh = c.check_expression(&p, lit);
+    let regular = c.get_string_literal_type("a");
+    assert_ne!(
+        fresh, regular,
+        "a literal expression must yield the fresh form, distinct from the interned regular"
+    );
+    assert_eq!(
+        c.regular_type_of_literal_type(fresh),
+        regular,
+        "the fresh literal's regular counterpart is the interned regular literal"
+    );
+}
+
+// 4bd slice 1 guard (green-on-arrival): two `"a"` expressions still share one
+// id after the fresh wrapping, because `getFreshTypeOfLiteralType` caches the
+// fresh form on the regular literal (so both occurrences resolve to the same
+// fresh type).
+// Go: internal/checker/checker.go:Checker.getFreshTypeOfLiteralType(25146)
+#[test]
+fn fresh_string_literal_expressions_still_intern_to_one_type_id() {
+    let p = StubProgram::parse_and_bind("/a.ts", "\"a\";\n\"a\";");
+    let mut c = Checker::new();
+    let first = expr_stmt_expression(&p, 0);
+    let second = expr_stmt_expression(&p, 1);
+    let t1 = c.check_expression(&p, first);
+    let t2 = c.check_expression(&p, second);
+    assert_eq!(t1, t2, "two fresh `\"a\"` literals must share one TypeId");
+}
+
 // Go: internal/checker/checker.go:Checker.checkPropertyAccessExpression
 #[test]
 fn check_property_access_yields_member_type() {
@@ -3514,6 +3556,163 @@ fn instanceof_callable_right_reports_no_diagnostic() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
         "interface O {\n  x: number;\n}\ndeclare const o: O;\ndeclare function f(): void;\no instanceof f;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bd slice 2 tracer (genuine RED): an un-annotated `let` binding widens its
+// fresh string-literal initializer to `string` (Go's
+// `widenTypeInferredFromInitializer` -> `getWidenedLiteralTypeForInitializer`,
+// which only keeps the literal for `const`/`readonly`). With `let x = "a"`, the
+// inferred type of `x` is `string`, which is NOT assignable to the literal
+// target `"a"`, so `const y: "a" = x` reports `2322`. Before this round an
+// un-annotated variable resolved to `any`, so nothing was reported.
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralType(25346)
+#[test]
+fn let_binding_widens_string_literal_initializer_to_string() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x = \"a\";\nconst y: \"a\" = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type '\"a\"'."
+    );
+}
+
+// 4bd slice 2 guard (green-on-arrival): the widened `let` binding is assignable
+// to its base primitive, so `let x = "a"; var s: string = x;` reports nothing.
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralType(25346)
+#[test]
+fn let_binding_widened_string_is_assignable_to_string() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x = \"a\";\nvar s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bd slice 2 guard (green-on-arrival): a `const` binding keeps the literal
+// (Go's `getWidenedLiteralTypeForInitializer` returns the type unchanged when
+// the combined node flags include `Const`), so `const x = "a"` types `x` as the
+// literal `"a"`, assignable to the literal target `"a"`: no diagnostics.
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralTypeForInitializer(16756)
+#[test]
+fn const_binding_keeps_string_literal_assignable_to_literal_target() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = \"a\";\nconst y: \"a\" = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bd slice 3a tracer (genuine RED): an un-annotated `let` binding widens its
+// fresh number-literal initializer to `number` (the `NumberLiteral` arm of Go's
+// `getWidenedLiteralType`). With `let n = 1`, `n` is `number`, NOT assignable to
+// the literal target `1`, so `const m: 1 = n` reports `2322`. Before the number
+// arm landed the fresh `1` was not widened, so `n` stayed assignable to `1`.
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralType(25346)
+#[test]
+fn let_binding_widens_number_literal_initializer_to_number() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let n = 1;\nconst m: 1 = n;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type '1'."
+    );
+}
+
+// 4bd slice 3a guard (green-on-arrival): the widened `let` number binding is
+// assignable to its base primitive, so `let n = 1; var x: number = n;` reports
+// nothing.
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralType(25346)
+#[test]
+fn let_binding_widened_number_is_assignable_to_number() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let n = 1;\nvar x: number = n;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bd slice 3b tracer (genuine RED): an un-annotated `let` binding widens its
+// fresh boolean-literal initializer to `boolean` (the `BooleanLiteral` arm of
+// Go's `getWidenedLiteralType`). With `let b = true`, `b` is `boolean`, NOT
+// assignable to the literal target `true`, so `const c: true = b` reports
+// `2322`. Before the boolean arm landed the fresh `true` was not widened, so
+// `b` stayed assignable to `true`.
+//
+// The widened source `boolean` prints as its `false | true` union here: the
+// `false | true` => `boolean` collapse in `typeToString` (Go's
+// `formatUnionTypes`) is DEFER'd to 4j's printer, mirroring the existing
+// `check_element_access_boolean_index_reports_2538` test.
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralType(25346)
+#[test]
+fn let_binding_widens_boolean_literal_initializer_to_boolean() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let b = true;\nconst c: true = b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'false | true' is not assignable to type 'true'."
+    );
+}
+
+// 4bd slice 3b guard (green-on-arrival): the widened `let` boolean binding is
+// assignable to its base primitive, so `let b = true; var x: boolean = b;`
+// reports nothing.
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralType(25346)
+#[test]
+fn let_binding_widened_boolean_is_assignable_to_boolean() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let b = true;\nvar x: boolean = b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bd slice 3b guard (green-on-arrival): a `const` boolean binding keeps the
+// literal, so `const b = true; const c: true = b;` reports nothing (the literal
+// `true` is assignable to the literal target `true`).
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralTypeForInitializer(16756)
+#[test]
+fn const_binding_keeps_boolean_literal_assignable_to_literal_target() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const b = true;\nconst c: true = b;",
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
