@@ -508,20 +508,34 @@ impl EmitResolver {
     /// [`Symbol`](SerializedTypeNode::Symbol), `void`/`undefined`/`never` and a
     /// `null` literal type → [`VoidZero`](SerializedTypeNode::VoidZero), and
     /// `any`/`unknown`/`object` (plus Go's catch-all) →
-    /// [`Object`](SerializedTypeNode::Object).
+    /// [`Object`](SerializedTypeNode::Object). 4au extends the same switch with
+    /// the structural arms that reuse the existing variants: Go's leading
+    /// `SkipTypeParentheses` (`(T)` unwraps to its inner type), the
+    /// `TemplateLiteralType` arm (→ `String`, grouped with `string`), and the
+    /// non-`null` literal-type arms (`serializeLiteralOfLiteralTypeNode`):
+    /// string literal → `String`, numeric literal → `Number`, bigint literal →
+    /// `BigInt`, `true`/`false` → `Boolean`, and a negated numeric/bigint
+    /// literal (`-1`) recurses on its operand.
     ///
     /// DEFER(phase-5): the non-keyword arms Go also handles — a `TypeReference`
     /// to a value-having entity (`Date`/a class → that entity's constructor, via
     /// `GetTypeReferenceSerializationKind` + symbol/value resolution),
-    /// union/intersection/conditional recursion, `FunctionType`/`ConstructorType`
-    /// → `Function`, `ArrayType`/`TupleType` → `Array`, `TypePredicate`,
-    /// `TemplateLiteralType` → `String`, the non-`null` literal-type arms
-    /// (string/numeric/bigint/boolean), and `SkipTypeParentheses`. These
+    /// union/intersection/conditional recursion, and `TypePredicate`. These
     /// currently fall to the conservative [`Object`](SerializedTypeNode::Object)
     /// tail rather than their Go-specific result.
     /// blocked-by: `GetTypeReferenceSerializationKind` (entity value-ness +
     /// `printer.TypeReferenceSerializationKind`) + the `serializeTypeNode`
     /// recursion, which the P5 decorator transform drives.
+    ///
+    /// DEFER: `FunctionType`/`ConstructorType` → `Function` and
+    /// `ArrayType`/`TupleType` → `Array` are *not* ported here because they
+    /// require new [`SerializedTypeNode`] variants (`Function`/`Array`), and the
+    /// P5 `tsgo_transformers` `serialized_type_to_expression` matches this enum
+    /// *exhaustively with no wildcard* — adding variants breaks
+    /// `cargo build -p tsgo_compiler`. They must land in a lane that may also
+    /// extend that transformer match.
+    /// blocked-by: a coordinated checker+transformers change adding the
+    /// `Function`/`Array` variants and their transformer arms.
     ///
     /// # Examples
     /// ```
@@ -538,6 +552,13 @@ impl EmitResolver {
         program: &dyn BoundProgram,
         type_node: NodeId,
     ) -> SerializedTypeNode {
+        // Go: `node = ast.SkipTypeParentheses(node)` (run before the switch) —
+        // `SkipTypeParentheses` loops `for IsParenthesizedTypeNode(node) { node =
+        // node.Type() }`, so `(T)` (and `((T))`) dispatches on its inner type.
+        let mut type_node = type_node;
+        while let NodeData::ParenthesizedType(d) = program.arena().data(type_node) {
+            type_node = d.type_node;
+        }
         match program.arena().kind(type_node) {
             // Go: case KindVoidKeyword, KindUndefinedKeyword, KindNeverKeyword
             // -> NewVoidZeroExpression.
@@ -551,23 +572,17 @@ impl EmitResolver {
             // Go: case KindSymbolKeyword -> NewIdentifier("Symbol").
             Kind::SymbolKeyword => SerializedTypeNode::Symbol,
             // Go: case KindTemplateLiteralType, KindStringKeyword -> NewIdentifier("String").
-            Kind::StringKeyword => SerializedTypeNode::String,
+            Kind::TemplateLiteralType | Kind::StringKeyword => SerializedTypeNode::String,
             // Go: case KindBooleanKeyword -> NewIdentifier("Boolean").
             Kind::BooleanKeyword => SerializedTypeNode::Boolean,
-            // Go: case KindLiteralType -> serializeLiteralOfLiteralTypeNode.
-            // Reachable subset: a `null` literal type (`: null`) serializes to
-            // `void 0` (Go's `case KindNullKeyword -> NewVoidZeroExpression`).
-            // DEFER(phase-5): the string/numeric/bigint/boolean literal arms
-            // (-> String/Number/BigInt/Boolean) and the negative-numeric prefix.
-            // blocked-by: full serializeLiteralOfLiteralTypeNode port (P5).
-            Kind::LiteralType
-                if matches!(
-                    program.arena().data(type_node),
-                    NodeData::LiteralType(d) if program.arena().kind(d.literal) == Kind::NullKeyword
-                ) =>
-            {
-                SerializedTypeNode::VoidZero
-            }
+            // Go: case KindLiteralType ->
+            // serializeLiteralOfLiteralTypeNode(node.AsLiteralTypeNode().Literal).
+            Kind::LiteralType => match program.arena().data(type_node) {
+                NodeData::LiteralType(d) => {
+                    serialize_literal_of_literal_type_node(program, d.literal)
+                }
+                _ => SerializedTypeNode::Object,
+            },
             // Go: the `serializeTypeNode` switch tail
             // (`return s.f.NewIdentifier("Object")`) — the catch-all for
             // everything not matched by a specific arm.
@@ -634,6 +649,55 @@ fn modifier_flags(arena: &tsgo_ast::NodeArena, node: NodeId) -> ModifierFlags {
     modifiers
         .map(|m| m.modifier_flags)
         .unwrap_or(ModifierFlags::empty())
+}
+
+// Serializes the `literal` expression of a `LiteralType` node (the literal `"a"`
+// / `1` / `true` / `null` inside `: "a"` / `: 1` / `: true` / `: null`) to the
+// runtime-constructor descriptor Go's `serializeLiteralOfLiteralTypeNode`
+// emits.
+//
+// DEFER(phase-5): the `KindNoSubstitutionTemplateLiteral -> String` literal arm
+// is not reachable here — the Rust parser's `parseNonArrayType` does not yet
+// route a no-substitution template (`` `abc` ``) type to `parseLiteralTypeNode`
+// (it falls to a type reference), so this port omits that arm until the parser
+// gap is closed. The conservative `Object` tail covers any other literal kind.
+// blocked-by: parser `parseNonArrayType` `NoSubstitutionTemplateLiteral` arm.
+// Go: internal/transformers/tstransforms/typeserializer.go:metadataSerializer.serializeLiteralOfLiteralTypeNode
+fn serialize_literal_of_literal_type_node(
+    program: &dyn BoundProgram,
+    literal: NodeId,
+) -> SerializedTypeNode {
+    match program.arena().kind(literal) {
+        // Go: case KindStringLiteral, KindNoSubstitutionTemplateLiteral ->
+        // NewIdentifier("String").
+        Kind::StringLiteral => SerializedTypeNode::String,
+        // Go: case KindNumericLiteral -> NewIdentifier("Number").
+        Kind::NumericLiteral => SerializedTypeNode::Number,
+        // Go: case KindBigIntLiteral -> NewIdentifier("BigInt").
+        Kind::BigIntLiteral => SerializedTypeNode::BigInt,
+        // Go: case KindTrueKeyword, KindFalseKeyword -> NewIdentifier("Boolean").
+        Kind::TrueKeyword | Kind::FalseKeyword => SerializedTypeNode::Boolean,
+        // Go: case KindPrefixUnaryExpression { operand := node.Operand; switch
+        // operand.Kind { case KindNumericLiteral, KindBigIntLiteral ->
+        // serializeLiteralOfLiteralTypeNode(operand) } } — a negative
+        // numeric/bigint literal type (`-1` / `-1n`) recurses on the operand.
+        Kind::PrefixUnaryExpression => match program.arena().data(literal) {
+            NodeData::PrefixUnaryExpression(d)
+                if matches!(
+                    program.arena().kind(d.operand),
+                    Kind::NumericLiteral | Kind::BigIntLiteral
+                ) =>
+            {
+                serialize_literal_of_literal_type_node(program, d.operand)
+            }
+            // Go default: debug.FailBadSyntaxKind(operand) — conservative tail.
+            _ => SerializedTypeNode::Object,
+        },
+        // Go: case KindNullKeyword -> NewVoidZeroExpression.
+        Kind::NullKeyword => SerializedTypeNode::VoidZero,
+        // Go default: debug.FailBadSyntaxKind — the conservative `Object` tail.
+        _ => SerializedTypeNode::Object,
+    }
 }
 
 #[cfg(test)]

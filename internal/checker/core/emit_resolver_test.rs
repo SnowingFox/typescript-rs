@@ -521,6 +521,132 @@ fn serialize_type_node_any_unknown_object_are_object() {
     );
 }
 
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (Go applies `ast.SkipTypeParentheses(node)` *before* the switch, so a
+// parenthesized type `(number)` unwraps to its inner `number` keyword and
+// serializes to the global `Number` ctor — not the conservative `Object`)
+#[test]
+fn serialize_type_node_parenthesized_unwraps_to_inner() {
+    // `: (number)` parses as a `ParenthesizedType` wrapping a `NumberKeyword`.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: (number);");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::ParenthesizedType);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::Number
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (`case KindTemplateLiteralType, KindStringKeyword -> NewIdentifier("String")`:
+// a template literal *type* with substitutions serializes to the global
+// `String` ctor)
+#[test]
+fn serialize_type_node_template_literal_type_is_string() {
+    // `` : `a${string}b` `` (with a substitution) parses as a
+    // `TemplateLiteralType` node, distinct from the `String` keyword.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: `a${string}b`;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::TemplateLiteralType);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::String
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeLiteralOfLiteralTypeNode
+// (`case KindStringLiteral, KindNoSubstitutionTemplateLiteral ->
+// NewIdentifier("String")`: a string-literal type `"a"` serializes to `String`)
+#[test]
+fn serialize_type_node_string_literal_type_is_string() {
+    // `: "a"` parses as a `LiteralType` whose literal is a `StringLiteral`.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: \"a\";");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::LiteralType);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::String
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeLiteralOfLiteralTypeNode
+// (`case KindNumericLiteral -> NewIdentifier("Number")`: a numeric-literal type
+// `1` serializes to the global `Number` ctor)
+#[test]
+fn serialize_type_node_numeric_literal_type_is_number() {
+    // `: 1` parses as a `LiteralType` whose literal is a `NumericLiteral`.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: 1;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::LiteralType);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::Number
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeLiteralOfLiteralTypeNode
+// (`case KindTrueKeyword, KindFalseKeyword -> NewIdentifier("Boolean")`: the
+// `true`/`false` literal types serialize to the global `Boolean` ctor)
+#[test]
+fn serialize_type_node_boolean_literal_types_are_boolean() {
+    // `: true` / `: false` parse as `LiteralType`s whose literal is the
+    // `true`/`false` keyword.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const a: true;\ndeclare const b: false;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, var_type_annotation(&p, 0)),
+        SerializedTypeNode::Boolean
+    );
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, var_type_annotation(&p, 1)),
+        SerializedTypeNode::Boolean
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeLiteralOfLiteralTypeNode
+// (`case KindBigIntLiteral -> NewIdentifier("BigInt")`: a bigint-literal type
+// `1n` serializes to the global `BigInt` ctor)
+#[test]
+fn serialize_type_node_bigint_literal_type_is_bigint() {
+    // `: 1n` parses as a `LiteralType` whose literal is a `BigIntLiteral`.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: 1n;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::LiteralType);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::BigInt
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeLiteralOfLiteralTypeNode
+// (`case KindPrefixUnaryExpression` recurses on the operand: a negative
+// numeric-literal type `-1` serializes to the global `Number` ctor)
+#[test]
+fn serialize_type_node_negative_numeric_literal_type_is_number() {
+    // `: -1` parses as a `LiteralType` whose literal is a
+    // `PrefixUnaryExpression` (`-`) over a `NumericLiteral`.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: -1;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::LiteralType);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::Number
+    );
+}
+
 // Go: internal/checker/emitresolver.go:EmitResolver.IsImplementationOfOverload
 #[test]
 fn implementation_of_overload_is_detected() {
