@@ -3900,3 +3900,203 @@ fn non_const_assertion_to_matching_type_is_assignable() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// 4bf slice 1 tracer (genuine RED): an object literal `{ a: 1 }` types as an
+// anonymous object type whose property `a` carries the member initializer's
+// (widened) type, so reading `o.a` resolves to `number`. Before this arm was
+// wired `check_expression` returned the `error` type for an
+// `ObjectLiteralExpression`, so `o` was `error` and `o.a` resolved to `error`
+// (not `number`). Go's `checkPropertyAssignment` types the initializer through
+// `checkExpressionForMutableLocation`, which widens the fresh literal `1` to
+// `number`, so the stored property type is `number`.
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076)
+#[test]
+fn object_literal_property_reads_member_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1 };\no.a;");
+    let access = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let number = c.number_type();
+    assert_eq!(c.check_expression(&p, access), number);
+}
+
+// 4bf slice 1 guard (green-on-arrival): a string-valued member types as
+// `string` (the widened `"x"`), confirming non-numeric member initializers
+// flow through `checkExpressionForMutableLocation` too.
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076)
+#[test]
+fn object_literal_string_property_reads_member_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { b: \"x\" };\no.b;");
+    let access = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let string = c.string_type();
+    assert_eq!(c.check_expression(&p, access), string);
+}
+
+// 4bf slice 1 guard (green-on-arrival): a multi-property literal builds an
+// anonymous object type carrying both members, printed structurally by the node
+// builder as `{ a: number; b: string; }` (member-declaration order preserved).
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) / nodebuilder
+#[test]
+fn object_literal_prints_structural_member_types() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1, b: \"x\" };\no;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ a: number; b: string; }"
+    );
+}
+
+// 4bf slice 2 (green-on-arrival, unlocked by slice 1): an object literal is
+// structurally assignable to a matching annotation, so
+// `const o: { a: number } = { a: 1 }` reports nothing (member `a: number`
+// relates to the target's `a: number`). Before slice 1 the literal was the
+// `error` type (assignable to anything), so this also reported nothing — its
+// genuine red lived in the mismatch case below.
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) + relater
+#[test]
+fn object_literal_assignable_to_matching_annotation() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { a: number } = { a: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bf slice 2 (genuine RED before slice 1): a member whose (widened) type does
+// not relate to the annotated property type reports `2322`. `{ a: "x" }` has
+// `a: string`, which is not assignable to the target's `a: number`. Before
+// slice 1 the literal was the `error` type (0 diagnostics); slice 1's
+// object-literal typing makes the structural mismatch observable.
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) + relater
+#[test]
+fn object_literal_property_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { a: number } = { a: \"x\" };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '{ a: string; }' is not assignable to type '{ a: number; }'."
+    );
+}
+
+// 4bf slice 3 tracer (genuine RED): an array literal `[1, 2]` types as the
+// global `Array<T>` reference whose element type is the widened union of the
+// element expression types (here `number`). Reading `arr[0]` therefore resolves
+// to `number` (through the `[n: number]: T` index signature instantiated to
+// `number`). Before this arm `check_expression` returned the `error` type for
+// an `ArrayLiteralExpression`, so `arr` was `error` and `arr[0]` was `error`
+// (not `number`). A synthetic top-level `interface Array<T>` stands in for the
+// lib type until P6 loads lib.d.ts.
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral(7989)
+#[test]
+fn array_literal_element_access_resolves_element_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst arr = [1, 2];\narr[0];",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let number = c.number_type();
+    assert_eq!(c.check_expression(&p, access), number);
+}
+
+// 4bf slice 3 (green-on-arrival, unlocked by the tracer impl): the array element
+// type is assignable to a matching annotation. `arr` is `number[]`, so
+// `const n: number = arr[0]` reports nothing.
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral(7989)
+#[test]
+fn array_literal_element_assignable_to_number() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst arr = [1, 2];\nconst n: number = arr[0];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bf slice 3 (genuine RED before the tracer impl): the array element type does
+// not relate to a mismatched annotation. `arr` is `number[]`, so `arr[0]` is
+// `number`, which is not assignable to `string`: `const n: string = arr[0]`
+// reports `2322`. Before the array-literal arm `arr` was the `error` type and
+// nothing was reported.
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral(7989)
+#[test]
+fn array_literal_element_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst arr = [1, 2];\nconst n: string = arr[0];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// 4bf slice 3 guard: an empty array literal `[]` takes the `never` element type
+// under strictNullChecks (Go's `implicitNeverType` arm; defaults on via
+// `strict != false`), so its type is `Array<never>`. Checked directly on the
+// literal node (reading a binding's element via flow would engage the deferred
+// evolving-array path).
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral(7989)
+#[test]
+fn empty_array_literal_is_never_array_under_strict_null_checks() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\n[];",
+    );
+    let literal = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, literal);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "Array<never>"
+    );
+}
+
+// 4bf slice 3 guard: with strictNullChecks off, an empty array literal `[]`
+// takes the `undefined` element type (Go's `undefinedWideningType` arm; the
+// widening distinction is not modeled), so its type is `Array<undefined>`.
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral(7989)
+#[test]
+fn empty_array_literal_is_undefined_array_without_strict_null_checks() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+    let options = CompilerOptions {
+        strict_null_checks: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    // The checker reads strictNullChecks off its RETAINED program's options, so
+    // the program must be retained (an intrinsic-only `Checker::new()` would use
+    // the defaults, where `strict != false` enables strictNullChecks).
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\n[];",
+        options,
+    ));
+    let literal = expr_stmt_expression(&p, 1);
+    let view = std::rc::Rc::clone(&p);
+    let mut c = Checker::new_checker(p);
+    let t = c.check_expression(view.as_ref(), literal);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, view.as_ref(), t),
+        "Array<undefined>"
+    );
+}

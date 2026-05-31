@@ -132,7 +132,14 @@ fn serialize_members(checker: &mut Checker, program: &dyn BoundProgram, ty: Type
     }
     let mut parts = Vec::with_capacity(properties.len());
     for property in properties {
-        let name = program.symbol(property).name.clone();
+        // An object-literal property is a checker-synthesized (transient)
+        // symbol whose name lives in the checker's transient arena, not the
+        // program (which would panic on the tagged id).
+        let name = if super::is_synthesized_symbol(property) {
+            checker.synthesized_symbol_name(property)
+        } else {
+            program.symbol(property).name.clone()
+        };
         let property_type = get_type_of_symbol(checker, program, property, None);
         let printed = type_to_string(checker, program, property_type);
         parts.push(format!("{name}: {printed}"));

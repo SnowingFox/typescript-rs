@@ -784,6 +784,33 @@ impl Checker {
         symbols::SymbolId(SYNTHESIZED_SYMBOL_TAG | index)
     }
 
+    /// Mints a synthesized (transient) property symbol for an object-literal
+    /// member named `name`, carrying `flags` and the already-computed member
+    /// `member_type` as its resolved type.
+    ///
+    /// Unlike [`new_synthesized_property`](Checker::new_synthesized_property)
+    /// (whose type is lazily combined from a union/intersection
+    /// `containing_type`), an object-literal property's type is known eagerly
+    /// from its initializer, so it is stored directly via
+    /// [`set_synthesized_symbol_resolved_type`](Checker::set_synthesized_symbol_resolved_type).
+    /// The containing-type slot is irrelevant for such a symbol (the resolved
+    /// type short-circuits the union/intersection combine path), so the member
+    /// type itself is recorded there as a harmless valid placeholder.
+    ///
+    /// Side effects: pushes a symbol into the synthesized-symbol arena and
+    /// records its resolved type.
+    // Go: internal/checker/checker.go:Checker.checkObjectLiteral (newSymbolEx + links.resolvedType = t)
+    pub(crate) fn new_object_literal_property(
+        &mut self,
+        name: &str,
+        flags: symbols::SymbolFlags,
+        member_type: TypeId,
+    ) -> symbols::SymbolId {
+        let prop = self.new_synthesized_property(name, flags, CheckFlags::empty(), member_type);
+        self.set_synthesized_symbol_resolved_type(prop, member_type);
+        prop
+    }
+
     // Returns the arena index encoded in a synthesized symbol id.
     fn synthesized_index(id: symbols::SymbolId) -> usize {
         (id.0 & !SYNTHESIZED_SYMBOL_TAG) as usize

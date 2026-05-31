@@ -2579,6 +2579,65 @@ impl EmitResolver {
 
 **推荐下一轮（4bf）**：(a) `[1,2] as const` / `{x:1} as const` 的 readonly 元组/对象——需先给 `check_expression` 接 `ArrayLiteralExpression`/`ObjectLiteralExpression`（字面量表达式类型化）再做 const 冻结（`getRegularTypeOfObjectLiteral` + tuple readonly）；(b) `<T>expr`（`TypeAssertionExpression`）臂 + `checkAssertionDeferred` 的 `2352` 可比性（须 `isTypeComparableTo` + `getWidenedType`）；(c) bigint 字面量 interning（`LiteralValue::BigInt` + `PseudoBigInt` + `BigIntLiteral` 表达式臂）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
 
+## 4bf 落地记录（worklog 摘要）—— 对象字面量 / 数组字面量**表达式**类型化（`checkObjectLiteral` / `checkArrayLiteral` 可达子集）
+
+**目标**：补齐 `check_expression` 的长期地基缺口——`{ x: 1 }`（`ObjectLiteralExpression`）与 `[1, 2]`（`ArrayLiteralExpression`）此前一律返回 `error_type`。本轮把二者类型化为 Go 一致的可达形态：对象字面量 → 带属性符号的匿名对象类型；数组字面量 → `Array<T>` 引用（元素 widen union）。逐行为红→绿，一次一个。单 lane（无其它 lane）。cargo 仅 `-p tsgo_checker`（未 `--workspace`）。未 `git commit`。
+
+**建立在以下既有基建之上**：
+- 4x **瞬态/合成符号 arena**（`new_synthesized_property` + `set_synthesized_symbol_resolved_type` + `is_synthesized_symbol`）：本轮新增 `new_object_literal_property`——直接置 `resolvedType` 的对象字面量属性符号（不走 union/intersection 的惰性合并；`containingType` 槽对它无意义，置成员类型自身作无害有效占位）。
+- 4a/4v **类型 arena**（`new_object_type` / `ObjectType.members`+`properties` / `ObjectFlags`）：对象字面量类型直接 `types.alloc(OBJECT, Anonymous|ObjectLiteral|FreshLiteral|ContainsObjectOrArrayLiteral, symbol, Object{members,properties})`。
+- 4ad/4ae **`Array<T>` 引用 + 数字索引签名实例化**：数组字面量经 `create_type_reference(globalArrayType, [elementType])`（名字解析 `Array`，与 `get_type_from_array_type_node` 同 lib stand-in），`arr[0]` 经 4ad 数字索引签名实例化到元素类型。
+- 4bc/4bd **fresh/regular 配对 + `getWidenedLiteralType`**：`checkExpressionForMutableLocation` 在对象成员值 / 数组元素位 widen fresh 字面量（`1`→`number`，`"x"`→`string`），非-const/无上下文路径。
+- 4u/4w **关系引擎结构化对象比较**（`properties_related_to`）：对象/数组字面量赋值性（2322）天然解锁——合成成员被 `get_properties_of_type` 迭代、`get_type_of_symbol` 经 `is_synthesized_symbol` 读 `resolvedType`。
+
+**可达裁剪（faithful-but-reachable）**：
+- `check_expression` 新增 `Kind::ObjectLiteralExpression => check_object_literal` 与 `Kind::ArrayLiteralExpression => check_array_literal`。
+- `check_object_literal`：仅 `PropertyAssignment`（非计算名）成员；`name: value` → `check_property_assignment`（`checkExpressionForMutableLocation`）→ `new_object_literal_property(name, Property, t)` → 入 `members`/`properties`。对象类型旗标取 Go `createObjectLiteralType` 的 `Anonymous|ObjectLiteral|FreshLiteral|ContainsObjectOrArrayLiteral`。
+- `check_array_literal`：每元素 `checkExpressionForMutableLocation` → 非空 `getUnionType` / 空 `strictNullChecks ? never : undefined` → `create_array_literal_type`（`create_type_reference(Array_target, [elementType])`）。
+- node builder `serialize_members`：改为 `is_synthesized_symbol` 感知（瞬态成员名取 `synthesized_symbol_name`，否则 `program.symbol().name`）。**必要修复**：对象字面量类型成员是瞬态符号，旧版经 `program.symbol(tagged_id)` 越界 panic。
+
+**DEFER（带 blocked-by）**：spread 成员（`{...o}`，`getSpreadType`）、计算属性名（`checkComputedPropertyName` + late binding + string/number/symbol 索引签名合成）、get/set/方法成员、shorthand 属性、上下文类型（类型**流入**字面量，`getApparentTypeOfContextualType`）、元组/const 上下文（`createTupleType` + `as const` readonly 冻结 `getRegularTypeOfObjectLiteral`）、excess-property `2353`（关系引擎无 elaboration）、`createArrayLiteralType` 的 `ObjectFlagsArrayLiteral` 克隆（可达子集返回裸 `Array<T>` 引用即足够元素访问+赋值性）、PropertyAssignment 上的（grammar-error）显式类型注解（`checkTypeAssignableToAndOptionallyElaborate`）。
+
+**red→green 切片表（实测红/绿）**：
+
+| # | 切片 | 最小 input → observable（实测红/绿） | 实现触点 |
+|---|---|---|---|
+| 1 tracer（genuine RED）| `object_literal_property_reads_member_type` | `const o = { a: 1 };\no.a;` → `check_expression(o.a)==number`（红：旧 `ObjectLiteralExpression` 产 `error`，`o.a`=`error`，`TypeId(3)≠TypeId(8)`）| `check.rs` `check_expression` 新 `ObjectLiteralExpression` 臂 + 新私有 `check_object_literal`/`check_property_assignment`/`check_expression_for_mutable_location` + 私有 fn `property_name_text` + `mod.rs` 新 `pub(crate) new_object_literal_property` + `nodebuilder.rs` `serialize_members` 合成符号感知 |
+| 2（slice 1 前 genuine RED；正例 green-on-arrival）| `object_literal_property_mismatch_reports_2322` / `object_literal_assignable_to_matching_annotation` | `const o: { a: number } = { a: "x" };` → 1×2322「Type '{ a: string; }' is not assignable to type '{ a: number; }'.」；`= { a: 1 }` → 0 诊断（红：slice 1 前对象=`error` 可赋任意 0 诊断）| 无（既有 `properties_related_to` 迭代合成成员）|
+| 3 tracer（genuine RED）| `array_literal_element_access_resolves_element_type` | `interface Array<T>{...}\nconst arr = [1, 2];\narr[0];` → `check_expression(arr[0])==number`（红：旧 `ArrayLiteralExpression` 产 `error`，`arr[0]`=`error`）| `check.rs` 新 `ArrayLiteralExpression` 臂 + 新私有 `check_array_literal`/`create_array_literal_type`（复用 `get_declared_type_of_symbol` + `resolve_name`）|
+| 3（tracer 前 genuine RED；正例 green-on-arrival）| `array_literal_element_mismatch_reports_2322` / `array_literal_element_assignable_to_number` | `const n: string = arr[0];` → 1×2322「Type 'number' is not assignable to type 'string'.」；`const n: number = arr[0];` → 0 诊断 | 无 |
+| 3 guard | `empty_array_literal_is_never_array_under_strict_null_checks` / `..._is_undefined_array_without_strict_null_checks` | `[];` → `Array<never>`（默认 strict）/ strictNullChecks=False → `Array<undefined>` | 空臂 `strict_null_checks() ? never : undefined` |
+
+> 红→绿证据：slice 1 / slice 3 tracer **均 genuine RED**（`o.a`/`arr[0]` 旧为 `error`，断言 id 不等）→最小触点转绿；slice 2 的 2322 在 slice 1 落地前亦 genuine red（对象=`error` 0 诊断）。正例「0 诊断」与对象多成员印刷为 **green-on-arrival 守卫**（slice 1 / slice 3 tracer impl 一并解锁结构赋值/印刷）——**如实记录非伪造红**（同 4bc/4bd/4be 口径）。**踩坑修正 1**：node builder `serialize_members` 经 `program.symbol(tagged)` 对瞬态成员越界 panic（`index 2147483648 = 1<<31`）→ 改 `is_synthesized_symbol` 分流转绿（同修 2322 源类型印刷 `{ a: string; }`）。**踩坑修正 2**：空 `[]` 默认取 `never`（非 `undefined`，默认 options `strict != false` 开 strictNullChecks）；`Checker::new()` 直接 `check_expression` 取默认 options，故 strictNullChecks-off 臂须 `new_checker(Rc<program>)` 保留 program 读其 options 才能见证。
+
+**本轮交付**：
+- `core/check.rs`：`check_expression` 新增 `ObjectLiteralExpression`/`ArrayLiteralExpression` 臂；新私有 `check_object_literal`、`check_property_assignment`、`check_expression_for_mutable_location`、`check_array_literal`、`create_array_literal_type`；新私有自由 fn `property_name_text`。imports 加 `SymbolTable`、`ObjectFlags`/`ObjectType`、`get_declared_type_of_symbol`。
+- `core/mod.rs`：新 `pub(crate) Checker::new_object_literal_property`（瞬态属性 + 直接置 `resolvedType`）。
+- `core/nodebuilder.rs`：`serialize_members` 合成符号名感知（必要修复）。
+- 测试：`check_test.rs` +10（slice1×3 + slice2×2 + slice3×3 + 空数组×2）。
+- **未改任何既有 pub fn 签名、无 `lib.rs` 改动、无新依赖。** 唯一新公开项 `new_object_literal_property` 为 `pub(crate)`（不挂 doctest）。
+
+**新公开 API 形状**：本轮新增 1 个 `pub(crate)` 方法（`new_object_literal_property`），其余均私有方法/自由 fn 与 `check_expression` 臂内部改写。无新 `pub` 项，公开 API 形状与 4be 完全一致。`cargo build -p tsgo_compiler` 绿（实测）。
+
+**测试增量**：**428 单测**（+10，相对 4be 基线 418）+ **134 doctest**（**±0**：新增 `pub(crate)` 方法用 `//` 行注释、不挂 doctest）。
+
+**公开 API 仅加法（compiler + transformers 保持绿）**：未改任何既有 `pub fn` 签名，未加任何 pub 项。`check_expression` 对 `ObjectLiteralExpression`/`ArrayLiteralExpression` 从 `error_type` 改为匿名对象类型 / `Array<T>` 引用（下游属性访问/元素访问/赋值性更精确，无既有测试回归）。`cargo build -p tsgo_compiler` 绿（实测）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker`（`--lib` 428 单测 + `--doc` 134 doctest）绿；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。未 `--workspace`（无其它 lane）。未 `git commit`。
+
+**本轮 DEFER（带 blocked-by）**：
+- **spread 成员 `{...o}`**：未做。blocked-by: `getSpreadType`（对象类型合并 + 覆盖诊断 `checkSpreadPropOverrides`）。
+- **计算属性名 `[expr]: v`**：`property_name_text` 对计算名返回 `None`（跳过该成员）。blocked-by: `checkComputedPropertyName` + late-binding（4ag 已有 well-known symbol 半张）+ string/number/symbol 索引签名合成（`getObjectLiteralIndexInfo`）。
+- **get/set/方法成员 / shorthand 属性**：未做（仅 `PropertyAssignment`）。blocked-by: 访问器/方法签名收集（`checkObjectLiteralMethod`）+ shorthand 解析（`checkShorthandPropertyAssignment`）。
+- **上下文类型（类型流入字面量）**：`checkExpressionForMutableLocation` 仅做无上下文 widen。blocked-by: `getApparentTypeOfContextualType` + `getContextualType` + `instantiateContextualType`。
+- **元组 / `as const` readonly 冻结**：数组字面量仅非-元组非-const 路径；`[1,2] as const` / `{x:1} as const` 仍经 `regular_type_of_literal_type` 恒等（4be DEFER 现部分解锁——字面量已类型化，但 readonly 冻结未做）。blocked-by: `createTupleType`(elementInfos) + `getRegularTypeOfObjectLiteral` + tuple readonly 化 + `isValidConstAssertionArgument` 的 array/object 臂。
+- **excess-property `2353`**（`{ a: 1, b: 2 }` 赋 `{ a: number }` 多余 `b`）：探查后 DEFER——关系引擎 `properties_related_to` 无 excess-property elaboration（不检查 source 多出的属性）。blocked-by: `checkTypeRelatedTo` 的 fresh-object-literal excess-property 检查 + elaboration（`getPropertyOfType` source-side 反查）。
+- **`createArrayLiteralType` 的 `ObjectFlagsArrayLiteral` 克隆**：可达子集返回裸 `Array<T>` 引用即足够元素访问+赋值性。blocked-by: array-literal widening 旗标消费者。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/types/objectLiterals/`（简单 `{ a: 1 }` 属性类型 + 结构赋值 2322）+ `tests/cases/conformance/types/typeRelationships/typeInference/`（数组字面量元素 union → `T[]`）最基础形态——无 spread/computed/method/contextual/excess-property/tuple-inference。
+
+**推荐下一轮（4bg）**：(a) **excess-property `2353`**（fresh object literal 多余属性，关系引擎 elaboration）——本轮已置 `FreshLiteral` 旗标，下一步给 `checkTypeRelatedTo` 接 fresh-object-literal excess-property 检查；(b) **shorthand 属性 `{ a }`**（`checkShorthandPropertyAssignment` → resolve identifier value）+ 计算属性名索引签名（`getObjectLiteralIndexInfo`）；(c) **`[1,2] as const` / `{x:1} as const`** readonly 元组/对象冻结（`getRegularTypeOfObjectLiteral` + tuple readonly，承接 4be DEFER，现字面量已类型化）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

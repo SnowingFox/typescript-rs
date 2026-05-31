@@ -21,19 +21,20 @@
 
 use std::rc::Rc;
 
-use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags};
+use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags, SymbolTable};
 use tsgo_core::compileroptions::ScriptTarget;
 use tsgo_diagnostics::{Category, Message};
 
 use super::declared_types::{
-    get_apparent_type, get_property_of_type, get_type_of_property_of_type, get_type_of_symbol,
+    get_apparent_type, get_declared_type_of_symbol, get_property_of_type,
+    get_type_of_property_of_type, get_type_of_symbol,
 };
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
 use super::signatures::SignatureId;
 use super::symbols::resolve_name;
 use super::type_facts::TypeFacts;
-use super::types::{LiteralValue, TypeFlags, TypeId};
+use super::types::{LiteralValue, ObjectFlags, ObjectType, TypeFlags, TypeId};
 use super::Checker;
 
 /// A type-checking diagnostic produced while checking a source file.
@@ -161,6 +162,8 @@ impl Checker {
             Kind::JsxSelfClosingElement => self.check_jsx_self_closing_element(program, node),
             Kind::JsxElement => self.check_jsx_element(program, node),
             Kind::JsxFragment => self.check_jsx_fragment(program, node),
+            Kind::ObjectLiteralExpression => self.check_object_literal(program, node),
+            Kind::ArrayLiteralExpression => self.check_array_literal(program, node),
             Kind::FunctionExpression => self.check_function_expression(program, node),
             Kind::ArrowFunction => self.check_arrow_function(program, node),
             Kind::NonNullExpression => self.check_non_null_assertion(program, node),
@@ -199,6 +202,175 @@ impl Checker {
         }
         let globals = program.globals();
         super::declared_types::get_type_from_type_node(self, program, type_node, globals)
+    }
+
+    // Types an object literal `{ a: 1, b: "x" }` as a fresh anonymous object
+    // type whose properties are synthesized (transient) symbols carrying each
+    // member initializer's (widened) type (Go's `checkObjectLiteral` ->
+    // `createObjectLiteralType` over `newAnonymousType`).
+    //
+    // DEFER(phase-4-checker-4bg+): spread members (`{...o}`), computed property
+    // names, get/set/method members, shorthand properties, contextual typing
+    // (the type flowing INTO the literal), the excess-property `2353` check, the
+    // `as const` readonly freeze (`getRegularTypeOfObjectLiteral`), and the
+    // string/number/symbol index-signature synthesis for computed-name members.
+    // blocked-by: spread-type merge (`getSpreadType`), computed-name typing,
+    // accessor/method signature collection, shorthand resolution, contextual
+    // type propagation, and the relation engine's excess-property elaboration.
+    // Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076)
+    fn check_object_literal(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let members_nodes = match program.arena().data(node) {
+            NodeData::ObjectLiteralExpression(d) => d.list.nodes.clone(),
+            _ => return self.error_type,
+        };
+        let mut members = SymbolTable::default();
+        let mut properties: Vec<tsgo_ast::SymbolId> = Vec::new();
+        for member_decl in members_nodes {
+            // DEFER(phase-4-checker-4bg+): only `name: value` property
+            // assignments with a non-computed name are typed; shorthand, spread,
+            // accessor, method, and computed-name members are skipped.
+            let name_node = match program.arena().data(member_decl) {
+                NodeData::PropertyAssignment(d) => d.name,
+                _ => continue,
+            };
+            let Some(name) = property_name_text(program, name_node) else {
+                continue;
+            };
+            let member_type = self.check_property_assignment(program, member_decl);
+            // Go: `newSymbolEx(SymbolFlagsProperty | member.Flags, member.Name, checkFlags)`
+            // then `links.resolvedType = t`. Object-literal properties are never
+            // optional in the reachable subset, so only `Property` is carried.
+            let prop = self.new_object_literal_property(&name, SymbolFlags::PROPERTY, member_type);
+            members.insert(name, prop);
+            properties.push(prop);
+        }
+        let object = ObjectType {
+            members,
+            properties,
+            ..Default::default()
+        };
+        // Go's `createObjectLiteralType` sets `ObjectFlagsFreshLiteral |
+        // ObjectFlagsObjectLiteral | ObjectFlagsContainsObjectOrArrayLiteral`
+        // on top of the `ObjectFlagsAnonymous` from `newAnonymousType`.
+        let symbol = program.symbol_of_node(node);
+        self.types.alloc(
+            TypeFlags::OBJECT,
+            ObjectFlags::ANONYMOUS
+                | ObjectFlags::OBJECT_LITERAL
+                | ObjectFlags::FRESH_LITERAL
+                | ObjectFlags::CONTAINS_OBJECT_OR_ARRAY_LITERAL,
+            symbol,
+            super::types::TypeData::Object(object),
+        )
+    }
+
+    // Types an object-literal `name: value` member (Go's
+    // `checkPropertyAssignment`): the member's type is its initializer typed
+    // through `checkExpressionForMutableLocation` (so a fresh literal widens to
+    // its primitive in this non-const, non-contextual position).
+    //
+    // DEFER(phase-4-checker-4bg+): the (grammar-error) explicit type annotation
+    // on a property assignment (`{ a: number }` as a value), whose Go path runs
+    // `checkTypeAssignableToAndOptionallyElaborate`, and computed property
+    // names. blocked-by: assignment elaboration + computed-name typing.
+    // Go: internal/checker/checker.go:Checker.checkPropertyAssignment(13587)
+    fn check_property_assignment(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let initializer = match program.arena().data(node) {
+            NodeData::PropertyAssignment(d) => d.initializer,
+            _ => return self.error_type,
+        };
+        let Some(initializer) = initializer else {
+            return self.error_type;
+        };
+        self.check_expression_for_mutable_location(program, initializer)
+    }
+
+    // Types an expression occupying a mutable location (an object-literal
+    // property value or an array-literal element): its fresh literal type is
+    // widened to the base primitive (Go's `checkExpressionForMutableLocation`,
+    // whose default branch is `getWidenedLiteralLikeTypeForContextualType` with
+    // no contextual type, i.e. `getWidenedLiteralType`).
+    //
+    // DEFER(phase-4-checker-4bg+): the `isConstContext` branch (an `as const`
+    // member/element keeps its regular literal via `getRegularTypeOfLiteralType`)
+    // and the contextual-type branch (a literal preserved by a literal-typed
+    // context). blocked-by: object/array-literal const-context recursion +
+    // contextual type propagation.
+    // Go: internal/checker/checker.go:Checker.checkExpressionForMutableLocation(13784)
+    fn check_expression_for_mutable_location(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
+        let t = self.check_expression(program, node);
+        self.get_widened_literal_type(t)
+    }
+
+    // Types an array literal `[1, 2]` as the global `Array<T>` reference whose
+    // element type `T` is the widened union of the element expression types
+    // (Go's `checkArrayLiteral` non-tuple, non-destructuring, non-const path ->
+    // `createArrayLiteralType(createArrayType(elementType))`). An empty literal
+    // takes `never` under strictNullChecks, else `undefined` (Go's
+    // `implicitNeverType` / `undefinedWideningType`).
+    //
+    // DEFER(phase-4-checker-4bg+): spread (`[...a]`) and omitted elements, the
+    // tuple/const contexts (`createTupleType`, `as const` readonly), contextual
+    // typing, and the `ObjectFlagsArrayLiteral` clone of `createArrayLiteralType`
+    // (the reachable subset returns the plain `Array<T>` reference, which is
+    // sufficient for element access + assignability). blocked-by: spread/iterator
+    // typing, tuple inference, contextual type propagation, and the
+    // array-literal widening flag's consumers.
+    // Go: internal/checker/checker.go:Checker.checkArrayLiteral(7989)
+    fn check_array_literal(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let elements = match program.arena().data(node) {
+            NodeData::ArrayLiteralExpression(d) => d.list.nodes.clone(),
+            _ => return self.error_type,
+        };
+        // DEFER(phase-4-checker-4bg+): spread/omitted elements are typed through
+        // the plain mutable-location path here, which yields the `error` type
+        // for a `SpreadElement`/`OmittedExpression` (no clean element type),
+        // degrading the array element type. blocked-by: spread/iterator typing.
+        let element_types: Vec<TypeId> = elements
+            .iter()
+            .map(|&element| self.check_expression_for_mutable_location(program, element))
+            .collect();
+        let element_type = if element_types.is_empty() {
+            // Go: `core.IfElse(c.strictNullChecks, c.implicitNeverType,
+            // c.undefinedWideningType)`. The widening distinction is not modeled.
+            if self.strict_null_checks() {
+                self.never_type()
+            } else {
+                self.undefined_type()
+            }
+        } else {
+            self.get_union_type(&element_types)
+        };
+        self.create_array_literal_type(program, node, element_type)
+    }
+
+    // Builds the `Array<element_type>` reference for an array literal at `node`,
+    // resolving the global `Array` interface by name through the node's scope
+    // (Go's `createArrayType` -> `createTypeReference(globalArrayType,
+    // [elementType])`). Mirrors `get_type_from_array_type_node` (the `T[]` type
+    // node path), which likewise resolves `Array` by name as the lib stand-in.
+    //
+    // DEFER(phase-4-checker-P6): no global `Array` in scope (lib.d.ts not
+    // loaded) yields the error type. blocked-by: library globals (P6).
+    // Go: internal/checker/checker.go:Checker.createArrayType / createArrayTypeEx
+    fn create_array_literal_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        element_type: TypeId,
+    ) -> TypeId {
+        let globals = program.globals();
+        let array_symbol =
+            match resolve_name(program, node, "Array", SymbolFlags::TYPE, false, globals) {
+                Some(symbol) => symbol,
+                None => return self.error_type,
+            };
+        let target = get_declared_type_of_symbol(self, program, array_symbol, globals);
+        self.create_type_reference(target, vec![element_type])
     }
 
     // Checks a non-null assertion `expr!`: the operand's type with `null`/
@@ -3090,6 +3262,22 @@ fn is_const_type_reference(arena: &tsgo_ast::NodeArena, type_node: NodeId) -> bo
                 && arena.text(d.type_name) == "const"
         }
         _ => false,
+    }
+}
+
+// Returns the property name text of a non-computed object-literal member name
+// node (an identifier, string literal, or numeric literal). A computed property
+// name (`[expr]: v`) yields `None` (deferred). Mirrors reading `member.Name`
+// off the binder's property symbol, where a numeric name is its decimal text.
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral (member.Name)
+fn property_name_text(program: &dyn BoundProgram, name_node: NodeId) -> Option<String> {
+    match program.arena().kind(name_node) {
+        Kind::Identifier | Kind::StringLiteral | Kind::NumericLiteral => {
+            Some(program.arena().text(name_node).to_string())
+        }
+        // DEFER(phase-4-checker-4bg+): computed property names (`[expr]: v`).
+        // blocked-by: `checkComputedPropertyName` + late binding.
+        _ => None,
     }
 }
 
