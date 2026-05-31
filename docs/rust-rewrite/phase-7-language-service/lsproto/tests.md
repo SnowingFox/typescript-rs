@@ -106,13 +106,44 @@
 
 > 既有 `empty_server_capabilities`（`from_str("{}")`）与 `InitializeResult capabilities null`（拒 null）在 open-object 退役后仍绿（typed struct 全字段可选、`InitializeResult.capabilities` 仍 `reqnn`）。
 
+## 续轮：服务端 provider 注册选项树（registration-options）（`generated_test.rs`）
+
+> 本轮把 `ServerCapabilities` 的 22 个 raw-JSON DEFER provider 中的 **21 个**落成 typed option/registration 树。Go 侧 `lsp_json_test.go` 对这些 provider **无 populated serde 测试**（服务端产出值），按 PORTING §8.6 自写行为级 serde 测试，expected 取 Go `json` 标签语义 + LSP spec 字面量，测试加在既有 `generated_test.rs`。
+> red→green：每个 provider 字段从 `serde_json::Value` 换成 typed `Option<T>`，对应测试**先引用不存在的 typed 类型/字段 → 编译失败 RED → 加类型 + 换字段 → GREEN**（与上一轮 ServerCapabilities 同一 RED 约定）。`ExecuteCommandOptions`（tracer）/`DocumentOnTypeFormattingOptions`/各 boolean-or-options/`DiagnosticOptions`/新 `boolean_or_options_or_registration!` 宏的首个用例（declaration）均为**真 RED→GREEN**；同宏后续 11 个 triple-union 为 **green-on-arrival**（诚实标注）。
+
+| Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
+|---|---|---|---|---|
+| `server_capabilities_execute_command_provider_options` | **tracer（真 RED→GREEN）**：typed `ExecuteCommandOptions` 替换 raw JSON（`reqnn commands`） | 置位 → `{"executeCommandProvider":{"commands":["foo.bar","foo.baz"]}}` | `lsp_generated.go:ExecuteCommandOptions` | ✓ |
+| `server_capabilities_document_on_type_formatting_provider_options` | `req firstTriggerCharacter` + `opt moreTriggerCharacter` round-trip | 置位 → `{"documentOnTypeFormattingProvider":{"firstTriggerCharacter":"{","moreTriggerCharacter":[";","\n"]}}` | `lsp_generated.go:DocumentOnTypeFormattingOptions` | ✓ |
+| `document_on_type_formatting_requires_first_trigger_character` | 必填缺失 → Go `errMissing` 文案 | `{"moreTriggerCharacter":[";"]}` → `missing required properties: firstTriggerCharacter` | 同上（missingFirstTriggerCharacter） | ✓ |
+| `server_capabilities_code_lens_provider_options` | `CodeLensOptions`（resolveProvider）round-trip | 置位 → `{"codeLensProvider":{"resolveProvider":true}}` | `lsp_generated.go:CodeLensOptions` | ✓ |
+| `server_capabilities_document_link_provider_options` | `DocumentLinkOptions`（workDoneProgress+resolveProvider）round-trip | 置位 → `{"documentLinkProvider":{"workDoneProgress":true,"resolveProvider":false}}` | `lsp_generated.go:DocumentLinkOptions` | ✓ |
+| `server_capabilities_vs_on_auto_insert_provider_options` | `VsOnAutoInsertOptions`（`reqnn _vs_triggerCharacters`）round-trip | 置位 → `{"_vs_onAutoInsertProvider":{"_vs_triggerCharacters":[">","/"]}}` | `lsp_generated.go:VsOnAutoInsertOptions` | ✓ |
+| `server_capabilities_document_highlight_provider_bool` | `BooleanOrDocumentHighlightOptions` bool 变体 | `bool(true)` → `{"documentHighlightProvider":true}` | `lsp_generated.go:BooleanOrDocumentHighlightOptions` | ✓ |
+| `server_capabilities_document_range_formatting_provider_options` | options 变体（rangesSupport）round-trip | 置位 → `{"documentRangeFormattingProvider":{"rangesSupport":true}}` | `lsp_generated.go:DocumentRangeFormattingOptions` | ✓ |
+| `server_capabilities_inline_completion_provider_options` | `BooleanOrInlineCompletionOptions` options 变体 round-trip | 置位 → `{"inlineCompletionProvider":{"workDoneProgress":true}}` | `lsp_generated.go:BooleanOrInlineCompletionOptions` | ✓ |
+| `server_capabilities_diagnostic_provider_options` | `DiagnosticOptions`：`req` bool 始终序列化 | 置位 → `{"diagnosticProvider":{"identifier":"ts","interFileDependencies":true,"workspaceDiagnostics":false}}` | `lsp_generated.go:DiagnosticOptions` | ✓ |
+| `diagnostic_provider_registration_variant` | 按 `documentSelector` 键 → registration 变体（raw JSON） | `{"documentSelector":[...],...}` → `registration_options=Some` | `lsp_generated.go:DiagnosticOptionsOrRegistrationOptions.UnmarshalJSONFrom` | ✓ |
+| `server_capabilities_declaration_provider_bool` | **新宏首用（真 RED→GREEN）**：triple-union bool 变体 | `bool(true)` → `{"declarationProvider":true}` | `lsp_generated.go:BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions` | ✓ |
+| `server_capabilities_declaration_provider_options` | triple-union typed options 变体 round-trip | 置位 → `{"declarationProvider":{"workDoneProgress":true}}` | `lsp_generated.go:DeclarationOptions` | ✓ |
+| `declaration_provider_registration_variant` | triple-union 按 `documentSelector` → registration（raw JSON） | `{"documentSelector":[...],"id":"reg1"}` → `registration_options=Some` | 同上（UnmarshalJSONFrom） | ✓ |
+| `server_capabilities_inlay_hint_provider_options` | inlayHint options 变体（含额外 `resolveProvider`） | 置位 → `{"inlayHintProvider":{"resolveProvider":true}}` | `lsp_generated.go:InlayHintOptions` | ✓ |
+| `server_capabilities_color_provider_bool` | color triple-union bool 变体（共享宏，green-on-arrival） | `bool(true)` → `{"colorProvider":true}` | `lsp_generated.go:BooleanOrDocumentColorOptionsOrDocumentColorRegistrationOptions` | ✓ |
+| `type_definition_provider_registration_variant` | typeDefinition triple-union registration 派发（green-on-arrival） | `{"documentSelector":[...]}` → `registration_options=Some` | `lsp_generated.go:BooleanOrTypeDefinitionOptionsOrTypeDefinitionRegistrationOptions` | ✓ |
+| `server_capabilities_all_triple_union_providers_round_trip` | 其余 8 个 triple-union（impl/folding/selection/callHierarchy/linkedEditing/moniker/typeHierarchy/inlineValue）深层 round-trip（green-on-arrival） | 多组置位 → `to_string`→`from_str` 等值 | `lsp_generated.go:ServerCapabilities`（provider 组） | ✓ |
+| `every_simple_server_option_default_serializes_empty`（扩展） | §8.6：全 `opt` option struct `default → {}`（新增 17 个：CodeLens/DocumentLink/DocumentHighlight/DocumentRangeFormatting/InlineCompletion/Declaration/TypeDefinition/Implementation/DocumentColor/FoldingRange/SelectionRange/CallHierarchy/LinkedEditingRange/Moniker/TypeHierarchy/InlineValue/InlayHint） | `T::default()` → `"{}"` | omitzero 不变式 | ✓ |
+
+> 既有 `server_capabilities_deferred_and_bool_fields_round_trip` 的 `execute_command_provider` 字面量本轮从 raw `json!({...})` 改为 typed `ExecuteCommandOptions{...}`（同一期望 JSON，仍绿）。`req`/`reqnn` 字段的 option struct（`ExecuteCommandOptions`/`DocumentOnTypeFormattingOptions`/`VsOnAutoInsertOptions`/`DiagnosticOptions`）因 `default ≠ {}` 不纳入 `every_simple_server_option_default_serializes_empty`；`BooleanOr*` union `default` 序列化为 err（恰一变体置位），同样不纳入。
+
 ## 推迟到后续 phase 的测试
 
 | 测试 / 行为 | 原因 | 目标 phase |
 |---|---|---|
 | ~~`(*ClientCapabilities).Resolve()` 转换正确性~~ | ✅ 已落地（4 组全树 red→green） | 完成 |
-| ~~`ServerCapabilities` typed serde~~ | ✅ 本轮已落地（见上表，11 组高价值 provider red→green；22 深字段 DEFER raw JSON） | 完成 |
-| `ServerCapabilities` 深/稀有 provider 的精确嵌套类型 serde（triple-union/registration/workspace/executeCommand/onAutoInsert 等） | 本轮建成 `serde_json::Value`（保字段名+optionality）；精确类型待生成器 pass | — blocked-by 生成器 pass |
+| ~~`ServerCapabilities` typed serde~~ | ✅ 已落地（11 组高价值 provider red→green） | 完成 |
+| ~~`ServerCapabilities` 深/稀有 provider 的 typed option 树（triple-union/executeCommand/onTypeFormatting/diagnostic/onAutoInsert 等）~~ | ✅ 本轮已落地（见上表，21/22 provider typed；新 `boolean_or_options_or_registration!` 宏） | 完成 |
+| `ServerCapabilities.workspace`（`WorkspaceOptions`）typed serde | 深依赖未移植（workspaceFolders/fileOperations/textDocumentContent）；保留 raw JSON | — blocked-by 生成器 pass |
+| triple-union / `*OrRegistrationOptions` 的 **registration 变体** typed serde（`*RegistrationOptions`） | 嵌入未移植 `DocumentSelectorOrNull`；本轮保留 raw JSON（typed options+boolean 变体已全 typed） | — blocked-by 生成器 pass |
 | 新枚举 `String()` stringer（`TextDocumentSyncKind` 已含；其余） | resolved/server 树不全用；生成器 pass 落地完整枚举集时补 | P8 |
 | resolved / 请求类型显式 `null` 字段的 Go `errNull` 精度 | 非线上收报关键路径，低优先 | — blocked-by 生成器 pass |
 | Go 非指针字段（`support`/`tokenTypes` 等）的精确反序列化严格度 | 本轮统一建成 `Option<T>`；对 `resolve()` 等价 | — blocked-by 生成器 pass |

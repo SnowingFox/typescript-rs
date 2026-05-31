@@ -247,6 +247,74 @@ macro_rules! boolean_or_options {
     };
 }
 
+/// Generates a `boolean | <Options> | <RegistrationOptions>` triple-union, the
+/// shape Go emits for the many `BooleanOr<Options>Or<RegistrationOptions>`
+/// provider unions in `ServerCapabilities` (declaration / typeDefinition /
+/// implementation / color / foldingRange / selectionRange / callHierarchy /
+/// linkedEditing / moniker / typeHierarchy / inlineValue / inlayHint).
+///
+/// Serialization writes the single set variant (a bare JSON boolean, the typed
+/// options object, or the deferred raw-JSON registration object).
+/// Deserialization mirrors the Go `PeekKind`/`jsonObjectHasKey` dispatch: a
+/// JSON boolean fills `boolean`; a JSON object carrying a `documentSelector`
+/// key is the registration variant (kept as raw [`serde_json::Value`] because
+/// `*RegistrationOptions` embeds the not-yet-ported `DocumentSelectorOrNull`),
+/// and any other object is decoded as the typed options.
+// DEFER: the `*RegistrationOptions` variant stays raw JSON. blocked-by:
+// generator pass landing the registration-options tree (DocumentSelectorOrNull).
+macro_rules! boolean_or_options_or_registration {
+    (
+        $(#[$smeta:meta])*
+        $name:ident, $field:ident : $ty:ty, $expecting:literal
+    ) => {
+        $(#[$smeta])*
+        #[derive(Debug, Clone, Default, PartialEq)]
+        pub struct $name {
+            /// The boolean variant.
+            pub boolean: Option<bool>,
+            /// The typed options-object variant.
+            pub $field: Option<$ty>,
+            /// The registration-options variant (deferred: raw JSON).
+            pub registration_options: Option<serde_json::Value>,
+        }
+
+        impl Serialize for $name {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                match (self.boolean, &self.$field, &self.registration_options) {
+                    (Some(b), None, None) => serializer.serialize_bool(b),
+                    (None, Some(o), None) => o.serialize(serializer),
+                    (None, None, Some(r)) => r.serialize(serializer),
+                    _ => Err(serde::ser::Error::custom(concat!(
+                        "exactly one element of ",
+                        stringify!($name),
+                        " should be set"
+                    ))),
+                }
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let value = serde_json::Value::deserialize(deserializer)?;
+                let mut out = $name::default();
+                if let Some(b) = value.as_bool() {
+                    out.boolean = Some(b);
+                } else if value.is_object() {
+                    if value.get("documentSelector").is_some() {
+                        out.registration_options = Some(value);
+                    } else {
+                        out.$field =
+                            Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+                    }
+                } else {
+                    return Err(de::Error::custom($expecting));
+                }
+                Ok(out)
+            }
+        }
+    };
+}
+
 /// A document URI. Mirrors Go `type DocumentUri string`: a string newtype that
 /// (de)serializes as a plain JSON string.
 ///
@@ -1774,6 +1842,379 @@ impl<'de> Deserialize<'de> for SemanticTokensOptionsOrRegistrationOptions {
 }
 
 lsp_object! {
+    /// Execute-command request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:ExecuteCommandOptions
+    ExecuteCommandOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["The commands to be executed on the server."]
+        reqnn commands: Vec<String> => "commands",
+    }
+}
+
+lsp_object! {
+    /// On-type formatting request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:DocumentOnTypeFormattingOptions
+    DocumentOnTypeFormattingOptions {
+        ["A character on which formatting should be triggered, like `{`."]
+        req first_trigger_character: String => "firstTriggerCharacter",
+        ["More trigger characters."]
+        opt more_trigger_character: Vec<String> => "moreTriggerCharacter",
+    }
+}
+
+lsp_object! {
+    /// Code-lens request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:CodeLensOptions
+    CodeLensOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["Whether code lens has a resolve provider as well."]
+        opt resolve_provider: bool => "resolveProvider",
+    }
+}
+
+lsp_object! {
+    /// Document-link request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:DocumentLinkOptions
+    DocumentLinkOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["Whether document links have a resolve provider as well."]
+        opt resolve_provider: bool => "resolveProvider",
+    }
+}
+
+lsp_object! {
+    /// VS auto-insert request options (`textDocument/_vs_onAutoInsert`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:VsOnAutoInsertOptions
+    VsOnAutoInsertOptions {
+        ["List of trigger characters that trigger auto-insert."]
+        reqnn vs_trigger_characters: Vec<String> => "_vs_triggerCharacters",
+    }
+}
+
+lsp_object! {
+    /// Document-highlight request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:DocumentHighlightOptions
+    DocumentHighlightOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options! {
+    /// A union of a boolean or [`DocumentHighlightOptions`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrDocumentHighlightOptions
+    BooleanOrDocumentHighlightOptions,
+    document_highlight_options: DocumentHighlightOptions,
+    "a boolean or a document-highlight-options object"
+}
+
+lsp_object! {
+    /// Document-range-formatting request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:DocumentRangeFormattingOptions
+    DocumentRangeFormattingOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["Whether the server supports formatting multiple ranges at once."]
+        opt ranges_support: bool => "rangesSupport",
+    }
+}
+
+boolean_or_options! {
+    /// A union of a boolean or [`DocumentRangeFormattingOptions`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrDocumentRangeFormattingOptions
+    BooleanOrDocumentRangeFormattingOptions,
+    document_range_formatting_options: DocumentRangeFormattingOptions,
+    "a boolean or a document-range-formatting-options object"
+}
+
+lsp_object! {
+    /// Inline-completion request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:InlineCompletionOptions
+    InlineCompletionOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options! {
+    /// A union of a boolean or [`InlineCompletionOptions`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:BooleanOrInlineCompletionOptions
+    BooleanOrInlineCompletionOptions,
+    inline_completion_options: InlineCompletionOptions,
+    "a boolean or an inline-completion-options object"
+}
+
+lsp_object! {
+    /// Pull-model diagnostic request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:DiagnosticOptions
+    DiagnosticOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["An optional identifier under which diagnostics are managed by the client."]
+        opt identifier: String => "identifier",
+        ["Whether the language has inter-file dependencies."]
+        req inter_file_dependencies: bool => "interFileDependencies",
+        ["Whether the server provides support for workspace diagnostics as well."]
+        req workspace_diagnostics: bool => "workspaceDiagnostics",
+    }
+}
+
+lsp_object! {
+    /// Goto-declaration request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:DeclarationOptions
+    DeclarationOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`DeclarationOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions
+    BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions,
+    declaration_options: DeclarationOptions,
+    "a boolean, declaration options, or declaration registration options"
+}
+
+lsp_object! {
+    /// Goto-type-definition request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:TypeDefinitionOptions
+    TypeDefinitionOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`TypeDefinitionOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrTypeDefinitionOptionsOrTypeDefinitionRegistrationOptions
+    BooleanOrTypeDefinitionOptionsOrTypeDefinitionRegistrationOptions,
+    type_definition_options: TypeDefinitionOptions,
+    "a boolean, type-definition options, or type-definition registration options"
+}
+
+lsp_object! {
+    /// Goto-implementation request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:ImplementationOptions
+    ImplementationOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`ImplementationOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrImplementationOptionsOrImplementationRegistrationOptions
+    BooleanOrImplementationOptionsOrImplementationRegistrationOptions,
+    implementation_options: ImplementationOptions,
+    "a boolean, implementation options, or implementation registration options"
+}
+
+lsp_object! {
+    /// Document-color request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:DocumentColorOptions
+    DocumentColorOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`DocumentColorOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrDocumentColorOptionsOrDocumentColorRegistrationOptions
+    BooleanOrDocumentColorOptionsOrDocumentColorRegistrationOptions,
+    document_color_options: DocumentColorOptions,
+    "a boolean, document-color options, or document-color registration options"
+}
+
+lsp_object! {
+    /// Folding-range request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:FoldingRangeOptions
+    FoldingRangeOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`FoldingRangeOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrFoldingRangeOptionsOrFoldingRangeRegistrationOptions
+    BooleanOrFoldingRangeOptionsOrFoldingRangeRegistrationOptions,
+    folding_range_options: FoldingRangeOptions,
+    "a boolean, folding-range options, or folding-range registration options"
+}
+
+lsp_object! {
+    /// Selection-range request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:SelectionRangeOptions
+    SelectionRangeOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`SelectionRangeOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrSelectionRangeOptionsOrSelectionRangeRegistrationOptions
+    BooleanOrSelectionRangeOptionsOrSelectionRangeRegistrationOptions,
+    selection_range_options: SelectionRangeOptions,
+    "a boolean, selection-range options, or selection-range registration options"
+}
+
+lsp_object! {
+    /// Call-hierarchy request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:CallHierarchyOptions
+    CallHierarchyOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`CallHierarchyOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrCallHierarchyOptionsOrCallHierarchyRegistrationOptions
+    BooleanOrCallHierarchyOptionsOrCallHierarchyRegistrationOptions,
+    call_hierarchy_options: CallHierarchyOptions,
+    "a boolean, call-hierarchy options, or call-hierarchy registration options"
+}
+
+lsp_object! {
+    /// Linked-editing-range request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:LinkedEditingRangeOptions
+    LinkedEditingRangeOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`LinkedEditingRangeOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrLinkedEditingRangeOptionsOrLinkedEditingRangeRegistrationOptions
+    BooleanOrLinkedEditingRangeOptionsOrLinkedEditingRangeRegistrationOptions,
+    linked_editing_range_options: LinkedEditingRangeOptions,
+    "a boolean, linked-editing-range options, or linked-editing-range registration options"
+}
+
+lsp_object! {
+    /// Moniker request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:MonikerOptions
+    MonikerOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`MonikerOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrMonikerOptionsOrMonikerRegistrationOptions
+    BooleanOrMonikerOptionsOrMonikerRegistrationOptions,
+    moniker_options: MonikerOptions,
+    "a boolean, moniker options, or moniker registration options"
+}
+
+lsp_object! {
+    /// Type-hierarchy request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:TypeHierarchyOptions
+    TypeHierarchyOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`TypeHierarchyOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrTypeHierarchyOptionsOrTypeHierarchyRegistrationOptions
+    BooleanOrTypeHierarchyOptionsOrTypeHierarchyRegistrationOptions,
+    type_hierarchy_options: TypeHierarchyOptions,
+    "a boolean, type-hierarchy options, or type-hierarchy registration options"
+}
+
+lsp_object! {
+    /// Inline-value request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:InlineValueOptions
+    InlineValueOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`InlineValueOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrInlineValueOptionsOrInlineValueRegistrationOptions
+    BooleanOrInlineValueOptionsOrInlineValueRegistrationOptions,
+    inline_value_options: InlineValueOptions,
+    "a boolean, inline-value options, or inline-value registration options"
+}
+
+lsp_object! {
+    /// Inlay-hint request options.
+    // Go: internal/lsp/lsproto/lsp_generated.go:InlayHintOptions
+    InlayHintOptions {
+        ["Whether the server reports work-done progress."]
+        opt work_done_progress: bool => "workDoneProgress",
+        ["Whether the server resolves additional inlay-hint information."]
+        opt resolve_provider: bool => "resolveProvider",
+    }
+}
+
+boolean_or_options_or_registration! {
+    /// A triple union of a boolean, [`InlayHintOptions`], or registration options.
+    // Go: lsp_generated.go:BooleanOrInlayHintOptionsOrInlayHintRegistrationOptions
+    BooleanOrInlayHintOptionsOrInlayHintRegistrationOptions,
+    inlay_hint_options: InlayHintOptions,
+    "a boolean, inlay-hint options, or inlay-hint registration options"
+}
+
+/// A union of [`DiagnosticOptions`] or registration options
+/// (LSP `DiagnosticOptions | DiagnosticRegistrationOptions`).
+///
+/// The registration-options variant (an object carrying a `documentSelector`)
+/// is deferred to raw JSON; the server produces the plain options variant.
+// DEFER: DiagnosticRegistrationOptions is a deep registration type (embeds
+// `documentSelector: DocumentSelectorOrNull`); kept as raw JSON. blocked-by:
+// generator pass landing the registration-options tree.
+// Go: internal/lsp/lsproto/lsp_generated.go:DiagnosticOptionsOrRegistrationOptions
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DiagnosticOptionsOrRegistrationOptions {
+    /// The plain options variant.
+    pub options: Option<DiagnosticOptions>,
+    /// The registration-options variant (deferred: raw JSON).
+    pub registration_options: Option<serde_json::Value>,
+}
+
+impl Serialize for DiagnosticOptionsOrRegistrationOptions {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (&self.options, &self.registration_options) {
+            (Some(o), None) => o.serialize(serializer),
+            (None, Some(r)) => r.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of DiagnosticOptionsOrRegistrationOptions should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DiagnosticOptionsOrRegistrationOptions {
+    // Go: lsp_generated.go:DiagnosticOptionsOrRegistrationOptions.UnmarshalJSONFrom
+    //
+    // Go dispatches on the presence of a `documentSelector` key: present means
+    // the registration-options variant, otherwise the plain options variant.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut out = DiagnosticOptionsOrRegistrationOptions::default();
+        if value.get("documentSelector").is_some() {
+            out.registration_options = Some(value);
+        } else {
+            out.options = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+        }
+        Ok(out)
+    }
+}
+
+lsp_object! {
     /// The capabilities the server provides (LSP `ServerCapabilities`).
     ///
     /// This is a *server-produced* value: every provider field is an optional
@@ -1799,100 +2240,70 @@ lsp_object! {
         opt hover_provider: BooleanOrHoverOptions => "hoverProvider",
         ["The server provides signature-help support."]
         opt signature_help_provider: SignatureHelpOptions => "signatureHelpProvider",
-        ["The server provides goto-declaration support (deferred: raw JSON)."]
-        // DEFER: BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions (triple union
-        // with registration options). blocked-by: generator pass landing the declaration tree.
-        opt declaration_provider: serde_json::Value => "declarationProvider",
+        ["The server provides goto-declaration support."]
+        opt declaration_provider: BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions => "declarationProvider",
         ["The server provides goto-definition support."]
         opt definition_provider: BooleanOrDefinitionOptions => "definitionProvider",
-        ["The server provides goto-type-definition support (deferred: raw JSON)."]
-        // DEFER: BooleanOrTypeDefinitionOptionsOrTypeDefinitionRegistrationOptions.
-        // blocked-by: generator pass landing the type-definition tree.
-        opt type_definition_provider: serde_json::Value => "typeDefinitionProvider",
-        ["The server provides goto-implementation support (deferred: raw JSON)."]
-        // DEFER: BooleanOrImplementationOptionsOrImplementationRegistrationOptions.
-        // blocked-by: generator pass landing the implementation tree.
-        opt implementation_provider: serde_json::Value => "implementationProvider",
+        ["The server provides goto-type-definition support."]
+        opt type_definition_provider: BooleanOrTypeDefinitionOptionsOrTypeDefinitionRegistrationOptions => "typeDefinitionProvider",
+        ["The server provides goto-implementation support."]
+        opt implementation_provider: BooleanOrImplementationOptionsOrImplementationRegistrationOptions => "implementationProvider",
         ["The server provides find-references support."]
         opt references_provider: BooleanOrReferenceOptions => "referencesProvider",
-        ["The server provides document-highlight support (deferred: raw JSON)."]
-        // DEFER: BooleanOrDocumentHighlightOptions. blocked-by: generator pass.
-        opt document_highlight_provider: serde_json::Value => "documentHighlightProvider",
+        ["The server provides document-highlight support."]
+        opt document_highlight_provider: BooleanOrDocumentHighlightOptions => "documentHighlightProvider",
         ["The server provides document-symbol support."]
         opt document_symbol_provider: BooleanOrDocumentSymbolOptions => "documentSymbolProvider",
         ["The server provides code actions."]
         opt code_action_provider: BooleanOrCodeActionOptions => "codeActionProvider",
-        ["The server provides code lens (deferred: raw JSON)."]
-        // DEFER: CodeLensOptions. blocked-by: generator pass.
-        opt code_lens_provider: serde_json::Value => "codeLensProvider",
-        ["The server provides document-link support (deferred: raw JSON)."]
-        // DEFER: DocumentLinkOptions. blocked-by: generator pass.
-        opt document_link_provider: serde_json::Value => "documentLinkProvider",
-        ["The server provides color support (deferred: raw JSON)."]
-        // DEFER: BooleanOrDocumentColorOptionsOrDocumentColorRegistrationOptions.
-        // blocked-by: generator pass.
-        opt color_provider: serde_json::Value => "colorProvider",
+        ["The server provides code lens."]
+        opt code_lens_provider: CodeLensOptions => "codeLensProvider",
+        ["The server provides document-link support."]
+        opt document_link_provider: DocumentLinkOptions => "documentLinkProvider",
+        ["The server provides color support."]
+        opt color_provider: BooleanOrDocumentColorOptionsOrDocumentColorRegistrationOptions => "colorProvider",
         ["The server provides workspace-symbol support."]
         opt workspace_symbol_provider: BooleanOrWorkspaceSymbolOptions => "workspaceSymbolProvider",
         ["The server provides document formatting."]
         opt document_formatting_provider: BooleanOrDocumentFormattingOptions => "documentFormattingProvider",
-        ["The server provides document-range formatting (deferred: raw JSON)."]
-        // DEFER: BooleanOrDocumentRangeFormattingOptions. blocked-by: generator pass.
-        opt document_range_formatting_provider: serde_json::Value => "documentRangeFormattingProvider",
-        ["The server provides on-type formatting (deferred: raw JSON)."]
-        // DEFER: DocumentOnTypeFormattingOptions. blocked-by: generator pass.
-        opt document_on_type_formatting_provider: serde_json::Value => "documentOnTypeFormattingProvider",
+        ["The server provides document-range formatting."]
+        opt document_range_formatting_provider: BooleanOrDocumentRangeFormattingOptions => "documentRangeFormattingProvider",
+        ["The server provides on-type formatting."]
+        opt document_on_type_formatting_provider: DocumentOnTypeFormattingOptions => "documentOnTypeFormattingProvider",
         ["The server provides rename support."]
         opt rename_provider: BooleanOrRenameOptions => "renameProvider",
-        ["The server provides folding-range support (deferred: raw JSON)."]
-        // DEFER: BooleanOrFoldingRangeOptionsOrFoldingRangeRegistrationOptions.
-        // blocked-by: generator pass.
-        opt folding_range_provider: serde_json::Value => "foldingRangeProvider",
-        ["The server provides selection-range support (deferred: raw JSON)."]
-        // DEFER: BooleanOrSelectionRangeOptionsOrSelectionRangeRegistrationOptions.
-        // blocked-by: generator pass.
-        opt selection_range_provider: serde_json::Value => "selectionRangeProvider",
-        ["The server provides execute-command support (deferred: raw JSON)."]
-        // DEFER: ExecuteCommandOptions. blocked-by: generator pass.
-        opt execute_command_provider: serde_json::Value => "executeCommandProvider",
-        ["The server provides call-hierarchy support (deferred: raw JSON)."]
-        // DEFER: BooleanOrCallHierarchyOptionsOrCallHierarchyRegistrationOptions.
-        // blocked-by: generator pass.
-        opt call_hierarchy_provider: serde_json::Value => "callHierarchyProvider",
-        ["The server provides linked-editing-range support (deferred: raw JSON)."]
-        // DEFER: BooleanOrLinkedEditingRangeOptionsOrLinkedEditingRangeRegistrationOptions.
-        // blocked-by: generator pass.
-        opt linked_editing_range_provider: serde_json::Value => "linkedEditingRangeProvider",
+        ["The server provides folding-range support."]
+        opt folding_range_provider: BooleanOrFoldingRangeOptionsOrFoldingRangeRegistrationOptions => "foldingRangeProvider",
+        ["The server provides selection-range support."]
+        opt selection_range_provider: BooleanOrSelectionRangeOptionsOrSelectionRangeRegistrationOptions => "selectionRangeProvider",
+        ["The server provides execute-command support."]
+        opt execute_command_provider: ExecuteCommandOptions => "executeCommandProvider",
+        ["The server provides call-hierarchy support."]
+        opt call_hierarchy_provider: BooleanOrCallHierarchyOptionsOrCallHierarchyRegistrationOptions => "callHierarchyProvider",
+        ["The server provides linked-editing-range support."]
+        opt linked_editing_range_provider: BooleanOrLinkedEditingRangeOptionsOrLinkedEditingRangeRegistrationOptions => "linkedEditingRangeProvider",
         ["The server provides semantic-tokens support."]
         opt semantic_tokens_provider: SemanticTokensOptionsOrRegistrationOptions => "semanticTokensProvider",
-        ["The server provides moniker support (deferred: raw JSON)."]
-        // DEFER: BooleanOrMonikerOptionsOrMonikerRegistrationOptions. blocked-by: generator pass.
-        opt moniker_provider: serde_json::Value => "monikerProvider",
-        ["The server provides type-hierarchy support (deferred: raw JSON)."]
-        // DEFER: BooleanOrTypeHierarchyOptionsOrTypeHierarchyRegistrationOptions.
-        // blocked-by: generator pass.
-        opt type_hierarchy_provider: serde_json::Value => "typeHierarchyProvider",
-        ["The server provides inline values (deferred: raw JSON)."]
-        // DEFER: BooleanOrInlineValueOptionsOrInlineValueRegistrationOptions. blocked-by: generator pass.
-        opt inline_value_provider: serde_json::Value => "inlineValueProvider",
-        ["The server provides inlay hints (deferred: raw JSON)."]
-        // DEFER: BooleanOrInlayHintOptionsOrInlayHintRegistrationOptions. blocked-by: generator pass.
-        opt inlay_hint_provider: serde_json::Value => "inlayHintProvider",
-        ["The server has support for pull-model diagnostics (deferred: raw JSON)."]
-        // DEFER: DiagnosticOptionsOrRegistrationOptions. blocked-by: generator pass.
-        opt diagnostic_provider: serde_json::Value => "diagnosticProvider",
-        ["Inline-completion options (deferred: raw JSON)."]
-        // DEFER: BooleanOrInlineCompletionOptions. blocked-by: generator pass.
-        opt inline_completion_provider: serde_json::Value => "inlineCompletionProvider",
+        ["The server provides moniker support."]
+        opt moniker_provider: BooleanOrMonikerOptionsOrMonikerRegistrationOptions => "monikerProvider",
+        ["The server provides type-hierarchy support."]
+        opt type_hierarchy_provider: BooleanOrTypeHierarchyOptionsOrTypeHierarchyRegistrationOptions => "typeHierarchyProvider",
+        ["The server provides inline values."]
+        opt inline_value_provider: BooleanOrInlineValueOptionsOrInlineValueRegistrationOptions => "inlineValueProvider",
+        ["The server provides inlay hints."]
+        opt inlay_hint_provider: BooleanOrInlayHintOptionsOrInlayHintRegistrationOptions => "inlayHintProvider",
+        ["The server has support for pull-model diagnostics."]
+        opt diagnostic_provider: DiagnosticOptionsOrRegistrationOptions => "diagnosticProvider",
+        ["The server provides inline completions."]
+        opt inline_completion_provider: BooleanOrInlineCompletionOptions => "inlineCompletionProvider",
         ["Workspace-specific server capabilities (deferred: raw JSON)."]
         // DEFER: WorkspaceOptions (workspaceFolders / fileOperations / textDocumentContent).
         // blocked-by: generator pass.
         opt workspace: serde_json::Value => "workspace",
         ["Source-definition support via `custom/textDocument/sourceDefinition`."]
         opt custom_source_definition_provider: bool => "customSourceDefinitionProvider",
-        ["VS auto-insert provider options (deferred: raw JSON)."]
-        // DEFER: VsOnAutoInsertOptions. blocked-by: generator pass.
-        opt vs_on_auto_insert_provider: serde_json::Value => "_vs_onAutoInsertProvider",
+        ["VS auto-insert provider options."]
+        opt vs_on_auto_insert_provider: VsOnAutoInsertOptions => "_vs_onAutoInsertProvider",
         ["VS-specific grouped references via `textDocument/_vs_references`."]
         opt vs_references_provider: bool => "_vs_referencesProvider",
         ["Multi-document highlight support via `custom/textDocument/multiDocumentHighlight`."]

@@ -162,11 +162,48 @@
 - [x] semanticTokens 组（options/legend/fullDelta + `OrRegistrationOptions` union，registration 变体 DEFER）
 - [x] 其余 22 个深/稀有 provider 字段建成 `opt serde_json::Value`（DEFER）+ 3 个 `*bool` provider + `positionEncoding`
 
+## 续轮：服务端 provider 注册选项树（registration-options）（本轮落地）
+
+> 上一轮把 `ServerCapabilities` 落成 typed struct，但有 **22 个深/稀有 provider 字段**仍是 `serde_json::Value` raw-JSON DEFER 占位。**本轮**把其中 **21 个**替换为真实 typed option/registration 树（保留 Go 字段名 + optionality），仅 `workspace`（`WorkspaceOptions`）因深依赖未移植而保留 DEFER。全部编辑在 `generated.rs`(+`generated_test.rs`)，无新模块、无新第三方 crate。
+
+**新增宏 `boolean_or_options_or_registration!`（`generated.rs`）**：生成 Go 的 triple-union `boolean | <Options> | <RegistrationOptions>`（结构 `{ boolean: Option<bool>, <field>: Option<T>, registration_options: Option<serde_json::Value> }`）。serde 复刻 Go `PeekKind`/`jsonObjectHasKey` 派发：JSON `bool` → `boolean`；带 `documentSelector` 键的对象 → registration 变体（**保持 raw JSON**，因 `*RegistrationOptions` 嵌入尚未移植的 `DocumentSelectorOrNull`）；其余对象 → typed options。DRY 掉 12 个同形 triple-union。`registration_options` raw-JSON 与既有 `SemanticTokensOptionsOrRegistrationOptions` 先例一致。
+
+**类型/所有权映射（本子树关键决策）**：
+
+| Go 构造 | Rust 表示 | 说明 |
+|---|---|---|
+| `*XxxOptions json:",omitzero"` 简单 provider（只有 `workDoneProgress *bool`） | `lsp_object!` 的全 `opt` struct | omitzero；`default → {}`（§8.6 覆盖）。 |
+| `Commands []string`（`ExecuteCommandOptions`，非指针必填、有 null 守卫） | `reqnn Vec<String>` | 缺→`missing required properties: commands`、拒 null、始终序列化（对齐 `SemanticTokensLegend.tokenTypes` 先例）。 |
+| `FirstTriggerCharacter string`（`DocumentOnTypeFormatting`，非指针必填值类型、无 null 守卫） | `req String` | 缺→`errMissing`、始终序列化、不拒 null（值类型）。 |
+| `InterFileDependencies/WorkspaceDiagnostics bool`（`DiagnosticOptions`，非指针必填、无 omitzero） | `req bool` | 始终序列化（即使 `false`），缺→`errMissing`。 |
+| `Boolean\|Options\|RegistrationOptions` triple-union | `boolean_or_options_or_registration!` 宏 | 见上；registration 变体 raw JSON DEFER。 |
+| `Boolean\|Options`（无 registration：documentHighlight/documentRangeFormatting/inlineCompletion） | 复用既有 `boolean_or_options!` 宏 | 与既有 definition/reference 等同形。 |
+| `Options\|RegistrationOptions`（无 boolean：`DiagnosticOptionsOrRegistrationOptions`） | 手写 union（复刻 `SemanticTokensOptionsOrRegistrationOptions`） | 按 `documentSelector` 键派发；registration 变体 raw JSON DEFER。 |
+
+**落地的 provider option（21/22，全 typed + 各带行为测试）**：
+- 直接 typed option：`executeCommandProvider`(`ExecuteCommandOptions`，**tracer**)、`documentOnTypeFormattingProvider`(`DocumentOnTypeFormattingOptions`)、`codeLensProvider`(`CodeLensOptions`)、`documentLinkProvider`(`DocumentLinkOptions`)、`_vs_onAutoInsertProvider`(`VsOnAutoInsertOptions`)
+- `boolean_or_options!` 复用：`documentHighlightProvider`(`BooleanOrDocumentHighlightOptions`)、`documentRangeFormattingProvider`(`BooleanOrDocumentRangeFormattingOptions`)、`inlineCompletionProvider`(`BooleanOrInlineCompletionOptions`)
+- options-or-registration：`diagnosticProvider`(`DiagnosticOptionsOrRegistrationOptions` + `DiagnosticOptions`)
+- triple-union（新宏，12 个）：`declarationProvider`(**首个 RED→GREEN**)、`typeDefinitionProvider`、`implementationProvider`、`colorProvider`、`foldingRangeProvider`、`selectionRangeProvider`、`callHierarchyProvider`、`linkedEditingRangeProvider`、`monikerProvider`、`typeHierarchyProvider`、`inlineValueProvider`、`inlayHintProvider`(`InlayHintOptions` 含额外 `resolveProvider`)
+
+**实现 TODO（本轮，可勾选）**：
+
+- [x] 新宏 `boolean_or_options_or_registration!`（triple-union serde：bool/typed-options/raw-registration 派发）　`// Go: lsp_generated.go:BooleanOr*Or*RegistrationOptions.UnmarshalJSONFrom`
+- [x] tracer：`ExecuteCommandOptions`（`reqnn commands`）+ 替换 `executeCommandProvider` 字段（退役 raw JSON；改既有测试字面量）　`// Go: lsp_generated.go:ExecuteCommandOptions`
+- [x] `DocumentOnTypeFormattingOptions`（`req firstTriggerCharacter` + `opt moreTriggerCharacter`）
+- [x] 直接 typed：`CodeLensOptions`/`DocumentLinkOptions`/`VsOnAutoInsertOptions`
+- [x] `boolean_or_options!` 复用：documentHighlight/documentRangeFormatting/inlineCompletion 三组（含 `DocumentRangeFormattingOptions.rangesSupport`）
+- [x] `DiagnosticOptions` + `DiagnosticOptionsOrRegistrationOptions`（按 `documentSelector` 派发；`interFileDependencies`/`workspaceDiagnostics` 为 `req bool`）
+- [x] 12 个 triple-union（declaration 首个真 RED→GREEN，其余宏生成 green-on-arrival；各自 `*Options` 全 typed）
+- [x] `workspace`(`WorkspaceOptions`) 维持 raw JSON DEFER（深依赖未移植，见下）
+
 ## 转交 / 推迟（DEFER）
 
 - ✅ 上一轮的 `(*ClientCapabilities).Resolve()` DEFER **已解除**（落地于 `capabilities.rs`，4 组全树）。
-- ✅ 上一轮维持的 `ServerCapabilities` open-object **本轮退役**，落地 typed 树（高价值 11 组 provider 全 typed）。
-- `// DEFER`：`ServerCapabilities` 深/稀有 provider 的精确嵌套类型——22 个字段当前为 `serde_json::Value`（保留 Go 字段名 + optionality），含全部 triple-union（`*OrRegistrationOptions`）、`WorkspaceOptions`、`ExecuteCommandOptions`、`VsOnAutoInsertOptions` 等。`blocked-by:` 生成器 pass 落地完整 options/registration 树。
+- ✅ 上一轮维持的 `ServerCapabilities` open-object **已退役**，落地 typed 树（高价值 11 组 provider 全 typed）。
+- ✅ 本轮把 `ServerCapabilities` 22 个 raw-JSON DEFER provider 中的 **21 个**落成 typed option/registration 树（见上）。
+- `// DEFER`：`ServerCapabilities.workspace`（`WorkspaceOptions`）保持 `serde_json::Value`（保留 Go 字段名 + optionality）。`blocked-by:` 其字段 `workspaceFolders`(`WorkspaceFoldersServerCapabilities`) / `fileOperations`(`FileOperationOptions`→`FileOperationRegistrationOptions`→`FileOperationFilter`/`FileOperationPattern`) / `textDocumentContent`(`TextDocumentContentOptionsOrRegistrationOptions`) 均为未移植深类型，留待生成器 pass。
+- `// DEFER`：全部 triple-union / `DiagnosticOptionsOrRegistrationOptions` 的 **registration 变体**（`*RegistrationOptions`）保持 raw JSON——其嵌入 `DocumentSelectorOrNull`（`[]DocumentFilter` 深 union）尚未移植。`blocked-by:` 生成器 pass 落地 registration-options 树（含 `DocumentSelectorOrNull`/`TextDocumentRegistrationOptions`/`StaticRegistrationOptions`）。typed options 变体 + boolean 变体本轮已全 typed。
 - `// DEFER`：`SemanticTokensRegistrationOptions`（`semanticTokensProvider` 的 registration 变体，深 registration 类型）保持 raw JSON。`blocked-by:` 生成器 pass。
 - `// DEFER`：`CodeActionKindDocumentation`（`CodeActionOptions.documentation` 的 `[]*` 元素，proposed/稀有）保持 raw JSON。`blocked-by:` 生成器 pass。
 - `// DEFER`：新枚举 `String()` stringer（同生成器 pass；本轮 `TextDocumentSyncKind` 已含 `Display` 复刻 stringer）。

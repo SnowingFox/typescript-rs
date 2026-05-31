@@ -1480,7 +1480,10 @@ fn server_capabilities_position_encoding() {
 #[test]
 fn server_capabilities_deferred_and_bool_fields_round_trip() {
     let v = ServerCapabilities {
-        execute_command_provider: Some(serde_json::json!({"commands": ["foo.bar"]})),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            work_done_progress: None,
+            commands: vec!["foo.bar".to_string()],
+        }),
         custom_source_definition_provider: Some(true),
         vs_references_provider: Some(true),
         ..Default::default()
@@ -1490,6 +1493,415 @@ fn server_capabilities_deferred_and_bool_fields_round_trip() {
         json,
         r#"{"executeCommandProvider":{"commands":["foo.bar"]},"customSourceDefinitionProvider":true,"_vs_referencesProvider":true}"#
     );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `executeCommandProvider` is a typed `ExecuteCommandOptions` (required
+// `commands`, optional `workDoneProgress`). Round-trips through the typed tree.
+// Go: lsp_generated.go:ExecuteCommandOptions
+#[test]
+fn server_capabilities_execute_command_provider_options() {
+    let v = ServerCapabilities {
+        execute_command_provider: Some(ExecuteCommandOptions {
+            work_done_progress: None,
+            commands: vec!["foo.bar".to_string(), "foo.baz".to_string()],
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"executeCommandProvider":{"commands":["foo.bar","foo.baz"]}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `documentOnTypeFormattingProvider` is a typed `DocumentOnTypeFormattingOptions`
+// (required `firstTriggerCharacter`, optional `moreTriggerCharacter`).
+// Go: lsp_generated.go:DocumentOnTypeFormattingOptions
+#[test]
+fn server_capabilities_document_on_type_formatting_provider_options() {
+    let v = ServerCapabilities {
+        document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+            first_trigger_character: "{".to_string(),
+            more_trigger_character: Some(vec![";".to_string(), "\n".to_string()]),
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"documentOnTypeFormattingProvider":{"firstTriggerCharacter":"{","moreTriggerCharacter":[";","\n"]}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `firstTriggerCharacter` is required: decoding without it yields the Go
+// `errMissing` text.
+// Go: lsp_generated.go:DocumentOnTypeFormattingOptions (missingFirstTriggerCharacter)
+#[test]
+fn document_on_type_formatting_requires_first_trigger_character() {
+    let err = serde_json::from_str::<DocumentOnTypeFormattingOptions>(
+        r#"{"moreTriggerCharacter":[";"]}"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("missing required properties: firstTriggerCharacter"),
+        "unexpected error: {err}"
+    );
+}
+
+// `codeLensProvider` is a typed `CodeLensOptions` (workDoneProgress +
+// resolveProvider). Round-trips through the typed tree.
+// Go: lsp_generated.go:CodeLensOptions
+#[test]
+fn server_capabilities_code_lens_provider_options() {
+    let v = ServerCapabilities {
+        code_lens_provider: Some(CodeLensOptions {
+            work_done_progress: None,
+            resolve_provider: Some(true),
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"codeLensProvider":{"resolveProvider":true}}"#);
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `documentLinkProvider` is a typed `DocumentLinkOptions` (workDoneProgress +
+// resolveProvider).
+// Go: lsp_generated.go:DocumentLinkOptions
+#[test]
+fn server_capabilities_document_link_provider_options() {
+    let v = ServerCapabilities {
+        document_link_provider: Some(DocumentLinkOptions {
+            work_done_progress: Some(true),
+            resolve_provider: Some(false),
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"documentLinkProvider":{"workDoneProgress":true,"resolveProvider":false}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `_vs_onAutoInsertProvider` is a typed `VsOnAutoInsertOptions` (required
+// `_vs_triggerCharacters`).
+// Go: lsp_generated.go:VsOnAutoInsertOptions
+#[test]
+fn server_capabilities_vs_on_auto_insert_provider_options() {
+    let v = ServerCapabilities {
+        vs_on_auto_insert_provider: Some(VsOnAutoInsertOptions {
+            vs_trigger_characters: vec![">".to_string(), "/".to_string()],
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"_vs_onAutoInsertProvider":{"_vs_triggerCharacters":[">","/"]}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `documentHighlightProvider` is a `boolean | DocumentHighlightOptions` union;
+// the bare-boolean variant serializes as a JSON boolean.
+// Go: lsp_generated.go:BooleanOrDocumentHighlightOptions
+#[test]
+fn server_capabilities_document_highlight_provider_bool() {
+    let v = ServerCapabilities {
+        document_highlight_provider: Some(BooleanOrDocumentHighlightOptions {
+            boolean: Some(true),
+            document_highlight_options: None,
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"documentHighlightProvider":true}"#);
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `documentRangeFormattingProvider` options variant carries `rangesSupport`.
+// Go: lsp_generated.go:DocumentRangeFormattingOptions / BooleanOrDocumentRangeFormattingOptions
+#[test]
+fn server_capabilities_document_range_formatting_provider_options() {
+    let v = ServerCapabilities {
+        document_range_formatting_provider: Some(BooleanOrDocumentRangeFormattingOptions {
+            boolean: None,
+            document_range_formatting_options: Some(DocumentRangeFormattingOptions {
+                work_done_progress: None,
+                ranges_support: Some(true),
+            }),
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"documentRangeFormattingProvider":{"rangesSupport":true}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `inlineCompletionProvider` is a `boolean | InlineCompletionOptions` union;
+// the options variant round-trips through `workDoneProgress`.
+// Go: lsp_generated.go:BooleanOrInlineCompletionOptions
+#[test]
+fn server_capabilities_inline_completion_provider_options() {
+    let v = ServerCapabilities {
+        inline_completion_provider: Some(BooleanOrInlineCompletionOptions {
+            boolean: None,
+            inline_completion_options: Some(InlineCompletionOptions {
+                work_done_progress: Some(true),
+            }),
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"inlineCompletionProvider":{"workDoneProgress":true}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `diagnosticProvider` options variant: `DiagnosticOptions` always serializes
+// the required non-pointer bools `interFileDependencies`/`workspaceDiagnostics`.
+// Go: lsp_generated.go:DiagnosticOptions / DiagnosticOptionsOrRegistrationOptions
+#[test]
+fn server_capabilities_diagnostic_provider_options() {
+    let v = ServerCapabilities {
+        diagnostic_provider: Some(DiagnosticOptionsOrRegistrationOptions {
+            options: Some(DiagnosticOptions {
+                work_done_progress: None,
+                identifier: Some("ts".to_string()),
+                inter_file_dependencies: true,
+                workspace_diagnostics: false,
+            }),
+            registration_options: None,
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        json,
+        r#"{"diagnosticProvider":{"identifier":"ts","interFileDependencies":true,"workspaceDiagnostics":false}}"#
+    );
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `diagnosticProvider` dispatches an object carrying `documentSelector` to the
+// registration-options variant (kept as raw JSON), mirroring the Go dispatch.
+// Go: lsp_generated.go:DiagnosticOptionsOrRegistrationOptions.UnmarshalJSONFrom
+#[test]
+fn diagnostic_provider_registration_variant() {
+    let input = r#"{"diagnosticProvider":{"documentSelector":[{"language":"typescript"}],"interFileDependencies":true,"workspaceDiagnostics":false,"id":"reg1"}}"#;
+    let caps: ServerCapabilities = serde_json::from_str(input).unwrap();
+    let d = caps.diagnostic_provider.unwrap();
+    assert!(d.options.is_none());
+    assert!(d.registration_options.is_some());
+}
+
+// `declarationProvider` is a `boolean | DeclarationOptions |
+// DeclarationRegistrationOptions` triple union. The bare-boolean variant
+// serializes as a JSON boolean.
+// Go: lsp_generated.go:BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions
+#[test]
+fn server_capabilities_declaration_provider_bool() {
+    let v = ServerCapabilities {
+        declaration_provider: Some(
+            BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions {
+                boolean: Some(true),
+                declaration_options: None,
+                registration_options: None,
+            },
+        ),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"declarationProvider":true}"#);
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// The options variant (an object without `documentSelector`) round-trips
+// through the typed `DeclarationOptions`.
+// Go: lsp_generated.go:DeclarationOptions
+#[test]
+fn server_capabilities_declaration_provider_options() {
+    let v = ServerCapabilities {
+        declaration_provider: Some(
+            BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions {
+                boolean: None,
+                declaration_options: Some(DeclarationOptions {
+                    work_done_progress: Some(true),
+                }),
+                registration_options: None,
+            },
+        ),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"declarationProvider":{"workDoneProgress":true}}"#);
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// An object carrying `documentSelector` dispatches to the registration-options
+// variant (kept as raw JSON), mirroring the Go `jsonObjectHasKey` dispatch.
+// Go: lsp_generated.go:BooleanOrDeclarationOptionsOrDeclarationRegistrationOptions.UnmarshalJSONFrom
+#[test]
+fn declaration_provider_registration_variant() {
+    let input =
+        r#"{"declarationProvider":{"documentSelector":[{"language":"typescript"}],"id":"reg1"}}"#;
+    let caps: ServerCapabilities = serde_json::from_str(input).unwrap();
+    let d = caps.declaration_provider.unwrap();
+    assert!(d.boolean.is_none());
+    assert!(d.declaration_options.is_none());
+    assert!(d.registration_options.is_some());
+}
+
+// `inlayHintProvider` options variant carries `resolveProvider` in addition to
+// `workDoneProgress` (the one triple-union whose options type is non-trivial).
+// Go: lsp_generated.go:InlayHintOptions / BooleanOrInlayHintOptionsOrInlayHintRegistrationOptions
+#[test]
+fn server_capabilities_inlay_hint_provider_options() {
+    let v = ServerCapabilities {
+        inlay_hint_provider: Some(BooleanOrInlayHintOptionsOrInlayHintRegistrationOptions {
+            boolean: None,
+            inlay_hint_options: Some(InlayHintOptions {
+                work_done_progress: None,
+                resolve_provider: Some(true),
+            }),
+            registration_options: None,
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"inlayHintProvider":{"resolveProvider":true}}"#);
+    let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
+    assert_eq!(v, back);
+}
+
+// `colorProvider` boolean variant serializes as a JSON boolean (shared macro).
+// Go: lsp_generated.go:BooleanOrDocumentColorOptionsOrDocumentColorRegistrationOptions
+#[test]
+fn server_capabilities_color_provider_bool() {
+    let v = ServerCapabilities {
+        color_provider: Some(
+            BooleanOrDocumentColorOptionsOrDocumentColorRegistrationOptions {
+                boolean: Some(true),
+                document_color_options: None,
+                registration_options: None,
+            },
+        ),
+        ..Default::default()
+    };
+    assert_eq!(
+        serde_json::to_string(&v).unwrap(),
+        r#"{"colorProvider":true}"#
+    );
+}
+
+// `typeDefinitionProvider` dispatches an object with `documentSelector` to the
+// raw-JSON registration variant (shared macro dispatch).
+// Go: lsp_generated.go:BooleanOrTypeDefinitionOptionsOrTypeDefinitionRegistrationOptions
+#[test]
+fn type_definition_provider_registration_variant() {
+    let input = r#"{"typeDefinitionProvider":{"documentSelector":[{"language":"typescript"}]}}"#;
+    let caps: ServerCapabilities = serde_json::from_str(input).unwrap();
+    let t = caps.type_definition_provider.unwrap();
+    assert!(t.boolean.is_none());
+    assert!(t.type_definition_options.is_none());
+    assert!(t.registration_options.is_some());
+}
+
+// All remaining triple-union options round-trip via the shared macro: a deeply
+// populated `ServerCapabilities` survives serialize → deserialize unchanged.
+// Go: lsp_generated.go:ServerCapabilities (provider groups)
+#[test]
+fn server_capabilities_all_triple_union_providers_round_trip() {
+    let opt_true = || Some(true);
+    let v = ServerCapabilities {
+        implementation_provider: Some(
+            BooleanOrImplementationOptionsOrImplementationRegistrationOptions {
+                boolean: None,
+                implementation_options: Some(ImplementationOptions {
+                    work_done_progress: opt_true(),
+                }),
+                registration_options: None,
+            },
+        ),
+        folding_range_provider: Some(
+            BooleanOrFoldingRangeOptionsOrFoldingRangeRegistrationOptions {
+                boolean: opt_true(),
+                folding_range_options: None,
+                registration_options: None,
+            },
+        ),
+        selection_range_provider: Some(
+            BooleanOrSelectionRangeOptionsOrSelectionRangeRegistrationOptions {
+                boolean: None,
+                selection_range_options: Some(SelectionRangeOptions {
+                    work_done_progress: None,
+                }),
+                registration_options: None,
+            },
+        ),
+        call_hierarchy_provider: Some(
+            BooleanOrCallHierarchyOptionsOrCallHierarchyRegistrationOptions {
+                boolean: opt_true(),
+                call_hierarchy_options: None,
+                registration_options: None,
+            },
+        ),
+        linked_editing_range_provider: Some(
+            BooleanOrLinkedEditingRangeOptionsOrLinkedEditingRangeRegistrationOptions {
+                boolean: None,
+                linked_editing_range_options: Some(LinkedEditingRangeOptions {
+                    work_done_progress: opt_true(),
+                }),
+                registration_options: None,
+            },
+        ),
+        moniker_provider: Some(BooleanOrMonikerOptionsOrMonikerRegistrationOptions {
+            boolean: opt_true(),
+            moniker_options: None,
+            registration_options: None,
+        }),
+        type_hierarchy_provider: Some(
+            BooleanOrTypeHierarchyOptionsOrTypeHierarchyRegistrationOptions {
+                boolean: None,
+                type_hierarchy_options: Some(TypeHierarchyOptions {
+                    work_done_progress: None,
+                }),
+                registration_options: None,
+            },
+        ),
+        inline_value_provider: Some(
+            BooleanOrInlineValueOptionsOrInlineValueRegistrationOptions {
+                boolean: opt_true(),
+                inline_value_options: None,
+                registration_options: None,
+            },
+        ),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&v).unwrap();
     let back: ServerCapabilities = serde_json::from_str(&json).unwrap();
     assert_eq!(v, back);
 }
@@ -1541,6 +1953,24 @@ fn every_simple_server_option_default_serializes_empty() {
     assert_empty::<RenameOptions>();
     assert_empty::<WorkspaceSymbolOptions>();
     assert_empty::<SemanticTokensFullDelta>();
+    // Provider option trees landed in the registration-options round.
+    assert_empty::<CodeLensOptions>();
+    assert_empty::<DocumentLinkOptions>();
+    assert_empty::<DocumentHighlightOptions>();
+    assert_empty::<DocumentRangeFormattingOptions>();
+    assert_empty::<InlineCompletionOptions>();
+    assert_empty::<DeclarationOptions>();
+    assert_empty::<TypeDefinitionOptions>();
+    assert_empty::<ImplementationOptions>();
+    assert_empty::<DocumentColorOptions>();
+    assert_empty::<FoldingRangeOptions>();
+    assert_empty::<SelectionRangeOptions>();
+    assert_empty::<CallHierarchyOptions>();
+    assert_empty::<LinkedEditingRangeOptions>();
+    assert_empty::<MonikerOptions>();
+    assert_empty::<TypeHierarchyOptions>();
+    assert_empty::<InlineValueOptions>();
+    assert_empty::<InlayHintOptions>();
 }
 
 // Go: .../TestMarshalUnmarshalRoundTrip/InitializeParams with null processId
