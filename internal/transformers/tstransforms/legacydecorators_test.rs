@@ -224,18 +224,85 @@ fn class_decorator_is_left_unchanged() {
     check_legacy("@dec class C {}", "@dec\nclass C {\n}");
 }
 
-// Go: typeserializer.go:serializeTypeReferenceNode — but checker 4at DEFER'd the
-// `TypeReference` arm to the conservative `Object` tail (it does not yet resolve
-// the entity's `TypeReferenceSerializationKind`). So a `: D` (type reference)
-// annotation serializes to `Object` rather than the entity constructor `D`.
-// DEFER guard documenting that boundary (blocked-by checker
-// `GetTypeReferenceSerializationKind`).
+// Go: typeserializer.go:serializeTypeReferenceNode
+// (`case TypeReferenceSerializationKindTypeWithConstructSignatureAndValue:
+// return s.serializeEntityNameAsExpression(node.TypeName)`).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
+//   class C {}
+//   class D { @dec x: C; }
+//   =>
+//   class C {}
+//   class D { x; }
+//   __decorate([dec, __metadata("design:type", C)], D.prototype, "x", void 0);
+//
+// Headline (round 4ax/6an, consumes checker 4aw): a class-typed property's
+// `design:type` is the referenced class's *identifier* itself (`C`), not the
+// `Object` fallback. The checker's `get_type_reference_serialization_kind`
+// classifies `: C` as `TypeWithConstructSignatureAndValue` (a runtime
+// constructor), and the transformer emits the entity name as an expression.
 #[test]
-fn type_reference_property_serializes_to_object_fallback() {
+fn class_typed_property_serializes_to_entity_identifier() {
     check_legacy_metadata(
-        "class C { @dec x: D; }",
+        "class C {}\nclass D { @dec x: C; }",
         &format!(
-            "{}\n{}\nclass C {{\n    x;\n}}\n__decorate([dec, __metadata(\"design:type\", Object)], C.prototype, \"x\", void 0);",
+            "{}\n{}\nclass C {{\n}}\nclass D {{\n    x;\n}}\n__decorate([dec, __metadata(\"design:type\", C)], D.prototype, \"x\", void 0);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: typeserializer.go:serializeTypeReferenceNode
+// (`case TypeReferenceSerializationKindObjectType: return
+// s.f.NewIdentifier("Object")`).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
+//   interface I {}
+//   class D { @dec x: I; }
+//   =>
+//   class D { x; }
+//   __decorate([dec, __metadata("design:type", Object)], D.prototype, "x", void 0);
+//
+// A type-only reference (an interface has type meaning but no runtime value)
+// classifies as `ObjectType`, so its `design:type` is the `Object` fallback —
+// *not* the entity identifier. Green-on-arrival once behavior 1 wires the
+// `TypeReference` dispatch (the `ObjectType` arm maps to `Object`); guards that
+// a type-only reference is not mistakenly emitted as its own identifier.
+// (The `interface I {}` passes through verbatim because this transformer runs
+// in isolation, without the type-eraser stage that would drop it in the full
+// pipeline; the assertion of record is the `design:type` value.)
+#[test]
+fn interface_typed_property_serializes_to_object() {
+    check_legacy_metadata(
+        "interface I {}\nclass D { @dec x: I; }",
+        &format!(
+            "{}\n{}\ninterface I {{\n}}\nclass D {{\n    x;\n}}\n__decorate([dec, __metadata(\"design:type\", Object)], D.prototype, \"x\", void 0);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: typeserializer.go:serializeTypeReferenceNode (`case
+// TypeReferenceSerializationKindUnknown:`). Go's full form (outside a
+// conditional-type branch) emits a `typeof (_a = Missing) === "function" ? _a :
+// Object` guard; the reachable single-file port emits the `Object` tail (Go's
+// `serializingConditionalTypeBranch` result). The conditional guard is DEFER'd
+// (blocked-by `NewTempVariable`/`AddVariableDeclaration`).
+// Verified `design:type` against `tsc --experimentalDecorators
+// --emitDecoratorMetadata` for a resolvable class; the unresolved-name fallback
+// is `Object`:
+//   class D { @dec x: Missing; }
+//   =>
+//   class D { x; }
+//   __decorate([dec, __metadata("design:type", Object)], D.prototype, "x", void 0);
+//
+// An unresolved entity name (`Missing` has no declaration and there are no lib
+// globals) classifies as `Unknown` → `Object`. Green-on-arrival after behavior 1
+// (the `Unknown` arm maps to `Object`).
+#[test]
+fn unresolved_type_reference_property_serializes_to_object() {
+    check_legacy_metadata(
+        "class D { @dec x: Missing; }",
+        &format!(
+            "{}\n{}\nclass D {{\n    x;\n}}\n__decorate([dec, __metadata(\"design:type\", Object)], D.prototype, \"x\", void 0);",
             DECORATE_HELPER.text, METADATA_HELPER.text
         ),
     );

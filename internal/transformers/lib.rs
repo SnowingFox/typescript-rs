@@ -15,7 +15,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use tsgo_ast::{NodeId, SymbolId};
-use tsgo_checker::{BoundProgram, EmitResolver, SerializedTypeNode};
+use tsgo_checker::{
+    BoundProgram, Checker, EmitResolver, SerializedTypeNode, TypeReferenceSerializationKind,
+};
 use tsgo_printer::EmitContext;
 
 pub mod chain;
@@ -58,6 +60,15 @@ pub type SharedEmitContext = Rc<RefCell<EmitContext>>;
 /// constructs `TransformOptions` with an exhaustive struct literal that adding a
 /// field would break (and the compiler crate is out of this port's edit scope).
 ///
+/// Some queries (e.g.
+/// [`get_type_reference_serialization_kind`](Self::get_type_reference_serialization_kind))
+/// need a mutable [`Checker`] to build declared types; the resolver owns one
+/// (built from the same source as `program`) behind an
+/// `Rc<RefCell<..>>` and borrows it mutably internally, so the passthrough
+/// methods keep their `&self`, read-only-looking surface. Go threads the program
+/// implicitly through the checker's emit-resolver back-pointer; this port bundles
+/// the checker here instead.
+///
 /// # Examples
 /// ```
 /// use tsgo_transformers::EmitReferenceResolver;
@@ -71,6 +82,10 @@ pub type SharedEmitContext = Rc<RefCell<EmitContext>>;
 pub struct EmitReferenceResolver {
     program: Rc<dyn BoundProgram>,
     resolver: EmitResolver,
+    /// A checker over `program`, needed by the type-backed queries that build
+    /// declared types (Go's emit resolver reaches the checker through a
+    /// back-pointer). Shared (`Rc`) so [`Clone`] copies share one cache.
+    checker: Rc<RefCell<Checker>>,
 }
 
 impl EmitReferenceResolver {
@@ -91,9 +106,13 @@ impl EmitReferenceResolver {
     /// # }
     /// ```
     ///
-    /// Side effects: none (stores the handles).
+    /// Side effects: none (stores the handles; builds an empty [`Checker`]).
     pub fn new(program: Rc<dyn BoundProgram>, resolver: EmitResolver) -> EmitReferenceResolver {
-        EmitReferenceResolver { program, resolver }
+        EmitReferenceResolver {
+            program,
+            resolver,
+            checker: Rc::new(RefCell::new(Checker::new())),
+        }
     }
 
     /// Reports whether the declaration `node` (an import clause / namespace
@@ -270,6 +289,42 @@ impl EmitReferenceResolver {
     pub fn serialize_type_node_for_metadata(&self, type_node: NodeId) -> SerializedTypeNode {
         self.resolver
             .serialize_type_node_for_metadata(self.program.as_ref(), type_node)
+    }
+
+    /// Classifies a `TypeReference` type node for legacy-decorator `design:type`
+    /// emit: whether the referenced entity is reachable at runtime as a value
+    /// (`: SomeClass` → a runtime constructor) or only as a type
+    /// (`: SomeInterface` → the `Object` fallback).
+    ///
+    /// Delegates to [`EmitResolver::get_type_reference_serialization_kind`]
+    /// against the bound program and the owned [`Checker`] (Go's
+    /// `serializeTypeReferenceNode` -> `resolver.GetTypeReferenceSerializationKind`).
+    /// The checker is borrowed mutably internally — building the referenced
+    /// symbol's declared type may populate caches — so this stays a `&self`
+    /// method. `type_node`'s id must be the original (pre-transform) annotation
+    /// node so it resolves to the same syntactic node in the bound program.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// use tsgo_checker::TypeReferenceSerializationKind;
+    /// # fn demo(r: &EmitReferenceResolver, ty: tsgo_ast::NodeId) -> TypeReferenceSerializationKind {
+    /// r.get_type_reference_serialization_kind(ty)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may build and cache declared types in the owned checker.
+    // Go: internal/checker/emitresolver.go:EmitResolver.GetTypeReferenceSerializationKind
+    pub fn get_type_reference_serialization_kind(
+        &self,
+        type_node: NodeId,
+    ) -> TypeReferenceSerializationKind {
+        let mut checker = self.checker.borrow_mut();
+        self.resolver.get_type_reference_serialization_kind(
+            &mut checker,
+            self.program.as_ref(),
+            type_node,
+        )
     }
 }
 

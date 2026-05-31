@@ -53,10 +53,15 @@
 //!   `getAllAccessorDeclarations`.
 //! - **Parameter decorators** (`__param(i, dec)`) and `design:paramtypes`.
 //!   blocked-by: `getDecoratorsOfParameters` + `serializeParameterTypesOfNode`.
-//! - **`TypeReference` `design:type`** (`: Date`/a class → its constructor):
-//!   checker 4at serializes these to [`SerializedTypeNode::Object`] (DEFER'd
-//!   there), so a `TypeReference`-typed property emits `Object` rather than the
-//!   entity constructor. blocked-by: checker `GetTypeReferenceSerializationKind`.
+//! - **`TypeReference` `design:type`** for lib-globals/qualified-name entities.
+//!   Round 4ax/6an wires the reachable single-file `TypeReference` dispatch
+//!   (consuming checker 4aw's `get_type_reference_serialization_kind`): a
+//!   class-typed reference (`: C`) emits the class identifier `C`, an
+//!   interface/type-alias reference emits `Object`, and an unresolved name emits
+//!   `Object`. Still deferred: the lib-globals kinds the checker classifies as
+//!   `ObjectType` (`Promise`/array/primitive), qualified-name (`A.B`) entities,
+//!   and the full `Unknown` `typeof`-conditional guard. blocked-by: checker lib
+//!   global types + qualified-name `resolveEntityName` + `NewTempVariable`.
 //! - **Computed property names**, decorator expression evaluation order edge
 //!   cases, and decorators on overloads. blocked-by: `pendingExpressions`
 //!   inlining + per-node `ConstructorReference` flags.
@@ -67,7 +72,7 @@ use tsgo_ast::{
     Kind, ModifierFlags, ModifierList, NodeArena, NodeData, NodeFlags, NodeId, NodeList,
     TokenFlags, VisitOptions,
 };
-use tsgo_checker::SerializedTypeNode;
+use tsgo_checker::{SerializedTypeNode, TypeReferenceSerializationKind};
 use tsgo_printer::emithelpers::EmitHelper;
 use tsgo_printer::EmitContext;
 
@@ -415,20 +420,18 @@ fn generate_class_element_decoration_statement(
     // With `--emitDecoratorMetadata`, append a `design:type` metadata decorator
     // *after* the real decorators (Go's `transformAllDecoratorsOfDeclaration`
     // orders metadata last). The runtime constructor comes from the checker's
-    // `serialize_type_node_for_metadata` over the property's type annotation
-    // (4at); a property with no annotation serializes to `Object` (Go's
-    // `serializeTypeNode(nil)`).
+    // type serialization over the property's type annotation; a property with no
+    // annotation serializes to `Object` (Go's `serializeTypeNode(nil)`).
     if cfg.emit_decorator_metadata {
         if let Some(resolver) = &cfg.resolver {
             let type_node = match ec.arena().data(member) {
                 NodeData::PropertyDeclaration(d) => d.type_node,
                 _ => None,
             };
-            let serialized = match type_node {
-                Some(type_node) => resolver.serialize_type_node_for_metadata(type_node),
-                None => SerializedTypeNode::Object,
+            let value = match type_node {
+                Some(type_node) => serialize_type_node(ec, resolver, type_node),
+                None => ec.arena_mut().new_identifier("Object"),
             };
-            let value = serialized_type_to_expression(ec, serialized);
             let metadata = new_metadata_helper(ec, "design:type", value);
             decorator_expressions.push(metadata);
         }
@@ -563,6 +566,125 @@ fn new_metadata_helper(ec: &mut EmitContext, key: &str, value: NodeId) -> NodeId
         NodeList::new(vec![key_literal, value]),
         NodeFlags::NONE,
     )
+}
+
+/// Serializes the property type-annotation node `type_node` to the
+/// `__metadata("design:type", ..)` expression (Go's `serializeTypeNode`).
+///
+/// A `TypeReference` (`: SomeClass` / `: SomeInterface`) is dispatched to
+/// [`serialize_type_reference_node`], which consults the checker's
+/// classification so a class-typed member emits the class identifier itself.
+/// Every other (keyword / structural) annotation is serialized by the checker's
+/// [`serialize_type_node_for_metadata`](EmitReferenceResolver::serialize_type_node_for_metadata)
+/// into a [`SerializedTypeNode`] and turned into its global constructor /
+/// `void 0`.
+///
+/// Side effects: pushes the result expression nodes.
+// Go: internal/transformers/tstransforms/typeserializer.go:metadataSerializer.serializeTypeNode
+fn serialize_type_node(
+    ec: &mut EmitContext,
+    resolver: &EmitReferenceResolver,
+    type_node: NodeId,
+) -> NodeId {
+    // Go: `node = ast.SkipTypeParentheses(node)` runs before the switch, so a
+    // parenthesized reference (`(C)`) still dispatches on the inner reference.
+    let mut type_node = type_node;
+    while let NodeData::ParenthesizedType(d) = ec.arena().data(type_node) {
+        type_node = d.type_node;
+    }
+    // Go: `case KindTypeReference: return s.serializeTypeReferenceNode(...)`.
+    if ec.arena().kind(type_node) == Kind::TypeReference {
+        return serialize_type_reference_node(ec, resolver, type_node);
+    }
+    let serialized = resolver.serialize_type_node_for_metadata(type_node);
+    serialized_type_to_expression(ec, serialized)
+}
+
+/// Serializes a `TypeReference` annotation to its `design:type` expression,
+/// switching on the checker's [`TypeReferenceSerializationKind`] (Go's
+/// `serializeTypeReferenceNode`).
+///
+/// The reachable single-file classifications (round 4ax/6an): a class-typed
+/// reference is [`TypeWithConstructSignatureAndValue`](TypeReferenceSerializationKind::TypeWithConstructSignatureAndValue)
+/// and emits the entity name as an expression (the class identifier `C`); an
+/// interface/type-alias reference is [`ObjectType`](TypeReferenceSerializationKind::ObjectType)
+/// and an unresolved name is [`Unknown`](TypeReferenceSerializationKind::Unknown),
+/// both emitting `Object`.
+///
+/// DEFER(phase-6): the `Unknown` arm's full Go form is a
+/// `typeof (_a = A) === "function" ? _a : Object` conditional guard; the
+/// reachable port emits the `Object` tail (Go's `serializingConditionalTypeBranch`
+/// result). The lib-globals-dependent kinds
+/// (`Number`/`String`/`Boolean`/`BigInt`/`Symbol`/`Array`/`Function`/`Promise`/
+/// `void 0`) are build-complete here, faithfully mirroring Go's switch, but the
+/// checker (round 4aw) still classifies those types as `ObjectType`, so they are
+/// not yet produced.
+/// blocked-by: checker lib global types + construct/call-signature collection
+/// (the conditional guard also needs `NewTempVariable` / `AddVariableDeclaration`).
+///
+/// Side effects: pushes the result expression nodes.
+// Go: internal/transformers/tstransforms/typeserializer.go:metadataSerializer.serializeTypeReferenceNode
+fn serialize_type_reference_node(
+    ec: &mut EmitContext,
+    resolver: &EmitReferenceResolver,
+    type_node: NodeId,
+) -> NodeId {
+    let kind = resolver.get_type_reference_serialization_kind(type_node);
+    match kind {
+        // Go: `case TypeWithConstructSignatureAndValue: return
+        // s.serializeEntityNameAsExpression(node.TypeName)` — the class
+        // identifier itself carries the runtime constructor.
+        TypeReferenceSerializationKind::TypeWithConstructSignatureAndValue => {
+            let type_name = match ec.arena().data(type_node) {
+                NodeData::TypeReference(d) => d.type_name,
+                _ => unreachable!("kind checked above"),
+            };
+            serialize_entity_name_as_expression(ec, type_name)
+        }
+        // Go: `case Unknown:` — outside a conditional-type branch Go emits a
+        // `typeof`/conditional guard; the reachable port emits the `Object` tail
+        // (the `serializingConditionalTypeBranch` result). DEFER the guard.
+        TypeReferenceSerializationKind::Unknown => ec.arena_mut().new_identifier("Object"),
+        // Go: `case ObjectType: return s.f.NewIdentifier("Object")`.
+        TypeReferenceSerializationKind::ObjectType => ec.arena_mut().new_identifier("Object"),
+        // Go: `case VoidNullableOrNeverType: return s.f.NewVoidZeroExpression()`.
+        TypeReferenceSerializationKind::VoidNullableOrNeverType => make_void_zero(ec),
+        // Go: `case NumberLikeType: return s.f.NewIdentifier("Number")`.
+        TypeReferenceSerializationKind::NumberLikeType => ec.arena_mut().new_identifier("Number"),
+        // Go: `case BigIntLikeType: return s.f.NewIdentifier("BigInt")`.
+        TypeReferenceSerializationKind::BigIntLikeType => ec.arena_mut().new_identifier("BigInt"),
+        // Go: `case StringLikeType: return s.f.NewIdentifier("String")`.
+        TypeReferenceSerializationKind::StringLikeType => ec.arena_mut().new_identifier("String"),
+        // Go: `case BooleanType: return s.f.NewIdentifier("Boolean")`.
+        TypeReferenceSerializationKind::BooleanType => ec.arena_mut().new_identifier("Boolean"),
+        // Go: `case ArrayLikeType: return s.f.NewIdentifier("Array")`.
+        TypeReferenceSerializationKind::ArrayLikeType => ec.arena_mut().new_identifier("Array"),
+        // Go: `case ESSymbolType: return s.f.NewIdentifier("Symbol")`.
+        TypeReferenceSerializationKind::ESSymbolType => ec.arena_mut().new_identifier("Symbol"),
+        // Go: `case TypeWithCallSignature: return s.f.NewIdentifier("Function")`.
+        TypeReferenceSerializationKind::TypeWithCallSignature => {
+            ec.arena_mut().new_identifier("Function")
+        }
+        // Go: `case Promise: return s.f.NewIdentifier("Promise")`.
+        TypeReferenceSerializationKind::Promise => ec.arena_mut().new_identifier("Promise"),
+    }
+}
+
+/// Serializes an entity name to an expression for decorator type metadata (Go's
+/// `serializeEntityNameAsExpression`): a bare identifier `C` becomes a fresh
+/// identifier expression `C`.
+///
+/// DEFER(phase-6): a qualified name (`A.B`) becomes a property-access chain;
+/// the checker only classifies a bare identifier as
+/// `TypeWithConstructSignatureAndValue` (qualified names resolve to `Unknown`),
+/// so this arm is not reachable yet.
+/// blocked-by: qualified-name `resolveEntityName` + namespace resolution.
+///
+/// Side effects: pushes the identifier node.
+// Go: internal/transformers/tstransforms/typeserializer.go:metadataSerializer.serializeEntityNameAsExpression
+fn serialize_entity_name_as_expression(ec: &mut EmitContext, entity_name: NodeId) -> NodeId {
+    let text = ec.arena().text(entity_name).to_string();
+    ec.arena_mut().new_identifier(&text)
 }
 
 /// Maps a checker [`SerializedTypeNode`] to the AST expression the
