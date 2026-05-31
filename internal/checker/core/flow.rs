@@ -449,9 +449,215 @@ impl Checker {
             }
             return self.narrow_type_by_equality(program, t, value_type, effective);
         }
-        // DEFER(phase-4-checker-4h+): discriminant-property narrowing on a key
-        // property of a union (`obj.kind === "a"`).
+        // Discriminated-union narrowing (`obj.kind === "a"`): neither side
+        // matches the reference directly, but one side is a property access
+        // `ref.kind` on a literal discriminant property of the union `t`. Go
+        // routes through `getDiscriminantPropertyAccess` ->
+        // `narrowTypeByDiscriminantProperty`.
+        // DEFER(phase-4-checker-later): `getDiscriminantPropertyAccess`'s
+        // const-alias / binding-pattern candidate forms and the optional-chain
+        // containment branch. blocked-by: alias-reference matching + optional
+        // chains.
+        if let Some(access) = self.get_discriminant_property_access(program, reference, left, t) {
+            let value_type = self.check_expression(program, right);
+            return self
+                .narrow_type_by_discriminant_property(program, t, access, value_type, effective);
+        }
+        if let Some(access) = self.get_discriminant_property_access(program, reference, right, t) {
+            let value_type = self.check_expression(program, left);
+            return self
+                .narrow_type_by_discriminant_property(program, t, access, value_type, effective);
+        }
         t
+    }
+
+    // Returns the property-access node `ref.prop` (`left`/`right` of an equality)
+    // when it is a candidate discriminant-property access for `reference` on the
+    // union `t`: the access's object must match the reference and `prop` must be
+    // a literal discriminant property of `t` (Go's `getDiscriminantPropertyAccess`
+    // + `getCandidateDiscriminantPropertyAccess`).
+    //
+    // DEFER(phase-4-checker-later): the const-alias (`const k = obj.kind`) and
+    // destructuring (`const { kind } = obj`) candidate forms, and using the
+    // declared union type when the computed type isn't a union subset.
+    // blocked-by: alias/binding-element reference matching.
+    // Go: internal/checker/flow.go:Checker.getDiscriminantPropertyAccess(1408)
+    fn get_discriminant_property_access(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        expr: NodeId,
+        t: TypeId,
+    ) -> Option<NodeId> {
+        if !self.get_type(t).flags().contains(TypeFlags::UNION) {
+            return None;
+        }
+        // The candidate access: an access expression whose object matches the
+        // reference (Go's `getCandidateDiscriminantPropertyAccess`, access case).
+        if program.arena().kind(expr) != Kind::PropertyAccessExpression {
+            return None;
+        }
+        let object = match program.arena().data(expr) {
+            NodeData::PropertyAccessExpression(d) => d.expression,
+            _ => return None,
+        };
+        if !self.is_matching_reference(program, reference, object) {
+            return None;
+        }
+        let name = self.get_accessed_property_name(program, expr)?;
+        if self.is_discriminant_property(program, t, &name) {
+            Some(expr)
+        } else {
+            None
+        }
+    }
+
+    // Returns the accessed property name of an access expression (Go's
+    // `getAccessedPropertyName`, reachable subset: property access only).
+    //
+    // DEFER(phase-4-checker-later): element-access (`obj["k"]`), binding-element,
+    // and parameter forms. blocked-by: element-access name extraction + binding
+    // destructuring names.
+    // Go: internal/checker/flow.go:Checker.getAccessedPropertyName(1699)
+    fn get_accessed_property_name(
+        &self,
+        program: &dyn BoundProgram,
+        access: NodeId,
+    ) -> Option<String> {
+        match program.arena().data(access) {
+            NodeData::PropertyAccessExpression(d) => Some(program.arena().text(d.name).to_string()),
+            _ => None,
+        }
+    }
+
+    // Reports whether `name` is a literal discriminant property of the union
+    // `t`: a synthesized union property whose per-constituent types are
+    // non-uniform and at least one is a literal (Go's `isDiscriminantProperty`
+    // gating on `CheckFlagsNonUniformAndLiteral`).
+    //
+    // Non-uniformity is compared by literal value (not type id), because the
+    // port does not intern literal types — two `"a"` occurrences are distinct
+    // ids but the same discriminant value.
+    //
+    // DEFER(phase-4-checker-later): the `!isGenericType(prop type)` exclusion
+    // and the `HasNeverType` interaction. blocked-by: generic-type detection.
+    // Go: internal/checker/relater.go:Checker.isDiscriminantProperty(1084)
+    fn is_discriminant_property(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        name: &str,
+    ) -> bool {
+        if !self.get_type(t).flags().contains(TypeFlags::UNION) {
+            return false;
+        }
+        // Only a synthesized (synthetic) union property is a candidate; a
+        // property contributed by a single symbol across all constituents is
+        // not (it cannot be non-uniform).
+        let prop = match crate::core::declared_types::get_property_of_type(self, t, name) {
+            Some(p) => p,
+            None => return false,
+        };
+        if !crate::core::is_synthesized_symbol(prop) {
+            return false;
+        }
+        let members = self.distributed_types(t);
+        let mut first: Option<TypeId> = None;
+        let mut non_uniform = false;
+        let mut has_literal = false;
+        for m in members {
+            let pt = match crate::core::declared_types::get_type_of_property_of_type(
+                self, program, m, name,
+            ) {
+                Some(pt) => pt,
+                None => continue,
+            };
+            match first {
+                None => first = Some(pt),
+                Some(f) => {
+                    if pt != f && !self.types_same_literal_value(f, pt) {
+                        non_uniform = true;
+                    }
+                }
+            }
+            if self.is_literal_type(pt) {
+                has_literal = true;
+            }
+        }
+        non_uniform && has_literal
+    }
+
+    // Reports whether `a` and `b` are literal types carrying the same value,
+    // standing in for Go's literal interning when checking discriminant
+    // uniformity.
+    // Go: internal/checker/relater.go:createUnionOrIntersectionProperty (uniform check)
+    fn types_same_literal_value(&self, a: TypeId, b: TypeId) -> bool {
+        match (
+            self.get_type(a).literal_value(),
+            self.get_type(b).literal_value(),
+        ) {
+            (Some(va), Some(vb)) => va == vb,
+            _ => false,
+        }
+    }
+
+    // Narrows a union `t` by a discriminant-property equality (`obj.kind === v`).
+    // The 4az equality dispatch narrows the property type, then the union is
+    // filtered to the constituents whose own discriminant property is comparable
+    // to the narrowed property type (Go's `narrowTypeByDiscriminantProperty` ->
+    // `narrowTypeByDiscriminant` fallback, the equality closure).
+    //
+    // DEFER(phase-4-checker-later): the `getKeyPropertyName` fast path (only
+    // taken for unions with >= 10 constituents), the optional-chain / non-null
+    // `removeNullable` adjustment, and the `getTypeOfPropertyOrIndexSignatureOf
+    // Type` index-signature fallback. blocked-by: key-property maps + optional
+    // chains + index-signature property typing.
+    // Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminantProperty(683) /
+    //     narrowTypeByDiscriminant(706)
+    fn narrow_type_by_discriminant_property(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        access: NodeId,
+        value_type: TypeId,
+        assume_true: bool,
+    ) -> TypeId {
+        let prop_name = match self.get_accessed_property_name(program, access) {
+            Some(n) => n,
+            None => return t,
+        };
+        let prop_type = match crate::core::declared_types::get_type_of_property_of_type(
+            self, program, t, &prop_name,
+        ) {
+            Some(pt) => pt,
+            None => return t,
+        };
+        let narrowed_prop_type =
+            self.narrow_type_by_equality(program, prop_type, value_type, assume_true);
+        let narrowed_is_never = self
+            .get_type(narrowed_prop_type)
+            .flags()
+            .contains(TypeFlags::NEVER);
+        let unknown = self.unknown_type();
+        let members = self.distributed_types(t);
+        let mut kept: Vec<TypeId> = Vec::new();
+        for m in members {
+            let discriminant = crate::core::declared_types::get_type_of_property_of_type(
+                self, program, m, &prop_name,
+            )
+            .unwrap_or(unknown);
+            let discriminant_never = self
+                .get_type(discriminant)
+                .flags()
+                .contains(TypeFlags::NEVER);
+            if !discriminant_never
+                && !narrowed_is_never
+                && self.are_types_comparable(program, narrowed_prop_type, discriminant)
+            {
+                kept.push(m);
+            }
+        }
+        self.get_union_type(&kept)
     }
 
     // Narrows `t` at a `switch`-clause flow node for `reference`. 4t subset: a

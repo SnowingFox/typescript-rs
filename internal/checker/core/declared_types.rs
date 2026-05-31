@@ -985,14 +985,16 @@ pub fn get_type_from_type_node(
     }
 }
 
-// Resolves a literal type node. The reachable subset handles the `null` type
-// (`LiteralType` wrapping a `NullKeyword`) -> `null_type`; the string/number/
-// boolean literal type nodes route through `checkExpression` +
-// `getRegularTypeOfLiteralType` in Go and are deferred here.
+// Resolves a literal type node. A `LiteralType` wrapping a `NullKeyword`
+// resolves to `null_type`; the string/number/boolean literal type nodes
+// (`"a"`/`1`/`true` in type position) route through `checkExpression` +
+// `getRegularTypeOfLiteralType` (a literal in type position carries the
+// *regular*, not fresh, literal type).
 //
-// DEFER(phase-4-checker-4az+): the non-`null` literal type nodes (`"a"`/`1`/
-// `true` in type position) -> `getRegularTypeOfLiteralType(checkExpression(literal))`.
-// blocked-by: fresh/regular literal-type pairing in type position.
+// DEFER(phase-4-checker-later): the negative-numeric (`-1`) and bigint literal
+// type nodes (a `PrefixUnaryExpression`/`BigIntLiteral` operand, not yet typed
+// by `check_expression`) and the `links.resolvedType` memoization Go keeps.
+// blocked-by: prefix-unary/bigint literal expression typing.
 // Go: internal/checker/checker.go:Checker.getTypeFromLiteralTypeNode(22781)
 fn get_type_from_literal_type_node(
     checker: &mut Checker,
@@ -1006,7 +1008,8 @@ fn get_type_from_literal_type_node(
     if program.arena().kind(literal) == Kind::NullKeyword {
         return checker.null_type();
     }
-    checker.error_type()
+    let t = checker.check_expression(program, literal);
+    checker.regular_type_of_literal_type(t)
 }
 
 // Resolves an `A | B` type node to the constructed union type: each constituent

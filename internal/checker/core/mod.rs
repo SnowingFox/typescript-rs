@@ -1240,7 +1240,7 @@ impl Checker {
     // Normalizes a fresh literal type to its regular counterpart (Go's
     // `getRegularTypeOfLiteralType` for the fresh/regular literal pair).
     // Go: internal/checker/checker.go:Checker.getRegularTypeOfLiteralType
-    fn regular_type_of_literal_type(&self, t: TypeId) -> TypeId {
+    pub(crate) fn regular_type_of_literal_type(&self, t: TypeId) -> TypeId {
         if let TypeData::Literal(d) = &self.get_type(t).data {
             if d.fresh_type == Some(t) {
                 return d.regular_type.unwrap_or(t);

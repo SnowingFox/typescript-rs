@@ -639,17 +639,27 @@ impl Checker {
             // `undefined`/`null` (`hasTypeFacts(left, EQUndefinedOrNull)`). For a
             // non-nullable left, the result is exactly the left type.
             //
-            // DEFER(phase-4-checker-4ba+): the `checkNullishCoalesceOperands`
-            // grammar diagnostics (`??` mixed with `||`/`&&` without parentheses,
-            // `2025`/etc.) and the `UnionReductionSubtype` reduction of the result
-            // (the port's union keeps literal members; the observable
-            // assignability is unaffected). blocked-by: the grammar mixed-operator
-            // check + 4b union subtype reduction.
+            // The result union is subtype-reduced (`UnionReductionSubtype`): a
+            // member that is a subtype of another (e.g. the literal `"a"`
+            // subsumed by `string`) is dropped, so `("a" | undefined) ?? string`
+            // is `string`, not `"a" | string`.
+            //
+            // DEFER(phase-4-checker-later): the `checkNullishCoalesceOperands`
+            // always-/never-nullish operand diagnostics (`This_expression_is_
+            // always_nullish` / `Right_operand_..._never_nullish`). blocked-by:
+            // the syntactic nullishness-semantics analysis. (The mixed-operator
+            // `5076` grammar check is wired separately below.)
             Kind::QuestionQuestionToken | Kind::QuestionQuestionEqualsToken => {
+                // Go runs the mixed-operator grammar check (`5076`) only for the
+                // binary `??` form, not the `??=` compound assignment.
+                if operator == Kind::QuestionQuestionToken {
+                    self.check_nullish_coalesce_operands(program, node, left, right);
+                }
                 let mut result = left_type;
                 if self.has_type_facts(left_type, TypeFacts::EQ_UNDEFINED_OR_NULL) {
                     let non_null = self.get_non_null_type(left_type);
-                    result = self.get_union_dropping_never(&[non_null, right_type]);
+                    let reduced = self.subtype_reduce(program, &[non_null, right_type]);
+                    result = self.get_union_type(&reduced);
                 }
                 if operator == Kind::QuestionQuestionEqualsToken {
                     self.check_assignment_operator(program, left, left_type, right_type);
@@ -1033,7 +1043,12 @@ impl Checker {
     // Reports whether `a` and `b` are comparable in either direction (Go's
     // `areTypesComparable`).
     // Go: internal/checker/relater.go:Checker.areTypesComparable(166)
-    fn are_types_comparable(&mut self, program: &dyn BoundProgram, a: TypeId, b: TypeId) -> bool {
+    pub(crate) fn are_types_comparable(
+        &mut self,
+        program: &dyn BoundProgram,
+        a: TypeId,
+        b: TypeId,
+    ) -> bool {
         self.is_type_comparable_to(program, a, b) || self.is_type_comparable_to(program, b, a)
     }
 
@@ -2765,7 +2780,7 @@ impl Checker {
     // DEFER(phase-4-checker-4m+): unions whose members are all unit types.
     // blocked-by: union literal-type construction.
     // Go: internal/checker/checker.go:isLiteralType(25252)
-    fn is_literal_type(&self, t: TypeId) -> bool {
+    pub(crate) fn is_literal_type(&self, t: TypeId) -> bool {
         let f = self.get_type(t).flags();
         f.intersects(TypeFlags::BOOLEAN) || f.intersects(TypeFlags::UNIT)
     }

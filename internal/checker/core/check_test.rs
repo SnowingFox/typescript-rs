@@ -1165,6 +1165,116 @@ fn nullish_coalesce_assign_removes_undefined_assignable_to_string() {
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
+// 4bb slice 2 (genuine RED): the `??` result union is subtype-reduced (Go's
+// `getUnionTypeEx([GetNonNullableType(left), right], UnionReductionSubtype)`).
+// With `x: "a" | undefined` and `y: string`, `x ?? y` is
+// `getNonNullableType("a" | undefined) | string` = `"a" | string`, which
+// subtype-reduces to `string` (the literal `"a"` is subsumed by `string`).
+// Assigning to `number` therefore reports `2322` whose SOURCE is the reduced
+// `string`. Before subtype reduction the result kept both members and the
+// message read `Type '"a" | string' ...`.
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12468)
+#[test]
+fn nullish_coalesce_result_is_subtype_reduced() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: \"a\" | undefined;\ndeclare const y: string;\nconst n: number = x ?? y;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// 4bb slice 3 (genuine RED): mixing `??` with `||` without parentheses is a
+// grammar error (`5076`). `a ?? b || c` parses as `(a ?? b) || c` (`??` and
+// `||` share precedence, left-associative), so when the `??` node is checked
+// its grandparent is a `||` whose left operand is the `??` expression: Go's
+// `checkNullishCoalesceOperands` reports `5076` on that `a ?? b` node.
+// Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperands(12859)
+#[test]
+fn nullish_coalesce_mixed_with_logical_or_reports_5076() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: number;\ndeclare const b: number;\ndeclare const c: number;\na ?? b || c;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 5076);
+    assert_eq!(
+        diags[0].message,
+        "'??' and '||' operations cannot be mixed without parentheses."
+    );
+}
+
+// 4bb slice 3 (branch 2, green-on-arrival): `a || b ?? c` parses as
+// `(a || b) ?? c`, so the `??` node's LEFT operand is a `||` expression. Go's
+// `checkNullishCoalesceOperands` reports `5076` on that left operand with the
+// operands in `||`-then-`??` order.
+// Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperands(12866)
+#[test]
+fn logical_or_then_nullish_coalesce_reports_5076() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: number;\ndeclare const b: number;\ndeclare const c: number;\na || b ?? c;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 5076);
+    assert_eq!(
+        diags[0].message,
+        "'||' and '??' operations cannot be mixed without parentheses."
+    );
+}
+
+// 4bb slice 3 (branch 3, green-on-arrival): `a ?? b && c` parses as
+// `a ?? (b && c)` (`&&` binds tighter than `??`), so the `??` node's RIGHT
+// operand is a `&&` expression. Go reports `5076` on that right operand with
+// the operands in `??`-then-`&&` order.
+// Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperands(12871)
+#[test]
+fn nullish_coalesce_with_logical_and_reports_5076() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: number;\ndeclare const b: number;\ndeclare const c: number;\na ?? b && c;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 5076);
+    assert_eq!(
+        diags[0].message,
+        "'??' and '&&' operations cannot be mixed without parentheses."
+    );
+}
+
+// 4bb slice 3 (contrast, green-on-arrival): explicit parentheses resolve the
+// ambiguity, so `(a ?? b) || c` reports NO `5076` — the `??` node's grandparent
+// is a parenthesized expression (not a binary `||`), and neither operand of the
+// `??` is a logical binary.
+// Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperands(12859)
+#[test]
+fn parenthesized_nullish_coalesce_with_logical_or_reports_nothing() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: number;\ndeclare const b: number;\ndeclare const c: number;\n(a ?? b) || c;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
 // Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (compound arithmetic operand, 2362)
 #[test]
 fn compound_arithmetic_assignment_checks_operand() {
@@ -3161,6 +3271,152 @@ fn plain_string_or_number_assigned_to_string_reports_2322() {
         diags[0].message,
         "Type 'string | number' is not assignable to type 'string'."
     );
+}
+
+// 4bb slice 1a (genuine RED): a literal type node (`"a"`/`1`/`true` in type
+// position) resolves to the corresponding literal type, not `error` (Go's
+// `getTypeFromLiteralTypeNode` -> `getRegularTypeOfLiteralType(checkExpression(
+// literal))`). With `x: "a"`, the string-literal type `"a"` is not assignable
+// to the distinct literal `"b"`, so `const n: "b" = x` reports `2322`; the
+// target `"b"` is itself a unit type, so the source is NOT widened and the
+// message preserves both literals. Before the literal type node was wired (4az
+// DEFER returned `error_type`), `x` was `error`, assignable everywhere, so
+// nothing was reported.
+// Go: internal/checker/checker.go:Checker.getTypeFromLiteralTypeNode(22781)
+#[test]
+fn string_literal_type_node_not_assignable_to_other_literal() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: \"a\";\nconst n: \"b\" = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '\"a\"' is not assignable to type '\"b\"'."
+    );
+}
+
+// 4bb slice 1a contrast (green-on-arrival): a string-literal type node is
+// assignable to its base primitive `string`, so `const s: string = x` with
+// `x: "a"` reports nothing (the literal `"a"` is a subtype of `string`).
+// Go: internal/checker/checker.go:Checker.getTypeFromLiteralTypeNode(22781)
+#[test]
+fn string_literal_type_node_assignable_to_string() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: \"a\";\nconst s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bb slice 1b (genuine RED): comparing a literal-union value to one of its
+// member literals is a valid comparison, so `k === "a"` with `k: "a" | "b"`
+// reports nothing. The two `"a"` literal types (the union member and the
+// condition operand) are distinct ids in the port (literals are not interned
+// by value as they are in Go), so the comparable relation must relate two
+// literals with equal value/flags — mirroring Go's literal interning where
+// `"a" === "a"` holds by pointer identity. Before this fix the equality
+// comparability check found "no overlap" and reported `2367`.
+// Go: internal/checker/relater.go:Checker.isTypeRelatedTo (interned literal identity)
+#[test]
+fn equality_literal_in_its_union_reports_no_overlap_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const k: \"a\" | \"b\";\nk === \"a\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bb slice 1b contrast (green-on-arrival): comparing a literal-union value to
+// a literal that is NOT a member still reports `2367` (no overlap), so the fix
+// does not suppress genuine no-overlap comparisons. `k: "a" | "b"` vs `"c"`.
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (equality 2367)
+#[test]
+fn equality_literal_outside_union_reports_no_overlap() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const k: \"a\" | \"b\";\nk === \"c\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2367);
+    assert_eq!(
+        diags[0].message,
+        "This comparison appears to be unintentional because the types '\"a\" | \"b\"' and '\"c\"' have no overlap."
+    );
+}
+
+// 4bb slice 1 (genuine RED): discriminated-union narrowing. Inside
+// `if (v.kind === "a")`, the union `A | B` narrows to `A` because `kind` is a
+// literal discriminant property (Go's `getDiscriminantPropertyAccess` ->
+// `narrowTypeByDiscriminantProperty` -> `narrowTypeByDiscriminant`). The
+// narrowed `v: A` then exposes `v.x: number`, so `const n: number = v.x`
+// reports nothing. Before the discriminant narrowing, `v` kept the whole union
+// and `v.x` reported `2339` ("Property 'x' does not exist on type 'A | B'")
+// because `x` is not present on every constituent.
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminantProperty(683)
+#[test]
+fn discriminant_property_eq_narrows_union_in_then_branch() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\ntype B = { kind: \"b\"; y: string };\ndeclare const v: A | B;\nif (v.kind === \"a\") {\n  const n: number = v.x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bb slice 1 (narrowing witness, green-on-arrival): inside `if (v.kind ===
+// "a")` the union narrows to `A`, so accessing the OTHER constituent's property
+// `v.y` (only on `B`) reports `2339` against the NARROWED type `A`
+// (`{ kind: "a"; x: number; }`), not the whole union. The narrowed-type message
+// distinguishes this from the un-narrowed case.
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminantProperty(683)
+#[test]
+fn discriminant_narrowed_branch_rejects_other_constituent_property() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\ntype B = { kind: \"b\"; y: string };\ndeclare const v: A | B;\nif (v.kind === \"a\") {\n  v.y;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+    assert_eq!(
+        diags[0].message,
+        "Property 'y' does not exist on type '{ kind: \"a\"; x: number; }'."
+    );
+}
+
+// 4bb slice 1 (negation witness, green-on-arrival): inside `if (v.kind !== "a")`
+// the union narrows to the complement `B`, so `v.y` (`y: string`) exists and
+// `const s: string = v.y` reports nothing. The `!==` flips `assume_true`, which
+// the equality dispatch turns into removing the `"a"` constituent.
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminantProperty(683)
+#[test]
+fn discriminant_not_equal_narrows_to_complement_constituent() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\ntype B = { kind: \"b\"; y: string };\ndeclare const v: A | B;\nif (v.kind !== \"a\") {\n  const s: string = v.y;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
 // Go: internal/checker/checker.go:Checker.resolveInstanceofExpression (right callable -> ok)

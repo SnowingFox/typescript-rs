@@ -241,6 +241,88 @@ impl Checker {
         false
     }
 
+    // Reports the mixed-operator grammar error `5076` when a `??` binary
+    // expression is combined with `||`/`&&` without parentheses (Go's
+    // `checkNullishCoalesceOperands`).
+    //
+    // Because `??`, `||`, and `&&` cannot be mixed unparenthesized, exactly one
+    // of three syntactic shapes is reported, mirroring Go's `if`/`else if`
+    // chain: (1) the `??` node's parent is a `||` whose left operand is the `??`
+    // expression (`a ?? b || c` parses as `(a ?? b) || c`); (2) the `??` left
+    // operand is itself a `||`/`&&` expression; (3) the `??` right operand is a
+    // `&&` expression. `node` is the `??` binary expression; `left`/`right` are
+    // its operands.
+    //
+    // DEFER(phase-4-checker-later): `checkNullishCoalesceOperandLeft` (the
+    // always-/never-nullish operand diagnostics). blocked-by: the syntactic
+    // nullishness-semantics analysis.
+    //
+    // Side effects: may record a `5076` diagnostic.
+    // Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperands(12859)
+    pub(crate) fn check_nullish_coalesce_operands(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        left: NodeId,
+        right: NodeId,
+    ) {
+        let arena = program.arena();
+        // Go's `left.Parent.Parent` is the `??` node's parent (the operand's
+        // grandparent), since the operand's direct parent is the `??` node.
+        let grandparent = arena.parent(node);
+        let grandparent_binary = grandparent.filter(|&g| arena.kind(g) == Kind::BinaryExpression);
+        if let Some(grandparent) = grandparent_binary {
+            // Branch 1: `(a ?? b) || c` — the `??` node sits as the left operand
+            // of a `||`. Report `5076` on that left operand.
+            let (gp_left, gp_op) = match arena.data(grandparent) {
+                NodeData::BinaryExpression(d) => (d.left, arena.kind(d.operator_token)),
+                _ => return,
+            };
+            if arena.kind(gp_left) == Kind::BinaryExpression && gp_op == Kind::BarBarToken {
+                self.error(
+                    program,
+                    gp_left,
+                    &tsgo_diagnostics::X_0_AND_1_OPERATIONS_CANNOT_BE_MIXED_WITHOUT_PARENTHESES,
+                    &["??", "||"],
+                );
+            }
+        } else if arena.kind(left) == Kind::BinaryExpression {
+            // Branch 2: the `??` left operand is itself a `||`/`&&` expression.
+            let op = match arena.data(left) {
+                NodeData::BinaryExpression(d) => arena.kind(d.operator_token),
+                _ => return,
+            };
+            let op_text = match op {
+                Kind::BarBarToken => "||",
+                Kind::AmpersandAmpersandToken => "&&",
+                _ => return,
+            };
+            self.error(
+                program,
+                left,
+                &tsgo_diagnostics::X_0_AND_1_OPERATIONS_CANNOT_BE_MIXED_WITHOUT_PARENTHESES,
+                &[op_text, "??"],
+            );
+        } else if arena.kind(right) == Kind::BinaryExpression {
+            // Branch 3: the `??` right operand is a `&&` expression.
+            let op = match arena.data(right) {
+                NodeData::BinaryExpression(d) => arena.kind(d.operator_token),
+                _ => return,
+            };
+            if op == Kind::AmpersandAmpersandToken {
+                self.error(
+                    program,
+                    right,
+                    &tsgo_diagnostics::X_0_AND_1_OPERATIONS_CANNOT_BE_MIXED_WITHOUT_PARENTHESES,
+                    &["??", "&&"],
+                );
+            }
+        }
+        // DEFER(phase-4-checker-later): `checkNullishCoalesceOperandLeft` (the
+        // always-nullish `This_expression_is_always_nullish` / never-nullish
+        // `Right_operand_..._never_nullish` diagnostics).
+    }
+
     /// Checks that a constructor declaration `node` has no type parameters
     /// (Go's `checkGrammarConstructorTypeParameters`): any present are `1092`.
     ///
