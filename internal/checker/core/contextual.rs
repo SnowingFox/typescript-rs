@@ -15,7 +15,10 @@
 
 use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags};
 
-use super::declared_types::{get_type_from_type_node, get_type_of_symbol};
+use super::declared_types::{
+    get_applicable_index_info_for_name, get_property_of_type, get_type_from_type_node,
+    get_type_of_symbol,
+};
 use super::program::BoundProgram;
 use super::signatures::SignatureId;
 use super::symbols::resolve_name;
@@ -54,17 +57,19 @@ impl Checker {
     /// 4bj reaches the two foundational arms: an expression that is the
     /// initializer of an annotated variable/parameter/property declaration, and
     /// the right-hand side of an assignment to an annotated identifier target.
+    /// 4bk adds the inverse-direction arms — type flowing *into* a literal:
+    /// an object-literal property/shorthand value (`getContextualTypeForObjectLiteralElement`)
+    /// and an array-literal element (`getContextualTypeForElementExpression`).
     ///
-    /// DEFER(phase-4-checker-4bk+): the `NodeFlagsInWithStatement` early-out, the
+    /// DEFER(phase-4-checker-4bl+): the `NodeFlagsInWithStatement` early-out, the
     /// cached-contextual-node lookup (`findContextualNode`/`contextualInfos`),
-    /// and every other parent arm — call/`new` arguments
+    /// and the remaining parent arms — call/`new` arguments
     /// (`getContextualTypeForArgument`, blocked-by: call resolution's contextual
     /// pass), return/arrow-body (`getContextualTypeForReturnExpression`),
     /// yield/await operands, decorators, `as`/`satisfies`/parenthesized/non-null
-    /// pass-through, object/array-literal elements (the inverse direction:
-    /// type flowing into a literal), conditional/template operands, and JSX.
-    /// blocked-by: call-resolution contextual pass + return-position inference +
-    /// literal contextual typing + JSX.
+    /// pass-through, the `SpreadAssignment` grandparent walk, conditional/template
+    /// operands, and JSX. blocked-by: call-resolution contextual pass +
+    /// return-position inference + spread typing + JSX.
     ///
     /// Side effects: may allocate types/signatures while resolving the
     /// contextual annotation.
@@ -87,6 +92,15 @@ impl Checker {
             Kind::BinaryExpression => {
                 self.get_contextual_type_for_binary_operand(program, node, context_flags)
             }
+            Kind::PropertyAssignment | Kind::ShorthandPropertyAssignment => {
+                self.get_contextual_type_for_object_literal_element(program, parent, context_flags)
+            }
+            Kind::ArrayLiteralExpression => self.get_contextual_type_for_array_literal_element(
+                program,
+                parent,
+                node,
+                context_flags,
+            ),
             _ => None,
         }
     }
@@ -215,6 +229,130 @@ impl Checker {
         let globals = program.globals();
         let symbol = resolve_name(program, left, &name, SymbolFlags::VALUE, false, globals)?;
         Some(get_type_of_symbol(self, program, symbol, globals))
+    }
+
+    /// In an object literal contextually typed by a type `T`, the contextual
+    /// type of a property/shorthand value is the type of the matching property
+    /// of `T` (or its applicable index signature's value type). This is the
+    /// inverse-direction flow: the annotation's property type flows *into* the
+    /// member value, so a literal value in a literal-typed property position is
+    /// preserved rather than widened.
+    ///
+    /// DEFER(phase-4-checker-4bl+): the explicit-type-annotation arm (a grammar
+    /// error whose Go path returns `getTypeFromTypeNode`), object-literal
+    /// methods (`getContextualTypeForObjectLiteralMethod`), and the
+    /// computed/dynamic-name arms — a computed name keyed by its expression type
+    /// (`getPropertyNameFromType`) and the by-name index-info fallback
+    /// (`mapType` over `findApplicableIndexInfo`). blocked-by: property-element
+    /// annotation elaboration + object-literal methods + computed-name typing +
+    /// union `mapType`.
+    // Go: internal/checker/checker.go:Checker.getContextualTypeForObjectLiteralElement
+    fn get_contextual_type_for_object_literal_element(
+        &mut self,
+        program: &dyn BoundProgram,
+        element: NodeId,
+        context_flags: ContextFlags,
+    ) -> Option<TypeId> {
+        let object_literal = program.arena().parent(element)?;
+        let t =
+            self.get_apparent_type_of_contextual_type(program, object_literal, context_flags)?;
+        // `hasBindableName` reachable subset: a static (non-computed) property
+        // name. A computed/dynamic name has no statically-known property name to
+        // look up here (DEFER).
+        let name = object_literal_element_static_name(program, element)?;
+        self.get_type_of_property_of_contextual_type(program, t, &name)
+    }
+
+    /// The contextual type of an array-literal element: derived from the
+    /// element's position in the array literal's (apparent) contextual type.
+    ///
+    /// DEFER(phase-4-checker-4bl+): the spread-index offsets (`getSpreadIndices`)
+    /// that shift the positional mapping. blocked-by: spread-element typing.
+    // Go: internal/checker/checker.go:Checker.getContextualType (KindArrayLiteralExpression)
+    fn get_contextual_type_for_array_literal_element(
+        &mut self,
+        program: &dyn BoundProgram,
+        array_literal: NodeId,
+        element: NodeId,
+        context_flags: ContextFlags,
+    ) -> Option<TypeId> {
+        let t = self.get_apparent_type_of_contextual_type(program, array_literal, context_flags)?;
+        let elements = array_literal_elements(program, array_literal);
+        let element_index = elements.iter().position(|&e| e == element)?;
+        self.get_contextual_type_for_element_expression(program, t, element_index, elements.len())
+    }
+
+    /// The contextual type for the element at `index` of a contextual array/
+    /// tuple type `t`: a contextual property named by the index (the tuple/
+    /// numeric-index path), else the iterated/element type of the contextual
+    /// (array-like) type.
+    ///
+    /// DEFER(phase-4-checker-4bl+): the union `mapType` distribution, the tuple
+    /// positional-element typing (fixed/variadic elements, spread offsets,
+    /// `removeMissingType`), and the spread-index arguments. blocked-by:
+    /// union contextual typing + contextual tuple positional typing + spread
+    /// elements.
+    // Go: internal/checker/checker.go:Checker.getContextualTypeForElementExpression
+    fn get_contextual_type_for_element_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        index: usize,
+        _length: usize,
+    ) -> Option<TypeId> {
+        // If a contextual property with the element's numeric name exists, use
+        // it (Go's `getTypeOfPropertyOfContextualType(t, index)`); otherwise the
+        // iterated/element type of the contextual (array) type.
+        if let Some(prop) =
+            self.get_type_of_property_of_contextual_type(program, t, &index.to_string())
+        {
+            return Some(prop);
+        }
+        self.check_iterated_type_or_element_type(program, t, None, true)
+    }
+
+    /// The type of the property named `name` in a contextual type `t`: the
+    /// matching property's type, else the value type of an applicable index
+    /// signature, else `None`.
+    ///
+    /// DEFER(phase-4-checker-4bl+): the union `mapType` distribution, the
+    /// intersection per-constituent combine, generic mapped types
+    /// (`getIndexedMappedTypeSubstitutedTypeOfContextualType`), the circular
+    /// mapped-property guard, and `removeMissingType` for optional members.
+    /// blocked-by: union/intersection contextual typing + generic mapped types +
+    /// optional-member missing-type stripping.
+    // Go: internal/checker/checker.go:Checker.getTypeOfPropertyOfContextualType
+    fn get_type_of_property_of_contextual_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        name: &str,
+    ) -> Option<TypeId> {
+        if !self.get_type(t).flags().contains(TypeFlags::OBJECT) {
+            return None;
+        }
+        if let Some(prop) = get_property_of_type(self, t, name) {
+            let globals = program.globals();
+            return Some(get_type_of_symbol(self, program, prop, globals));
+        }
+        self.get_type_from_index_infos_of_contextual_type(program, t, name)
+    }
+
+    /// The value type of the index signature of `t` applicable to `name`, or
+    /// `None` when none applies.
+    ///
+    /// DEFER(phase-4-checker-4bl+): the tuple numeric-rest element path
+    /// (`getElementTypeOfSliceOfTupleType`). blocked-by: variadic/rest tuple
+    /// element typing.
+    // Go: internal/checker/checker.go:Checker.getTypeFromIndexInfosOfContextualType
+    fn get_type_from_index_infos_of_contextual_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        name: &str,
+    ) -> Option<TypeId> {
+        let info = get_applicable_index_info_for_name(self, program, t, name)?;
+        Some(self.index_info(info).value_type)
     }
 
     /// Returns the apparent type of `node`'s contextual type.
@@ -372,6 +510,58 @@ impl Checker {
         Some(get_type_of_symbol(self, program, symbol, None))
     }
 
+    /// Widens a literal value type for a mutable location, *unless* its
+    /// contextual type makes the position a "literal context", in which case the
+    /// literal is preserved (only stripped of freshness). This is the engine of
+    /// contextual typing into object/array literals: a `"x"` value in a `"x"`
+    /// property position stays `"x"` instead of widening to `string`.
+    ///
+    /// DEFER(phase-4-checker-4bl+): the `getWidenedUniqueESSymbolType` step (no
+    /// unique-symbol literal is typed yet). blocked-by: unique-ES-symbol typing.
+    // Go: internal/checker/checker.go:Checker.getWidenedLiteralLikeTypeForContextualType
+    pub(crate) fn get_widened_literal_like_type_for_contextual_type(
+        &mut self,
+        t: TypeId,
+        contextual_type: Option<TypeId>,
+    ) -> TypeId {
+        let t = if self.is_literal_of_contextual_type(t, contextual_type) {
+            t
+        } else {
+            self.get_widened_literal_type(t)
+        };
+        self.regular_type_of_literal_type(t)
+    }
+
+    /// Reports whether `candidate_type` (a literal) sits in a "literal context"
+    /// implied by `contextual_type`: a string/number/boolean literal whose
+    /// contextual type is a literal of the same primitive kind. Such a context
+    /// preserves the literal instead of widening it.
+    ///
+    /// DEFER(phase-4-checker-4bl+): the union/intersection distribution
+    /// (`Some(contextualType.Types(), ...)`), the instantiable-non-primitive
+    /// constraint path (`T extends string` etc.), and the bigint /
+    /// unique-ES-symbol / `Index` / template-literal / string-mapping literal
+    /// kinds. blocked-by: union/intersection contextual typing + base-constraint
+    /// resolution + bigint/unique-symbol/template-literal typing.
+    // Go: internal/checker/checker.go:Checker.isLiteralOfContextualType
+    pub(crate) fn is_literal_of_contextual_type(
+        &self,
+        candidate_type: TypeId,
+        contextual_type: Option<TypeId>,
+    ) -> bool {
+        let Some(contextual_type) = contextual_type else {
+            return false;
+        };
+        let context = self.get_type(contextual_type).flags();
+        let candidate = self.get_type(candidate_type).flags();
+        context.intersects(TypeFlags::STRING_LITERAL)
+            && candidate.intersects(TypeFlags::STRING_LITERAL)
+            || context.intersects(TypeFlags::NUMBER_LITERAL)
+                && candidate.intersects(TypeFlags::NUMBER_LITERAL)
+            || context.intersects(TypeFlags::BOOLEAN_LITERAL)
+                && candidate.intersects(TypeFlags::BOOLEAN_LITERAL)
+    }
+
     /// Assigns contextual parameter types to a contextually-typed function/arrow
     /// expression before its body is checked (the reachable core of Go's
     /// `contextuallyCheckFunctionExpressionOrObjectLiteralMethod`).
@@ -458,6 +648,34 @@ fn parameter_is_optional_for_arity(program: &dyn BoundProgram, parameter: NodeId
             d.question_token.is_some() || d.initializer.is_some() || d.dot_dot_dot_token.is_some()
         }
         _ => false,
+    }
+}
+
+/// Returns the static (non-computed) property name of an object-literal
+/// property/shorthand element, or `None` for a computed/dynamic name (which has
+/// no statically-known name to look up in a contextual type).
+fn object_literal_element_static_name(
+    program: &dyn BoundProgram,
+    element: NodeId,
+) -> Option<String> {
+    let name_node = match program.arena().data(element) {
+        NodeData::PropertyAssignment(d) => d.name,
+        NodeData::ShorthandPropertyAssignment(d) => d.name,
+        _ => return None,
+    };
+    match program.arena().kind(name_node) {
+        Kind::Identifier | Kind::StringLiteral | Kind::NumericLiteral => {
+            Some(program.arena().text(name_node).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Returns the element nodes of an array-literal expression.
+fn array_literal_elements(program: &dyn BoundProgram, node: NodeId) -> Vec<NodeId> {
+    match program.arena().data(node) {
+        NodeData::ArrayLiteralExpression(d) => d.list.nodes.clone(),
+        _ => Vec::new(),
     }
 }
 

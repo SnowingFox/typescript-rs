@@ -4600,3 +4600,188 @@ fn const_assertion_propagates_into_nested_inner_array_literal() {
         "readonly [readonly [1]]"
     );
 }
+
+// 4bk slice 1 tracer (genuine RED): an object-literal property value that is a
+// literal is contextually typed by the matching property of the annotation, so
+// a literal-typed property is PRESERVED instead of widened. For
+// `const o: { a: "x" } = { a: "x" }` the value `"x"` flows through the
+// contextual property type `"x"` (a string-literal context), so member `a`
+// stays `"x"` and the literal `{ a: "x"; }` is assignable to `{ a: "x"; }` with
+// no diagnostic. Before this round `checkExpressionForMutableLocation` widened
+// `"x"` to `string` with no contextual consultation, so the source was
+// `{ a: string; }`, NOT assignable to `{ a: "x"; }`, spuriously reporting 2322.
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralLikeTypeForContextualType(25374)
+#[test]
+fn object_literal_property_literal_preserved_by_contextual_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { a: \"x\" } = { a: \"x\" };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bk slice 1 guard (green-on-arrival): a property value whose (widened) type
+// does NOT match the literal annotation still reports 2322 — the contextual
+// preservation only keeps a literal whose KIND matches the context. `{ a: 1 }`
+// typed by `{ a: "x" }`: `1` is a number literal, the context `"x"` is a string
+// literal, so `is_literal_of_contextual_type` is false, `1` widens to `number`,
+// and `{ a: number; }` is not assignable to `{ a: "x"; }`.
+// Go: internal/checker/checker.go:Checker.isLiteralOfContextualType(25381)
+#[test]
+fn object_literal_property_mismatched_literal_kind_still_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { a: \"x\" } = { a: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '{ a: number; }' is not assignable to type '{ a: \"x\"; }'."
+    );
+}
+
+// 4bk slice 2 tracer (genuine RED): an array-literal element that is a literal
+// is contextually typed by the element type of the contextual array, so the
+// element is PRESERVED instead of widened. For `const xs: "a"[] = ["a"]` the
+// element `"a"` flows through the contextual element type `"a"` (the iterated
+// element type of `"a"[]`), so the literal array is `Array<"a">`, not
+// `Array<string>`. Before this round each element widened with no contextual
+// consultation, so `["a"]` was `Array<string>`.
+// Go: internal/checker/checker.go:Checker.getContextualTypeForElementExpression(29648)
+#[test]
+fn array_literal_element_literal_preserved_by_contextual_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst xs: \"a\"[] = [\"a\"];\nxs;",
+    );
+    // Navigate to the array literal initializer `["a"]`.
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let list = match arena.data(stmts[1]) {
+        NodeData::VariableStatement(d) => d.declaration_list,
+        _ => panic!("variable statement"),
+    };
+    let decl = match arena.data(list) {
+        NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+        _ => panic!("declaration list"),
+    };
+    let init = match arena.data(decl) {
+        NodeData::VariableDeclaration(d) => d.initializer.expect("initializer"),
+        _ => panic!("variable declaration"),
+    };
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, init);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "Array<\"a\">"
+    );
+}
+
+// 4bk slice 2 guard (no regression): an array literal with NO contextual type
+// still widens its elements — the literal preservation only fires when a
+// contextual element type makes the position a literal context. `const ys =
+// ["a"]` (no annotation) is `Array<string>`, confirming the contextual branch
+// degrades to the prior `getWidenedLiteralType` behavior when
+// `getContextualType` yields nothing.
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralLikeTypeForContextualType (nil contextual)
+#[test]
+fn array_literal_without_context_still_widens_elements() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst ys = [\"a\"];\nys;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "Array<string>"
+    );
+}
+
+// 4bk task slice 1 (green-on-arrival): `const xs: number[] = []; xs[0]` resolves
+// to `number`. The VARIABLE `xs` takes its type from the annotation `number[]`
+// (not from the empty-array initializer), so `xs[0]` is `number` regardless of
+// the literal's own type. This already held via the annotation path
+// (`getTypeOfVariableOrParameterOrProperty` reads the type node first); 4bk adds
+// no change here but pins the behavior the task names.
+// Go: internal/checker/checker.go:Checker.getTypeForVariableLikeDeclaration (type node)
+#[test]
+fn annotated_empty_array_variable_element_access_is_number() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst xs: number[] = [];\nxs[0];",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let number = c.number_type();
+    assert_eq!(c.check_expression(&p, access), number);
+}
+
+// 4bk task slice 1 negative control (Go-faithful): the empty array literal `[]`
+// ITSELF is `Array<never>` even under a `number[]` contextual type. Go's
+// `checkArrayLiteral` uses `implicitNeverType` for an element-less array
+// regardless of the contextual type (the contextual element type only flows
+// into PRESENT elements); the variable's `number[]` comes solely from the
+// annotation. This pins that 4bk does NOT (incorrectly) rewrite the empty
+// literal's element type from the context.
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral(7989) (implicitNeverType)
+#[test]
+fn annotated_empty_array_literal_itself_stays_never_array() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst xs: number[] = [];\nxs;",
+    );
+    // Navigate to the empty array literal initializer `[]`.
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let list = match arena.data(stmts[1]) {
+        NodeData::VariableStatement(d) => d.declaration_list,
+        _ => panic!("variable statement"),
+    };
+    let decl = match arena.data(list) {
+        NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+        _ => panic!("declaration list"),
+    };
+    let init = match arena.data(decl) {
+        NodeData::VariableDeclaration(d) => d.initializer.expect("initializer"),
+        _ => panic!("variable declaration"),
+    };
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, init);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "Array<never>"
+    );
+}
+
+// 4bk task slice 2 (green-on-arrival): `const o: { xs: number[] } = { xs: [] };
+// o.xs[0]` resolves to `number`. The variable `o` takes its type from the
+// annotation `{ xs: number[] }`, so `o.xs` is `number[]` and `o.xs[0]` is
+// `number` regardless of the empty-array property value's own type. Pins the
+// task-named behavior (already held via the annotation path).
+// Go: internal/checker/checker.go:Checker.getTypeForVariableLikeDeclaration (type node)
+#[test]
+fn annotated_object_empty_array_property_element_access_is_number() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst o: { xs: number[] } = { xs: [] };\no.xs[0];",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let number = c.number_type();
+    assert_eq!(c.check_expression(&p, access), number);
+}

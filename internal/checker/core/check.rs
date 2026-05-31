@@ -26,6 +26,7 @@ use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags, SymbolTable};
 use tsgo_core::compileroptions::ScriptTarget;
 use tsgo_diagnostics::{Category, Message};
 
+use super::contextual::ContextFlags;
 use super::declared_types::{
     get_apparent_type, get_declared_type_of_symbol, get_property_of_type,
     get_type_of_property_of_type, get_type_of_symbol,
@@ -601,11 +602,20 @@ impl Checker {
     // preserved) instead of being widened, so `{ a: 1 } as const`'s `a` stays the
     // literal `1`.
     //
-    // DEFER(phase-4-checker-4bi+): the type-assertion branch (`x as T` member
-    // value returns `T` unchanged) and the contextual-type branch (a literal
-    // preserved by a literal-typed context via
-    // `getWidenedLiteralLikeTypeForContextualType`). blocked-by: contextual type
-    // propagation.
+    // Otherwise (4bk) the literal is widened *unless* its contextual type makes
+    // the position a literal context, in which case it is preserved (Go's
+    // default branch -> `getWidenedLiteralLikeTypeForContextualType(t,
+    // getContextualType(node))`). This is the inverse-direction flow: an
+    // annotation's property/element type flows into the literal so that, e.g.,
+    // `{ a: "x" }` typed by `{ a: "x" }` keeps `a` at `"x"` rather than widening
+    // to `string`. With no contextual type the call degrades to the prior plain
+    // `getWidenedLiteralType` behavior.
+    //
+    // DEFER(phase-4-checker-4bl+): the `isTypeAssertion(node)` branch (a non-const
+    // `x as T` member/element value returns the asserted type unchanged) and
+    // `instantiateContextualType` (inference-context instantiation of the
+    // contextual type). blocked-by: assertion-value passthrough + inference
+    // contexts.
     // Go: internal/checker/checker.go:Checker.checkExpressionForMutableLocation(13784)
     fn check_expression_for_mutable_location(
         &mut self,
@@ -616,7 +626,8 @@ impl Checker {
         if is_const_context(program, node) {
             return self.regular_type_of_literal_type(t);
         }
-        self.get_widened_literal_type(t)
+        let contextual_type = self.get_contextual_type(program, node, ContextFlags::NONE);
+        self.get_widened_literal_like_type_for_contextual_type(t, contextual_type)
     }
 
     // Runs the fresh-object-literal excess-property check before assignability
@@ -3077,8 +3088,14 @@ impl Checker {
     // string constituent) and async iterables. blocked-by:
     // `getIteratedTypeOrElementType`'s string-constituent split + async
     // iteration types (lib.d.ts, P6).
+    // `pub(crate)` so the contextual-typing pass can reuse it as the port of
+    // Go's `getIteratedTypeOrElementType` call inside
+    // `getContextualTypeForElementExpression` (an array literal's element gets
+    // its contextual type from the iterated element type of the contextual
+    // array). It is called there with `error_node = None`, so every reporting
+    // branch early-returns and the query stays side-effect-light.
     // Go: internal/checker/checker.go:Checker.getIteratedTypeOrElementType
-    fn check_iterated_type_or_element_type(
+    pub(crate) fn check_iterated_type_or_element_type(
         &mut self,
         program: &dyn BoundProgram,
         input_type: TypeId,

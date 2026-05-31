@@ -322,3 +322,135 @@ fn arrow_parameter_is_contextually_typed_via_assignment_rhs() {
     let number = c.number_type();
     assert_eq!(c.check_expression(&p, x_ref), number);
 }
+
+// Returns the value expression of the `idx`-th property assignment of an object
+// literal initializer of the first variable declaration.
+fn object_literal_property_value(p: &StubProgram, member_idx: usize) -> NodeId {
+    let arena = p.arena();
+    let literal = var_decl_initializer(p, 0);
+    let members = match arena.data(literal) {
+        NodeData::ObjectLiteralExpression(d) => d.list.nodes.clone(),
+        _ => panic!("object literal"),
+    };
+    match arena.data(members[member_idx]) {
+        NodeData::PropertyAssignment(d) => d.initializer.expect("property value"),
+        _ => panic!("property assignment"),
+    }
+}
+
+// 4bk unit: the object-literal-element arm of `get_contextual_type`. A property
+// value in `const o: { a: "x" } = { a: "x" };` is contextually typed by the
+// annotation's matching property type `"x"`.
+// Go: internal/checker/checker.go:Checker.getContextualTypeForObjectLiteralElement
+#[test]
+fn get_contextual_type_of_object_literal_property_value_is_property_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o: { a: \"x\" } = { a: \"x\" };");
+    let value = object_literal_property_value(&p, 0);
+    let mut c = Checker::new();
+    let lit = c.get_string_literal_type("x");
+    assert_eq!(
+        c.get_contextual_type(&p, value, ContextFlags::NONE),
+        Some(lit)
+    );
+}
+
+// 4bk unit: a property value whose name is absent from the contextual type has
+// no contextual type. In `const o: { a: number } = { b: 1 };` the value of `b`
+// has no matching property/index signature in `{ a: number }`, so the
+// object-literal-element arm yields `None`.
+// Go: internal/checker/checker.go:Checker.getTypeOfPropertyOfContextualType (nil)
+#[test]
+fn get_contextual_type_of_unknown_object_literal_property_is_none() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o: { a: number } = { b: 1 };");
+    let value = object_literal_property_value(&p, 0);
+    let mut c = Checker::new();
+    assert_eq!(c.get_contextual_type(&p, value, ContextFlags::NONE), None);
+}
+
+// 4bk unit: the array-literal-element arm of `get_contextual_type`. The element
+// of `const xs: "a"[] = ["a"];` is contextually typed by the iterated element
+// type of the contextual array `"a"[]`, i.e. `"a"`. A synthetic `interface
+// Array<T>` stands in for the lib type.
+// Go: internal/checker/checker.go:Checker.getContextualTypeForElementExpression
+#[test]
+fn get_contextual_type_of_array_literal_element_is_element_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst xs: \"a\"[] = [\"a\"];",
+    );
+    // The variable statement is the 2nd top-level statement; reuse the local
+    // navigation by finding the array literal directly.
+    let arena = p.arena();
+    let list = match arena.data(source_statements(&p)[1]) {
+        NodeData::VariableStatement(d) => d.declaration_list,
+        _ => panic!("variable statement"),
+    };
+    let decl = match arena.data(list) {
+        NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+        _ => panic!("declaration list"),
+    };
+    let literal = match arena.data(decl) {
+        NodeData::VariableDeclaration(d) => d.initializer.expect("initializer"),
+        _ => panic!("variable declaration"),
+    };
+    let element = match arena.data(literal) {
+        NodeData::ArrayLiteralExpression(d) => d.list.nodes[0],
+        _ => panic!("array literal"),
+    };
+    let mut c = Checker::new();
+    let lit = c.get_string_literal_type("a");
+    assert_eq!(
+        c.get_contextual_type(&p, element, ContextFlags::NONE),
+        Some(lit)
+    );
+}
+
+// 4bk unit: `is_literal_of_contextual_type` is true when a literal candidate
+// sits in a context that is a literal of the same primitive kind, false for a
+// mismatched kind and for an absent context.
+// Go: internal/checker/checker.go:Checker.isLiteralOfContextualType
+#[test]
+fn is_literal_of_contextual_type_matches_same_kind_only() {
+    let mut c = Checker::new();
+    let str_x = c.get_string_literal_type("x");
+    let num_one = c.get_number_literal_type(tsgo_jsnum::Number::from(1.0));
+    // Same kind (string literal in a string-literal context) -> literal context.
+    assert!(c.is_literal_of_contextual_type(str_x, Some(str_x)));
+    // Mismatched kind (string-literal candidate, number-literal context) -> not.
+    assert!(!c.is_literal_of_contextual_type(str_x, Some(num_one)));
+    // A non-literal context (the `string` primitive) is not a literal context.
+    let string = c.string_type();
+    assert!(!c.is_literal_of_contextual_type(str_x, Some(string)));
+    // No contextual type at all.
+    assert!(!c.is_literal_of_contextual_type(str_x, None));
+}
+
+// 4bk unit: `get_widened_literal_like_type_for_contextual_type` preserves a
+// literal in a matching literal context (returning the regular literal), but
+// widens a fresh literal when there is no contextual type or the context's kind
+// does not match.
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralLikeTypeForContextualType
+#[test]
+fn get_widened_literal_like_type_for_contextual_type_preserves_or_widens() {
+    let mut c = Checker::new();
+    let regular_x = c.get_string_literal_type("x");
+    let fresh_x = c.get_fresh_type_of_literal_type(regular_x);
+    let string = c.string_type();
+    // In a matching literal context the fresh literal is preserved as the
+    // regular literal (freshness stripped, value kept).
+    assert_eq!(
+        c.get_widened_literal_like_type_for_contextual_type(fresh_x, Some(regular_x)),
+        regular_x
+    );
+    // With no contextual type the fresh literal widens to `string`.
+    assert_eq!(
+        c.get_widened_literal_like_type_for_contextual_type(fresh_x, None),
+        string
+    );
+    // With a non-matching context (the `string` primitive is not a literal) the
+    // fresh literal widens too.
+    assert_eq!(
+        c.get_widened_literal_like_type_for_contextual_type(fresh_x, Some(string)),
+        string
+    );
+}
