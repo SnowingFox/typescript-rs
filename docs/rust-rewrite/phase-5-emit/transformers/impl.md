@@ -108,7 +108,7 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 | `tstransforms/runtimesyntax.go` | `tstransforms/runtimesyntax.rs` | ✅ 6n 子集 | `new_runtime_syntax_transformer`：**enum → IIFE**（`var E; (function(E){ E[E["A"]=0]="A"; … })(E\|\|(E={}))`：自动编号 + 显式数字初值 auto-续接 + 字符串成员无反向映射 + const enum 省略）+ **instantiated namespace → IIFE**（`export const x=1` → `N.x = 1`；未实例化 type-only namespace 省略，句法 `is_instantiated_module`）。**句法求值替代 checker `GetEnumMemberValue`**；IIFE 容器名用声明名文本（替代 `NewGeneratedNameForNode`）；body 多行经 `MULTI_LINE` emit flag（printer additive）。DEFER：const enum 成员引用 inlining（checker 常量求值）、非字面量初值常量折叠、`E.A`/`N.x` 成员引用重写（binder resolver）、exported/merged enum & namespace、嵌套/点名 namespace、`export =`、参数属性、`import=` 降级 |
 | `tstransforms/legacydecorators.go` | `tstransforms/legacydecorators.rs` | ✅ 6al 子集 | `new_legacy_decorators_transformer(opt)` / `new_legacy_decorators_transformer_with_resolver(opt, resolver)`：**属性装饰器**首切片——`@dec x: number;` → 剥装饰器/类型的属性 `x;` + 尾随 `__decorate([dec, …], C.prototype/C, "x", void 0);`（instance→`C.prototype`、static→`C`），经 `SyntaxList` 展开。`design:type` 元数据（`--emitDecoratorMetadata`）经 4at `serialize_type_node_for_metadata` 序列化为 `Number`/`String`/…/`void 0`/`Object`（折叠 Go 的 metadata-注入两-transformer，metadata 居末）。`DECORATE_HELPER`/`METADATA_HELPER` 本 crate 内定义（priority 2/3）。严格 gate on `experimentalDecorators`（+metadata on `emitDecoratorMetadata`）。DEFER：class 装饰器 `let C=…;C=__decorate(...)` 包裹、method/accessor 装饰器（`Function`/`design:returntype`）、参数装饰器 `__param`+`design:paramtypes`、`TypeReference design:type`（4at→`Object`）、计算名、混合 instance/static 语句序、求值序边角 —— 见 mod.rs / 模块 doc |
 | `tstransforms/metadata.go` | `tstransforms/metadata.rs`（折入 `legacydecorators.rs`） | ✅ 6al 子集 | `design:type` 元数据注入折入 `legacydecorators` 单遍（`generate_class_element_decoration_statement` 的 metadata 臂）；`shouldAddTypeMetadata`(property) 子集。DEFER：`design:paramtypes`/`design:returntype`、`USE_NEW_TYPE_METADATA_FORMAT`、class/method 的 `Function` 类型、`injectClassTypeMetadata`（class 装饰器维度） |
-| `tstransforms/typeserializer.go` | （checker 4at `emit_resolver.rs` + `legacydecorators.rs` 的 `serialized_type_to_expression`） | ✅ 6al 子集 | 类型→元数据表达式分两段：checker 4at `serialize_type_node_for_metadata` 把 `: T` 注解 → `SerializedTypeNode` 枚举（keyword 子集）；transformer `serialized_type_to_expression` 把枚举 → AST（`Number`/`String`/`Boolean`/`BigInt`/`Symbol`/`Object` 标识符 或 `void 0`）。DEFER：`TypeReference`/union/intersection/conditional/`FunctionType`/`ArrayType`/字面量类型臂（blocked-by checker `GetTypeReferenceSerializationKind` + `serializeTypeNode` 递归，4at DEFER） |
+| `tstransforms/typeserializer.go` | （checker 4at/4av `emit_resolver.rs` + `legacydecorators.rs` 的 `serialized_type_to_expression`） | ✅ 6al+6am 子集 | 类型→元数据表达式分两段：checker `serialize_type_node_for_metadata` 把 `: T` 注解 → `SerializedTypeNode` 枚举（keyword 子集 4at/4au + **6am/4av 加 `Array`（`ArrayType`/`TupleType`）/`Function`（`FunctionType`/`ConstructorType`）**）；transformer `serialized_type_to_expression` 把枚举 → AST（`Number`/`String`/`Boolean`/`BigInt`/`Symbol`/`Object`/**`Array`/`Function`** 标识符 或 `void 0`）。DEFER：`TypeReference`/union/intersection/conditional 臂（blocked-by checker `GetTypeReferenceSerializationKind` + `serializeTypeNode` 递归，4av DEFER） |
 
 ### `estransforms`（17 文件）
 
@@ -1542,7 +1542,44 @@ Go 用两个串联 transformer：`MetadataTransformer` 先把合成 `@__metadata
 - **`TypeReference` `design:type`**（`: Date`/class → 实体构造器）：checker 4at 把 TypeReference 臂 DEFER 到 `Object`，故本轮 `: D` → `Object`。blocked-by：checker `GetTypeReferenceSerializationKind`（实体 value-ness + `printer.TypeReferenceSerializationKind`）+ `serializeTypeNode` 递归（union/intersection/conditional/`FunctionType`→`Function`/`ArrayType`→`Array`/字面量类型臂）。
 - **计算属性名**（`@dec [k]: T`）：需 Go `pendingExpressions` 内联 + temp 缓存。blocked-by：`getPropertyNameExpressionIfNeeded`。
 - **混合 instance+static 装饰成员的语句顺序**（Go instance-pass 先于 static-pass）：本轮按源序逐成员发 `__decorate`，单成员切片无差异；混合类待补。
-- **装饰器表达式求值序边角**、**重载上的装饰器**、`emitDecoratorMetadata` 的 `design:type=Function`（method/class）。
+- **装饰器表达式求值序边角**、**重载上的装饰器**、`emitDecoratorMetadata` 的 `design:type=Function`（method/class，硬编码无 checker——区别于本轮 6am 落地的**属性**的 `FunctionType` 注解 → `Function`）。
+
+## 6am worklog — `tstransforms/legacydecorators` `serialized_type_to_expression` `Array`/`Function` 臂（协调跨-crate lane：transformers 6am + checker 4av）
+
+> 本轮目标：解锁 6al/4au 的头号 DEFER——`design:type` 为 `Array`（数组/元组类型）/`Function`（函数/构造类型）。这两组臂需要 checker 新加 `SerializedTypeNode::Array`/`Function` 变体，而该变体会破坏本 crate `serialized_type_to_expression` 的**无-wildcard 穷尽 match**（4au 实测 `cargo build -p tsgo_compiler` E0004）。故本轮是一个**协调跨-crate lane**：同时拥有 `internal/checker/**`（加变体 + checker 臂，见 checker 4av）与 `internal/transformers/**`（加 `serialized_type_to_expression` 对应臂 + 端到端测试）。另一 lane 并发改 `internal/lsp/lsproto/**`（构建不相交，未触碰）。
+
+### 关键纪律：workspace 在行为之间始终可构建
+
+每个变体：**先在 checker 加枚举变体 → 立即在本 crate `serialized_type_to_expression` 加对应 match 臂**（保持穷尽，`tsgo_transformers`/`tsgo_compiler` 不进入非编译态）→ 再观察行为红→绿。transformer 臂在 checker 发射新变体之前**不可达**（纯穷尽-match 构建占位），故它不是"提前实现"——端到端翻绿的最小代码是 checker 臂（见下"诚实 RED"）。
+
+### 关键形态确认（vs Go / tsc）
+
+- Go `typeserializer.go:serializeTypeNode`：`case KindArrayType, KindTupleType -> NewIdentifier("Array")`、`case KindFunctionType, KindConstructorType -> NewIdentifier("Function")`。发射标识符 `Array`/`Function` 对 `tsc --experimentalDecorators --emitDecoratorMetadata` 核对。
+- 类型注解被 `visitPropertyDeclaration` 剥离（属性体仅 `x;`），`design:type` 取自**原始** type-node（经 resolver 在 bound program 解析，node id 对齐）；故 `@dec x: number[];` → `class C { x; }` + `__metadata("design:type", Array)`。
+- 数组 `[dec, __metadata(...)]` 恒单行（Rust printer 约束，同 6al）。
+
+### 诚实的 red→green 切片记录
+
+逐行为 test-first（端到端经真 transform 管线 emit 文本 + checker 经 bound program），每片先写测试再 `cargo test -p tsgo_transformers <name>` / `cargo test -p tsgo_checker <name>` 观察：
+
+1. **`array_typed_property_serializes_to_array_constructor`**（**genuine RED→GREEN，协调 checker 4av**）：加 `SerializedTypeNode::Array` 变体 + 本 crate `SerializedTypeNode::Array => new_identifier("Array")` 臂（保持构建）。在**未加 checker `ArrayType` 臂**的窗口观察 RED——实测 `class C { @dec x: number[]; }`+meta 发射 `__metadata("design:type", Object)`（checker 仍落 `_ => Object`）。checker 加 `Kind::ArrayType => SerializedTypeNode::Array` → GREEN（`Array`）。**证明协调**：`Array` 来自 checker 新臂，本 crate 臂仅映射。
+2. **`tuple_typed_property_serializes_to_array_constructor`**（**genuine RED→GREEN**）：`@dec x: [number, string]` → `Array`。在 checker `TupleType` 未并入 group 时观察 RED（发射 `Object`）→ checker 扩 `Kind::ArrayType | Kind::TupleType` → GREEN。
+3. **`function_typed_property_serializes_to_function_constructor`**（**genuine RED→GREEN，协调 checker 4av**）：加 `SerializedTypeNode::Function` 变体 + 本 crate `Function => new_identifier("Function")` 臂。在未加 checker `FunctionType` 臂的窗口观察 RED（`@dec x: () => void` 发射 `Object`）→ checker 加 `Kind::FunctionType => SerializedTypeNode::Function` → GREEN（`Function`）。ConstructorType 的 checker 侧补充（`: new () => C` → `Function`）见 checker 4av S4（本 crate 无需另增臂，复用同一 `Function` 映射）。
+
+> **为何全 genuine RED（诚实说明）**：每个端到端切片都在"transformer 臂已加（构建绿）但 checker 臂未加"的窗口实测看到 `__metadata("design:type", Object)`（期望 `Array`/`Function`），随后 checker 单处臂翻绿。不伪造 RED；transformer 臂是穷尽-match 的构建必需占位，翻绿的最小代码是 checker 臂。**硬证据**：array（slice 1）+ function（slice 3）同绿但发射不同标识符（`Array` vs `Function`），排除"硬编码"。
+
+### scope / upstream 增长（6am）
+
+> **scope**：`-p tsgo_transformers` + `-p tsgo_checker`（协调 lane，两 crate 同拥）。本 crate 改动仅 `serialized_type_to_expression` 加 2 臂（`Array`/`Function` → `new_identifier`）+ `legacydecorators_test.rs` +3 端到端测试；checker 改动见 4av（加 2 枚举变体 + 2 match 臂 + 4 测试）。**未改任何既有公共 fn 签名**；新工厂仍 standalone-only。未触碰 `internal/lsp/lsproto/**`、任何其它 crate、root Cargo、任何 `.go`、README。
+>
+> **测试计数（6am 新增）**：`tsgo_transformers` +3 `#[test]`（array/tuple/function 端到端，genuine RED→GREEN）+ 0 doctest → **229 unit + 44 doctest**（6al 基线 226+44）。`cargo test -p tsgo_transformers` 全绿；`cargo test -p tsgo_checker` 全绿（343+132）；`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_transformers -- --check` / `cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿（**确认协调枚举变更跨 workspace 一致**——本 crate 穷尽 match 现覆盖 `Array`/`Function`）。未 `--workspace`（lsproto lane 并发）。未 `git commit`。
+
+### DEFER（本轮确认的 blocked-by，6am 维度）
+
+- **`TypeReference` `design:type`**（`: Date`/class → 实体构造器）：checker 仍把 `TypeReference` 臂落 `Object`（4av 未动）。blocked-by：checker `GetTypeReferenceSerializationKind`（实体 value-ness + `printer.TypeReferenceSerializationKind`）。
+- **union/intersection/conditional/`TypePredicate`** 注解 → 落 `Object`。blocked-by：checker `serializeTypeNode` 递归（4av DEFER）。
+- **方法/访问器装饰器**：`design:type=Function`（硬编码，无 checker）、`design:returntype`、`design:paramtypes`（`__param`）。blocked-by：method/accessor/参数装饰形态 + `serializeReturnTypeOfNode`/`serializeParameterTypesOfNode`。
+- **class 装饰器包裹**、**计算属性名**、**混合 instance/static 语句序**：同 6al DEFER。
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

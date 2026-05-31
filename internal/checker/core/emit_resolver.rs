@@ -51,9 +51,10 @@ pub struct EmitResolver;
 /// or the `void 0` expression.
 ///
 /// 4at ports the reachable keyword-type subset (see
-/// [`EmitResolver::serialize_type_node_for_metadata`]); the type-reference,
-/// union/intersection, array and function arms that Go also produces are
-/// deferred.
+/// [`EmitResolver::serialize_type_node_for_metadata`]); 4av adds the
+/// [`Array`](Self::Array) (array/tuple types) and [`Function`](Self::Function)
+/// (function/constructor types) variants. The type-reference and
+/// union/intersection arms that Go also produces are still deferred.
 ///
 /// # Examples
 /// ```
@@ -79,6 +80,14 @@ pub enum SerializedTypeNode {
     /// The global `Object` constructor — Go's catch-all "anything else"
     /// fallback. Go: `s.f.NewIdentifier("Object")`.
     Object,
+    /// The global `Array` constructor, for an array or tuple type
+    /// (`number[]` / `[number, string]`). Go: `s.f.NewIdentifier("Array")`
+    /// (`case KindArrayType, KindTupleType`).
+    Array,
+    /// The global `Function` constructor, for a function or constructor type
+    /// (`() => void` / `new () => C`). Go: `s.f.NewIdentifier("Function")`
+    /// (`case KindFunctionType, KindConstructorType`).
+    Function,
     /// The `void 0` expression (the "undefined" serialization).
     /// Go: `s.f.NewVoidZeroExpression()`.
     VoidZero,
@@ -515,7 +524,12 @@ impl EmitResolver {
     /// non-`null` literal-type arms (`serializeLiteralOfLiteralTypeNode`):
     /// string literal → `String`, numeric literal → `Number`, bigint literal →
     /// `BigInt`, `true`/`false` → `Boolean`, and a negated numeric/bigint
-    /// literal (`-1`) recurses on its operand.
+    /// literal (`-1`) recurses on its operand. 4av adds the structural arms
+    /// that need new variants: `ArrayType`/`TupleType` →
+    /// [`Array`](SerializedTypeNode::Array) and `FunctionType`/`ConstructorType`
+    /// → [`Function`](SerializedTypeNode::Function) (landed in a coordinated
+    /// checker + `tsgo_transformers` lane that also extended the transformer's
+    /// exhaustive `serialized_type_to_expression` match).
     ///
     /// DEFER(phase-5): the non-keyword arms Go also handles — a `TypeReference`
     /// to a value-having entity (`Date`/a class → that entity's constructor, via
@@ -526,16 +540,6 @@ impl EmitResolver {
     /// blocked-by: `GetTypeReferenceSerializationKind` (entity value-ness +
     /// `printer.TypeReferenceSerializationKind`) + the `serializeTypeNode`
     /// recursion, which the P5 decorator transform drives.
-    ///
-    /// DEFER: `FunctionType`/`ConstructorType` → `Function` and
-    /// `ArrayType`/`TupleType` → `Array` are *not* ported here because they
-    /// require new [`SerializedTypeNode`] variants (`Function`/`Array`), and the
-    /// P5 `tsgo_transformers` `serialized_type_to_expression` matches this enum
-    /// *exhaustively with no wildcard* — adding variants breaks
-    /// `cargo build -p tsgo_compiler`. They must land in a lane that may also
-    /// extend that transformer match.
-    /// blocked-by: a coordinated checker+transformers change adding the
-    /// `Function`/`Array` variants and their transformer arms.
     ///
     /// # Examples
     /// ```
@@ -583,6 +587,11 @@ impl EmitResolver {
                 }
                 _ => SerializedTypeNode::Object,
             },
+            // Go: case KindArrayType, KindTupleType -> NewIdentifier("Array").
+            Kind::ArrayType | Kind::TupleType => SerializedTypeNode::Array,
+            // Go: case KindFunctionType, KindConstructorType ->
+            // NewIdentifier("Function").
+            Kind::FunctionType | Kind::ConstructorType => SerializedTypeNode::Function,
             // Go: the `serializeTypeNode` switch tail
             // (`return s.f.NewIdentifier("Object")`) — the catch-all for
             // everything not matched by a specific arm.

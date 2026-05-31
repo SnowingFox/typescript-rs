@@ -579,6 +579,8 @@ fn serialized_type_to_expression(ec: &mut EmitContext, serialized: SerializedTyp
         SerializedTypeNode::BigInt => ec.arena_mut().new_identifier("BigInt"),
         SerializedTypeNode::Symbol => ec.arena_mut().new_identifier("Symbol"),
         SerializedTypeNode::Object => ec.arena_mut().new_identifier("Object"),
+        SerializedTypeNode::Array => ec.arena_mut().new_identifier("Array"),
+        SerializedTypeNode::Function => ec.arena_mut().new_identifier("Function"),
         SerializedTypeNode::VoidZero => make_void_zero(ec),
     }
 }

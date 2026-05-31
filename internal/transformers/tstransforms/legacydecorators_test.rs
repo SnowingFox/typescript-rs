@@ -128,6 +128,70 @@ fn string_typed_property_serializes_to_string_constructor() {
     );
 }
 
+// Go: typeserializer.go:serializeTypeNode (`case KindArrayType, KindTupleType ->
+// NewIdentifier("Array")`).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
+//   class C { @dec x: number[]; }
+//   =>
+//   class C { x; }
+//   __decorate([dec, __metadata("design:type", Array)], C.prototype, "x", void 0);
+//
+// An array-typed property's `design:type` is the global `Array` constructor:
+// the checker (round 4av) maps `ArrayType` -> `SerializedTypeNode::Array`,
+// threaded through `serialized_type_to_expression`.
+#[test]
+fn array_typed_property_serializes_to_array_constructor() {
+    check_legacy_metadata(
+        "class C { @dec x: number[]; }",
+        &format!(
+            "{}\n{}\nclass C {{\n    x;\n}}\n__decorate([dec, __metadata(\"design:type\", Array)], C.prototype, \"x\", void 0);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: typeserializer.go:serializeTypeNode (`case KindArrayType, KindTupleType ->
+// NewIdentifier("Array")` — the tuple type is grouped with the array type).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
+//   class C { @dec x: [number, string]; }
+//   =>
+//   __decorate([dec, __metadata("design:type", Array)], C.prototype, "x", void 0);
+//
+// A tuple-typed property's `design:type` is also the global `Array` constructor
+// (checker 4av maps `TupleType` -> `SerializedTypeNode::Array`).
+#[test]
+fn tuple_typed_property_serializes_to_array_constructor() {
+    check_legacy_metadata(
+        "class C { @dec x: [number, string]; }",
+        &format!(
+            "{}\n{}\nclass C {{\n    x;\n}}\n__decorate([dec, __metadata(\"design:type\", Array)], C.prototype, \"x\", void 0);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: typeserializer.go:serializeTypeNode (`case KindFunctionType,
+// KindConstructorType -> NewIdentifier("Function")`).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
+//   class C { @dec x: () => void; }
+//   =>
+//   class C { x; }
+//   __decorate([dec, __metadata("design:type", Function)], C.prototype, "x", void 0);
+//
+// A function-typed property's `design:type` is the global `Function`
+// constructor (checker 4av maps `FunctionType` -> `SerializedTypeNode::Function`,
+// threaded through `serialized_type_to_expression`).
+#[test]
+fn function_typed_property_serializes_to_function_constructor() {
+    check_legacy_metadata(
+        "class C { @dec x: () => void; }",
+        &format!(
+            "{}\n{}\nclass C {{\n    x;\n}}\n__decorate([dec, __metadata(\"design:type\", Function)], C.prototype, \"x\", void 0);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
 // Gate: without `--experimentalDecorators` the transform is inert — a decorated
 // class passes through unchanged (decorators and type annotation intact, no
 // `__decorate`). The legacy lowering is strictly gated on the option.

@@ -647,6 +647,76 @@ fn serialize_type_node_negative_numeric_literal_type_is_number() {
     );
 }
 
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (`case KindArrayType, KindTupleType -> NewIdentifier("Array")`: an array type
+// `number[]` serializes to the global `Array` ctor)
+#[test]
+fn serialize_type_node_array_type_is_array() {
+    // `: number[]` parses as an `ArrayType` node.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: number[];");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::ArrayType);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::Array
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (`case KindArrayType, KindTupleType -> NewIdentifier("Array")`: a tuple type
+// `[number, string]` serializes to the global `Array` ctor, grouped with the
+// array type)
+#[test]
+fn serialize_type_node_tuple_type_is_array() {
+    // `: [number, string]` parses as a `TupleType` node.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: [number, string];");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::TupleType);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::Array
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (`case KindFunctionType, KindConstructorType -> NewIdentifier("Function")`: a
+// function type `() => void` serializes to the global `Function` ctor)
+#[test]
+fn serialize_type_node_function_type_is_function() {
+    // `: () => void` parses as a `FunctionType` node.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: () => void;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::FunctionType);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::Function
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (`case KindFunctionType, KindConstructorType -> NewIdentifier("Function")`: a
+// constructor type `new () => C` is grouped with the function type and also
+// serializes to the global `Function` ctor)
+#[test]
+fn serialize_type_node_constructor_type_is_function() {
+    // `: new () => C` parses as a `ConstructorType` node.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: new () => C;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::ConstructorType);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::Function
+    );
+}
+
 // Go: internal/checker/emitresolver.go:EmitResolver.IsImplementationOfOverload
 #[test]
 fn implementation_of_overload_is_detected() {
