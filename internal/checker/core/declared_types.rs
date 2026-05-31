@@ -978,10 +978,35 @@ pub fn get_type_from_type_node(
         Kind::IntersectionType => {
             get_type_from_intersection_type_node(checker, program, node, globals)
         }
+        Kind::LiteralType => get_type_from_literal_type_node(checker, program, node),
         // DEFER(phase-4-checker-4d): remaining type-node kinds.
         // blocked-by: their type constructors land across 4d+.
         _ => checker.error_type(),
     }
+}
+
+// Resolves a literal type node. The reachable subset handles the `null` type
+// (`LiteralType` wrapping a `NullKeyword`) -> `null_type`; the string/number/
+// boolean literal type nodes route through `checkExpression` +
+// `getRegularTypeOfLiteralType` in Go and are deferred here.
+//
+// DEFER(phase-4-checker-4az+): the non-`null` literal type nodes (`"a"`/`1`/
+// `true` in type position) -> `getRegularTypeOfLiteralType(checkExpression(literal))`.
+// blocked-by: fresh/regular literal-type pairing in type position.
+// Go: internal/checker/checker.go:Checker.getTypeFromLiteralTypeNode(22781)
+fn get_type_from_literal_type_node(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: tsgo_ast::NodeId,
+) -> TypeId {
+    let literal = match program.arena().data(node) {
+        NodeData::LiteralType(d) => d.literal,
+        _ => return checker.error_type(),
+    };
+    if program.arena().kind(literal) == Kind::NullKeyword {
+        return checker.null_type();
+    }
+    checker.error_type()
 }
 
 // Resolves an `A | B` type node to the constructed union type: each constituent

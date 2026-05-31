@@ -24,18 +24,43 @@ fn type_with_facts_drops_falsy_literal_subtypes() {
     assert_eq!(c.get_type_with_facts(union, TypeFacts::FALSY), empty);
 }
 
-// Go: internal/checker/utilities.go:Checker.getTypeFacts / hasTypeFacts
+// Go: internal/checker/checker.go:Checker.getTypeFactsWorker / hasTypeFacts
+// (the strict EQ/NE/Is/Truthy/Falsy subset; expectations synced when 4az
+// extended `get_type_facts` from the old TRUTHY/FALSY-only subset)
 #[test]
 fn type_facts_of_primitives_and_literals() {
     let c = Checker::new();
-    // `string` can be either truthy or falsy.
+    // `string` is truthy/falsy and (under strictNullChecks) carries the
+    // not-`undefined`/not-`null` facts but no `EQ_*`/`Is*` (Go's
+    // `StringStrictFacts` subset).
     assert_eq!(
         c.get_type_facts(c.string_type()),
-        TypeFacts::TRUTHY | TypeFacts::FALSY
+        TypeFacts::NE_UNDEFINED
+            | TypeFacts::NE_NULL
+            | TypeFacts::NE_UNDEFINED_OR_NULL
+            | TypeFacts::TRUTHY
+            | TypeFacts::FALSY
     );
-    // `undefined`/`null` are only falsy.
-    assert_eq!(c.get_type_facts(c.undefined_type()), TypeFacts::FALSY);
-    assert_eq!(c.get_type_facts(c.null_type()), TypeFacts::FALSY);
+    // `undefined` is falsy, `=== undefined`, `!== null`, and *is* undefined
+    // (Go's `UndefinedFacts`).
+    assert_eq!(
+        c.get_type_facts(c.undefined_type()),
+        TypeFacts::EQ_UNDEFINED
+            | TypeFacts::EQ_UNDEFINED_OR_NULL
+            | TypeFacts::NE_NULL
+            | TypeFacts::FALSY
+            | TypeFacts::IS_UNDEFINED
+    );
+    // `null` is falsy, `=== null`, `!== undefined`, and *is* null (Go's
+    // `NullFacts`).
+    assert_eq!(
+        c.get_type_facts(c.null_type()),
+        TypeFacts::EQ_NULL
+            | TypeFacts::EQ_UNDEFINED_OR_NULL
+            | TypeFacts::NE_UNDEFINED
+            | TypeFacts::FALSY
+            | TypeFacts::IS_NULL
+    );
     // `has_type_facts` is the OR over union members.
     let s = c.string_type();
     assert!(c.has_type_facts(s, TypeFacts::FALSY));

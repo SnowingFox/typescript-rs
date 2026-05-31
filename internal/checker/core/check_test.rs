@@ -2790,6 +2790,169 @@ fn truthy_branch_narrows_out_nullable() {
     );
 }
 
+// 4az slice A (genuine RED): property access on a possibly-`undefined` object
+// reports `18048` "'x' is possibly 'undefined'." under strictNullChecks, then
+// continues the property lookup on the non-null type `{ a: number }` (so no
+// `2339`). Go's `checkPropertyAccessExpression` types the object via
+// `checkNonNullExpression` -> `checkNonNullType` -> (the entity-name object `x`
+// is an identifier) `reportObjectPossiblyNullOrUndefinedError` emits the
+// `_0_is_possibly_undefined` (18048) message and narrows to the non-null type.
+// Before the non-null wiring, the union `{ a: number } | undefined` had no
+// shared `a` member, so the access reported `2339` instead.
+// Go: internal/checker/checker.go:Checker.checkNonNullType(7377)/reportObjectPossiblyNullOrUndefinedError(7424)
+#[test]
+fn property_access_on_possibly_undefined_reports_18048() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | undefined;\nx.a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 18048);
+    assert_eq!(diags[0].message, "'x' is possibly 'undefined'.");
+}
+
+// 4az slice A guard (green-on-arrival): a possibly-`null` object reports
+// `18047` "'x' is possibly 'null'." (`IS_NULL` fact only). Same code path as
+// the undefined case; the fact bits select the `_0_is_possibly_null` message.
+// Go: internal/checker/checker.go:Checker.reportObjectPossiblyNullOrUndefinedError(7424)
+#[test]
+fn property_access_on_possibly_null_reports_18047() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | null;\nx.a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 18047);
+    assert_eq!(diags[0].message, "'x' is possibly 'null'.");
+}
+
+// 4az slice A guard (green-on-arrival): a possibly-`null`-or-`undefined` object
+// reports `18049` "'x' is possibly 'null' or 'undefined'." (both `IS_NULL` and
+// `IS_UNDEFINED` facts present).
+// Go: internal/checker/checker.go:Checker.reportObjectPossiblyNullOrUndefinedError(7424)
+#[test]
+fn property_access_on_possibly_null_or_undefined_reports_18049() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | null | undefined;\nx.a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 18049);
+    assert_eq!(diags[0].message, "'x' is possibly 'null' or 'undefined'.");
+}
+
+// 4az slice A guard (green-on-arrival): element access `x["a"]` on a
+// possibly-`undefined` object also runs the non-null check (Go's
+// `checkIndexedAccess` -> `checkNonNullExpression`), reporting `18048` and then
+// resolving the property on the non-null type.
+// Go: internal/checker/checker.go:Checker.checkIndexedAccess
+#[test]
+fn element_access_on_possibly_undefined_reports_18048() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | undefined;\nx[\"a\"];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 18048);
+    assert_eq!(diags[0].message, "'x' is possibly 'undefined'.");
+}
+
+// 4az slice A guard: a non-nullable object access reports nothing (the
+// `IsUndefinedOrNull` facts are absent, so `checkNonNullType` is the identity).
+// Go: internal/checker/checker.go:Checker.checkNonNullType(7377)
+#[test]
+fn property_access_on_non_nullable_object_reports_nothing() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number };\nx.a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4az slice B (genuine RED): the `undefined` value identifier types as
+// `undefined` and resolves without a "Cannot find name" error. Go registers a
+// global `undefinedSymbol` (type `undefinedWideningType`) so `undefined` always
+// resolves; the stub program has no lib, so before this slice `undefined` fell
+// through to `Cannot_find_name_0` (2304). Reported as 0 diagnostics for a bare
+// `undefined;` statement.
+// Go: internal/checker/checker.go:NewChecker (undefinedSymbol, 949/1339/1456)
+#[test]
+fn undefined_value_resolves_without_cannot_find_name() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "undefined;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4az slice B (type witness): `check_expression` on the `undefined` value
+// identifier yields the `undefined` type (Go's `undefinedSymbol` ->
+// `undefinedWideningType`; the widening distinction is not modeled).
+// Go: internal/checker/checker.go:Checker.checkIdentifier(10999) (undefinedSymbol)
+#[test]
+fn undefined_value_checks_as_undefined_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "undefined;");
+    let usage = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    let undefined = c.undefined_type();
+    assert_eq!(c.check_expression(&p, usage), undefined);
+}
+
+// 4az slice C end-to-end (the task's slice-2 example): inside `if (x !==
+// undefined)`, `x: string | undefined` narrows to `string`, so assigning it to
+// a `string` variable reports nothing. This rides slice B (`undefined` resolves,
+// no `2304`) + slice C (the `NEUndefined` fact narrowing). Before both, the same
+// source reported two `Cannot find name 'undefined'` errors.
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality (NEUndefined)
+#[test]
+fn ne_undefined_branch_narrows_to_string_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nif (x !== undefined) {\n  var s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4az slice C end-to-end contrast: WITHOUT the guard, `x` keeps its nullable
+// union, so the same `var s: string = x` is not assignable and reports `2322`
+// (source the whole `undefined | string` union). The differing outcome (0 vs 1
+// diagnostic) is the observable effect of the equality narrowing.
+// Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration (2322)
+#[test]
+fn plain_nullable_assigned_to_string_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nvar s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'undefined | string' is not assignable to type 'string'."
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.resolveInstanceofExpression (right callable -> ok)
 #[test]
 fn instanceof_callable_right_reports_no_diagnostic() {

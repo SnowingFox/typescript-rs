@@ -173,6 +173,101 @@ fn flow_equality_narrows_literal_union() {
     assert_eq!(c.get_flow_type_of_reference(&p, usage, union), a);
 }
 
+// 4az slice C (genuine RED): a loose `x == null` guard narrows a nullable union
+// by the `EQUndefinedOrNull` fact in the true branch, keeping BOTH `null` and
+// `undefined` (loose `== null` matches both). Go's `narrowTypeByEquality` takes
+// the nullable-value branch (`valueType.flags & Nullable`) and, for `==`/`!=`
+// (double-equals), uses `EQUndefinedOrNull`/`NEUndefinedOrNull` via
+// `getTypeWithFacts`. The old literal/subtype `equality_overlap` path kept only
+// the exact `null` constituent, so this diverges.
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality(549) (nullable branch)
+#[test]
+fn flow_equality_loose_null_keeps_both_nullables() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | null | undefined;\nif (x == null) {\n  x;\n}",
+    );
+    let usage = first_then_block_usage(&p, 1);
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let null = c.null_type();
+    let u = c.undefined_type();
+    let declared = c.get_union_type(&[s, null, u]);
+    let expected = c.get_union_type(&[null, u]);
+    // `x == null` true branch: `EQUndefinedOrNull` keeps `null | undefined`.
+    assert_eq!(c.get_flow_type_of_reference(&p, usage, declared), expected);
+}
+
+// 4az slice C guard (green-on-arrival): the task's primary example — a strict
+// `x !== undefined` guard narrows `string | undefined` to `string` in the true
+// branch (Go `narrowTypeByEquality` nullable branch -> `NEUndefined`). Rides the
+// fact path now that the value operand `undefined` resolves (slice B).
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality (NEUndefined)
+#[test]
+fn flow_equality_ne_undefined_narrows_to_string() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nif (x !== undefined) {\n  x;\n}",
+    );
+    let usage = first_then_block_usage(&p, 1);
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let u = c.undefined_type();
+    let declared = c.get_union_type(&[s, u]);
+    assert_eq!(c.get_flow_type_of_reference(&p, usage, declared), s);
+}
+
+// 4az slice C guard (green-on-arrival): the strict `x === undefined` true branch
+// narrows `string | undefined` to `undefined` (`EQUndefined`).
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality (EQUndefined)
+#[test]
+fn flow_equality_eq_undefined_narrows_to_undefined() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nif (x === undefined) {\n  x;\n}",
+    );
+    let usage = first_then_block_usage(&p, 1);
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let u = c.undefined_type();
+    let declared = c.get_union_type(&[s, u]);
+    assert_eq!(c.get_flow_type_of_reference(&p, usage, declared), u);
+}
+
+// 4az slice C guard (green-on-arrival): mirror for `null` — `x !== null` narrows
+// `string | null` to `string` (`NENull`).
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality (NENull)
+#[test]
+fn flow_equality_ne_null_narrows_to_string() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | null;\nif (x !== null) {\n  x;\n}",
+    );
+    let usage = first_then_block_usage(&p, 1);
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let null = c.null_type();
+    let declared = c.get_union_type(&[s, null]);
+    assert_eq!(c.get_flow_type_of_reference(&p, usage, declared), s);
+}
+
+// 4az slice C guard (green-on-arrival): the strict `x === null` true branch
+// narrows `string | null` to `null` (`EQNull`).
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality (EQNull)
+#[test]
+fn flow_equality_eq_null_narrows_to_null() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | null;\nif (x === null) {\n  x;\n}",
+    );
+    let usage = first_then_block_usage(&p, 1);
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let null = c.null_type();
+    let declared = c.get_union_type(&[s, null]);
+    assert_eq!(c.get_flow_type_of_reference(&p, usage, declared), null);
+}
+
 // Resolves the expression of a top-level expression statement at `index`.
 fn top_level_expression(p: &StubProgram, index: usize) -> tsgo_ast::NodeId {
     use tsgo_ast::NodeData;

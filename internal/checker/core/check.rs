@@ -169,12 +169,136 @@ impl Checker {
         self.get_non_null_type(operand_type)
     }
 
+    // Checks an expression used as the object of a property/element access (Go's
+    // `checkNonNullExpression`): types the expression, then runs the
+    // possibly-`null`/`undefined` check on `node`.
+    // Go: internal/checker/checker.go:Checker.checkNonNullExpression(7373)
+    fn check_non_null_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let t = self.check_expression(program, node);
+        self.check_non_null_type(program, t, node)
+    }
+
+    // Reports the possibly-`null`/`undefined` error (`2531`/`2532`/`2533`, or the
+    // entity-name `18047`/`18048`/`18049`) when `t` can be `null`/`undefined`
+    // under strictNullChecks, then narrows to the non-null type. Returns
+    // `error_type` if nothing non-nullable survives (Go's `checkNonNullType` ->
+    // `checkNonNullTypeWithReporter` reachable subset).
+    //
+    // DEFER(phase-4-checker-4az+): the `unknown`-operand branch
+    // (`Object_is_of_type_unknown` / `_0_is_of_type_unknown`, 2571/18046) and
+    // the `checkNonNullNonVoidType` void path. blocked-by: `unknown` entity-name
+    // reporting + void-access diagnostics. Gated on strictNullChecks (Go relies
+    // on non-strict union simplification to suppress the facts; gating gives the
+    // same observable: no report in non-strict).
+    // Go: internal/checker/checker.go:Checker.checkNonNullType(7377)/checkNonNullTypeWithReporter(7381)
+    fn check_non_null_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        node: NodeId,
+    ) -> TypeId {
+        if !self.strict_null_checks() {
+            return t;
+        }
+        let facts = self.get_type_facts(t) & TypeFacts::IS_UNDEFINED_OR_NULL;
+        if !facts.intersects(TypeFacts::IS_UNDEFINED_OR_NULL) {
+            return t;
+        }
+        self.report_object_possibly_null_or_undefined_error(program, node, facts);
+        let non_nullable = self.get_non_null_type(t);
+        if self
+            .get_type(non_nullable)
+            .flags()
+            .intersects(TypeFlags::NULLABLE | TypeFlags::NEVER)
+        {
+            return self.error_type;
+        }
+        non_nullable
+    }
+
+    // Emits the possibly-`null`/`undefined` diagnostic for `node` given its
+    // `IsUndefined`/`IsNull` facts. An entity-name object (`x`, `a.b`) shorter
+    // than 100 chars uses the `'{0}' is possibly ...` form (`18047`/`18048`/
+    // `18049`); otherwise the `Object is possibly ...` form (`2531`/`2532`/
+    // `2533`). A bare `null`/`undefined` value reports `The_value_0_cannot_be
+    // _used_here`.
+    // Go: internal/checker/checker.go:Checker.reportObjectPossiblyNullOrUndefinedError(7424)
+    fn report_object_possibly_null_or_undefined_error(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        facts: TypeFacts,
+    ) {
+        let arena = program.arena();
+        let kind = arena.kind(node);
+        let node_text = if is_entity_name_expression(arena, node) {
+            Some(entity_name_to_string(arena, node))
+        } else {
+            None
+        };
+        if kind == Kind::NullKeyword {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::THE_VALUE_0_CANNOT_BE_USED_HERE,
+                &["null"],
+            );
+            return;
+        }
+        let has_undefined = facts.intersects(TypeFacts::IS_UNDEFINED);
+        let has_null = facts.intersects(TypeFacts::IS_NULL);
+        match node_text {
+            Some(text) if text.len() < 100 => {
+                if kind == Kind::Identifier && text == "undefined" {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::THE_VALUE_0_CANNOT_BE_USED_HERE,
+                        &["undefined"],
+                    );
+                    return;
+                }
+                let message: &'static Message = if has_undefined {
+                    if has_null {
+                        &tsgo_diagnostics::X_0_IS_POSSIBLY_NULL_OR_UNDEFINED
+                    } else {
+                        &tsgo_diagnostics::X_0_IS_POSSIBLY_UNDEFINED
+                    }
+                } else {
+                    &tsgo_diagnostics::X_0_IS_POSSIBLY_NULL
+                };
+                self.error(program, node, message, &[text.as_str()]);
+            }
+            _ => {
+                let message: &'static Message = if has_undefined {
+                    if has_null {
+                        &tsgo_diagnostics::OBJECT_IS_POSSIBLY_NULL_OR_UNDEFINED
+                    } else {
+                        &tsgo_diagnostics::OBJECT_IS_POSSIBLY_UNDEFINED
+                    }
+                } else {
+                    &tsgo_diagnostics::OBJECT_IS_POSSIBLY_NULL
+                };
+                self.error(program, node, message, &[]);
+            }
+        }
+    }
+
     // Resolves an identifier reference to its (flow-narrowed) value type.
     // Go: internal/checker/checker.go:Checker.checkIdentifier(10999)
     fn check_identifier(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let name = program.arena().text(node).to_string();
         match resolve_name(program, node, &name, SymbolFlags::VALUE, false, None) {
             None => {
+                // Go registers a global `undefinedSymbol` (type
+                // `undefinedWideningType`) in `NewChecker`, so the `undefined`
+                // value identifier always resolves; the stub program has no lib,
+                // so resolve it to the `undefined` type here (the widening
+                // distinction is not modeled).
+                // Go: internal/checker/checker.go:NewChecker (undefinedSymbol)
+                if name == "undefined" {
+                    return self.undefined_type();
+                }
                 self.error(
                     program,
                     node,
@@ -198,7 +322,10 @@ impl Checker {
             NodeData::PropertyAccessExpression(d) => (d.expression, d.name),
             _ => return self.error_type,
         };
-        let object_type = self.check_expression(program, expr);
+        // Go's `checkPropertyAccessExpression` types the object via
+        // `checkNonNullExpression`, reporting possibly-`null`/`undefined` and
+        // narrowing the object to its non-null type before the member lookup.
+        let object_type = self.check_non_null_expression(program, expr);
         let name = program.arena().text(name_node).to_string();
         match get_type_of_property_of_type(self, program, object_type, &name) {
             Some(t) => t,
@@ -224,7 +351,9 @@ impl Checker {
             NodeData::ElementAccessExpression(d) => (d.expression, d.argument_expression),
             _ => return self.error_type,
         };
-        let object_type = self.check_expression(program, expr);
+        // Go's `checkIndexedAccess` types the object via `checkNonNullExpression`
+        // (reports possibly-`null`/`undefined`, narrows to the non-null type).
+        let object_type = self.check_non_null_expression(program, expr);
         if program.arena().kind(arg) == Kind::StringLiteral {
             let name = program.arena().text(arg).to_string();
             if let Some(t) = get_type_of_property_of_type(self, program, object_type, &name) {
@@ -2779,6 +2908,45 @@ fn is_reference_expression(program: &dyn BoundProgram, node: NodeId) -> bool {
         program.arena().kind(node),
         Kind::Identifier | Kind::PropertyAccessExpression | Kind::ElementAccessExpression
     )
+}
+
+// Reports whether `node` is an entity-name expression (Go's
+// `IsEntityNameExpression`, `allowJS=false` reachable subset): an identifier, or
+// a property access `<entity>.name` whose name is an identifier and whose object
+// is itself an entity name. Drives the `'{0}' is possibly ...` vs the
+// `Object is possibly ...` diagnostic choice.
+// Go: internal/ast/utilities.go:IsEntityNameExpression(1580)/IsPropertyAccessEntityNameExpression
+fn is_entity_name_expression(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    match arena.kind(node) {
+        Kind::Identifier => true,
+        Kind::PropertyAccessExpression => match arena.data(node) {
+            NodeData::PropertyAccessExpression(d) => {
+                arena.kind(d.name) == Kind::Identifier
+                    && is_entity_name_expression(arena, d.expression)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+    // DEFER(phase-4-checker-4az+): the `allowJS` forms (`this`, element-access
+    // entity names). blocked-by: JS-file entity-name parity.
+}
+
+// Renders an entity-name expression to its source text (Go's
+// `entityNameToString` reachable subset): an identifier yields its text, a
+// property access yields `<object>.<name>`.
+// Go: internal/checker/utilities.go:entityNameToString(195) / ast.EntityNameToString
+fn entity_name_to_string(arena: &tsgo_ast::NodeArena, node: NodeId) -> String {
+    match arena.data(node) {
+        NodeData::PropertyAccessExpression(d) => {
+            format!(
+                "{}.{}",
+                entity_name_to_string(arena, d.expression),
+                arena.text(d.name)
+            )
+        }
+        _ => arena.text(node).to_string(),
+    }
 }
 
 // Reports whether `operator` is a compound assignment operator (`+=`/`*=`/`&&=`/

@@ -12,7 +12,13 @@ use super::types::{LiteralValue, TypeFlags, TypeId};
 use super::Checker;
 
 bitflags::bitflags! {
-    /// The truthiness facts a type can carry (4g subset of Go's `TypeFacts`).
+    /// The reachable subset of Go's `TypeFacts` lattice (4az): the
+    /// truthiness facts plus the `EQ`/`NE`/`Is` `undefined`/`null` facts that
+    /// drive nullable equality narrowing and the possibly-`null`/`undefined`
+    /// diagnostics. The bit positions mirror Go's `TypeFacts` constants exactly
+    /// (`checker.go`), so they can grow toward the full lattice without
+    /// renumbering; the `typeof`-result bits (`1 << 0 ..= 1 << 15`) are not yet
+    /// modeled (typeof narrowing uses the relation engine, not facts).
     ///
     /// # Examples
     /// ```
@@ -21,58 +27,163 @@ bitflags::bitflags! {
     /// ```
     ///
     /// Side effects: none (pure value type).
-    // Go: internal/checker/utilities.go:TypeFacts
+    // Go: internal/checker/checker.go:TypeFacts
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct TypeFacts: u32 {
+        /// The type can be `=== undefined` (`x === undefined` can hold).
+        const EQ_UNDEFINED = 1 << 16;
+        /// The type can be `=== null`.
+        const EQ_NULL = 1 << 17;
+        /// The type can be `== undefined`/`== null` (loose nullish).
+        const EQ_UNDEFINED_OR_NULL = 1 << 18;
+        /// The type can be `!== undefined`.
+        const NE_UNDEFINED = 1 << 19;
+        /// The type can be `!== null`.
+        const NE_NULL = 1 << 20;
+        /// The type can be `!= undefined`/`!= null` (loose non-nullish).
+        const NE_UNDEFINED_OR_NULL = 1 << 21;
         /// The type can be truthy.
-        const TRUTHY = 1 << 0;
+        const TRUTHY = 1 << 22;
         /// The type can be falsy.
-        const FALSY = 1 << 1;
+        const FALSY = 1 << 23;
+        /// The type *is* `undefined` (drives the possibly-undefined diagnostic).
+        const IS_UNDEFINED = 1 << 24;
+        /// The type *is* `null` (drives the possibly-null diagnostic).
+        const IS_NULL = 1 << 25;
+        /// The type is `undefined` or `null`.
+        const IS_UNDEFINED_OR_NULL = Self::IS_UNDEFINED.bits() | Self::IS_NULL.bits();
     }
 }
 
+// The reachable per-kind fact groups (Go's `TypeFacts*Facts` constants, reduced
+// to the EQ/NE/Is/Truthy/Falsy subset this port models). The `Base*` nullable
+// part of every non-nullable kind is `NE_UNDEFINED | NE_NULL |
+// NE_UNDEFINED_OR_NULL` under strictNullChecks; the non-strict form additionally
+// carries the `EQ_*` (everything is potentially `undefined`/`null`) and `FALSY`.
+// Go: internal/checker/checker.go (the `TypeFacts*Facts` group constants)
+const BASE_STRICT: TypeFacts = TypeFacts::NE_UNDEFINED
+    .union(TypeFacts::NE_NULL)
+    .union(TypeFacts::NE_UNDEFINED_OR_NULL);
+const BASE_NONSTRICT: TypeFacts = BASE_STRICT
+    .union(TypeFacts::EQ_UNDEFINED)
+    .union(TypeFacts::EQ_NULL)
+    .union(TypeFacts::EQ_UNDEFINED_OR_NULL)
+    .union(TypeFacts::FALSY);
+// `undefined`/`null`/`void` carry mode-independent facts (Go's `*Facts` for them
+// have no strict variant).
+const UNDEFINED_FACTS: TypeFacts = TypeFacts::EQ_UNDEFINED
+    .union(TypeFacts::EQ_UNDEFINED_OR_NULL)
+    .union(TypeFacts::NE_NULL)
+    .union(TypeFacts::FALSY)
+    .union(TypeFacts::IS_UNDEFINED);
+const NULL_FACTS: TypeFacts = TypeFacts::EQ_NULL
+    .union(TypeFacts::EQ_UNDEFINED_OR_NULL)
+    .union(TypeFacts::NE_UNDEFINED)
+    .union(TypeFacts::FALSY)
+    .union(TypeFacts::IS_NULL);
+const VOID_FACTS: TypeFacts = TypeFacts::EQ_UNDEFINED
+    .union(TypeFacts::EQ_UNDEFINED_OR_NULL)
+    .union(TypeFacts::NE_NULL)
+    .union(TypeFacts::FALSY);
+// The fallback for kinds this port does not model precisely (`any`/`unknown`/
+// `error`): everything except the `Is*` bits, mirroring Go's `UnknownFacts`
+// (`All & ^IsUndefinedOrNull`) so an `any` object never trips the
+// possibly-`null`/`undefined` diagnostic while still reading as truthy/falsy.
+const UNKNOWN_FACTS: TypeFacts = BASE_NONSTRICT.union(TypeFacts::TRUTHY);
+
+// Returns the strict/non-strict fact group for a non-nullable kind with the
+// given truthiness facts (`truthy`/`falsy`).
+fn primitive_facts(strict: bool, truthy: bool, falsy: bool) -> TypeFacts {
+    let mut facts = if strict { BASE_STRICT } else { BASE_NONSTRICT };
+    if truthy {
+        facts |= TypeFacts::TRUTHY;
+    }
+    if falsy {
+        facts |= TypeFacts::FALSY;
+    }
+    facts
+}
+
 impl Checker {
-    /// Returns the truthiness facts of a single (non-union) type.
+    /// Returns the facts of `t` (the reachable subset of Go's
+    /// `getTypeFactsWorker`): the truthiness facts plus the `EQ`/`NE`/`Is`
+    /// `undefined`/`null` facts. A union OR-folds its members' facts (Go's
+    /// `case flags&Union`); the `EQ_*`/`FALSY` facts of a non-nullable kind are
+    /// mode-dependent (strictNullChecks), while `undefined`/`null`/`void` carry
+    /// mode-independent facts.
     ///
     /// # Examples
     /// ```
     /// use tsgo_checker::{Checker, TypeFacts};
     /// let c = Checker::new();
-    /// assert_eq!(c.get_type_facts(c.undefined_type()), TypeFacts::FALSY);
+    /// // `undefined` is falsy and *is* undefined (no `NE_UNDEFINED`).
+    /// let f = c.get_type_facts(c.undefined_type());
+    /// assert!(f.contains(TypeFacts::FALSY | TypeFacts::IS_UNDEFINED));
+    /// assert!(!f.intersects(TypeFacts::NE_UNDEFINED));
     /// ```
     ///
     /// Side effects: none (pure).
-    // Go: internal/checker/utilities.go:Checker.getTypeFacts (truthiness subset)
+    // Go: internal/checker/checker.go:Checker.getTypeFactsWorker (EQ/NE/Is/Truthy/Falsy subset)
     pub fn get_type_facts(&self, t: TypeId) -> TypeFacts {
         let ty = self.get_type(t);
         let flags = ty.flags();
-        if flags.intersects(TypeFlags::UNDEFINED | TypeFlags::NULL | TypeFlags::VOID) {
-            return TypeFacts::FALSY;
+        let strict = self.strict_null_checks();
+        // A union is the OR of its members' facts (Go's union case).
+        if flags.contains(TypeFlags::UNION) {
+            return ty
+                .union_types()
+                .unwrap_or(&[])
+                .iter()
+                .fold(TypeFacts::empty(), |acc, &m| acc | self.get_type_facts(m));
         }
-        if flags.intersects(TypeFlags::STRING | TypeFlags::NUMBER | TypeFlags::BIG_INT) {
-            return TypeFacts::TRUTHY | TypeFacts::FALSY;
+        if flags.intersects(TypeFlags::STRING | TypeFlags::STRING_MAPPING) {
+            return primitive_facts(strict, true, true);
         }
-        match ty.literal_value() {
-            Some(LiteralValue::Boolean(false)) => TypeFacts::FALSY,
-            Some(LiteralValue::Boolean(true)) => TypeFacts::TRUTHY,
-            Some(LiteralValue::String(s)) => {
-                if s.is_empty() {
-                    TypeFacts::FALSY
-                } else {
-                    TypeFacts::TRUTHY
-                }
-            }
-            Some(LiteralValue::Number(n)) => {
-                if f64::from(*n) == 0.0 {
-                    TypeFacts::FALSY
-                } else {
-                    TypeFacts::TRUTHY
-                }
-            }
-            // Objects and anything else are truthy.
-            // DEFER(phase-4-checker-4h+): `0n` bigint-literal falsiness.
-            None => TypeFacts::TRUTHY,
+        if flags.intersects(TypeFlags::STRING_LITERAL | TypeFlags::TEMPLATE_LITERAL) {
+            let is_empty =
+                matches!(ty.literal_value(), Some(LiteralValue::String(s)) if s.is_empty());
+            return primitive_facts(strict, !is_empty, is_empty);
         }
+        if flags.intersects(TypeFlags::NUMBER) {
+            return primitive_facts(strict, true, true);
+        }
+        if flags.contains(TypeFlags::NUMBER_LITERAL) {
+            let is_zero =
+                matches!(ty.literal_value(), Some(LiteralValue::Number(n)) if f64::from(*n) == 0.0);
+            return primitive_facts(strict, !is_zero, is_zero);
+        }
+        if flags.intersects(TypeFlags::BIG_INT | TypeFlags::BIG_INT_LITERAL) {
+            // DEFER(phase-4-checker-4az+): `0n` bigint-literal falsiness; treat
+            // bigint as both truthy/falsy (the `Base*Facts` form).
+            return primitive_facts(strict, true, true);
+        }
+        if flags.contains(TypeFlags::BOOLEAN) {
+            return primitive_facts(strict, true, true);
+        }
+        if flags.contains(TypeFlags::BOOLEAN_LITERAL) {
+            let is_false = matches!(ty.literal_value(), Some(LiteralValue::Boolean(false)));
+            return primitive_facts(strict, !is_false, is_false);
+        }
+        if flags.contains(TypeFlags::OBJECT) {
+            // Objects are truthy; the precise empty-object/function refinement
+            // (Go's `getTypeFactsWorker` object branch) is not needed for the
+            // reachable EQ/NE/Is/Truthy subset.
+            return primitive_facts(strict, true, false);
+        }
+        if flags.intersects(TypeFlags::VOID) {
+            return VOID_FACTS;
+        }
+        if flags.intersects(TypeFlags::UNDEFINED) {
+            return UNDEFINED_FACTS;
+        }
+        if flags.intersects(TypeFlags::NULL) {
+            return NULL_FACTS;
+        }
+        if flags.contains(TypeFlags::NEVER) {
+            return TypeFacts::empty();
+        }
+        // `any`/`unknown`/`error` and any unmodeled kind: Go's `UnknownFacts`.
+        UNKNOWN_FACTS
     }
 
     /// Reports whether any constituent of `t` can carry `facts`.

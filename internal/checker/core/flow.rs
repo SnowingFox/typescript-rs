@@ -17,6 +17,7 @@ use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags};
 
 use super::program::BoundProgram;
 use super::symbols::resolve_name;
+use super::type_facts::TypeFacts;
 use super::types::{TypeFlags, TypeId};
 use super::Checker;
 
@@ -136,6 +137,59 @@ impl Checker {
             .filter(|&m| self.equality_overlap(program, m, value_type) == assume_true)
             .collect();
         self.get_union_type(&kept)
+    }
+
+    // The nullable-value branch of Go's `narrowTypeByEquality` (4az): when the
+    // compared `value_type` is `null`/`undefined`, narrow `t` by the matching
+    // `EQ`/`NE` `undefined`/`null` fact (via `getTypeWithFacts`) instead of the
+    // literal/subtype overlap. `assume_true` is the already-negation-adjusted
+    // truth value; `double_equals` selects the loose (`EQUndefinedOrNull`) vs
+    // strict (`EQUndefined`/`EQNull`) facts. Returns `None` for a non-nullable
+    // value so the caller falls back to `narrow_type_by_equality`.
+    //
+    // DEFER(phase-4-checker-4az+): the `getAdjustedTypeWithFacts` adjustments
+    // (non-null-assertion-only references, the `unknown`/empty-object
+    // recombination). blocked-by: `getAdjustedTypeWithFacts` extras (lib globals,
+    // P6).
+    // Go: internal/checker/flow.go:Checker.narrowTypeByEquality(549) (nullable branch)
+    fn narrow_type_by_equality_to_value(
+        &mut self,
+        t: TypeId,
+        value_type: TypeId,
+        double_equals: bool,
+        assume_true: bool,
+    ) -> Option<TypeId> {
+        if !self
+            .get_type(value_type)
+            .flags()
+            .intersects(TypeFlags::NULLABLE)
+        {
+            return None;
+        }
+        // Go: outside strictNullChecks a union never carries `null`/`undefined`,
+        // so the equality refinement is the identity.
+        if !self.strict_null_checks() {
+            return Some(t);
+        }
+        let value_is_null = self.get_type(value_type).flags().contains(TypeFlags::NULL);
+        let facts = if double_equals {
+            if assume_true {
+                TypeFacts::EQ_UNDEFINED_OR_NULL
+            } else {
+                TypeFacts::NE_UNDEFINED_OR_NULL
+            }
+        } else if value_is_null {
+            if assume_true {
+                TypeFacts::EQ_NULL
+            } else {
+                TypeFacts::NE_NULL
+            }
+        } else if assume_true {
+            TypeFacts::EQ_UNDEFINED
+        } else {
+            TypeFacts::NE_UNDEFINED
+        };
+        Some(self.get_type_with_facts(t, facts))
     }
 
     /// Narrows a union `t` by an `in` guard (`"prop" in x`).
@@ -361,6 +415,9 @@ impl Checker {
             Kind::ExclamationEqualsToken | Kind::ExclamationEqualsEqualsToken
         );
         let effective = assume_true != negated;
+        // Loose (`==`/`!=`) operators fold `null` and `undefined` together; strict
+        // (`===`/`!==`) keep them distinct (Go's `doubleEquals`).
+        let double_equals = matches!(op, Kind::EqualsEqualsToken | Kind::ExclamationEqualsToken);
         // `typeof x === "name"`
         if arena.kind(left) == Kind::TypeOfExpression && arena.kind(right) == Kind::StringLiteral {
             if let NodeData::TypeOfExpression(d) = arena.data(left) {
@@ -372,13 +429,24 @@ impl Checker {
             }
         }
         // `x === value` / `value === x`: narrow by the value's type (4g wires
-        // the expression checker to type the value operand).
+        // the expression checker to type the value operand). A `null`/`undefined`
+        // value takes the fact-based nullable branch (4az).
         if self.is_matching_reference(program, reference, left) {
             let value_type = self.check_expression(program, right);
+            if let Some(narrowed) =
+                self.narrow_type_by_equality_to_value(t, value_type, double_equals, effective)
+            {
+                return narrowed;
+            }
             return self.narrow_type_by_equality(program, t, value_type, effective);
         }
         if self.is_matching_reference(program, reference, right) {
             let value_type = self.check_expression(program, left);
+            if let Some(narrowed) =
+                self.narrow_type_by_equality_to_value(t, value_type, double_equals, effective)
+            {
+                return narrowed;
+            }
             return self.narrow_type_by_equality(program, t, value_type, effective);
         }
         // DEFER(phase-4-checker-4h+): discriminant-property narrowing on a key
