@@ -2681,13 +2681,22 @@ impl Checker {
     // The expression's own (function) type is not yet computed; `error_type` is
     // returned as a placeholder, matching the other un-typed expression kinds.
     //
-    // DEFER(phase-4-checker-4ar+): the inferred/contextual function type
-    // (`checkExpressionWithContextualType`), parameter/`this` checking,
-    // generator/async return unwrapping, and the un-annotated body return-type
-    // inference. blocked-by: contextual typing + signature/`this` machinery +
-    // awaited/iterable types (lib globals, P6) + body return-type inference.
+    // An un-annotated parameter is contextually typed first (4bj's
+    // `contextually_check_function_expression` -> `assign_contextual_parameter_types`),
+    // so a body reference to it resolves with the contextual type.
+    //
+    // DEFER(phase-4-checker-4bk+): the function expression's own (anonymous
+    // function) type (`checkExpressionWithContextualType`), `this`-parameter
+    // checking, generator/async return unwrapping, and un-annotated body
+    // return-type inference. blocked-by: anonymous function typing +
+    // signature/`this` machinery + awaited/iterable types (lib globals, P6) +
+    // body return-type inference.
     // Go: internal/checker/checker.go:Checker.checkFunctionExpressionOrObjectLiteralMethod
     fn check_function_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        // Assign contextual parameter types to un-annotated parameters before the
+        // body is descended into, so a body reference to such a parameter
+        // resolves with its contextual type (4bj).
+        self.contextually_check_function_expression(program, node);
         if let NodeData::FunctionExpression(d) = program.arena().data(node) {
             if let Some(body) = d.body {
                 self.check_statement(program, body);
@@ -2711,13 +2720,21 @@ impl Checker {
     // assignability/`enclosing_explicit_return_type` path as a `return <expr>`
     // (the body's parent is the arrow, so its annotation is found by the walk).
     //
-    // DEFER(phase-4-checker-4ar+): the inferred/contextual function type
-    // (`checkExpressionWithContextualType` for an un-annotated arrow), parameter/
-    // `this` checking, and generator/async unwrapping (the awaited type of an
-    // async concise body against the promised return type). blocked-by:
-    // contextual typing + signature/`this` machinery + awaited types (P6).
+    // An un-annotated parameter is contextually typed first (4bj's
+    // `contextually_check_function_expression` -> `assign_contextual_parameter_types`),
+    // so a body reference to it resolves with the contextual type.
+    //
+    // DEFER(phase-4-checker-4bk+): the arrow's own (anonymous function) type
+    // (`checkExpressionWithContextualType` for an un-annotated arrow),
+    // `this`-parameter checking, and generator/async unwrapping (the awaited type
+    // of an async concise body against the promised return type). blocked-by:
+    // anonymous function typing + signature/`this` machinery + awaited types (P6).
     // Go: internal/checker/checker.go:Checker.checkArrowFunction / checkFunctionExpressionOrObjectLiteralMethodDeferred
     fn check_arrow_function(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        // Assign contextual parameter types to un-annotated parameters before the
+        // body is descended into, so a body reference to such a parameter
+        // resolves with its contextual type (4bj).
+        self.contextually_check_function_expression(program, node);
         if let NodeData::ArrowFunction(d) = program.arena().data(node) {
             let body = d.body;
             if program.arena().kind(body) == Kind::Block {

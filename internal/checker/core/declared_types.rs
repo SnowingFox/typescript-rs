@@ -12,7 +12,7 @@
 
 use rustc_hash::FxHashMap;
 
-use tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_INDEX;
+use tsgo_ast::symbol::{INTERNAL_SYMBOL_NAME_CALL, INTERNAL_SYMBOL_NAME_INDEX};
 use tsgo_ast::{
     CheckFlags, Kind, ModifierFlags, NodeArena, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId,
     SymbolTable,
@@ -758,10 +758,17 @@ fn get_signatures_of_symbol(
     let mut result = Vec::new();
     for &decl in declarations {
         // A method member contributes its `MethodSignature`/`MethodDeclaration`
-        // call signature (4ah), alongside the function-declaration case (4q).
+        // call signature (4ah), alongside the function-declaration case (4q). A
+        // function/constructor *type* node (`(x: number) => void`) contributes
+        // its call signature too (4bj), so a contextual function type yields the
+        // signature that types an assigned arrow/function expression.
         if !matches!(
             program.arena().kind(decl),
-            Kind::FunctionDeclaration | Kind::MethodSignature | Kind::MethodDeclaration
+            Kind::FunctionDeclaration
+                | Kind::MethodSignature
+                | Kind::MethodDeclaration
+                | Kind::FunctionType
+                | Kind::ConstructorType
         ) {
             continue;
         }
@@ -793,8 +800,14 @@ fn get_signature_from_declaration(
         // type the same way (4ah), so `[Symbol.iterator]()`/`next()` resolve.
         NodeData::MethodSignature(d) => (d.parameters.nodes.clone(), d.type_node),
         NodeData::MethodDeclaration(d) => (d.parameters.nodes.clone(), d.type_node),
-        // DEFER(phase-4-checker-4q+): accessor/function-expression/arrow/
-        // constructor declarations. blocked-by: those declaration kinds.
+        // A function/constructor type node (`(x: number) => void`) contributes
+        // its parameters and (return) type the same way (4bj), so a contextual
+        // function type's call signature exposes its parameter types.
+        NodeData::FunctionType(d) | NodeData::ConstructorType(d) => {
+            (d.parameters.nodes.clone(), d.type_node)
+        }
+        // DEFER(phase-4-checker-4q+): accessor/function-expression/arrow
+        // declarations. blocked-by: those declaration kinds.
         _ => (Vec::new(), None),
     };
     let mut parameters = Vec::with_capacity(param_nodes.len());
@@ -923,6 +936,22 @@ fn get_type_of_variable_or_property(
     });
     let t = if let Some(node) = type_node {
         get_type_from_type_node(checker, program, node, globals)
+    } else if let Some(parameter) =
+        declaration.filter(|&decl| program.arena().kind(decl) == Kind::Parameter)
+    {
+        // An un-annotated parameter takes its type from the contextual signature
+        // of the containing arrow/function expression (Go's
+        // `getTypeForVariableLikeDeclaration` parameter branch ->
+        // `getContextuallyTypedParameterType`), falling back to `any` when there
+        // is no contextual type.
+        //
+        // DEFER(phase-4-checker-4bk+): the `this`-parameter contextual type, the
+        // default-initializer inference for an un-contextual parameter, and the
+        // `addOptionalityEx` optional widening. blocked-by: `this`-typing +
+        // parameter initializer inference + optional-parameter widening.
+        checker
+            .get_contextually_typed_parameter_type(program, parameter)
+            .unwrap_or_else(|| checker.any_type())
     } else if let Some((decl, initializer)) = declaration
         .and_then(|decl| variable_declaration_initializer(program, decl).map(|i| (decl, i)))
     {
@@ -1050,6 +1079,9 @@ pub fn get_type_from_type_node(
         Kind::ArrayType => get_type_from_array_type_node(checker, program, node, globals),
         Kind::TupleType => get_type_from_tuple_type_node(checker, program, node, globals),
         Kind::TypeLiteral => get_type_from_type_literal_node(checker, program, node),
+        Kind::FunctionType | Kind::ConstructorType => {
+            get_type_from_function_or_constructor_type_node(checker, program, node)
+        }
         Kind::TypeOperator => get_type_from_type_operator_node(checker, program, node, globals),
         Kind::UnionType => get_type_from_union_type_node(checker, program, node, globals),
         Kind::IntersectionType => {
@@ -1283,6 +1315,48 @@ fn get_type_from_type_literal_node(
     let object = ObjectType {
         members,
         properties,
+        ..Default::default()
+    };
+    checker.new_object_type(ObjectFlags::ANONYMOUS, Some(symbol), object)
+}
+
+// Resolves a function/constructor type node (`(x: number) => void`) to an
+// anonymous object type carrying its call signatures (Go's
+// `getTypeFromTypeLiteralOrFunctionOrConstructorTypeNode` ->
+// `resolveAnonymousTypeMembers`, where the call signatures come from the
+// `__call` member the binder placed on the node's `__type` symbol). The
+// signatures are resolved eagerly here (4q's pattern), so a contextual function
+// type yields a call signature whose parameter types contextually type an
+// assigned arrow/function expression's parameters (4bj).
+//
+// DEFER(phase-4-checker-4bk+): construct signatures (the `__new` member of a
+// `ConstructorType`), generic type parameters, the `this` parameter, and the
+// per-node `links.resolvedType` memoization Go keeps. blocked-by: construct
+// signatures + generic signatures + `this`-typing + type-node memoization.
+// Go: internal/checker/checker.go:Checker.getTypeFromTypeLiteralOrFunctionOrConstructorTypeNode
+fn get_type_from_function_or_constructor_type_node(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: tsgo_ast::NodeId,
+) -> TypeId {
+    let Some(symbol) = program.symbol_of_node(node) else {
+        return checker.error_type();
+    };
+    // The `__type` symbol's `__call` member declares the call signature; its
+    // declarations are the function-type node itself.
+    let call_signatures = match program
+        .symbol(symbol)
+        .members
+        .get(INTERNAL_SYMBOL_NAME_CALL)
+    {
+        Some(&call_symbol) => {
+            let declarations = program.symbol(call_symbol).declarations.clone();
+            get_signatures_of_symbol(checker, program, &declarations)
+        }
+        None => Vec::new(),
+    };
+    let object = ObjectType {
+        call_signatures,
         ..Default::default()
     };
     checker.new_object_type(ObjectFlags::ANONYMOUS, Some(symbol), object)

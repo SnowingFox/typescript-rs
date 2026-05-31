@@ -7,6 +7,7 @@
 //! `instantiation`, `flow`, and the rest.
 
 pub mod check;
+pub mod contextual;
 pub mod declared_types;
 pub mod emit_resolver;
 pub mod flow;
