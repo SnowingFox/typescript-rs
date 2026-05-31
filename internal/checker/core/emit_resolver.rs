@@ -40,6 +40,50 @@ use super::Checker;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EmitResolver;
 
+/// The serialized runtime-constructor descriptor for a type-annotation node,
+/// the value the legacy-decorator transform (Phase 5) turns into the second
+/// argument of `__metadata("design:type", <Ctor>)`.
+///
+/// Go's `serializeTypeNode` builds the AST expression directly
+/// (`s.f.NewIdentifier("Number")` / `s.f.NewVoidZeroExpression()` / ...); this
+/// enum *names* that result so the transform can construct it. Each variant
+/// maps to exactly one of Go's emitted forms: a global constructor identifier
+/// or the `void 0` expression.
+///
+/// 4at ports the reachable keyword-type subset (see
+/// [`EmitResolver::serialize_type_node_for_metadata`]); the type-reference,
+/// union/intersection, array and function arms that Go also produces are
+/// deferred.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::SerializedTypeNode;
+/// // `: number` serializes to the global `Number` constructor.
+/// assert_ne!(SerializedTypeNode::Number, SerializedTypeNode::Object);
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/transformers/tstransforms/typeserializer.go:metadataSerializer.serializeTypeNode
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SerializedTypeNode {
+    /// The global `Number` constructor. Go: `s.f.NewIdentifier("Number")`.
+    Number,
+    /// The global `String` constructor. Go: `s.f.NewIdentifier("String")`.
+    String,
+    /// The global `Boolean` constructor. Go: `s.f.NewIdentifier("Boolean")`.
+    Boolean,
+    /// The global `BigInt` constructor. Go: `s.f.NewIdentifier("BigInt")`.
+    BigInt,
+    /// The global `Symbol` constructor. Go: `s.f.NewIdentifier("Symbol")`.
+    Symbol,
+    /// The global `Object` constructor — Go's catch-all "anything else"
+    /// fallback. Go: `s.f.NewIdentifier("Object")`.
+    Object,
+    /// The `void 0` expression (the "undefined" serialization).
+    /// Go: `s.f.NewVoidZeroExpression()`.
+    VoidZero,
+}
+
 impl EmitResolver {
     /// Reports whether `node`'s declaration is visible to declaration emit
     /// (Go's `IsDeclarationVisible`).
@@ -449,6 +493,85 @@ impl EmitResolver {
         match get_symbol_of_declaration(program, node) {
             Some(symbol) => program.symbol(symbol).declarations.len() > 1,
             None => false,
+        }
+    }
+
+    /// Serializes a *type-annotation node* to the runtime-constructor descriptor
+    /// the legacy-decorator transform emits for `__metadata("design:type", ..)`
+    /// (Go's `serializeTypeNode`).
+    ///
+    /// 4at ports the reachable keyword-type subset, faithful to Go's switch:
+    /// `number` → [`Number`](SerializedTypeNode::Number), `string` →
+    /// [`String`](SerializedTypeNode::String), `boolean` →
+    /// [`Boolean`](SerializedTypeNode::Boolean), `bigint` →
+    /// [`BigInt`](SerializedTypeNode::BigInt), `symbol` →
+    /// [`Symbol`](SerializedTypeNode::Symbol), `void`/`undefined`/`never` and a
+    /// `null` literal type → [`VoidZero`](SerializedTypeNode::VoidZero), and
+    /// `any`/`unknown`/`object` (plus Go's catch-all) →
+    /// [`Object`](SerializedTypeNode::Object).
+    ///
+    /// DEFER(phase-5): the non-keyword arms Go also handles — a `TypeReference`
+    /// to a value-having entity (`Date`/a class → that entity's constructor, via
+    /// `GetTypeReferenceSerializationKind` + symbol/value resolution),
+    /// union/intersection/conditional recursion, `FunctionType`/`ConstructorType`
+    /// → `Function`, `ArrayType`/`TupleType` → `Array`, `TypePredicate`,
+    /// `TemplateLiteralType` → `String`, the non-`null` literal-type arms
+    /// (string/numeric/bigint/boolean), and `SkipTypeParentheses`. These
+    /// currently fall to the conservative [`Object`](SerializedTypeNode::Object)
+    /// tail rather than their Go-specific result.
+    /// blocked-by: `GetTypeReferenceSerializationKind` (entity value-ness +
+    /// `printer.TypeReferenceSerializationKind`) + the `serializeTypeNode`
+    /// recursion, which the P5 decorator transform drives.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, EmitResolver, SerializedTypeNode};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, p: &P, type_node: tsgo_ast::NodeId) -> SerializedTypeNode {
+    /// r.serialize_type_node_for_metadata(p, type_node)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/transformers/tstransforms/typeserializer.go:metadataSerializer.serializeTypeNode
+    pub fn serialize_type_node_for_metadata(
+        &self,
+        program: &dyn BoundProgram,
+        type_node: NodeId,
+    ) -> SerializedTypeNode {
+        match program.arena().kind(type_node) {
+            // Go: case KindVoidKeyword, KindUndefinedKeyword, KindNeverKeyword
+            // -> NewVoidZeroExpression.
+            Kind::VoidKeyword | Kind::UndefinedKeyword | Kind::NeverKeyword => {
+                SerializedTypeNode::VoidZero
+            }
+            // Go: case KindNumberKeyword -> NewIdentifier("Number").
+            Kind::NumberKeyword => SerializedTypeNode::Number,
+            // Go: case KindBigIntKeyword -> NewIdentifier("BigInt").
+            Kind::BigIntKeyword => SerializedTypeNode::BigInt,
+            // Go: case KindSymbolKeyword -> NewIdentifier("Symbol").
+            Kind::SymbolKeyword => SerializedTypeNode::Symbol,
+            // Go: case KindTemplateLiteralType, KindStringKeyword -> NewIdentifier("String").
+            Kind::StringKeyword => SerializedTypeNode::String,
+            // Go: case KindBooleanKeyword -> NewIdentifier("Boolean").
+            Kind::BooleanKeyword => SerializedTypeNode::Boolean,
+            // Go: case KindLiteralType -> serializeLiteralOfLiteralTypeNode.
+            // Reachable subset: a `null` literal type (`: null`) serializes to
+            // `void 0` (Go's `case KindNullKeyword -> NewVoidZeroExpression`).
+            // DEFER(phase-5): the string/numeric/bigint/boolean literal arms
+            // (-> String/Number/BigInt/Boolean) and the negative-numeric prefix.
+            // blocked-by: full serializeLiteralOfLiteralTypeNode port (P5).
+            Kind::LiteralType
+                if matches!(
+                    program.arena().data(type_node),
+                    NodeData::LiteralType(d) if program.arena().kind(d.literal) == Kind::NullKeyword
+                ) =>
+            {
+                SerializedTypeNode::VoidZero
+            }
+            // Go: the `serializeTypeNode` switch tail
+            // (`return s.f.NewIdentifier("Object")`) — the catch-all for
+            // everything not matched by a specific arm.
+            _ => SerializedTypeNode::Object,
         }
     }
 }

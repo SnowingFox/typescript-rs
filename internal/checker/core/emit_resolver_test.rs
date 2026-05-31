@@ -1,3 +1,4 @@
+use crate::core::emit_resolver::SerializedTypeNode;
 use crate::core::program::BoundProgram;
 use crate::core::symbols_query::get_symbol_of_declaration;
 use crate::core::test_support::StubProgram;
@@ -364,6 +365,159 @@ fn serialize_type_of_declaration_uses_real_type() {
     assert_eq!(
         resolver.serialize_type_of_declaration(&mut c, &p, x_decl),
         "Foo"
+    );
+}
+
+// Returns the type-annotation node of the first variable declaration in the
+// statement at `stmt_idx` (e.g. the `: T` type node of `declare const x: T;`).
+fn var_type_annotation(p: &StubProgram, stmt_idx: usize) -> NodeId {
+    let decl = first_var_declaration(p, stmt_idx);
+    match p.arena().data(decl) {
+        NodeData::VariableDeclaration(d) => d.type_node.expect("type annotation"),
+        _ => panic!("variable declaration"),
+    }
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (tracer: the `number` keyword type serializes to the global `Number` ctor)
+#[test]
+fn serialize_type_node_number_keyword_is_number() {
+    // `: number` (a `NumberKeyword` type node) serializes to `Number`.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: number;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::Number
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (the `string` keyword type serializes to the global `String` ctor)
+#[test]
+fn serialize_type_node_string_keyword_is_string() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: string;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::String
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (the `boolean` keyword type serializes to the global `Boolean` ctor)
+#[test]
+fn serialize_type_node_boolean_keyword_is_boolean() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: boolean;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::Boolean
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (`void`/`undefined`/`never` all serialize to the `void 0` ("undefined")
+// expression — Go's `case KindVoidKeyword, KindUndefinedKeyword,
+// KindNeverKeyword -> NewVoidZeroExpression`)
+#[test]
+fn serialize_type_node_void_undefined_never_are_void_zero() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: void;\ndeclare const b: undefined;\ndeclare const c: never;",
+    );
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, var_type_annotation(&p, 0)),
+        SerializedTypeNode::VoidZero
+    );
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, var_type_annotation(&p, 1)),
+        SerializedTypeNode::VoidZero
+    );
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, var_type_annotation(&p, 2)),
+        SerializedTypeNode::VoidZero
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// -> serializeLiteralOfLiteralTypeNode (a `null` literal type serializes to the
+// `void 0` expression — Go's `case KindNullKeyword -> NewVoidZeroExpression`)
+#[test]
+fn serialize_type_node_null_literal_is_void_zero() {
+    // `: null` parses as a `LiteralType` whose literal is the `null` keyword.
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: null;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(p.arena().kind(ty), tsgo_ast::Kind::LiteralType);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::VoidZero
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (the `bigint` keyword type serializes to the global `BigInt` ctor)
+#[test]
+fn serialize_type_node_bigint_keyword_is_bigint() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: bigint;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::BigInt
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (the `symbol` keyword type serializes to the global `Symbol` ctor)
+#[test]
+fn serialize_type_node_symbol_keyword_is_symbol() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: symbol;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let ty = var_type_annotation(&p, 0);
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, ty),
+        SerializedTypeNode::Symbol
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeTypeNode
+// (`any`/`unknown`/`object` serialize to the global `Object` ctor — Go's
+// `KindObjectKeyword` arm + the `KindAnyKeyword, KindUnknownKeyword` break
+// group that falls through to the `NewIdentifier("Object")` switch tail; both
+// routes converge on the conservative `Object` default in this port).
+// Green-on-arrival coverage guard (no new arm; locks Go's "anything else ->
+// Object" default for these kinds), not a fabricated RED.
+#[test]
+fn serialize_type_node_any_unknown_object_are_object() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: any;\ndeclare const b: unknown;\ndeclare const c: object;",
+    );
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, var_type_annotation(&p, 0)),
+        SerializedTypeNode::Object
+    );
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, var_type_annotation(&p, 1)),
+        SerializedTypeNode::Object
+    );
+    assert_eq!(
+        resolver.serialize_type_node_for_metadata(&p, var_type_annotation(&p, 2)),
+        SerializedTypeNode::Object
     );
 }
 
