@@ -908,6 +908,53 @@ lsp_object! {
 }
 
 lsp_object! {
+    /// A [`TextEdit`] carrying an additional change-annotation identifier.
+    ///
+    /// Since LSP 3.16.0. Mirrors a plain [`TextEdit`] plus the required
+    /// `annotationId` referencing a `ChangeAnnotation` (Go models the
+    /// identifier as a plain `string`).
+    // Go: internal/lsp/lsproto/lsp_generated.go:AnnotatedTextEdit
+    AnnotatedTextEdit {
+        ["The range of the document to be replaced."]
+        req range: Range => "range",
+        ["The replacement text."]
+        req new_text: String => "newText",
+        ["The identifier of the change annotation."]
+        req annotation_id: String => "annotationId",
+    }
+}
+
+lsp_object! {
+    /// A snippet string carrying its kind discriminator.
+    ///
+    /// The `kind` is always the literal `"snippet"` ([`StringLiteralSnippet`]);
+    /// `value` holds the snippet text (LSP snippet syntax).
+    // Go: internal/lsp/lsproto/lsp_generated.go:StringValue
+    StringValue {
+        ["The kind of string value (always `\"snippet\"`)."]
+        req kind: StringLiteralSnippet => "kind",
+        ["The snippet string."]
+        req value: String => "value",
+    }
+}
+
+lsp_object! {
+    /// An interactive text edit whose replacement is a snippet [`StringValue`].
+    ///
+    /// Since LSP 3.18.0 (proposed). The `snippet` is required and rejects an
+    /// explicit `null`; `annotationId` is optional and also rejects `null`.
+    // Go: internal/lsp/lsproto/lsp_generated.go:SnippetTextEdit
+    SnippetTextEdit {
+        ["The range of the document to be replaced."]
+        req range: Range => "range",
+        ["The snippet to be inserted."]
+        reqnn snippet: StringValue => "snippet",
+        ["The identifier of the snippet edit's change annotation."]
+        opt annotation_id: String => "annotationId",
+    }
+}
+
+lsp_object! {
     /// A command reference (LSP `Command`): a title plus the command identifier
     /// and its arguments.
     ///
@@ -1033,6 +1080,11 @@ string_literal! {
 string_literal! {
     /// The `"delete"` discriminator literal for `DeleteFile`.
     StringLiteralDelete, "delete"
+}
+string_literal! {
+    /// The `"snippet"` discriminator literal for [`StringValue`].
+    // Go: internal/lsp/lsproto/lsp_generated.go:StringLiteralSnippet
+    StringLiteralSnippet, "snippet"
 }
 
 /// A symbol kind (LSP `SymbolKind`, an integer enum).
@@ -1172,8 +1224,8 @@ lsp_object! {
     TextDocumentEdit {
         ["The text document to change."]
         req text_document: OptionalVersionedTextDocumentIdentifier => "textDocument",
-        ["The edits to apply (deferred element type: raw JSON)."]
-        reqnn edits: Vec<serde_json::Value> => "edits",
+        ["The edits to apply (`TextEdit | AnnotatedTextEdit | SnippetTextEdit`)."]
+        reqnn edits: Vec<TextEditOrAnnotatedTextEditOrSnippetTextEdit> => "edits",
     }
 }
 
@@ -1402,6 +1454,65 @@ impl<'de> Deserialize<'de> for TextEditOrInsertReplaceEdit {
             out.text_edit = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
         } else {
             return Err(de::Error::custom("invalid TextEditOrInsertReplaceEdit"));
+        }
+        Ok(out)
+    }
+}
+
+/// A presence-discriminated union of [`TextEdit`], [`AnnotatedTextEdit`], or
+/// [`SnippetTextEdit`] (LSP `TextEdit | AnnotatedTextEdit | SnippetTextEdit`).
+///
+/// A JSON object carrying a `snippet` key is a [`SnippetTextEdit`]; otherwise an
+/// `annotationId` key makes it an [`AnnotatedTextEdit`]; otherwise it is a plain
+/// [`TextEdit`].
+// Go: internal/lsp/lsproto/lsp_generated.go:TextEditOrAnnotatedTextEditOrSnippetTextEdit
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TextEditOrAnnotatedTextEditOrSnippetTextEdit {
+    /// The plain [`TextEdit`] variant.
+    pub text_edit: Option<TextEdit>,
+    /// The [`AnnotatedTextEdit`] variant.
+    pub annotated_text_edit: Option<AnnotatedTextEdit>,
+    /// The [`SnippetTextEdit`] variant.
+    pub snippet_text_edit: Option<SnippetTextEdit>,
+}
+
+impl Serialize for TextEditOrAnnotatedTextEditOrSnippetTextEdit {
+    // Go: lsp_generated.go:TextEditOrAnnotatedTextEditOrSnippetTextEdit.MarshalJSONTo
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (
+            &self.text_edit,
+            &self.annotated_text_edit,
+            &self.snippet_text_edit,
+        ) {
+            (Some(v), None, None) => v.serialize(serializer),
+            (None, Some(v), None) => v.serialize(serializer),
+            (None, None, Some(v)) => v.serialize(serializer),
+            _ => Err(serde::ser::Error::custom(
+                "exactly one element of TextEditOrAnnotatedTextEditOrSnippetTextEdit should be set",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TextEditOrAnnotatedTextEditOrSnippetTextEdit {
+    // Go: lsp_generated.go:TextEditOrAnnotatedTextEditOrSnippetTextEdit.UnmarshalJSONFrom
+    //
+    // Go uses `jsonObjectHasKey(data, "snippet", "annotationId")`: a `snippet`
+    // key selects `SnippetTextEdit`, else an `annotationId` key selects
+    // `AnnotatedTextEdit`, else a plain `TextEdit`. This port checks presence in
+    // that priority order, equivalent for all real inputs (a `SnippetTextEdit`
+    // always carries `snippet`; an `AnnotatedTextEdit` carries `annotationId`
+    // but no `snippet`).
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut out = TextEditOrAnnotatedTextEditOrSnippetTextEdit::default();
+        if value.get("snippet").is_some() {
+            out.snippet_text_edit = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+        } else if value.get("annotationId").is_some() {
+            out.annotated_text_edit =
+                Some(serde_json::from_value(value).map_err(de::Error::custom)?);
+        } else {
+            out.text_edit = Some(serde_json::from_value(value).map_err(de::Error::custom)?);
         }
         Ok(out)
     }

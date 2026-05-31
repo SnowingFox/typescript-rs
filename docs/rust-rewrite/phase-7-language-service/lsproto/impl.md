@@ -364,6 +364,48 @@
 - [x] `CallHierarchyItem`（+ `SymbolKind` 补 `Default`）；swap `CallHierarchyIncomingCallsParams.item`/`CallHierarchyIncomingCall.from`　`// Go: lsp_generated.go:CallHierarchyItem`
 - [x] `CreateFileOptions`/`RenameFileOptions`/`DeleteFileOptions`；swap 三 `options` 字段　`// Go: lsp_generated.go:CreateFileOptions/RenameFileOptions/DeleteFileOptions`
 
+## 续轮：`TextDocumentEdit.edits` 3 臂 union（本轮落地）
+
+> 上一轮把请求/结果参数 + 通知类型里 17 处 concrete-typed raw-JSON 槽收紧后，**请求/结果树里仅剩 `TextDocumentEdit.edits` 一个非 `*Data` 的 raw `Vec<serde_json::Value>` 槽**（DEFER 原因：依赖未移植的 `AnnotatedTextEdit`/`SnippetTextEdit`）。**本轮**移植这两个 edit 类型 + `StringValue`（含 `StringLiteralSnippet` 字面量）+ 3 臂 union `TextEditOrAnnotatedTextEditOrSnippetTextEdit`，并把 `TextDocumentEdit.edits` 从 raw `Vec<Value>` 升级为 `Vec<the union>`——**清空请求/结果树里最后一个非 `*Data` raw 槽**。全部编辑在 `generated.rs`(+`generated_test.rs`)，无新模块、无新第三方 crate。
+
+**落地的类型（与 Go 字段名 / optionality / union try-decode 序 1:1）**：
+- `AnnotatedTextEdit { range: req Range, newText: req String, annotationId: req String }`（`lsp_object!`；Go 把 `ChangeAnnotationIdentifier` 建成 `string`，三字段全必填、无 null 守卫 → `req`）。
+- `StringLiteralSnippet`（`string_literal!` 生成的 `"snippet"` 字面量，风格同 `StringLiteralCreate`）。
+- `StringValue { kind: req StringLiteralSnippet, value: req String }`（`lsp_object!`；两字段必填、无 null 守卫 → `req`）。
+- `SnippetTextEdit { range: req Range, snippet: reqnn StringValue, annotationId: opt String }`（Go `Snippet *StringValue` 有 `errNull` 守卫 → `reqnn`；`AnnotationId *string json:",omitzero"` 有 `errNull` 守卫 → `opt`（`opt` 经 `next_reject_null` 拒 null））。
+- `TextEditOrAnnotatedTextEditOrSnippetTextEdit`（3 `Option<变体>` + 手写 serde）：复刻 Go `jsonObjectHasKey(data, "snippet", "annotationId")` 派发——按优先序 `snippet` 键 → `SnippetTextEdit`、`annotationId` 键 → `AnnotatedTextEdit`、否则 → `TextEdit`（与既有 `TextEditOrInsertReplaceEdit` 同一 presence-priority 端口约定，对所有真实输入等价）。序列化复刻 Go `assertOnlyOne` + marshal 序（TextEdit→Annotated→Snippet）。
+- swap `TextDocumentEdit.edits`：`reqnn edits: Vec<serde_json::Value>` → `reqnn edits: Vec<TextEditOrAnnotatedTextEditOrSnippetTextEdit>`（`reqnn` 语义不变：拒 null、缺→`missing required properties: edits`、始终序列化）。
+
+**类型/所有权映射（本子树关键决策）**：
+
+| Go 构造 | Rust 表示 | 说明 |
+|---|---|---|
+| `AnnotatedTextEdit`（`Range`/`NewText`/`AnnotationId` 全 `req`，无 null 守卫） | `lsp_object!` 全 `req` | `AnnotationId ChangeAnnotationIdentifier`(=`string`) → `req annotation_id: String`。 |
+| `type StringLiteralSnippet struct{}`（marshal `"snippet"`） | `string_literal! StringLiteralSnippet, "snippet"` | 复刻 `StringLiteralCreate` 风格；错误字面量拒绝。 |
+| `StringValue{ Kind StringLiteralSnippet; Value string }` | `lsp_object!` `req kind`/`req value` | — |
+| `SnippetTextEdit.Snippet *StringValue`（`errNull` 守卫、必填） | `reqnn snippet: StringValue` | 缺→`errMissing`、拒 null、始终序列化。 |
+| `SnippetTextEdit.AnnotationId *string json:",omitzero"`（`errNull` 守卫） | `opt annotation_id: String` | omit None、拒 null。 |
+| `TextEditOrAnnotatedTextEditOrSnippetTextEdit`（`jsonObjectHasKey` 派发 snippet→annotationId→default） | 3 `Option<变体>` + 手写 serde（presence priority：snippet → annotationId → TextEdit） | 复刻 `TextEditOrInsertReplaceEdit` 先例；对真实输入与 Go 等价。 |
+| `TextDocumentEdit.Edits []<union>` | `reqnn edits: Vec<union>` | 仅字段**内层元素类型**从 `Value` 收紧为 typed union，`reqnn` 不变。 |
+
+**红→绿推进序（slice，逐行为 tracer）**：
+1. `AnnotatedTextEdit`（**tracer，真 RED→GREEN**：测试引用不存在的类型→编译失败 RED → 加 `lsp_object!` → GREEN）；`annotationId` 必填（errMissing）green-on-arrival。
+2. `SnippetTextEdit`+`StringValue`+`StringLiteralSnippet`（**真 RED→GREEN**：引用不存在类型→编译失败 RED → 加三类型 → GREEN）；optional annotationId omit / `snippet` 必填 / 拒 null / `StringValue` 错误 kind 拒绝 green-on-arrival。
+3. 3 臂 union（**tracer 真 RED→GREEN**：snippet 臂派发；类型不存在→编译失败 RED → 加 union → GREEN）；annotationId 臂 / plain 臂 / 序列化 assertOnlyOne green-on-arrival。
+4. swap `TextDocumentEdit.edits`（**headline 真 RED→GREEN**：测试访问 `edits[0].text_edit`/`edits[1].snippet_text_edit` 在 raw-`Value` 态编译失败 RED → 换 typed union → GREEN）；annotated-edit-in-vec round-trip green-on-arrival。
+
+> 诚实记录：每个新类型/swap 的首个引用测试均为真 RED（类型/字段不存在→编译失败），实现后 GREEN；同类型的另一 union 臂 / round-trip / required-missing / null 守卫 / `StringValue` 错误 kind 多为 green-on-arrival（`lsp_object!`/`string_literal!`/手写 union 一旦成立即过）。
+
+**公共 API 影响（additive / 非破坏）**：仅把 `TextDocumentEdit.edits` 的**元素类型**从 `serde_json::Value` 收紧为 typed union，**字段名 + `reqnn` optionality 不变**，serde 行为（拒 null、缺→errMissing、未知键忽略、始终序列化）保持。crate 外无 Rust 使用者（P8 未移植）；crate 内既有 `null_rejected_textdocumentedit_edits`（`reqnn` 拒 null）与 `doc_edit_text_document_edit`（union 内 `serde_json::from_value` 解 `TextDocumentEdit`，其 edits 元素 `{range,newText}` → TextEdit 臂）**全部不改即过**。本轮 +13 单测（290 → 303），doctest 不变（15）。
+
+**实现 TODO（本轮，可勾选）**：
+
+- [x] `AnnotatedTextEdit`（`req range`/`req new_text`/`req annotation_id`）　`// Go: lsp_generated.go:AnnotatedTextEdit`
+- [x] `StringLiteralSnippet` + `StringValue`（`req kind`/`req value`）　`// Go: lsp_generated.go:StringLiteralSnippet/StringValue`
+- [x] `SnippetTextEdit`（`req range`/`reqnn snippet`/`opt annotation_id`）　`// Go: lsp_generated.go:SnippetTextEdit`
+- [x] 3 臂 union `TextEditOrAnnotatedTextEditOrSnippetTextEdit`（snippet→annotationId→default 派发；assertOnlyOne 序列化）　`// Go: lsp_generated.go:TextEditOrAnnotatedTextEditOrSnippetTextEdit`
+- [x] swap `TextDocumentEdit.edits`：raw `Vec<Value>` → `Vec<union>`（清空请求/结果树最后一个非 `*Data` raw 槽）　`// Go: lsp_generated.go:TextDocumentEdit`
+
 ## 转交 / 推迟（DEFER）
 
 - ✅ 上一轮的 `(*ClientCapabilities).Resolve()` DEFER **已解除**（落地于 `capabilities.rs`，4 组全树）。
@@ -374,7 +416,7 @@
 - ✅ **本轮**移植 `RelativePattern` 对象变体（`WorkspaceFolder`/`WorkspaceFolderOrURI`/`RelativePattern`），把 `PatternOrRelativePattern.relative_pattern` 从 `serde_json::Value` 升级为 `Option<RelativePattern>`——**`PatternOrRelativePattern` 两个变体现已全 typed**。
 - ✅ **本轮**收紧请求/结果参数 + 通知类型里 **17 处** concrete-typed raw-JSON 槽（Hover.contents 4 臂 union / StringOrMarkupContent×3 / clientInfo / trace / rootPath / workspaceFolders / serverInfo / labelDetails / tags / insertTextMode / command×2 / callHierarchy item+from / 三个 file options）。
 - `// DEFER`：`CodeActionKindDocumentation`（`CodeActionOptions.documentation` 的 `[]*` 元素，proposed/稀有）保持 raw JSON。`blocked-by:` 生成器 pass。这是 `ServerCapabilities` provider 树里**唯一**剩余的 raw-JSON DEFER（不在本轮范围）。
-- `// DEFER`：`TextDocumentEdit.edits`（`[]TextEditOrAnnotatedTextEditOrSnippetTextEdit`，深 3 臂 union）保持 `Vec<serde_json::Value>`。`blocked-by:` `AnnotatedTextEdit`/`SnippetTextEdit` 类型未移植。`reqnn` 语义（拒 null）已正确（既有 `null_rejected_textdocumentedit_edits` 仍绿）。
+- ✅ **本轮**移植 `AnnotatedTextEdit`/`SnippetTextEdit`(+`StringValue`/`StringLiteralSnippet`) + 3 臂 union `TextEditOrAnnotatedTextEditOrSnippetTextEdit`，把 `TextDocumentEdit.edits` 从 `Vec<serde_json::Value>` 升级为 `Vec<the union>`——**请求/结果树里最后一个非 `*Data` raw 槽已清空**（`reqnn` 拒 null 不变，既有 `null_rejected_textdocumentedit_edits` 仍绿）。
 - `// DEFER`：`*Data` carrier（`CompletionItem.data`/`InlayHint.data`/`CallHierarchyItem.data` → `*CompletionItemData`/`*InlayHintData`(`struct{}`)/`*CallHierarchyItemData`）保持 raw JSON。`blocked-by:` 生成器 pass。typescript-go 内部 cookie，低价值；缺→`None`、拒 null、round-trip 原值。
 - **intentionally-any（保留 raw，Go-faithful）**：`Command.arguments`（`[]any`/LSPAny 数组，元素任意 JSON）、`InitializationOptions`（open-object，用户自定义初始化项）。Go 把它们建成 `any`/`LSPAny`，over-type 会偏离 Go。
 - `// DEFER`：新枚举 `String()` stringer（同生成器 pass；本轮 `TextDocumentSyncKind` 已含 `Display` 复刻 stringer；`TraceValue` 无 Go stringer）。

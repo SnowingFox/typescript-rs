@@ -3506,3 +3506,188 @@ fn file_options_default_serialize_empty() {
         "{}"
     );
 }
+
+// === AnnotatedTextEdit / SnippetTextEdit / TextEditOrAnnotatedTextEditOrSnippetTextEdit ===
+
+// Tracer (real RED -> GREEN): `AnnotatedTextEdit` does not exist yet, so this
+// test fails to compile until the type is added; once present it round-trips
+// the three required fields in Go declaration order (range, newText,
+// annotationId).
+// Go: lsp_generated.go:AnnotatedTextEdit
+#[test]
+fn annotated_text_edit_round_trip() {
+    let json = r#"{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}},"newText":"abc","annotationId":"ann1"}"#;
+    let v: AnnotatedTextEdit = serde_json::from_str(json).unwrap();
+    assert_eq!(v.new_text, "abc");
+    assert_eq!(v.annotation_id, "ann1");
+    assert_eq!(v.range.end.character, 3);
+    assert_eq!(serde_json::to_string(&v).unwrap(), json);
+}
+
+// green-on-arrival: `annotationId` is required (Go errMissing), distinguishing
+// `AnnotatedTextEdit` from a plain `TextEdit`.
+// Go: lsp_generated.go:AnnotatedTextEdit (missingAnnotationId)
+#[test]
+fn annotated_text_edit_requires_annotation_id() {
+    let err = serde_json::from_str::<AnnotatedTextEdit>(
+        r#"{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"newText":"x"}"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("annotationId"), "got: {err}");
+}
+
+// Tracer (real RED -> GREEN): `SnippetTextEdit` and `StringValue` do not exist
+// yet. Once present, an edit with a snippet round-trips in Go declaration order
+// (range, snippet, annotationId) with the nested `StringValue` discriminator.
+// Go: lsp_generated.go:SnippetTextEdit / StringValue
+#[test]
+fn snippet_text_edit_round_trip() {
+    let json = r#"{"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":0}},"snippet":{"kind":"snippet","value":"$1"},"annotationId":"ann2"}"#;
+    let v: SnippetTextEdit = serde_json::from_str(json).unwrap();
+    assert_eq!(v.snippet.value, "$1");
+    assert_eq!(v.annotation_id.as_deref(), Some("ann2"));
+    assert_eq!(serde_json::to_string(&v).unwrap(), json);
+}
+
+// green-on-arrival: `annotationId` is optional (omitzero) and omitted when None.
+// Go: lsp_generated.go:SnippetTextEdit (AnnotationId *string `json:",omitzero"`)
+#[test]
+fn snippet_text_edit_omits_optional_annotation_id() {
+    let json = r#"{"range":{"start":{"line":2,"character":1},"end":{"line":2,"character":1}},"snippet":{"kind":"snippet","value":"${1:name}"}}"#;
+    let v: SnippetTextEdit = serde_json::from_str(json).unwrap();
+    assert_eq!(v.annotation_id, None);
+    assert_eq!(serde_json::to_string(&v).unwrap(), json);
+}
+
+// green-on-arrival: `snippet` is required (Go errMissing).
+// Go: lsp_generated.go:SnippetTextEdit (missingSnippet)
+#[test]
+fn snippet_text_edit_requires_snippet() {
+    let err = serde_json::from_str::<SnippetTextEdit>(
+        r#"{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("snippet"), "got: {err}");
+}
+
+// green-on-arrival: a `null` snippet is rejected (Go errNull guard / reqnn).
+// Go: lsp_generated.go:SnippetTextEdit (errNull("snippet"))
+#[test]
+fn snippet_text_edit_rejects_null_snippet() {
+    assert_null_rejected::<SnippetTextEdit>(
+        r#"{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"snippet":null}"#,
+        "snippet",
+    );
+}
+
+// green-on-arrival: `StringValue` round-trips and its `kind` is fixed to the
+// `"snippet"` literal; a wrong literal is rejected.
+// Go: lsp_generated.go:StringValue / StringLiteralSnippet
+#[test]
+fn string_value_round_trip_and_rejects_wrong_kind() {
+    let json = r#"{"kind":"snippet","value":"$0"}"#;
+    let v: StringValue = serde_json::from_str(json).unwrap();
+    assert_eq!(v.value, "$0");
+    assert_eq!(serde_json::to_string(&v).unwrap(), json);
+    assert!(serde_json::from_str::<StringValue>(r#"{"kind":"literal","value":"x"}"#).is_err());
+}
+
+// Tracer (real RED -> GREEN): the 3-arm union does not exist yet. Go dispatches
+// by scanning for a `snippet` key first, so an object carrying `snippet` decodes
+// to the `SnippetTextEdit` arm.
+// Go: lsp_generated.go:TextEditOrAnnotatedTextEditOrSnippetTextEdit (case 0: snippet)
+#[test]
+fn text_edit_union_snippet_variant() {
+    let v: TextEditOrAnnotatedTextEditOrSnippetTextEdit = serde_json::from_str(
+        r#"{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"snippet":{"kind":"snippet","value":"$1"}}"#,
+    )
+    .unwrap();
+    assert!(v.text_edit.is_none());
+    assert!(v.annotated_text_edit.is_none());
+    assert_eq!(v.snippet_text_edit.unwrap().snippet.value, "$1");
+}
+
+// An object with `annotationId` but no `snippet` decodes to the
+// `AnnotatedTextEdit` arm (Go case 1: annotationId).
+// Go: lsp_generated.go:TextEditOrAnnotatedTextEditOrSnippetTextEdit (case 1)
+#[test]
+fn text_edit_union_annotated_variant() {
+    let v: TextEditOrAnnotatedTextEditOrSnippetTextEdit = serde_json::from_str(
+        r#"{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":2}},"newText":"hi","annotationId":"a1"}"#,
+    )
+    .unwrap();
+    assert!(v.text_edit.is_none());
+    assert!(v.snippet_text_edit.is_none());
+    assert_eq!(v.annotated_text_edit.unwrap().annotation_id, "a1");
+}
+
+// An object with neither `snippet` nor `annotationId` decodes to the plain
+// `TextEdit` arm (Go default case).
+// Go: lsp_generated.go:TextEditOrAnnotatedTextEditOrSnippetTextEdit (default)
+#[test]
+fn text_edit_union_plain_variant() {
+    let v: TextEditOrAnnotatedTextEditOrSnippetTextEdit = serde_json::from_str(
+        r#"{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"newText":"z"}"#,
+    )
+    .unwrap();
+    assert!(v.annotated_text_edit.is_none());
+    assert!(v.snippet_text_edit.is_none());
+    assert_eq!(v.text_edit.unwrap().new_text, "z");
+}
+
+// green-on-arrival: serialization emits the single set variant's object, and a
+// union with zero/multiple arms set is an error (Go assertOnlyOne).
+// Go: lsp_generated.go:TextEditOrAnnotatedTextEditOrSnippetTextEdit.MarshalJSONTo
+#[test]
+fn text_edit_union_serializes_set_variant() {
+    let only_annotated = TextEditOrAnnotatedTextEditOrSnippetTextEdit {
+        annotated_text_edit: Some(AnnotatedTextEdit {
+            range: Range::default(),
+            new_text: "x".to_string(),
+            annotation_id: "a".to_string(),
+        }),
+        ..Default::default()
+    };
+    let out = serde_json::to_string(&only_annotated).unwrap();
+    assert!(out.contains(r#""annotationId":"a""#), "got: {out}");
+    assert!(out.contains(r#""newText":"x""#), "got: {out}");
+
+    assert!(
+        serde_json::to_string(&TextEditOrAnnotatedTextEditOrSnippetTextEdit::default()).is_err()
+    );
+}
+
+// Headline (real RED -> GREEN): `TextDocumentEdit.edits` is tightened from raw
+// `Vec<serde_json::Value>` to the typed 3-arm union, so element fields are
+// typed and mixed plain/snippet edits round-trip byte-for-byte.
+// Go: lsp_generated.go:TextDocumentEdit (Edits []TextEditOrAnnotatedTextEditOrSnippetTextEdit)
+#[test]
+fn text_document_edit_edits_typed() {
+    let json = r#"{"textDocument":{"uri":"file:///a.ts","version":1},"edits":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"newText":"x"},{"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":0}},"snippet":{"kind":"snippet","value":"$0"}}]}"#;
+    let v: TextDocumentEdit = serde_json::from_str(json).unwrap();
+    assert_eq!(v.edits.len(), 2);
+    assert_eq!(v.edits[0].text_edit.as_ref().unwrap().new_text, "x");
+    assert_eq!(
+        v.edits[1].snippet_text_edit.as_ref().unwrap().snippet.value,
+        "$0"
+    );
+    assert_eq!(serde_json::to_string(&v).unwrap(), json);
+}
+
+// green-on-arrival: an annotated edit inside `edits` decodes to its typed arm
+// and round-trips, confirming the swap covers all three union arms in the vec.
+// Go: lsp_generated.go:TextDocumentEdit (AnnotatedTextEdit element)
+#[test]
+fn text_document_edit_annotated_edit_in_vec() {
+    let json = r#"{"textDocument":{"uri":"file:///b.ts","version":2},"edits":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"newText":"q","annotationId":"a7"}]}"#;
+    let v: TextDocumentEdit = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        v.edits[0]
+            .annotated_text_edit
+            .as_ref()
+            .unwrap()
+            .annotation_id,
+        "a7"
+    );
+    assert_eq!(serde_json::to_string(&v).unwrap(), json);
+}

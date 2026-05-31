@@ -237,6 +237,29 @@
 
 > 既有 `null_rejected_hover_range` / `null_rejected_callhierarchy_incoming_params_item` / `null_rejected_callhierarchy_incoming_call_from` / `null_rejected_completionitem_insert_text_format` / `unmarshal_completion_item` / `roundtrip_initialize_params_null_process_id` / `null_accepted_initialize_root_uri` / `null_accepted_initialize_workspace_folders` / `null_accepted_initialize_process_id` / `null_rejected_textdocumentedit_edits` 在字段内层类型从 `serde_json::Value` 收紧为 typed `Option<T>`/`req T`/`reqnn` 后**全部不改即过**（`reqnn`/`optn` 语义 + `..Default::default()` 对内层类型透明）。给 `SymbolKind` 补 `Default` 是纯新增。
 
+## 续轮：`TextDocumentEdit.edits` 3 臂 union（`generated_test.rs`）
+
+> 本轮移植 `AnnotatedTextEdit`/`SnippetTextEdit`(+`StringValue`/`StringLiteralSnippet`) + 3 臂 union，并把 `TextDocumentEdit.edits` 从 raw `Vec<serde_json::Value>` 收紧为 `Vec<the union>`。Go 侧 `lsp_json_test.go` 对这些 edit 类型**无 populated serde 测试**（多为服务端产出值），按 PORTING §8.6 自写行为级 serde 测试，expected 取 Go `json` 标签语义 + LSP spec 字面量，测试加在既有 `generated_test.rs`。
+> red→green：每个新类型/swap 的**首个引用测试**为**真 RED→GREEN**（类型/字段在 raw-`Value` 态不存在 → 编译失败 RED → 加类型/换字段 → GREEN）；同类型的另一 union 臂 / round-trip / required-missing / null 守卫多为 **green-on-arrival**（诚实标注）。本轮 +13 单测（290 → 303），doctest 不变（15）。
+
+| Rust 测试 | 验证内容 | input → expected | 依据 | 完成 |
+|---|---|---|---|---|
+| `annotated_text_edit_round_trip` | **tracer（真 RED→GREEN）**：`AnnotatedTextEdit`（range/newText/annotationId 全 req）byte-for-byte round-trip | `{"range":...,"newText":"abc","annotationId":"ann1"}` → 三字段 + 同字面量 | `lsp_generated.go:AnnotatedTextEdit` | ✓ |
+| `annotated_text_edit_requires_annotation_id` | `annotationId` 必填（区分于 `TextEdit`）→ errMissing（green-on-arrival） | 缺 annotationId → `missing required properties: annotationId` | 同上（missingAnnotationId） | ✓ |
+| `snippet_text_edit_round_trip` | **tracer（真 RED→GREEN）**：`SnippetTextEdit`/`StringValue` 嵌套 round-trip（Go 字段序 range/snippet/annotationId） | `{"range":...,"snippet":{"kind":"snippet","value":"$1"},"annotationId":"ann2"}` → snippet.value/annotationId + 同字面量 | `lsp_generated.go:SnippetTextEdit/StringValue` | ✓ |
+| `snippet_text_edit_omits_optional_annotation_id` | `annotationId` 可选（omitzero），None 省略（green-on-arrival） | 无 annotationId 置位 → `annotation_id=None` + 同字面量 | 同上（AnnotationId omitzero） | ✓ |
+| `snippet_text_edit_requires_snippet` | `snippet` 必填 → errMissing（green-on-arrival） | 缺 snippet → `missing required properties: snippet` | 同上（missingSnippet） | ✓ |
+| `snippet_text_edit_rejects_null_snippet` | `snippet:null` 拒绝（reqnn / Go errNull guard；green-on-arrival） | `{"snippet":null,...}` → null 拒绝 | 同上（errNull("snippet")） | ✓ |
+| `string_value_round_trip_and_rejects_wrong_kind` | `StringValue` round-trip + `kind` 固定 `"snippet"`、错误字面量拒绝（green-on-arrival） | `{"kind":"snippet","value":"$0"}` round-trip；`{"kind":"literal",...}` → err | `lsp_generated.go:StringValue/StringLiteralSnippet` | ✓ |
+| `text_edit_union_snippet_variant` | **tracer（真 RED→GREEN）**：union 按 `snippet` 键 → SnippetTextEdit 臂（Go case 0） | `{"range":...,"snippet":{...}}` → `snippet_text_edit=Some` | `lsp_generated.go:TextEditOrAnnotatedTextEditOrSnippetTextEdit`(case 0) | ✓ |
+| `text_edit_union_annotated_variant` | `annotationId`(无 snippet) → AnnotatedTextEdit 臂（Go case 1；green-on-arrival） | `{"range":...,"newText":"hi","annotationId":"a1"}` → `annotated_text_edit=Some` | 同上(case 1) | ✓ |
+| `text_edit_union_plain_variant` | 无 snippet/annotationId → TextEdit 臂（Go default；green-on-arrival） | `{"range":...,"newText":"z"}` → `text_edit=Some` | 同上(default) | ✓ |
+| `text_edit_union_serializes_set_variant` | 序列化置位臂 + 零/多臂错误（Go assertOnlyOne；green-on-arrival） | set annotated → 含 `"annotationId":"a"`；`default` → err | `...MarshalJSONTo` | ✓ |
+| `text_document_edit_edits_typed` | **headline（真 RED→GREEN）**：`TextDocumentEdit.edits` 从 raw `Value` 换 typed `Vec<union>`，混合 plain/snippet 元素 typed 字段可访问 + byte-for-byte round-trip | `{"textDocument":...,"edits":[{...,"newText":"x"},{...,"snippet":{...}}]}` → `edits[0].text_edit`/`edits[1].snippet_text_edit` + 同字面量 | `lsp_generated.go:TextDocumentEdit`(Edits) | ✓ |
+| `text_document_edit_annotated_edit_in_vec` | edits 内 annotated 元素 typed 臂 + round-trip（green-on-arrival） | `{"edits":[{...,"newText":"q","annotationId":"a7"}]}` → `edits[0].annotated_text_edit.annotation_id` + 同字面量 | 同上（AnnotatedTextEdit 元素） | ✓ |
+
+> 既有 `null_rejected_textdocumentedit_edits`（`reqnn` 拒 null）/ `doc_edit_text_document_edit`（union 内 `from_value` 解 `TextDocumentEdit`，edits 元素 `{range,newText}` → TextEdit 臂）在 `edits` 元素类型从 `serde_json::Value` 收紧为 typed union 后**全部不改即过**（`reqnn` 语义 + 元素 union 对 `{range,newText}` 解为 TextEdit 臂透明）。
+
 ## 推迟到后续 phase 的测试
 
 | 测试 / 行为 | 原因 | 目标 phase |
@@ -248,7 +271,7 @@
 | ~~`ServerCapabilities.workspace`（`WorkspaceOptions`）typed serde~~ | ✅ 本轮已落地（`WorkspaceOptions` 子树 red→green，清空 ServerCapabilities 最后一个 raw 槽） | 完成 |
 | ~~`PatternOrRelativePattern` 的 **`RelativePattern` 对象变体** typed serde~~ | ✅ 本轮已落地（`WorkspaceFolder`/`WorkspaceFolderOrURI`/`RelativePattern` red→green；两变体全 typed） | 完成 |
 | ~~请求/结果参数 + 通知类型的 concrete-typed raw-JSON 槽（Hover.contents / *.documentation / clientInfo / trace / rootPath / workspaceFolders / serverInfo / labelDetails / tags / insertTextMode / command / callHierarchy item / file options）~~ | ✅ **本轮**已落地（17 处收紧，red→green，+30 单测） | 完成 |
-| `TextDocumentEdit.edits`（`[]TextEditOrAnnotatedTextEditOrSnippetTextEdit`）typed serde | 深 3 臂 union；`reqnn`（拒 null）已正确 | — blocked-by `AnnotatedTextEdit`/`SnippetTextEdit` 类型 |
+| ~~`TextDocumentEdit.edits`（`[]TextEditOrAnnotatedTextEditOrSnippetTextEdit`）typed serde~~ | ✅ **本轮**已落地（`AnnotatedTextEdit`/`SnippetTextEdit`/`StringValue` + 3 臂 union red→green，清空请求/结果树最后一个非 `*Data` raw 槽，+13 单测） | 完成 |
 | `*Data` carrier（`CompletionItem.data`/`InlayHint.data`/`CallHierarchyItem.data`）typed serde | typescript-go 内部 cookie carrier，低价值；缺/null/round-trip 已正确 | — blocked-by 生成器 pass |
 | `Command.arguments` / `InitializationOptions` typed serde | **intentionally-any**（Go `[]any`/`LSPAny`）：保留 raw 才是 Go-faithful，不 over-type | — N/A（设计如此） |
 | `CodeActionKindDocumentation`（`CodeActionOptions.documentation`）typed serde | proposed/稀有嵌套类型，`ServerCapabilities` provider 树里唯一剩余 raw-JSON DEFER | — blocked-by 生成器 pass |
