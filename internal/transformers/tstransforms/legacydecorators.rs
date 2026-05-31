@@ -48,9 +48,24 @@
 //!   __decorate([dec], C);`), including the self-reference class-alias rewrite.
 //!   blocked-by: `getLocalName`/`GetDeclarationName` emit-name forms + the
 //!   `classAliases` substitution and `getReferencedValueDeclaration`.
-//! - **Accessor decorators** (get/set merge, `getAccessorTypeNode`). blocked-by:
-//!   the accessor decoration shape and `getAllAccessorDeclarations`. (Method
-//!   decorators landed in 6ao: `design:type` = `Function` + `design:returntype`.)
+//! - **Accessor decorators** landed in 6aq: a decorated get/set accessor lowers
+//!   to `__decorate([...], C.prototype, "x", null)` (4th arg `null`, like a
+//!   method); a get/set pair merges into a single `__decorate` owned by the
+//!   first accessor with decorators (`getAllAccessorDeclarations` +
+//!   `getAllDecoratorsOfAccessors`); with `--emitDecoratorMetadata` an accessor
+//!   emits `design:type` (from `getAccessorTypeNode`: the setter's value-param
+//!   type if a setter exists, else the getter's return type) *and*
+//!   `design:paramtypes` (`shouldAddParamTypesMetadata` is true for accessors),
+//!   but NOT `design:returntype` (method-only). Still deferred for accessors:
+//!   computed/private accessor names (need `getPropertyNameForPropertyNameNode` /
+//!   checker symbol pairing); parameter decorators on a setter
+//!   (`getDecoratorsOfParameters(setAccessor)` — `member_is_decorated` only sees
+//!   the accessor's own decorator); the `this`-parameter body erasure
+//!   (`set x(this: T, v)` keeps `this` in the lowered body); and the
+//!   both-get-and-set-decorated case (a grammar error in valid TS). blocked-by:
+//!   computed-name resolution + accessor parameter-decorator detection.
+//!   (Method decorators landed in 6ao: `design:type` = `Function` +
+//!   `design:returntype`.)
 //! - **`this`-parameter offset + rest-parameter element type** for the 6ap
 //!   `design:paramtypes` / `__param` paths. blocked-by: `IsThisParameter` skip +
 //!   `GetRestParameterElementType`. (The reachable subset — plain leading
@@ -346,6 +361,15 @@ fn visit_class_declaration(ec: &mut EmitContext, node: NodeId, cfg: &Config) -> 
             Kind::MethodDeclaration if member_is_decorated(ec.arena(), m) => {
                 rebuild_method_without_decorators(ec.arena_mut(), m)
             }
+            // Go's `transformClassDeclarationWithoutClassDecorators` visits *every*
+            // member, so both the decorated accessor and its undecorated partner
+            // are rebuilt — stripping decorators and (for the setter's value
+            // parameter / the getter's return type) the type annotations. Rebuild
+            // accessors unconditionally so a `set x(value: number)` partner lowers
+            // to `set x(value)` to match Go's isolated output.
+            Kind::GetAccessor | Kind::SetAccessor => {
+                rebuild_accessor_without_decorators(ec.arena_mut(), m)
+            }
             _ => m,
         })
         .collect();
@@ -358,10 +382,15 @@ fn visit_class_declaration(ec: &mut EmitContext, node: NodeId, cfg: &Config) -> 
         NodeList::new(new_members),
     );
 
-    // Build a `__decorate(...)` statement per decorated property.
+    // Build a `__decorate(...)` statement per decorated member. The *original*
+    // member ids (with type annotations intact) are threaded through so accessor
+    // metadata can pair a get/set accessor (`getAllAccessorDeclarations`) and
+    // read the un-stripped setter parameter / getter return type.
+    let member_ids: Vec<NodeId> = members.nodes.clone();
     let mut statements = vec![updated_class];
     for member in decorated_members {
-        if let Some(stmt) = generate_class_element_decoration_statement(ec, cfg, &name_text, member)
+        if let Some(stmt) =
+            generate_class_element_decoration_statement(ec, cfg, &name_text, member, &member_ids)
         {
             statements.push(stmt);
         }
@@ -379,6 +408,9 @@ fn member_has_decorators(arena: &NodeArena, member: NodeId) -> bool {
     let modifiers = match arena.data(member) {
         NodeData::PropertyDeclaration(d) => d.modifiers.as_ref(),
         NodeData::MethodDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+            d.modifiers.as_ref()
+        }
         _ => None,
     };
     modifiers.is_some_and(|m| m.modifier_flags.contains(ModifierFlags::DECORATOR))
@@ -500,6 +532,54 @@ fn rebuild_parameter_without_decorators(arena: &mut NodeArena, param: NodeId) ->
     arena.new_parameter_declaration(None, dot_dot_dot_token, name, None, None, initializer)
 }
 
+/// Rebuilds a get/set accessor declaration with its decorators removed from the
+/// modifier list and its type parameters / return type / full signature dropped,
+/// rebuilding each parameter (Go's
+/// `LegacyDecoratorsTransformer.visitGetAccessorDeclaration` /
+/// `visitSetAccessorDeclaration`, which pass `nil` for the type parameters,
+/// type, and full signature and visit each parameter via
+/// `visitParamerDeclaration`). Applied to both the decorated accessor and its
+/// undecorated partner so a `set x(value: number)` lowers to `set x(value)`.
+///
+/// Side effects: pushes the rebuilt accessor node.
+// Go: internal/transformers/tstransforms/legacydecorators.go:visitGetAccessorDeclaration / visitSetAccessorDeclaration
+fn rebuild_accessor_without_decorators(arena: &mut NodeArena, member: NodeId) -> NodeId {
+    let (kind, modifiers, name, parameters, body) = match arena.data(member) {
+        NodeData::GetAccessorDeclaration(d) => (
+            Kind::GetAccessor,
+            d.modifiers.clone(),
+            d.name,
+            d.parameters.clone(),
+            d.body,
+        ),
+        NodeData::SetAccessorDeclaration(d) => (
+            Kind::SetAccessor,
+            d.modifiers.clone(),
+            d.name,
+            d.parameters.clone(),
+            d.body,
+        ),
+        _ => return member,
+    };
+    let modifiers = strip_decorators(arena, modifiers.as_ref());
+    let new_parameters: Vec<NodeId> = parameters
+        .nodes
+        .iter()
+        .copied()
+        .map(|p| rebuild_parameter_without_decorators(arena, p))
+        .collect();
+    arena.new_accessor_declaration(
+        kind,
+        modifiers,
+        name,
+        None,
+        NodeList::new(new_parameters),
+        None,
+        None,
+        body,
+    )
+}
+
 /// Returns a copy of `modifiers` with decorator entries removed and the flag
 /// union recomputed; `None` when nothing remains (Go's `VisitModifiers`, which
 /// elides `KindDecorator`).
@@ -553,9 +633,32 @@ fn append_type_metadata(
     ec: &mut EmitContext,
     resolver: &EmitReferenceResolver,
     member: NodeId,
+    members: &[NodeId],
     decorator_expressions: &mut Vec<NodeId>,
 ) {
     match ec.arena().kind(member) {
+        Kind::GetAccessor | Kind::SetAccessor => {
+            // Go: `shouldAddTypeMetadata` is true for accessors -> `design:type`
+            // = `serializeTypeNode(getAccessorTypeNode(...))`, i.e. the setter's
+            // value-parameter type (if a setter exists) else the getter's return
+            // type, and `Object` when that annotation is absent.
+            let type_node = accessor_type_node(ec.arena(), member, members);
+            let value = match type_node {
+                Some(type_node) => serialize_type_node(ec, resolver, type_node),
+                None => ec.arena_mut().new_identifier("Object"),
+            };
+            let type_meta = new_metadata_helper(ec, "design:type", value);
+            decorator_expressions.push(type_meta);
+            // Go: `shouldAddParamTypesMetadata` is *also* true for accessors, so
+            // a `design:paramtypes` array follows. The parameters come from the
+            // setter (for a getter with a setter partner) else the accessor's own
+            // parameters (`getParametersOfDecoratedDeclaration`). Note: Go does
+            // NOT emit `design:returntype` for accessors
+            // (`shouldAddReturnTypeMetadata` is method-only).
+            let paramtypes = serialize_accessor_parameter_types(ec, resolver, member, members);
+            let paramtypes_meta = new_metadata_helper(ec, "design:paramtypes", paramtypes);
+            decorator_expressions.push(paramtypes_meta);
+        }
         Kind::PropertyDeclaration => {
             let type_node = match ec.arena().data(member) {
                 NodeData::PropertyDeclaration(d) => d.type_node,
@@ -640,6 +743,231 @@ fn serialize_parameter_types(
         .new_array_literal_expression(NodeList::new(expressions))
 }
 
+/// A get/set accessor pair sharing a property name and static-ness within a
+/// class body (the reachable subset of Go's `getAllAccessorDeclarations`).
+struct AccessorPair {
+    /// The matched accessors in declaration (member) order — used to pick the
+    /// *first* accessor that owns the emitted `__decorate`.
+    ordered: Vec<NodeId>,
+    /// The get accessor of the pair, if present.
+    get_accessor: Option<NodeId>,
+    /// The set accessor of the pair, if present.
+    set_accessor: Option<NodeId>,
+}
+
+/// Returns the identifier text of an accessor's property name, or `None` for a
+/// computed / private / string-literal name (DEFER: those need
+/// `getPropertyNameForPropertyNameNode` / checker symbol lookup).
+///
+/// Side effects: none (reads the arena).
+fn accessor_name_text(arena: &NodeArena, member: NodeId) -> Option<String> {
+    let name = match arena.data(member) {
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => d.name,
+        _ => return None,
+    };
+    if arena.kind(name) == Kind::Identifier {
+        Some(arena.text(name).to_string())
+    } else {
+        None
+    }
+}
+
+/// Pairs an accessor with its same-named, same-static-ness partner among the
+/// class `members` (Go's `getAllAccessorDeclarations` ->
+/// `getAllAccessorDeclarationsForDeclaration`). A computed / private name cannot
+/// be paired syntactically, so the accessor is treated as standalone (Go's
+/// `HasDynamicName` early return).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/ast/utilities.go:GetAllAccessorDeclarations
+fn find_accessor_pair(arena: &NodeArena, members: &[NodeId], accessor: NodeId) -> AccessorPair {
+    let mut pair = AccessorPair {
+        ordered: Vec::new(),
+        get_accessor: None,
+        set_accessor: None,
+    };
+    let Some(name) = accessor_name_text(arena, accessor) else {
+        pair.ordered.push(accessor);
+        match arena.kind(accessor) {
+            Kind::GetAccessor => pair.get_accessor = Some(accessor),
+            Kind::SetAccessor => pair.set_accessor = Some(accessor),
+            _ => {}
+        }
+        return pair;
+    };
+    let is_static = is_static_member(arena, accessor);
+    for &m in members {
+        let kind = arena.kind(m);
+        if kind != Kind::GetAccessor && kind != Kind::SetAccessor {
+            continue;
+        }
+        if is_static_member(arena, m) != is_static {
+            continue;
+        }
+        if accessor_name_text(arena, m).as_deref() != Some(name.as_str()) {
+            continue;
+        }
+        pair.ordered.push(m);
+        match kind {
+            Kind::GetAccessor if pair.get_accessor.is_none() => pair.get_accessor = Some(m),
+            Kind::SetAccessor if pair.set_accessor.is_none() => pair.set_accessor = Some(m),
+            _ => {}
+        }
+    }
+    pair
+}
+
+/// Reports whether `accessor` is the first accessor (in declaration order) of
+/// its pair that carries decorators — the one that owns the single emitted
+/// `__decorate` (Go's `getAllDecoratorsOfAccessors`: returns `nil` for any
+/// accessor that is not `firstAccessorWithDecorators`).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/transformers/tstransforms/legacydecorators.go:getAllDecoratorsOfAccessors
+fn accessor_owns_decoration(arena: &NodeArena, accessor: NodeId, members: &[NodeId]) -> bool {
+    let pair = find_accessor_pair(arena, members, accessor);
+    let first = pair
+        .ordered
+        .iter()
+        .copied()
+        .find(|&a| member_has_decorators(arena, a));
+    first == Some(accessor)
+}
+
+/// Reports whether a parameter is the contextual `this` parameter (an identifier
+/// named `this`), which is excluded from the accessor's value parameter and the
+/// `design:paramtypes` array (Go's `IsThisParameter`).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/ast/utilities.go:IsThisParameter
+fn is_this_parameter(arena: &NodeArena, param: NodeId) -> bool {
+    let name = match arena.data(param) {
+        NodeData::ParameterDeclaration(d) => d.name,
+        _ => return false,
+    };
+    arena.kind(name) == Kind::Identifier && arena.text(name) == "this"
+}
+
+/// Returns the set accessor's value parameter — its first parameter, skipping a
+/// leading `this` parameter (Go's `GetSetAccessorValueParameter`).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/transformers/tstransforms/metadata.go:GetSetAccessorValueParameter
+fn set_accessor_value_parameter(arena: &NodeArena, set: NodeId) -> Option<NodeId> {
+    let params = match arena.data(set) {
+        NodeData::SetAccessorDeclaration(d) => &d.parameters.nodes,
+        _ => return None,
+    };
+    let first = *params.first()?;
+    if params.len() >= 2 && is_this_parameter(arena, first) {
+        Some(params[1])
+    } else {
+        Some(first)
+    }
+}
+
+/// Returns the type annotation of a set accessor's value parameter, or `None`
+/// when absent (Go's `getSetAccessorTypeAnnotationNode`).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/transformers/tstransforms/metadata.go:getSetAccessorTypeAnnotationNode
+fn set_accessor_type_annotation_node(arena: &NodeArena, set: NodeId) -> Option<NodeId> {
+    let p = set_accessor_value_parameter(arena, set)?;
+    match arena.data(p) {
+        NodeData::ParameterDeclaration(d) => d.type_node,
+        _ => None,
+    }
+}
+
+/// Returns the type node used for an accessor's `design:type`: the set accessor's
+/// value-parameter type when a setter exists, else the getter's return type
+/// (Go's `getAccessorTypeNode`). `None` (-> `Object` at the call site) when the
+/// chosen annotation is absent.
+///
+/// Side effects: none (reads the arena).
+// Go: internal/transformers/tstransforms/metadata.go:getAccessorTypeNode
+fn accessor_type_node(arena: &NodeArena, accessor: NodeId, members: &[NodeId]) -> Option<NodeId> {
+    let pair = find_accessor_pair(arena, members, accessor);
+    if let Some(set) = pair.set_accessor {
+        return set_accessor_type_annotation_node(arena, set);
+    }
+    if let Some(get) = pair.get_accessor {
+        return match arena.data(get) {
+            NodeData::GetAccessorDeclaration(d) => d.type_node,
+            _ => None,
+        };
+    }
+    None
+}
+
+/// Returns the parameters whose types form an accessor's `design:paramtypes`
+/// array: the setter's parameters when pairing a getter with a setter, else the
+/// accessor's own parameters (Go's `getParametersOfDecoratedDeclaration`).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/transformers/tstransforms/typeserializer.go:getParametersOfDecoratedDeclaration
+fn parameters_of_decorated_accessor(
+    arena: &NodeArena,
+    accessor: NodeId,
+    members: &[NodeId],
+) -> Vec<NodeId> {
+    if arena.kind(accessor) == Kind::GetAccessor {
+        let pair = find_accessor_pair(arena, members, accessor);
+        if let Some(set) = pair.set_accessor {
+            return match arena.data(set) {
+                NodeData::SetAccessorDeclaration(d) => d.parameters.nodes.clone(),
+                _ => Vec::new(),
+            };
+        }
+    }
+    match arena.data(accessor) {
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+            d.parameters.nodes.clone()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Builds the `design:paramtypes` array for a decorated accessor: one serialized
+/// type per parameter (Go's `serializeParameterTypesOfNode`). The parameters are
+/// the setter's (for a getter+setter pair) else the accessor's own; a getter
+/// with no setter yields `[]`. Each parameter's annotation is serialized through
+/// the same checker path as a property's `design:type`; an unannotated parameter
+/// serializes to `Object`.
+///
+/// DEFER(phase-6): the rest-parameter element type (Go's
+/// `GetRestParameterElementType`); not reachable for accessors in the current
+/// subset (a setter takes exactly one value parameter). blocked-by: rest
+/// element-type extraction. (The leading-`this` parameter is skipped here.)
+///
+/// Side effects: pushes the array / serialized-type nodes.
+// Go: internal/transformers/tstransforms/typeserializer.go:serializeParameterTypesOfNode
+fn serialize_accessor_parameter_types(
+    ec: &mut EmitContext,
+    resolver: &EmitReferenceResolver,
+    accessor: NodeId,
+    members: &[NodeId],
+) -> NodeId {
+    let params = parameters_of_decorated_accessor(ec.arena(), accessor, members);
+    let mut expressions: Vec<NodeId> = Vec::new();
+    for (index, param) in params.iter().copied().enumerate() {
+        if index == 0 && is_this_parameter(ec.arena(), param) {
+            continue;
+        }
+        let type_node = match ec.arena().data(param) {
+            NodeData::ParameterDeclaration(d) => d.type_node,
+            _ => None,
+        };
+        let value = match type_node {
+            Some(type_node) => serialize_type_node(ec, resolver, type_node),
+            None => ec.arena_mut().new_identifier("Object"),
+        };
+        expressions.push(value);
+    }
+    ec.arena_mut()
+        .new_array_literal_expression(NodeList::new(expressions))
+}
+
 /// Builds the `__decorate([...], <prefix>, "<name>", <descriptor>);` statement
 /// for a decorated property or method `member` of class `class_name` (Go's
 /// `generateClassElementDecorationExpression` wrapped in an expression
@@ -653,7 +981,19 @@ fn generate_class_element_decoration_statement(
     cfg: &Config,
     class_name: &str,
     member: NodeId,
+    members: &[NodeId],
 ) -> Option<NodeId> {
+    // Go's `getAllDecoratorsOfAccessors`: a get/set pair emits a single
+    // `__decorate`, owned by the *first* accessor (in declaration order) that
+    // carries decorators. The other accessor returns no decoration expression.
+    if matches!(
+        ec.arena().kind(member),
+        Kind::GetAccessor | Kind::SetAccessor
+    ) && !accessor_owns_decoration(ec.arena(), member, members)
+    {
+        return None;
+    }
+
     let mut decorator_expressions = decorator_expressions_of(ec.arena(), member);
     // Parameter decorators contribute `__param(index, dec)` entries *after* the
     // member's own decorators and *before* any metadata (Go's
@@ -669,7 +1009,7 @@ fn generate_class_element_decoration_statement(
     // orders metadata last).
     if cfg.emit_decorator_metadata {
         if let Some(resolver) = &cfg.resolver {
-            append_type_metadata(ec, resolver, member, &mut decorator_expressions);
+            append_type_metadata(ec, resolver, member, members, &mut decorator_expressions);
         }
     }
 
@@ -688,9 +1028,11 @@ fn generate_class_element_decoration_statement(
     let member_name = expression_for_property_name(ec, member);
     // Go's `generateClassElementDecorationExpression`: a property (not an
     // accessor) uses `void 0` so `__decorate` invokes `Object.defineProperty`
-    // directly; every other member (here, a method) uses `null` so `__decorate`
-    // invokes `Object.getOwnPropertyDescriptor` directly. (Accessor members with
-    // the `accessor` modifier are DEFER, so a plain property maps to `void 0`.)
+    // directly; every other member (a method or a get/set accessor) uses `null`
+    // so `__decorate` invokes `Object.getOwnPropertyDescriptor` directly. (An
+    // auto-accessor field — a `PropertyDeclaration` with the `accessor` modifier,
+    // which Go's `HasAccessorModifier` would route to `null` — is DEFER, so a
+    // plain property maps to `void 0` here.)
     let descriptor = if ec.arena().kind(member) == Kind::PropertyDeclaration {
         make_void_zero(ec)
     } else {
@@ -715,6 +1057,9 @@ fn is_static_member(arena: &NodeArena, member: NodeId) -> bool {
     let modifiers = match arena.data(member) {
         NodeData::PropertyDeclaration(d) => d.modifiers.as_ref(),
         NodeData::MethodDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+            d.modifiers.as_ref()
+        }
         _ => None,
     };
     modifiers.is_some_and(|m| m.modifier_flags.contains(ModifierFlags::STATIC))
@@ -728,6 +1073,9 @@ fn decorator_expressions_of(arena: &NodeArena, member: NodeId) -> Vec<NodeId> {
     let modifiers = match arena.data(member) {
         NodeData::PropertyDeclaration(d) => d.modifiers.as_ref(),
         NodeData::MethodDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+            d.modifiers.as_ref()
+        }
         _ => None,
     };
     let Some(modifiers) = modifiers else {
@@ -806,6 +1154,7 @@ fn expression_for_property_name(ec: &mut EmitContext, member: NodeId) -> NodeId 
     let name = match ec.arena().data(member) {
         NodeData::PropertyDeclaration(d) => d.name,
         NodeData::MethodDeclaration(d) => d.name,
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => d.name,
         _ => unreachable!("kind/data mismatch"),
     };
     match ec.arena().kind(name) {

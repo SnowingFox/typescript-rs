@@ -410,6 +410,251 @@ fn parameter_decorator_with_metadata_emits_param_and_object_paramtype() {
     );
 }
 
+// Go: internal/transformers/tstransforms/legacydecorators.go:visitGetAccessorDeclaration
+// + generateClassElementDecorationExpression (accessor descriptor is `null`,
+// like a method — Go's `else` branch, since an accessor is not a
+// `PropertyDeclaration`).
+// Verified against Go / `tsc --experimentalDecorators`:
+//   class C { @dec get x() { return 1; } }
+//   =>
+//   class C { get x() { return 1; } }
+//   __decorate([dec], C.prototype, "x", null);
+//
+// Tracer bullet (6aq): a decorated instance *get accessor* lowers to a trailing
+// `__decorate([dec], C.prototype, "x", null);` statement — the 4th argument is
+// `null` (an accessor, like a method, not the property's `void 0`), the
+// accessor's decorator is stripped, the getter body is kept, and the
+// `__decorate` helper is emitted once in the prologue. No `--emitDecoratorMetadata`.
+#[test]
+fn instance_get_accessor_decorator_lowers_to_decorate_call() {
+    check_legacy(
+        "class C { @dec get x() { return 1; } }",
+        &format!(
+            "{}\nclass C {{\n    get x() {{ return 1; }}\n}}\n__decorate([dec], C.prototype, \"x\", null);",
+            DECORATE_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:visitSetAccessorDeclaration
+// (the symmetric set-accessor form; descriptor `null`, the set accessor's value
+// parameter is rebuilt without its type annotation).
+// Verified against Go / `tsc --experimentalDecorators`:
+//   class C { @dec set x(v) {} }
+//   =>
+//   class C { set x(v) { } }
+//   __decorate([dec], C.prototype, "x", null);
+//
+// Coverage (6aq): a decorated instance *set accessor* (no getter partner)
+// lowers the same way — `__decorate([dec], C.prototype, "x", null);`, decorator
+// stripped, value parameter kept. Green-on-arrival once slice 1 wires the
+// accessor member-detection helpers + `rebuild_accessor_without_decorators`;
+// guards the set-accessor arm symmetric to the getter tracer bullet.
+#[test]
+fn instance_set_accessor_decorator_lowers_to_decorate_call() {
+    check_legacy(
+        "class C { @dec set x(v) {} }",
+        &format!(
+            "{}\nclass C {{\n    set x(v) {{ }}\n}}\n__decorate([dec], C.prototype, \"x\", null);",
+            DECORATE_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/metadata.go:getOldTypeMetadata
+// (`shouldAddTypeMetadata` true for KindGetAccessor -> typeserializer.go
+// `serializeTypeOfNode` KindGetAccessor -> `serializeTypeNode(getAccessorTypeNode(...))`,
+// which for a getter with no setter is the getter's return type;
+// `shouldAddParamTypesMetadata` is ALSO true for accessors -> a `design:paramtypes`
+// array; `shouldAddReturnTypeMetadata` is method-only, so NO `design:returntype`).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`
+// (baseline submodule/conformance/decoratorOnClassAccessor8 class E: a
+// getter-only accessor emits design:type + design:paramtypes []):
+//   class C { @dec get x(): number { return 1; } }
+//   =>
+//   class C { get x() { return 1; } }
+//   __decorate([dec, __metadata("design:type", Number), __metadata("design:paramtypes", [])], C.prototype, "x", null);
+//
+// Headline (6aq): a decorated *get accessor* with a return annotation emits a
+// `design:type` serialized from the getter's return type (`getAccessorTypeNode`
+// = the getter's return type when there is no setter) — `: number` -> `Number`
+// — *and* a `design:paramtypes` array (here `[]`, since the getter has no
+// parameters and there is no setter to borrow them from), but NO
+// `design:returntype` (that is method-only per `shouldAddReturnTypeMetadata`).
+// The task's "ONLY design:type" hint is contradicted by Go/tsc, which emits
+// both design:type and design:paramtypes for accessors.
+#[test]
+fn get_accessor_decorator_emits_design_type_from_return_and_empty_paramtypes() {
+    check_legacy_metadata(
+        "class C { @dec get x(): number { return 1; } }",
+        &format!(
+            "{}\n{}\nclass C {{\n    get x() {{ return 1; }}\n}}\n__decorate([dec, __metadata(\"design:type\", Number), __metadata(\"design:paramtypes\", [])], C.prototype, \"x\", null);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/metadata.go:getAccessorTypeNode
+// (`accessors.SetAccessor != nil` -> `getSetAccessorTypeAnnotationNode` = the
+// set accessor's value-parameter type) + serializeParameterTypesOfNode (the
+// setter's own parameter -> `[Number]`).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`
+// (baseline submodule/conformance/decoratorOnClassAccessor8 class F):
+//   class C { @dec set x(v: number) {} }
+//   =>
+//   class C { set x(v) { } }
+//   __decorate([dec, __metadata("design:type", Number), __metadata("design:paramtypes", [Number])], C.prototype, "x", null);
+//
+// Headline (6aq): a decorated *set accessor* (no getter partner) takes its
+// `design:type` from the value-parameter type (`getAccessorTypeNode` ->
+// `getSetAccessorTypeAnnotationNode`) — `v: number` -> `Number` — and its
+// `design:paramtypes` from the setter's own parameter list (`[Number]`). The
+// parameter type annotation is stripped from the lowered body (`set x(v)`).
+// Green-on-arrival once slice 2 wires the accessor metadata (both the getter and
+// setter arms are implemented together); guards the setter `design:type` source
+// (value parameter) and the `[Number]` paramtypes.
+#[test]
+fn set_accessor_decorator_emits_design_type_and_paramtypes_from_value_param() {
+    check_legacy_metadata(
+        "class C { @dec set x(v: number) {} }",
+        &format!(
+            "{}\n{}\nclass C {{\n    set x(v) {{ }}\n}}\n__decorate([dec, __metadata(\"design:type\", Number), __metadata(\"design:paramtypes\", [Number])], C.prototype, \"x\", null);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:getAllDecoratorsOfAccessors
+// (a get/set pair emits a *single* `__decorate`, owned by the first accessor
+// with decorators; the partner accessor returns `nil` so it emits nothing).
+// Verified against Go / `tsc --experimentalDecorators`:
+//   class C { @dec get x() { return 1; } set x(v) {} }
+//   =>
+//   class C { get x() { return 1; } set x(v) { } }
+//   __decorate([dec], C.prototype, "x", null);
+//
+// Headline (6aq): a decorated getter with an (undecorated) setter partner emits
+// exactly ONE `__decorate([dec], C.prototype, "x", null);` — the getter owns it,
+// and the setter does not emit its own. Both accessors are kept in the class
+// body. No `--emitDecoratorMetadata`. Green-on-arrival once slices 1/2 wire the
+// accessor lowering + `getAllAccessorDeclarations` pairing/ownership; guards the
+// merge invariant (one combined `__decorate`, not two).
+#[test]
+fn get_set_pair_emits_single_decorate_owned_by_getter() {
+    check_legacy(
+        "class C { @dec get x() { return 1; } set x(v) {} }",
+        &format!(
+            "{}\nclass C {{\n    get x() {{ return 1; }}\n    set x(v) {{ }}\n}}\n__decorate([dec], C.prototype, \"x\", null);",
+            DECORATE_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/metadata.go:getAccessorTypeNode +
+// getParametersOfDecoratedDeclaration — a decorated *getter* with a setter
+// partner pulls BOTH its `design:type` and its `design:paramtypes` from the
+// *setter's* value parameter (the setter wins for `design:type`, and the getter
+// borrows the setter's parameters).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`
+// (baseline submodule/conformance/decoratorOnClassAccessor8 class A):
+//   class C { @dec get x() { return 0; } set x(value: number) {} }
+//   =>
+//   class C { get x() { return 0; } set x(value) { } }
+//   __decorate([dec, __metadata("design:type", Number), __metadata("design:paramtypes", [Number])], C.prototype, "x", null);
+//
+// Headline (6aq): the get/set pair merges into one `__decorate`, and the
+// metadata crosses accessors — even though the *getter* is the decorated owner
+// (and has no return annotation, which alone would serialize to `Object`), the
+// `design:type` is `Number` from the setter's `value: number` parameter
+// (`getAccessorTypeNode` prefers the setter), and `design:paramtypes` is
+// `[Number]` borrowed from the setter (`getParametersOfDecoratedDeclaration`).
+// The setter's parameter type is stripped in the lowered body (`set x(value)`).
+#[test]
+fn get_set_pair_metadata_crosses_to_setter_value_param() {
+    check_legacy_metadata(
+        "class C { @dec get x() { return 0; } set x(value: number) {} }",
+        &format!(
+            "{}\n{}\nclass C {{\n    get x() {{ return 0; }}\n    set x(value) {{ }}\n}}\n__decorate([dec, __metadata(\"design:type\", Number), __metadata(\"design:paramtypes\", [Number])], C.prototype, \"x\", null);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:getAllDecoratorsOfAccessors
+// (`firstAccessorWithDecorators` may be the *second* accessor in declaration
+// order; the undecorated first accessor emits nothing).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`
+// (baseline submodule/conformance/decoratorOnClassAccessor8 class B):
+//   class C { get x() { return 0; } @dec set x(value: number) {} }
+//   =>
+//   class C { get x() { return 0; } set x(value) { } }
+//   __decorate([dec, __metadata("design:type", Number), __metadata("design:paramtypes", [Number])], C.prototype, "x", null);
+//
+// Coverage (6aq): the setter is decorated and declared *second*; it owns the
+// single `__decorate`, and the undecorated getter (first) emits nothing. The
+// `design:type` (`Number`) and `design:paramtypes` (`[Number]`) come from the
+// setter's value parameter. Guards the ownership-by-first-decorated-accessor
+// when the decorated accessor is not the first member of the pair.
+#[test]
+fn get_set_pair_setter_decorated_second_owns_single_decorate() {
+    check_legacy_metadata(
+        "class C { get x() { return 0; } @dec set x(value: number) {} }",
+        &format!(
+            "{}\n{}\nclass C {{\n    get x() {{ return 0; }}\n    set x(value) {{ }}\n}}\n__decorate([dec, __metadata(\"design:type\", Number), __metadata(\"design:paramtypes\", [Number])], C.prototype, \"x\", null);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:getClassMemberPrefix
+// (`ast.IsStatic(member)` -> `GetDeclarationName(node)` i.e. `C`), applied to a
+// static *get accessor* just as for a static method/property.
+// Verified against Go / `tsc --experimentalDecorators`:
+//   class C { @dec static get x() { return 1; } }
+//   =>
+//   class C { static get x() { return 1; } }
+//   __decorate([dec], C, "x", null);
+//
+// Headline (6aq): a static get accessor decorates the class constructor
+// directly — the `__decorate` target is the bare class name `C` (not
+// `C.prototype`), the `static` modifier is kept on the stripped accessor, and
+// the 4th argument is `null`. Green-on-arrival once slice 1 wires the accessor
+// arm of `is_static_member`; guards the static prefix for accessors.
+#[test]
+fn static_get_accessor_decorator_uses_class_name_prefix() {
+    check_legacy(
+        "class C { @dec static get x() { return 1; } }",
+        &format!(
+            "{}\nclass C {{\n    static get x() {{ return 1; }}\n}}\n__decorate([dec], C, \"x\", null);",
+            DECORATE_HELPER.text
+        ),
+    );
+}
+
+// Go: internal/transformers/tstransforms/legacydecorators.go:getClassMemberPrefix
+// + metadata.go:getOldTypeMetadata for an accessor (static path still emits
+// design:type + design:paramtypes; the prefix is `C`, not `C.prototype`).
+// Verified against `tsc --experimentalDecorators --emitDecoratorMetadata`:
+//   class C { @dec static get x(): number { return 1; } }
+//   =>
+//   class C { static get x() { return 1; } }
+//   __decorate([dec, __metadata("design:type", Number), __metadata("design:paramtypes", [])], C, "x", null);
+//
+// Coverage (6aq): a static get accessor with metadata combines the static
+// prefix `C` with the accessor metadata (design:type `Number` from the return
+// type, design:paramtypes `[]`). Guards that the static-vs-instance prefix is
+// orthogonal to the accessor metadata path.
+#[test]
+fn static_get_accessor_decorator_with_metadata_uses_class_name_prefix() {
+    check_legacy_metadata(
+        "class C { @dec static get x(): number { return 1; } }",
+        &format!(
+            "{}\n{}\nclass C {{\n    static get x() {{ return 1; }}\n}}\n__decorate([dec, __metadata(\"design:type\", Number), __metadata(\"design:paramtypes\", [])], C, \"x\", null);",
+            DECORATE_HELPER.text, METADATA_HELPER.text
+        ),
+    );
+}
+
 // Gate: without `--experimentalDecorators` the transform is inert — a decorated
 // class passes through unchanged (decorators and type annotation intact, no
 // `__decorate`). The legacy lowering is strictly gated on the option.
