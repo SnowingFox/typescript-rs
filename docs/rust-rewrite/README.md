@@ -102,6 +102,7 @@ flowchart LR
 2. **每个 subagent 必须遵循 `/tdd` 与本 README**（红→绿逐行为、严禁横切；收口判据同「实施纪律」）。
 3. **并行安全 = 编辑边界不重叠 + 之间无构建依赖边**：两个 lane 只有在「各自只改互不重叠的 crate」且「彼此不在对方构建依赖链上」时才可并行；否则一个 lane 的 TDD 红 / 半改非编译态会拖垮另一个的 `-p` 构建。`checker → transformers → compiler` 这条链上的包两两有构建依赖，只能单 lane 串行推进。
 4. **并行期间各 lane 用 `cargo <cmd> -p <crate>` 限定 gate**（不要 `--workspace`），避免互相编译对方 in-flight 的 crate。
+5. **🔴 单测只能比 Go 多、不能少；行覆盖率目标 ≥ 90%**：在 1:1 移植 Go `*_test.go` 全部用例之上，**为每个重要函数额外补行为级单测**（公开 `pub fn` 必测，不平凡的私有函数也测，即使 Go 没测），用 `/tdd` 红→绿逐条写出（绝不横切、不写无断言的凑数测试）。每轮报告给出 `cargo test` 计数增量。详见 [PORTING.md §8 第 10 条](./PORTING.md)。
 
 ## 质量 Gate（文档 gate + 代码 gate）
 
