@@ -2638,6 +2638,44 @@ impl EmitResolver {
 
 **推荐下一轮（4bg）**：(a) **excess-property `2353`**（fresh object literal 多余属性，关系引擎 elaboration）——本轮已置 `FreshLiteral` 旗标，下一步给 `checkTypeRelatedTo` 接 fresh-object-literal excess-property 检查；(b) **shorthand 属性 `{ a }`**（`checkShorthandPropertyAssignment` → resolve identifier value）+ 计算属性名索引签名（`getObjectLiteralIndexInfo`）；(c) **`[1,2] as const` / `{x:1} as const`** readonly 元组/对象冻结（`getRegularTypeOfObjectLiteral` + tuple readonly，承接 4be DEFER，现字面量已类型化）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
 
+## 4bg 落地记录（worklog 摘要）—— fresh object literal 的 excess-property 检查 `2353`
+
+> 承接 4bf：对象字面量已类型化并置 `FreshLiteral` 旗标。本轮在赋值性检查点对 **fresh object literal** 跑 excess-property 检查（Go `hasExcessProperties` 的可达子集），命中报 `2353` 并抑制 `2322` 头消息。
+
+**Go 真值锚点**：
+- `internal/checker/relater.go:Relater.hasExcessProperties(2695)`：核心——`isExcessPropertyCheckTarget` 门控、空对象/global Object 抑制、按 source 属性顺序逐个 `isKnownProperty`，首个未知属性报 `2353` 并 `return true`。
+- `internal/checker/relater.go:recursiveTypeRelatedToWorker(2647)`：`isPerformingExcessPropertyChecks := intersectionState&IntersectionStateTarget==0 && isObjectLiteralType(source) && source.objectFlags&ObjectFlagsFreshLiteral != 0`；命中 `hasExcessProperties` 则 `reportRelationError(headMessage)`。
+- `internal/checker/relater.go:reportRelationError(4773-4777)`：链头是 `2353`/`2561` excess 消息时**早返回**，故 `2322` 头消息被抑制（最终只报 `2353`）。
+- `internal/checker/relater.go:Checker.isKnownProperty(716)` + `isExcessPropertyCheckTarget(746)`；`internal/checker/checker.go:isEmptyObjectType(26326)`/`isEmptyResolvedType(26322)`；`getApplicableIndexInfoForName`；`getNamedMembers(21907)`/`isReservedMemberName(1584)`。
+- **freshness 剥离**：`internal/checker/checker.go:widenTypeForVariableLikeDeclaration(18101)` → `getWidenedType(18214)` → `getWidenedTypeOfObjectLiteral(18259)`：变量声明类型经 widening 丢掉 `FreshLiteral`/`ObjectLiteral` 旗标——故对象字面量赋给变量后**经变量读回不再 fresh**，不触发 excess 检查。
+
+**新增实现（全部 additive，未改既有签名 / lib.rs 导出 / 依赖 / `.go`）**：
+- `core/relations.rs`（镜像 relater.go）：`is_object_literal_type`、`is_excess_property_check_target`、`is_known_property`（属性查 + 索引签名查 `getApplicableIndexInfoForName` + union/intersection 递归）、`is_empty_object_type`（object：无属性/签名/索引；non-primitive `object`）——均 `pub(crate)`。
+- `core/check.rs`：`check_object_literal_excess_properties`（门控：source 是 fresh object literal）+ `has_excess_properties`（报 `2353`，错误节点定位到字面量成员名）+ `property_symbol_name`（synthesized/program 名分流）+ `get_widened_type`/`get_widened_type_of_object_literal`（可达子集：fresh object literal → 去 `FreshLiteral|ObjectLiteral|ContainsObjectOrArrayLiteral` 的 regular anonymous object）+ 自由函数 `object_literal_property_name_node`（在字面量里按名找 `PropertyAssignment` 名节点）。
+- `core/declared_types.rs`：`get_applicable_index_info_for_name`（`pub(crate)`，name → string-literal key → `get_applicable_index_info`）；`get_properties_of_type` 过滤 reserved-name 成员（`is_reserved_member_name`，镜像 `getNamedMembers`，使 `__index`/`__call`/`__new` 不再泄漏进属性表）；`get_type_of_variable_or_property` 末尾接 `get_widened_type`（镜像 `widenTypeForVariableLikeDeclaration`，对注解/非字面量恒等）。
+
+**集成点**：`check_variable_declaration` 在 `is_type_assignable_to` 报 `2322` **之前**先跑 `check_object_literal_excess_properties`；命中即 `return`（不再报 `2322`），镜像 Go reportRelationError 的 excess 抑制。
+
+**TDD 切片（逐个 genuine RED→GREEN）**：
+1. `const o: { a: number } = { a: 1, b: 2 };` → 1×`2353`（`b`）。RED：0 诊断（关系忽略多余属性）。GREEN：excess 检查命中报 `2353`。+ 正控 `{ a: 1 }` → 0 诊断。
+2. **非-fresh 源**：`const src = { a: 1, b: 2 }; const o: { a: number } = src;` → 0×`2353`。RED：`src` 保留 fresh 旗标 → 误报 `2353`。GREEN：`get_widened_type` 在变量类型计算处剥离 freshness。
+3. **索引签名抑制**：`interface T { [k: string]: number } const o: T = { a: 1, b: 2 };` → 0 诊断。RED：`is_known_property` 无索引通道 → 误报 `2353`（再加 `__index` 泄漏致 `2322`）。GREEN：补 `getApplicableIndexInfoForName` 索引通道 + `get_properties_of_type` 过滤 reserved 名。
+4. **空对象抑制**：`const o: {} = { a: 1 };` → 0 诊断。RED：误报 `2353`。GREEN：`has_excess_properties` 接 `is_empty_object_type` 抑制门。
+
+**测试增量**：`cargo test -p tsgo_checker` 单测 428 → 440（+12：4 集成切片含正控 / 5 关系谓词单测 / `get_applicable_index_info_for_name` / `get_properties_of_type` reserved-名过滤），doctest 134 不变。clippy `-D warnings` 干净、fmt 干净、`cargo build -p tsgo_compiler` 通过。
+
+**DEFER（带 blocked-by）**：
+- **"Did you mean to write X" 建议变体 `2561`**（`Object_literal_may_only_specify_known_properties_but_..._Did_you_mean_to_write`）：blocked-by `getSuggestionForNonexistentProperty`（拼写建议）。
+- **spread 经过的 excess**（`shouldCheckAsExcessProperty` 的 `ValueDeclaration.Parent` 判定 + spread 属性）：blocked-by `getSpreadType` + 属性 value-declaration 回链。
+- **union-target excess 归约**（`findMatchingDiscriminantType` / `filterPrimitivesIfContainsNonPrimitive` / `checkTypes` 的 `Types_of_property_0_are_incompatible` 臂）：blocked-by 判别式归约 + union 关系 elaboration。
+- **`suppressExcessPropertyErrors` / `// @ts-expect-error`**：blocked-by 指令解析 + 抑制基础设施。
+- **JS-literal 索引签名模拟 / `globalObjectType` subset 抑制 / JSX-attribute 消息变体**：blocked-by JS literals、lib globals（P6）、JSX 属性类型化。
+- **索引签名的结构关系**（source 属性逐个 vs target 索引签名，`indexSignaturesRelatedTo`）：本轮 `properties_related_to` 仍只比对名义属性；`{a:1}` 赋 `interface T {[k:string]:number}` 的 **2353 抑制**已可达（`isKnownProperty` 索引通道 + reserved-名过滤使 target 名义属性为空 → 结构关系真空成立），但完整索引签名关系 elaboration 仍 DEFER。blocked-by `checkTypeRelatedTo` 的 `indexSignaturesRelatedTo`。
+- **late-bound name / substitution-type / generic mapped** 在 `isKnownProperty`/`isExcessPropertyCheckTarget`/`isEmptyObjectType` 的臂：blocked-by late binding、substitution、mapped types。
+- **`getWidenedType` 全量**（`any`/nullable→`any`、union/intersection/array widening、widening context、嵌套字面量逐属性 re-widening）：本轮仅 fresh object literal 顶层去旗标（成员已在 `checkExpressionForMutableLocation` widen）。blocked-by union/array widening + widening contexts + 嵌套递归。
+
+**推荐下一轮（4bh）**：(a) **`2561` 建议变体**（`getSuggestionForNonexistentProperty` 拼写建议）；(b) **shorthand 属性 `{ a }`** + 计算属性名索引签名（`getObjectLiteralIndexInfo`）；(c) **`indexSignaturesRelatedTo`**（source 结构 vs target 索引签名的完整关系 elaboration）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

@@ -306,6 +306,161 @@ impl Checker {
         self.get_widened_literal_type(t)
     }
 
+    // Runs the fresh-object-literal excess-property check before assignability
+    // is reported, mirroring Go's `recursiveTypeRelatedToWorker`: excess-property
+    // checking is performed only when the source is a fresh object literal (and
+    // not in an `IntersectionStateTarget` context, which is unreachable here).
+    // When `has_excess_properties` reports `2353`, the caller suppresses the
+    // `2322` head message — Go's `reportRelationError` returns early when the
+    // chain head is an excess-property message.
+    //
+    // `literal_node` is the object-literal initializer whose member name nodes
+    // locate the precise error span (Go uses each property's `ValueDeclaration`).
+    //
+    // Returns `true` when an excess-property error was reported.
+    // Go: internal/checker/relater.go:Relater.recursiveTypeRelatedToWorker (isPerformingExcessPropertyChecks, 2647)
+    fn check_object_literal_excess_properties(
+        &mut self,
+        program: &dyn BoundProgram,
+        literal_node: NodeId,
+        source: TypeId,
+        target: TypeId,
+    ) -> bool {
+        // isPerformingExcessPropertyChecks := isObjectLiteralType(source) &&
+        //   source.objectFlags&ObjectFlagsFreshLiteral != 0
+        if !self.is_object_literal_type(source)
+            || !self
+                .get_type(source)
+                .object_flags()
+                .contains(ObjectFlags::FRESH_LITERAL)
+        {
+            return false;
+        }
+        self.has_excess_properties(program, literal_node, source, target)
+    }
+
+    // Reports the first source property absent from `target` as `2353`, returning
+    // whether such a property was found (Go's `hasExcessProperties`). Iterates the
+    // literal's own properties in declaration order; the error is reported on the
+    // property's name node within `literal_node`.
+    //
+    // DEFER(phase-4-checker-4bg+): the JS-literal index-signature simulation, the
+    // `globalObjectType` subset suppression (lib globals, P6), the union
+    // `reducedTarget`/`checkTypes` reduction and its `Types_of_property_0_are_incompatible`
+    // arm, the JSX-attribute message variant, and the `Did you mean to write`
+    // suggestion variant (`2561`).
+    // blocked-by: JS literals, lib globals, union discriminant reduction, JSX
+    // typing, and property suggestions.
+    // Go: internal/checker/relater.go:Relater.hasExcessProperties(2695)
+    fn has_excess_properties(
+        &mut self,
+        program: &dyn BoundProgram,
+        literal_node: NodeId,
+        source: TypeId,
+        target: TypeId,
+    ) -> bool {
+        if !self.is_excess_property_check_target(target) {
+            return false;
+        }
+        // The assignable relation suppresses excess checks against an empty
+        // object target (any property is accepted). Go also suppresses when the
+        // target is a superset of the global `Object` type (DEFER: lib globals,
+        // P6).
+        if self.is_empty_object_type(target) {
+            return false;
+        }
+        // Iterate the literal's own properties in declaration order (Go's
+        // `getPropertiesOfType(source)`); every object-literal member is declared
+        // directly in the literal, so Go's `shouldCheckAsExcessProperty` holds.
+        let properties = match self.get_type(source).as_object() {
+            Some(obj) => obj.properties.clone(),
+            None => return false,
+        };
+        for prop in properties {
+            let name = self.property_symbol_name(program, prop);
+            if !self.is_known_property(program, target, &name) {
+                let error_node = object_literal_property_name_node(program, literal_node, &name)
+                    .unwrap_or(literal_node);
+                let target_str = super::nodebuilder::type_to_string(self, program, target);
+                self.error(
+                    program,
+                    error_node,
+                    &tsgo_diagnostics::OBJECT_LITERAL_MAY_ONLY_SPECIFY_KNOWN_PROPERTIES_AND_0_DOES_NOT_EXIST_IN_TYPE_1,
+                    &[name.as_str(), target_str.as_str()],
+                );
+                return true;
+            }
+        }
+        false
+    }
+
+    // Returns a property symbol's name, routing checker-synthesized (transient)
+    // object-literal property symbols to the transient arena and program symbols
+    // to the bound program (which would panic on a tagged id).
+    fn property_symbol_name(
+        &self,
+        program: &dyn BoundProgram,
+        symbol: tsgo_ast::SymbolId,
+    ) -> String {
+        if super::is_synthesized_symbol(symbol) {
+            self.synthesized_symbol_name(symbol)
+        } else {
+            program.symbol(symbol).name.clone()
+        }
+    }
+
+    // Widens an inferred declaration type (the reachable subset of Go's
+    // `getWidenedType`): a fresh object-literal type is rebuilt as a regular
+    // anonymous object type, dropping the `FreshLiteral` / `ObjectLiteral` /
+    // `ContainsObjectOrArrayLiteral` flags. This is the freshness-stripping step
+    // that makes an object literal assigned to a variable stop participating in
+    // excess-property checking when read back through the variable. Types that do
+    // not require widening pass through unchanged.
+    //
+    // DEFER(phase-4-checker-later): the `any`/nullable arm, union / intersection /
+    // array widening, the widening context (sibling and `undefined`-padded
+    // properties), and recursive per-property widening of nested object literals.
+    // blocked-by: union/array widening, widening contexts, and nested-literal
+    // member re-widening.
+    // Go: internal/checker/checker.go:Checker.getWidenedType(18214) / getWidenedTypeWithContext(18218)
+    pub(crate) fn get_widened_type(&mut self, t: TypeId) -> TypeId {
+        if !self
+            .get_type(t)
+            .object_flags()
+            .contains(ObjectFlags::CONTAINS_OBJECT_OR_ARRAY_LITERAL)
+        {
+            return t;
+        }
+        if self.is_object_literal_type(t) {
+            return self.get_widened_type_of_object_literal(t);
+        }
+        t
+    }
+
+    // Rebuilds a fresh object-literal type as a regular anonymous object type
+    // (Go's `getWidenedTypeOfObjectLiteral`). The literal's member symbols are
+    // already widened in the reachable subset, so they are reused directly; the
+    // result keeps no object-literal flags (Go retains only `JSLiteral` /
+    // `NonInferrableType`, neither of which is modeled).
+    //
+    // DEFER(phase-4-checker-later): per-property `getWidenedType` recursion (for
+    // nested object/array literals) and the widening-context `undefined` padding.
+    // blocked-by: nested-literal recursion + widening contexts.
+    // Go: internal/checker/checker.go:Checker.getWidenedTypeOfObjectLiteral(18259)
+    fn get_widened_type_of_object_literal(&mut self, t: TypeId) -> TypeId {
+        let Some(obj) = self.get_type(t).as_object() else {
+            return t;
+        };
+        let widened = ObjectType {
+            members: obj.members.clone(),
+            properties: obj.properties.clone(),
+            index_infos: obj.index_infos.clone(),
+            ..Default::default()
+        };
+        let symbol = self.get_type(t).symbol;
+        self.new_object_type(ObjectFlags::ANONYMOUS, symbol, widened)
+    }
+
     // Types an array literal `[1, 2]` as the global `Array<T>` reference whose
     // element type `T` is the widened union of the element expression types
     // (Go's `checkArrayLiteral` non-tuple, non-destructuring, non-const path ->
@@ -2460,6 +2615,17 @@ impl Checker {
             return;
         }
         let initializer_type = self.check_expression(program, initializer);
+        // A fresh object-literal initializer is excess-property checked first
+        // (Go's `hasExcessProperties`); on a hit it reports `2353` and the `2322`
+        // head message is suppressed.
+        if self.check_object_literal_excess_properties(
+            program,
+            initializer,
+            initializer_type,
+            declared,
+        ) {
+            return;
+        }
         if !self.is_type_assignable_to(program, initializer_type, declared) {
             let generalized = self.generalized_source_for_error(initializer_type, declared);
             let source_str = super::nodebuilder::type_to_string(self, program, generalized);
@@ -3279,6 +3445,34 @@ fn property_name_text(program: &dyn BoundProgram, name_node: NodeId) -> Option<S
         // blocked-by: `checkComputedPropertyName` + late binding.
         _ => None,
     }
+}
+
+// Locates the name node of the object-literal property assignment named `name`
+// within `literal_node`, so an excess-property error reports on the property
+// itself (Go narrows `r.errorNode` to `prop.ValueDeclaration.Name()`).
+//
+// DEFER(phase-4-checker-4bg+): shorthand/spread/accessor/method members and
+// computed names; only `name: value` assignments are matched.
+// Go: internal/checker/relater.go:Relater.hasExcessProperties (errorNode = name)
+fn object_literal_property_name_node(
+    program: &dyn BoundProgram,
+    literal_node: NodeId,
+    name: &str,
+) -> Option<NodeId> {
+    let members = match program.arena().data(literal_node) {
+        NodeData::ObjectLiteralExpression(d) => d.list.nodes.clone(),
+        _ => return None,
+    };
+    for member in members {
+        let name_node = match program.arena().data(member) {
+            NodeData::PropertyAssignment(d) => d.name,
+            _ => continue,
+        };
+        if property_name_text(program, name_node).as_deref() == Some(name) {
+            return Some(name_node);
+        }
+    }
+    None
 }
 
 // Renders an entity-name expression to its source text (Go's

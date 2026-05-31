@@ -4100,3 +4100,105 @@ fn empty_array_literal_is_undefined_array_without_strict_null_checks() {
         "Array<undefined>"
     );
 }
+
+// 4bg slice 1 tracer (genuine RED): a FRESH object literal assigned to an
+// annotated target whose type lacks one of the literal's properties reports the
+// excess-property error 2353 on that property. `{ a: 1, b: 2 }` is fresh and
+// `b` does not exist in `{ a: number }`. Before this round the relation ignored
+// excess properties (structurally `{ a: number; b: number }` is assignable to
+// `{ a: number }`), so 0 diagnostics were reported. Go runs `hasExcessProperties`
+// first when the source is a fresh object literal and, on a hit, reports 2353
+// and suppresses the 2322 head message.
+// Go: internal/checker/relater.go:Relater.hasExcessProperties(2695)
+#[test]
+fn object_literal_excess_property_reports_2353() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { a: number } = { a: 1, b: 2 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2353);
+    assert_eq!(
+        diags[0].message,
+        "Object literal may only specify known properties, and 'b' does not exist in type '{ a: number; }'."
+    );
+}
+
+// 4bg slice 1 positive control (green-on-arrival): a fresh object literal with
+// exactly the target's properties reports nothing. `{ a: 1 }` has no property
+// absent from `{ a: number }`, so `hasExcessProperties` finds no excess and no
+// 2353 fires.
+// Go: internal/checker/relater.go:Relater.hasExcessProperties(2695)
+#[test]
+fn object_literal_no_excess_property_reports_nothing() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { a: number } = { a: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bg slice 3 (genuine RED): a NON-fresh object source does not trigger
+// excess-property checking. Assigning an object literal to a variable widens it
+// (Go's `widenTypeForVariableLikeDeclaration` -> `getWidenedType` ->
+// `getWidenedTypeOfObjectLiteral`), which drops the `FreshLiteral`/`ObjectLiteral`
+// flags, so reading the variable yields a regular object type. `const src =
+// { a: 1, b: 2 }` makes `src` a regular `{ a: number; b: number }`, which is
+// structurally assignable to `{ a: number }` with the extra `b` tolerated and no
+// 2353. Before widening was applied to the variable's type, `src` kept the fresh
+// flag and the excess check fired a spurious 2353.
+// Go: internal/checker/checker.go:Checker.widenTypeForVariableLikeDeclaration(18101)
+#[test]
+fn non_fresh_object_source_reports_no_excess_property() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const src = { a: 1, b: 2 };\nconst o: { a: number } = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bg slice 2 (genuine RED): a target with an applicable index signature has no
+// excess properties — every literal property is a "known property" through the
+// index signature (Go's `isKnownProperty` -> `getApplicableIndexInfoForName`).
+// `interface T { [k: string]: number }` accepts any string-named property, so
+// `const o: T = { a: 1, b: 2 }` reports nothing. Before the index-signature path
+// of `is_known_property`, `a`/`b` were unknown and a spurious 2353 fired.
+// Go: internal/checker/relater.go:Checker.isKnownProperty(716)
+#[test]
+fn index_signature_target_suppresses_excess_property() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface T {\n  [k: string]: number;\n}\nconst o: T = { a: 1, b: 2 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// 4bg slice 2b (genuine RED): the empty object type `{}` accepts any property,
+// so excess-property checking is suppressed against it (Go's `hasExcessProperties`
+// returns early when the target is an empty object type). `const o: {} = { a: 1 }`
+// reports nothing. Before the `is_empty_object_type` guard, `a` was unknown on
+// `{}` and a spurious 2353 fired.
+// Go: internal/checker/relater.go:Relater.hasExcessProperties(2701) / Checker.isEmptyObjectType(26326)
+#[test]
+fn empty_object_target_suppresses_excess_property() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: {} = { a: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

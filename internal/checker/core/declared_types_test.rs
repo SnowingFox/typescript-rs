@@ -12,6 +12,39 @@ fn local(p: &StubProgram, name: &str) -> SymbolId {
         .unwrap_or_else(|| panic!("missing local {name}"))
 }
 
+// Go: internal/checker/checker.go:Checker.getPropertiesOfType / getNamedMembers(21907)
+#[test]
+fn get_properties_of_type_excludes_reserved_index_member() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I {\n  x: number;\n  [k: string]: number;\n}",
+    );
+    let mut c = Checker::new();
+    let i = get_declared_type_of_symbol(&mut c, &p, local(&p, "I"), None);
+    let props = get_properties_of_type(&c, i);
+    // The binder's reserved `__index` member is filtered out; only `x` remains.
+    let names: Vec<&str> = props.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["x"]);
+}
+
+// Go: internal/checker/checker.go:Checker.getApplicableIndexInfoForName
+#[test]
+fn applicable_index_info_for_name_matches_string_index() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface S {\n  [k: string]: number;\n}\ninterface N {\n  x: number;\n}",
+    );
+    let mut c = Checker::new();
+    let s = get_declared_type_of_symbol(&mut c, &p, local(&p, "S"), None);
+    let n = get_declared_type_of_symbol(&mut c, &p, local(&p, "N"), None);
+    // A string index signature applies to any string-named property.
+    let info = get_applicable_index_info_for_name(&mut c, &p, s, "anything");
+    assert!(info.is_some(), "string index applies to a named property");
+    assert_eq!(c.index_info(info.unwrap()).value_type, c.number_type());
+    // A type with no index signature has no applicable index info for a name.
+    assert!(get_applicable_index_info_for_name(&mut c, &p, n, "x").is_none());
+}
+
 // Go: internal/checker/checker.go:Checker.getIndexInfosOfType (generic Array<T>)
 #[test]
 fn array_type_reference_index_signature_instantiates_element() {

@@ -250,6 +250,126 @@ fn assignable_null_undefined_gated_on_strict_null_checks() {
     assert!(c.is_type_assignable_to(&p, undef_t, undef_t));
 }
 
+// Returns the (fresh) type of the initializer of `const o = <init>;`.
+fn first_initializer_type(c: &mut Checker, p: &StubProgram) -> TypeId {
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        tsgo_ast::NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let list = match arena.data(stmts[0]) {
+        tsgo_ast::NodeData::VariableStatement(d) => d.declaration_list,
+        _ => panic!("variable statement"),
+    };
+    let decl = match arena.data(list) {
+        tsgo_ast::NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+        _ => panic!("declaration list"),
+    };
+    let init = match arena.data(decl) {
+        tsgo_ast::NodeData::VariableDeclaration(d) => d.initializer.expect("initializer"),
+        _ => panic!("variable declaration"),
+    };
+    c.check_expression(p, init)
+}
+
+// Go: internal/checker/utilities.go:isObjectLiteralType(801)
+#[test]
+fn is_object_literal_type_distinguishes_literals() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1 };");
+    let mut c = Checker::new();
+    let lit = first_initializer_type(&mut c, &p);
+    assert!(c.is_object_literal_type(lit), "a literal expression type");
+    // Intrinsics and interface types are not object-literal types.
+    let s = c.string_type();
+    assert!(!c.is_object_literal_type(s));
+    let iface_p = StubProgram::parse_and_bind("/b.ts", "interface I { x: number }");
+    let i = get_declared_type_of_symbol(&mut c, &iface_p, sym(&iface_p, "I"), None);
+    assert!(!c.is_object_literal_type(i));
+}
+
+// Go: internal/checker/relater.go:isExcessPropertyCheckTarget(746)
+#[test]
+fn is_excess_property_check_target_classifies_types() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { x: number }\ninterface B { y: string }",
+    );
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, sym(&p, "A"), None);
+    let b = get_declared_type_of_symbol(&mut c, &p, sym(&p, "B"), None);
+    // Object types and the non-primitive `object` type are valid targets.
+    assert!(c.is_excess_property_check_target(a));
+    assert!(c.is_excess_property_check_target(c.non_primitive_type()));
+    // Primitives are not.
+    let s = c.string_type();
+    assert!(!c.is_excess_property_check_target(s));
+    // A union is a target if SOME constituent is (object | string).
+    let obj_or_string = c.get_union_type(&[a, s]);
+    assert!(c.is_excess_property_check_target(obj_or_string));
+    // An intersection is a target if EVERY constituent is (object & object).
+    let inter = c.get_intersection_type(&[a, b]);
+    assert!(c.is_excess_property_check_target(inter));
+}
+
+// Go: internal/checker/relater.go:Checker.isKnownProperty(716)
+#[test]
+fn is_known_property_property_and_index_paths() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Named { x: number }\ninterface Indexed { [k: string]: number }",
+    );
+    let mut c = Checker::new();
+    let named = get_declared_type_of_symbol(&mut c, &p, sym(&p, "Named"), None);
+    let indexed = get_declared_type_of_symbol(&mut c, &p, sym(&p, "Indexed"), None);
+    // Named property is known by name; a different name is not.
+    assert!(c.is_known_property(&p, named, "x"));
+    assert!(!c.is_known_property(&p, named, "y"));
+    // An index signature makes any string-named property known.
+    assert!(c.is_known_property(&p, indexed, "anything"));
+    // A union target knows a name when SOME constituent does.
+    let union = c.get_union_type(&[named, indexed]);
+    assert!(c.is_known_property(&p, union, "x"));
+}
+
+// Go: internal/checker/checker.go:Checker.isEmptyObjectType(26326)
+#[test]
+fn is_empty_object_type_recognizes_empty_targets() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Empty {}\ninterface NonEmpty { x: number }\ninterface Indexed { [k: string]: number }",
+    );
+    let mut c = Checker::new();
+    let empty = get_declared_type_of_symbol(&mut c, &p, sym(&p, "Empty"), None);
+    let non_empty = get_declared_type_of_symbol(&mut c, &p, sym(&p, "NonEmpty"), None);
+    let indexed = get_declared_type_of_symbol(&mut c, &p, sym(&p, "Indexed"), None);
+    assert!(c.is_empty_object_type(empty));
+    // The non-primitive `object` type counts as empty.
+    assert!(c.is_empty_object_type(c.non_primitive_type()));
+    // A type with a property or an index signature is not empty.
+    assert!(!c.is_empty_object_type(non_empty));
+    assert!(!c.is_empty_object_type(indexed));
+    // Primitives are not empty object types.
+    let s = c.string_type();
+    assert!(!c.is_empty_object_type(s));
+}
+
+// Go: internal/checker/checker.go:Checker.getWidenedType(18214) / getWidenedTypeOfObjectLiteral(18259)
+#[test]
+fn get_widened_type_strips_object_literal_freshness() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1 };");
+    let mut c = Checker::new();
+    let lit = first_initializer_type(&mut c, &p);
+    assert!(c.is_object_literal_type(lit));
+    let widened = c.get_widened_type(lit);
+    // Widening produces a distinct, regular (non-object-literal) type.
+    assert_ne!(widened, lit);
+    assert!(!c.is_object_literal_type(widened));
+    // Widening is idempotent and identity for non-literal types.
+    assert_eq!(c.get_widened_type(widened), widened);
+    let s = c.string_type();
+    assert_eq!(c.get_widened_type(s), s);
+}
+
 // Go: internal/checker/relater.go:Relation.get/set
 #[test]
 fn relation_cache_get_set() {

@@ -943,6 +943,13 @@ fn get_type_of_variable_or_property(
         // No annotation and nothing to infer from (Go falls back to `any`).
         checker.any_type()
     };
+    // Widen the declaration's type (Go's `widenTypeForVariableLikeDeclaration` ->
+    // `getWidenedType`). This strips object-literal freshness, so an object
+    // literal assigned to a variable no longer triggers excess-property checks
+    // when read back through the variable. It is identity for annotation types
+    // and non-literal types.
+    // Go: internal/checker/checker.go:Checker.widenTypeForVariableLikeDeclaration(18101)
+    let t = checker.get_widened_type(t);
     checker.value_symbol_links.get(symbol).resolved_type = Some(t);
     t
 }
@@ -1523,6 +1530,25 @@ fn get_applicable_index_info(
     }
 }
 
+// Returns the index signature of `t` applicable to a property named `name`,
+// mapping the name to its string-literal key type and deferring to
+// `get_applicable_index_info`. Used by the excess-property check to treat a
+// property covered by an index signature as a known property.
+//
+// DEFER(phase-4-checker-4bg+): the late-bound-name arm keys the lookup by
+// `esSymbolType` instead of the name's string-literal type.
+// blocked-by: late binding (`isLateBoundName`) + the global ES symbol type.
+// Go: internal/checker/checker.go:Checker.getApplicableIndexInfoForName
+pub(crate) fn get_applicable_index_info_for_name(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    t: TypeId,
+    name: &str,
+) -> Option<IndexInfoId> {
+    let key = checker.get_string_literal_type(name);
+    get_applicable_index_info(checker, program, t, key)
+}
+
 /// Resolves `object_type[index_type]` to the element/indexed value type when an
 /// applicable index signature exists.
 ///
@@ -1918,9 +1944,11 @@ pub fn get_type_of_property_of_type(
 ///
 /// Used by the relation engine to iterate a type's members; delegates through
 /// [`resolve_structured_type_members`] (so references and inherited members are
-/// included). For an intersection it unions every constituent's properties
-/// (Go's `getPropertiesOfUnionOrIntersectionType`), keeping the first
-/// constituent that declares each name.
+/// included), filtering out reserved-name members (`__index` / `__call` /
+/// `__new`) the binder stores for signatures (Go's `getNamedMembers`). For an
+/// intersection it unions every constituent's properties (Go's
+/// `getPropertiesOfUnionOrIntersectionType`), keeping the first constituent that
+/// declares each name.
 ///
 /// # Examples
 /// ```
@@ -1930,7 +1958,7 @@ pub fn get_type_of_property_of_type(
 /// ```
 ///
 /// Side effects: none (pure read over the type arena).
-// Go: internal/checker/checker.go:Checker.getPropertiesOfType
+// Go: internal/checker/checker.go:Checker.getPropertiesOfType / getNamedMembers(21907)
 pub fn get_properties_of_type(checker: &Checker, t: TypeId) -> Vec<(String, SymbolId)> {
     let apparent = get_apparent_type(checker, t);
     if let Some(members) = checker.get_type(apparent).intersection_types() {
@@ -1947,7 +1975,25 @@ pub fn get_properties_of_type(checker: &Checker, t: TypeId) -> Vec<(String, Symb
     }
     resolve_structured_type_members(checker, apparent)
         .into_iter()
+        .filter(|(name, _)| !is_reserved_member_name(name))
         .collect()
+}
+
+// Reports whether `name` is a reserved internal member name the binder uses for
+// signatures (`__index` / `__call` / `__new`, etc.), which `getNamedMembers`
+// excludes from a type's property list. Well-known-symbol (`__@iterator`) and
+// private (`__#x`) names are NOT reserved — they are real named members.
+//
+// The Rust port stores the internal prefix as the char `\u{FE}` (Go uses the
+// raw byte `\xFE`); the rule is "prefix followed by a character other than
+// `@` or `#`".
+// Go: internal/checker/utilities.go:isReservedMemberName(1584)
+fn is_reserved_member_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    if chars.next() != Some('\u{FE}') {
+        return false;
+    }
+    matches!(chars.next(), Some(second) if second != '@' && second != '#')
 }
 
 /// Resolves and builds the global type named `name` from the `globals` table.
