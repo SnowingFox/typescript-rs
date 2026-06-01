@@ -72,6 +72,31 @@ pub trait System {
     /// deterministic test clock instead).
     // Go: internal/execute/tsc/compile.go:System.Now
     fn now(&self) -> SystemTime;
+
+    /// Blocks until the watched files change, returning `true` to run another
+    /// watch-loop build cycle or `false` to terminate the loop.
+    ///
+    /// This is the reachable, testable seam for Go's `vfswatch.FileWatcher`
+    /// poll loop (`watcher.go:Watcher.start`'s `w.fileWatcher.Run`): a real
+    /// production system would block on an OS file-watcher and rerun the build
+    /// on each change, while a test system reports a finite, deterministic
+    /// sequence of changes so the loop terminates.
+    ///
+    /// The default implementation returns `false`, so the watch loop runs the
+    /// initial build once and then exits. This keeps the change ADDITIVE — every
+    /// existing `System` implementation (including `cmd/tsgo`'s `OsSystem`)
+    /// compiles unchanged — and stubs out the production OS file-watcher.
+    ///
+    /// DEFER(P9): the real OS file-watching backend (poll interval, watched
+    /// file/wildcard-directory state, debounce) and Ctrl-C/signal handling.
+    /// blocked-by: `vfswatch.FileWatcher` (the `internal/vfs/vfswatch` package
+    /// is not yet ported) + signal handling.
+    ///
+    /// Side effects: a real implementation blocks on file-system events.
+    // Go: internal/vfs/vfswatch/filewatcher.go:FileWatcher.Run
+    fn wait_for_change(&self) -> bool {
+        false
+    }
 }
 
 /// A [`System`] backed by a shared [`Fs`] with an in-memory output buffer.

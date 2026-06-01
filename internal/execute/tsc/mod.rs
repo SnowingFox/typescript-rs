@@ -13,8 +13,10 @@ mod diagnostics;
 mod emit;
 
 pub use compile::{CommandLineResult, CompileAndEmitResult, ExitStatus};
+pub(crate) use diagnostics::format_status_time;
 pub use diagnostics::{
-    create_diagnostic_reporter, create_report_error_summary, sort_and_deduplicate_diagnostics,
-    DiagFile, DiagnosticReporter, ReportErrorSummary, ReportedDiagnostic,
+    create_diagnostic_reporter, create_report_error_summary, create_watch_status_reporter,
+    sort_and_deduplicate_diagnostics, DiagFile, DiagnosticReporter, ReportErrorSummary,
+    ReportedDiagnostic, WatchStatusReporter,
 };
 pub use emit::{emit_and_report_statistics, emit_files_and_report_errors};

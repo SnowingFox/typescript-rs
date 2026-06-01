@@ -39,15 +39,17 @@ use tsgo_vfs::Fs;
 pub mod build;
 pub mod sys;
 pub mod tsc;
+pub mod watch;
 
 pub use build::perform_build;
 pub use sys::{System, VfsSystem};
 pub use tsc::{
-    create_diagnostic_reporter, create_report_error_summary, emit_and_report_statistics,
-    emit_files_and_report_errors, sort_and_deduplicate_diagnostics, CommandLineResult,
-    CompileAndEmitResult, DiagFile, DiagnosticReporter, ExitStatus, ReportErrorSummary,
-    ReportedDiagnostic,
+    create_diagnostic_reporter, create_report_error_summary, create_watch_status_reporter,
+    emit_and_report_statistics, emit_files_and_report_errors, sort_and_deduplicate_diagnostics,
+    CommandLineResult, CompileAndEmitResult, DiagFile, DiagnosticReporter, ExitStatus,
+    ReportErrorSummary, ReportedDiagnostic, WatchStatusReporter,
 };
+pub use watch::perform_watch;
 
 /// Parses `args` into a command line and runs the single-project build/check/
 /// emit path, returning the process [`ExitStatus`] in a [`CommandLineResult`].
@@ -133,12 +135,43 @@ pub fn tsc_compilation(sys: &dyn System, command_line: ParsedCommandLine) -> Com
         };
     }
 
+    // `--watch` and `--listFilesOnly` cannot be combined.
+    // Go: `commandLine.CompilerOptions().Watch.IsTrue() && ...ListFilesOnly.IsTrue()`.
+    if command_line.compiler_options().watch.is_true()
+        && command_line.compiler_options().list_files_only.is_true()
+    {
+        report_diagnostic.report(
+            sys,
+            &ReportedDiagnostic::from_compiler_message(
+                &tsgo_diagnostics::OPTIONS_0_AND_1_CANNOT_BE_COMBINED,
+                &["watch".to_string(), "listFilesOnly".to_string()],
+                &locale,
+            ),
+        );
+        return CommandLineResult {
+            status: ExitStatus::DiagnosticsPresentOutputsSkipped,
+        };
+    }
+
     // DEFER(P9): `tsconfig.json` discovery, `--project`, `--init`/`--version`/
-    // `--help`/`--showConfig`, `--watch`, and incremental. blocked-by: those
-    // chunks. The reachable path builds a single program from the parsed
-    // command line.
+    // `--help`/`--showConfig`, and incremental. blocked-by: those chunks. The
+    // reachable path either enters the watch loop or builds a single program
+    // from the parsed command line.
     let report_error_summary =
         create_report_error_summary(sys, &locale, command_line.compiler_options());
+
+    // `--watch`/`-w` routes to the watch loop instead of the one-shot build.
+    // Go: `if configForCompilation.CompilerOptions().Watch.IsTrue()`.
+    if command_line.compiler_options().watch.is_true() {
+        return perform_watch(
+            sys,
+            command_line,
+            &report_diagnostic,
+            &report_error_summary,
+            &locale,
+        );
+    }
+
     perform_compilation(
         sys,
         command_line,

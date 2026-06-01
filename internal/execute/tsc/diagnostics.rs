@@ -15,14 +15,17 @@
 //! [`tsgo_diagnosticwriter`]'s existing renderers; bespoke colour styling
 //! beyond that is deferred.
 
+use std::time::{Duration, SystemTime};
+
 use tsgo_compiler::{OptionsDiagnostic, ParsedFile};
 use tsgo_core::compileroptions::CompilerOptions;
 use tsgo_core::compute_ecma_line_starts;
 use tsgo_core::text::TextPos;
-use tsgo_diagnostics::Category;
+use tsgo_diagnostics::{Category, Message};
 use tsgo_diagnosticwriter::{
-    format_diagnostic_with_color_and_context, write_error_summary_text, write_format_diagnostic,
-    Diagnostic as DwDiagnostic, FileLike, FormattingOptions,
+    format_diagnostic_with_color_and_context, format_diagnostics_status_and_time,
+    format_diagnostics_status_with_color_and_time, write_error_summary_text,
+    write_format_diagnostic, Diagnostic as DwDiagnostic, FileLike, FormattingOptions,
 };
 use tsgo_locale::Locale;
 use tsgo_tspath::ComparePathsOptions;
@@ -185,6 +188,34 @@ impl ReportedDiagnostic {
             len: 0,
             file: None,
             message_chain: chain.next.iter().map(Self::from_message_chain).collect(),
+            related_information: Vec::new(),
+        }
+    }
+
+    /// Builds a global (file-less) compiler diagnostic from a static `message`
+    /// and its `args`, localizing it with the run `locale`.
+    ///
+    /// Mirrors Go's `ast.NewCompilerDiagnostic` followed by
+    /// `diagnosticwriter.WrapASTDiagnostic`: it is how the watch/builder status
+    /// reporters turn a message constant (e.g. "Starting compilation in watch
+    /// mode...") into a renderable diagnostic.
+    ///
+    /// Side effects: none (allocates the wrapper).
+    // Go: internal/ast/diagnostic.go:NewCompilerDiagnostic
+    pub fn from_compiler_message(
+        message: &'static Message,
+        args: &[String],
+        locale: &Locale,
+    ) -> ReportedDiagnostic {
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        ReportedDiagnostic {
+            code: message.code(),
+            category: message.category(),
+            message: message.localize(locale, &arg_refs),
+            pos: 0,
+            len: 0,
+            file: None,
+            message_chain: Vec::new(),
             related_information: Vec::new(),
         }
     }
@@ -407,6 +438,96 @@ pub fn create_report_error_summary(
         pretty: should_be_pretty(sys, options),
         format_opts: get_format_opts_of_sys(sys, locale),
     }
+}
+
+/// A reporter that renders a time-stamped watch-mode status line
+/// (`HH:MM:SS PM - <message>`), used for the watch loop's lifecycle messages
+/// ("Starting compilation in watch mode...", "File change detected...",
+/// "Found N errors. Watching for file changes.").
+///
+/// Mirrors Go's `CreateWatchStatusReporter` returned closure. Unlike the error
+/// summary, the watch status is written in both plain and pretty modes (only
+/// the formatting differs); it is not gated by `--quiet`.
+///
+/// DEFER(P9): the `TryClearScreen` screen-clearing the pretty watch UI does
+/// before each fresh compilation, and the `CommandLineTesting`
+/// `OnWatchStatusReportStart`/`End` hooks. blocked-by: the pretty watch UI +
+/// the testing-hook chunk.
+///
+/// Side effects: [`report`](WatchStatusReporter::report) writes to the system.
+// Go: internal/execute/tsc/diagnostics.go:CreateWatchStatusReporter
+pub struct WatchStatusReporter {
+    pretty: bool,
+    format_opts: FormattingOptions,
+}
+
+impl WatchStatusReporter {
+    /// Renders `diagnostic` as a time-stamped status line (stamped with
+    /// `sys.now()`), followed by a blank line, matching Go's
+    /// `writeStatus(...); fmt.Fprint(writer, newLine, newLine)`.
+    ///
+    /// Side effects: reads `sys.now()` and writes the status line to `sys`.
+    // Go: internal/execute/tsc/diagnostics.go:CreateWatchStatusReporter (the returned closure)
+    pub fn report(&self, sys: &dyn System, diagnostic: &ReportedDiagnostic) {
+        let time = format_status_time(sys.now());
+        let mut out = String::new();
+        // DEFER(P9): `diagnosticwriter.TryClearScreen` runs here in Go before
+        // the status line; the screen-clearing pretty watch UI is deferred.
+        if self.pretty {
+            format_diagnostics_status_with_color_and_time(
+                &mut out,
+                &time,
+                diagnostic,
+                &self.format_opts,
+            );
+        } else {
+            format_diagnostics_status_and_time(&mut out, &time, diagnostic, &self.format_opts);
+        }
+        out.push_str(&self.format_opts.new_line);
+        out.push_str(&self.format_opts.new_line);
+        sys.write(&out);
+    }
+}
+
+/// Creates the watch-mode status reporter for a run, deciding plain/pretty from
+/// the options and system.
+///
+/// Side effects: none (reads the system; the returned reporter writes on use).
+// Go: internal/execute/tsc/diagnostics.go:CreateWatchStatusReporter
+pub fn create_watch_status_reporter(
+    sys: &dyn System,
+    locale: &Locale,
+    options: &CompilerOptions,
+) -> WatchStatusReporter {
+    WatchStatusReporter {
+        pretty: should_be_pretty(sys, options),
+        format_opts: get_format_opts_of_sys(sys, locale),
+    }
+}
+
+/// Formats `time` as Go's `03:04:05 PM` (zero-padded 12-hour clock), computed
+/// from the UTC time-of-day so it needs no calendar/timezone dependency.
+///
+/// Shared by the watch ([`WatchStatusReporter`]) and `--build` status
+/// reporters, both of which stamp their lines with `sys.Now().Format(...)`.
+///
+/// Side effects: none (pure).
+// Go: internal/execute/tsc/diagnostics.go:CreateWatchStatusReporter (sys.Now().Format)
+pub(crate) fn format_status_time(time: SystemTime) -> String {
+    let secs = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+    let secs_of_day = (secs % 86_400) as u32;
+    let hour24 = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+    let second = secs_of_day % 60;
+    let period = if hour24 < 12 { "AM" } else { "PM" };
+    let hour12 = match hour24 % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{hour12:02}:{minute:02}:{second:02} {period}")
 }
 
 /// Sorts diagnostics into stable report order and removes exact duplicates.

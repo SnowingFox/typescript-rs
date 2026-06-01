@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use tsgo_compiler::{
     get_resolved_project_reference, new_compiler_host, new_program, resolve_project_references,
@@ -46,7 +46,8 @@ use tsgo_tspath::{convert_to_relative_path, resolve_path, ComparePathsOptions, P
 use crate::sys::System;
 use crate::tsc::{
     create_diagnostic_reporter, create_report_error_summary, emit_and_report_statistics,
-    CommandLineResult, DiagnosticReporter, ExitStatus, ReportErrorSummary, ReportedDiagnostic,
+    format_status_time, CommandLineResult, DiagnosticReporter, ExitStatus, ReportErrorSummary,
+    ReportedDiagnostic,
 };
 
 /// Runs `tsc -b`: reports up-front command-line errors, otherwise resolves the
@@ -632,28 +633,6 @@ fn newest_input(inputs: &[InputFile]) -> Option<String> {
         }
     }
     newest.map(|(_, name)| name.to_string())
-}
-
-/// Formats `time` as Go's `03:04:05 PM` (zero-padded 12-hour clock), computed
-/// from the UTC time-of-day so it needs no calendar/timezone dependency.
-///
-/// Side effects: none (pure).
-// Go: internal/execute/tsc/diagnostics.go:CreateBuilderStatusReporter (sys.Now().Format)
-fn format_status_time(time: SystemTime) -> String {
-    let secs = time
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs();
-    let secs_of_day = (secs % 86_400) as u32;
-    let hour24 = secs_of_day / 3600;
-    let minute = (secs_of_day % 3600) / 60;
-    let second = secs_of_day % 60;
-    let period = if hour24 < 12 { "AM" } else { "PM" };
-    let hour12 = match hour24 % 12 {
-        0 => 12,
-        h => h,
-    };
-    format!("{hour12:02}:{minute:02}:{second:02} {period}")
 }
 
 #[cfg(test)]

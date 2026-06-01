@@ -203,3 +203,60 @@ fn perform_compilation_entry_compiles_clean_program() {
     assert_eq!(result.status, ExitStatus::Success);
     assert!(fs.file_exists("/p/index.js"));
 }
+
+// Watch dispatch: `--watch` routes through `tsc_compilation` to the watch loop.
+// A plain `VfsSystem` reports no changes (the default `wait_for_change` returns
+// `false`), so the loop runs the initial build, prints the watch-mode status
+// lines, emits the `.js`, then exits.
+//
+// Go ground truth: `tscCompilation` enters the watch branch when
+// `CompilerOptions().Watch.IsTrue()`.
+#[test]
+fn watch_flag_dispatches_to_watch_loop() {
+    let (sys, fs) = single_file_sys("index.ts", "const x: number = 1;\n");
+    let result = execute(&sys, &args(&["--watch", "index.ts"]));
+    assert_eq!(result.status, ExitStatus::Success);
+    let out = sys.output();
+    assert!(
+        out.contains("Starting compilation in watch mode..."),
+        "missing watch-start status: {out:?}"
+    );
+    assert!(
+        out.contains("Found 0 errors. Watching for file changes."),
+        "missing post-build status: {out:?}"
+    );
+    assert!(fs.file_exists("/p/index.js"));
+}
+
+// Watch dispatch via the `-w` short flag routes to the watch loop as well.
+#[test]
+fn watch_short_flag_dispatches_to_watch_loop() {
+    let (sys, _fs) = single_file_sys("index.ts", "const x: number = 1;\n");
+    let result = execute(&sys, &args(&["-w", "index.ts"]));
+    assert_eq!(result.status, ExitStatus::Success);
+    assert!(
+        sys.output()
+            .contains("Starting compilation in watch mode..."),
+        "missing watch-start status: {:?}",
+        sys.output()
+    );
+}
+
+// `--watch` and `--listFilesOnly` cannot be combined: TS6370 is reported and the
+// run exits 2 before any build.
+//
+// Go ground truth: `tscCompilation` reports `Options_0_and_1_cannot_be_combined`
+// ("watch", "listFilesOnly") and returns
+// `ExitStatusDiagnosticsPresent_OutputsSkipped`.
+#[test]
+fn watch_with_list_files_only_reports_ts6370_and_exits_two() {
+    let (sys, fs) = single_file_sys("index.ts", "const x: number = 1;\n");
+    let result = execute(&sys, &args(&["--watch", "--listFilesOnly", "index.ts"]));
+    assert_eq!(result.status, ExitStatus::DiagnosticsPresentOutputsSkipped);
+    assert_eq!(
+        sys.output(),
+        "error TS6370: Options 'watch' and 'listFilesOnly' cannot be combined.\n"
+    );
+    // No build happened, so nothing was emitted and no watch status printed.
+    assert!(!fs.file_exists("/p/index.js"));
+}
