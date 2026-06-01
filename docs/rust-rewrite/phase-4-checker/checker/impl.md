@@ -3236,6 +3236,77 @@ impl EmitResolver {
 
 **推荐下一轮（4bp）**：(a) **关系引擎 array/reference 类型实参变型**（解锁数组字面量 elaborate 的 end-to-end 可达 + 修 `(number|string)[]`↔`number[]` 误判）；(b) **signature/parameter 阐释 `2328` + 返回类型折叠**（`signaturesRelatedTo` reporting + `reportError` 的 `x()`/`x(...)` 臂）；(c) **`elaborateElement` 的 `6501`/`target.symbol` related-info 臂 + 默认库文件判定**。
 
+## 4bp 落地记录（worklog 摘要）—— type-reference **类型实参变型**（`typeArgumentsRelatedTo`）+ 括号表达式/类型定型 + 引用成员实例化
+
+**目标**：4bo 记录的关键 DEFER——port 的 bool 关系把 `Array<number|string>` 误判为可赋值给 `Array<number>`（`structured_type_related_to` 对 OBJECT↔OBJECT 仅走结构 `properties_related_to`，而引用共享 target 成员符号 ⇒ 结构上恒"相等" ⇒ 误判），导致 `const xs: number[] = [1,"x"]` 产 **0** 诊断（应 2322 在 `"x"`）、4bo 的 `elaborate_array_literal` end-to-end 不可达。本轮接入 Go `relater.go` 的 **same-target reference 变型臂**：两个指向**同一泛型 target** 的引用（`Array<X>` vs `Array<Y>`、`Foo<X>` vs `Foo<Y>`）改按**类型实参变型**（可达子集：covariant）逐对关系，而非结构比较。配套两个使可达性 end-to-end 的小修：(b) `check_expression` 给 `ParenthesizedExpression` 定型（4bo 记录的 gap）+ `get_type_from_type_node` 给 `ParenthesizedType` 定型（`(number|string)[]` 解析）；(c) `properties_related_to` 经引用 type-arg mapper 实例化成员类型 + 过滤泄漏进接口成员表的类型参数符号（Go `getNamedMembers`/`symbolIsValue`）。bool 快路径与 4bn/4bo 报告链对其余形态**不动**。逐行为红→绿。单 lane。cargo 仅 `-p tsgo_checker`（+ `cargo build -p tsgo_compiler` 验 additive）。未 `git commit`。
+
+**Go 真值（ground truth，用 `go build ./cmd/tsgo` 实跑快照逐一核对，非凭空推断）**：
+- 数组错元素（`const xs: number[] = [1,"x"]`）：`a.ts(1,26)` `2322` "Type 'string' is not assignable to type 'number'." 指在 `"x"` 元素（`1` 静默），无 related（元素类型来自 index 签名，6501 被抑制）。**4bo 的 `elaborateArrayLiteral` 现 end-to-end 可达**。
+- 数组正控（`const xs: number[] = [1,2]`）：**0** 诊断。
+- 协变成立（`const a: number[]=[1]; const b:(number|string)[]=a`）：**0** 诊断（`number[]` IS 可赋值给 `(number|string)[]`）。
+- 协变反向（`const c:(number|string)[]=["x"]; const d: number[]=c`）：`a.ts(1,43)` `2322`（指在 `d` 声明，RHS 是 identifier ⇒ 走通用关系链非 elaborate）"Type '(string | number)[]' is not assignable to type 'number[]'." + 嵌套链 "Type 'string | number' is not assignable to type 'number'." → "Type 'string' is not assignable to type 'number'."
+- 同 target 用户泛型错属性（`interface Box<T>{v:T} const x:Box<number>={v:"s"}`）：`a.ts(2,26)` `2322` "Type 'string' is not assignable to type 'number'." 指在字面量属性名 `v`（对象字面量 RHS 走 4bo elaborate）。
+- 同 target 用户泛型对属性（`const y:Box<number>={v:1}`）：**0** 诊断。
+- 括号（`const n:number=(1)`）：**0**；（`const s:string=(1)`）：`a.ts(1,7)` `2322` "Type 'number' is not assignable to type 'string'." 指在声明 `s`。
+
+**Go 函数镜像（`// Go:` 锚）**：`structuredTypeRelatedToWorker`（same-target reference 臂 `source.Target()==target.Target()`）、`typeArgumentsRelatedTo`（covariant 逐对）、`Type.Target`/`getTypeArguments`、`checkParenthesizedExpression`、`getTypeFromTypeNode`（`KindParenthesizedType`）、`getNamedMembers`/`symbolIsValue`（类型参数非 value 成员）、`getTypeOfSymbol`（引用实例化成员）。
+
+**严格 TDD（逐行为 red→green，先用 probe 实测红再产最终测试）**：
+
+| # | 切片 | 最小 input → observable（实测红/绿） | 实现触点 |
+|---|---|---|---|
+| 1 tracer（genuine RED）| `array_literal_wrong_element_reports_2322_end_to_end` | `const xs:number[]=[1,"x"]` → `2322` 在 `"x"`（红：实测 **0** 诊断——bool 误判 `(number\|string)[]`↔`number[]`）| `reference_type_arguments_related_to`+`type_arguments_related_to`+`type_reference_target_and_arguments`（bool 臂）|
+| 1 正控 | `array_literal_matching_elements_reports_nothing` | `[1,2]` → 0 诊断 | 同上（covariant 通过）|
+| 2 | `array_reference_covariance_is_assignable` | `number[]` 赋 `(number\|string)[]` → 0 | 类型实参 covariant |
+| 2（genuine RED）| `array_reference_reverse_reports_2322` | `(number\|string)[]` 赋 `number[]`（identifier RHS）→ `2322`+链（红：实测 **0** 诊断）| 报告孪生 `report_reference_type_arguments_related_to` + `get_type_from_type_node` 的 `ParenthesizedType` 臂 |
+| 3 | `generic_reference_target_wrong_property_reports_2322` | `Box<number>={v:"s"}` → `2322` 在 `v`+6500（绿：4bo elaborate；但需先修 box_good 暴露的实例化）| `instantiated_property_type` |
+| 3（genuine RED）| `generic_reference_target_matching_property_reports_nothing` | `Box<number>={v:1}` → 0（红：实测 **2741** "Property 'T' is missing"——类型参数 `T` 泄漏进属性表 + `v` 比对未实例化的 `T`）| `get_declared_type_of_class_or_interface` 过滤 TYPE_PARAMETER + `instantiated_property_type` |
+| 4（genuine RED）| `parenthesized_expression_takes_inner_type` | `(1)` 赋 `string` → `2322`；赋 `number` → 0（红：实测 `(1)` 返 error type ⇒ 0 诊断）| `check_expression` 的 `ParenthesizedExpression` 臂 |
+| 单测 | `type_arguments_related_to_relates_covariantly` | `[number]`→`[number\|string]` true；反向 false | `type_arguments_related_to` covariant |
+| 单测 | `type_arguments_related_to_identity_length_guard` | identity 不等长 → false | 长度守卫 |
+| 单测 | `reference_type_arguments_related_to_requires_same_target` | 同 target→Some / 异 target→None / 非引用→None | same-target 检测 |
+| 单测 | `array_references_relate_by_element_covariance` | `Array<number>`↔`Array<number\|string>` 双向（公开 API）| end-to-end bool 路径 |
+| 单测 | `reference_member_types_are_instantiated_for_relation` | `{v:number}`赋`Box<number>` true / `{v:string}` false | `instantiated_property_type` + 类型参数过滤 |
+
+> 红→绿证据：slice 1 **genuine RED**（实测 0 诊断，bool 误判）；slice 2 反向 **genuine RED**（实测 0 诊断）；slice 3 对属性 **genuine RED**（实测 `2741` "Property 'T' is missing"，类型参数泄漏 + 未实例化比对）；slice 4 **genuine RED**（`(1)` 返 error type ⇒ 0 诊断）。四处 RED 均用临时 probe 测试实测后产最终测试复绿。
+
+**可达裁剪（faithful-but-reachable）**：
+- **变型默认 covariant**：Go `getVariances(target)` 用 marker-probe 计算每个类型参数变型；可达子集 **全部默认 covariant**（`Array`/`ReadonlyArray` 元素参数 + 常见用户泛型协变位均正确，修了误判）。`typeArgumentsRelatedTo` 的 covariant 臂 = `source[i]` relates to `target[i]`。
+- **covariant 失败 = 不可赋值（无结构兜底）**：Go `relateVariances` 对纯 covariant 失败返回 `(false, ok=true)`（`varianceCheckFailed && !Some(Invariant)`），不走结构兜底。port 的 `reference_type_arguments_related_to` 同——同 target 引用返 `Some(result)`，false 即终（不 fall through `properties_related_to`）；非同 target 引用返 `None`（fall through 结构，如 reference↔plain-object）。
+- **tuple 排除**：Go same-target 臂带 `!isTupleType(source)`。port 的 tuple 用 `ObjectFlags::TUPLE`（无 `REFERENCE`、`target==None`），`type_reference_target_and_arguments` 要求 `REFERENCE` flag + `target.is_some()` ⇒ 天然排除 tuple（不会误判 `None==None`）。
+- **引用成员实例化**：Go `getPropertiesOfType(Box<number>)` 返回**已实例化**成员符号（`v: number`）；port 的 `get_properties_of_type` 返回共享 target 符号（成员类型实例化 4d/4e DEFER），故 `properties_related_to`/`report_property_related_to` 新增 `instantiated_property_type`——经引用 type-arg mapper 实例化 `get_type_of_symbol(prop)`（非引用类型恒等价于旧 `get_type_of_symbol(prop)`，无回归）。
+- **类型参数非属性**：binder 把泛型声明的类型参数放进接口 `members`（与 Go 一致）；Go `getNamedMembers`/`getPropertyOfObjectType` 经 `symbolIsValue` 滤掉。port 的属性迭代器 `get_properties_of_type` 仅取 `&Checker`（无 program 解析符号 flags），故在 `get_declared_type_of_class_or_interface` 构造声明类型时滤掉 TYPE_PARAMETER 成员（保留 value 成员 + `__call`/`__index`/`__new` 保留名签名；类型参数解析走 AST 父链 `resolve_type_parameter_in_scope`，不依赖成员表）——可观察等价。
+- **ParenthesizedType/Expression 定型**：Go `checkParenthesizedExpression` = `checkExpressionEx(inner)`；`getTypeFromTypeNode` `KindParenthesizedType` = 递归内层。port 各加一臂（纯透传内层）。
+
+**本轮交付**：
+- `core/relations.rs`：`structured_type_related_to` OBJECT↔OBJECT 在结构兜底前插入 `reference_type_arguments_related_to`（同 target 引用 ⇒ 变型）；新私有 `reference_type_arguments_related_to`/`type_reference_target_and_arguments`/`type_arguments_related_to`（bool）+ `report_reference_type_arguments_related_to`（报告孪生）+ `instantiated_property_type`；`properties_related_to`/`report_property_related_to` 改用 `instantiated_property_type`。
+- `core/check.rs`：`check_expression` 加 `Kind::ParenthesizedExpression` 臂。
+- `core/declared_types.rs`：`get_type_from_type_node` 加 `Kind::ParenthesizedType` 臂；`get_declared_type_of_class_or_interface` 过滤 `own_members` 的 TYPE_PARAMETER 符号。
+- 测试：`relations_test.rs`（+5）、`check_test.rs`（+7）+ 更新 2 既有 4bo 直驱测试的过时注释（end-to-end 现可达）。
+
+**新公开 API 形状（additive-only 确认）**：**无新 `pub` 面**——所有新函数均为 `Checker` 的私有 `fn`（`reference_type_arguments_related_to`/`type_reference_target_and_arguments`/`type_arguments_related_to`/`report_reference_type_arguments_related_to`/`instantiated_property_type`）或自由私有逻辑。**无既有 `pub fn` 签名变更**（`check_expression`/`get_type_from_type_node` 加 match 臂，签名不变；`get_declared_type_of_class_or_interface` 私有 fn）、无 `.go` 改动、无 `internal/ast` 改动、无新依赖、无 `lib.rs` 改动。`cargo build -p tsgo_compiler` 绿。
+
+**测试增量**：**549 单测**（+12，相对 4bo 基线 537：`relations_test`+5、`check_test`+7）+ **135 doctest**（+0）。**无既有测试弱化/删除**（仅更新 2 处 4bo 直驱测试的过时注释——测试体未改、断言未弱化）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker --lib`（549 绿）+ `--doc`（135 绿）；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。未触 `internal/ast`，故未跑 `--workspace`。未 `git commit`。
+
+**与 Go 的已知偏离（本轮，记录在案）**：
+- **数组打印 `Array<T>` vs `T[]`**：cov_bad 头消息 port 印 `Array<string | number>`/`Array<number>`，Go 印 `(string | number)[]`/`number[]`（Go `typeToString` 的 array-shorthand 臂未 port，pre-existing 打印偏离，非本轮引入、非关系 bug）。CODE(2322)、span、union 成员序（`string | number`）均对齐 Go。
+- **链深 2 vs 3**：cov_bad port 链 = 头 + 1 子（`Type 'string | number' is not assignable to type 'number'.`），Go = 头 + 2 子（多 `Type 'string' is not assignable to type 'number'.`）。最内层是 4bo DEFER 的 union/intersection 阐释，非本轮引入。
+
+**本轮 DEFER（带 blocked-by）**：
+- **完整 `getVariances` 变型计算**：contravariant（反向）/invariant（双向）/bivariant（任一）/independent（跳过）类型参数、`in`/`out` 变型注解、marker-probe（`isMarkerType` 排除 + `TernaryUnknown` 递归信号）、`relateVariances` 的结构兜底（`Unmeasurable`/`Unreliable`/`AllowsStructuralFallback`/covariant-`void` 实参）。可达子集全 covariant。blocked-by: 变型 marker 计算 + 函数参数位的 signature-level 关系。
+- **signature/index-signature 关系**：函数参数（contravariant）位的类型实参关系需 `signaturesRelatedTo`。blocked-by: 产关系签名比较。
+- **tuple/alias 变型**：固定 arity tuple 逐元素关系（Go `isTupleType` 臂 + `getAliasVariances`）、variadic/optional/rest/labeled tuple 元素、`isSingleElementGenericTupleType` 展开、空数组字面量 `never[]` 短路。blocked-by: tuple 元素 flags + alias 变型。
+- **intersection-of-references / 复杂源**：源为交集且含引用、`hasCovariantVoidArgument`。blocked-by: 交集变型路径。
+- **cov_bad 链最内层**：union 实参失败的 per-constituent 叶诊断（Go 第 3 层 `Type 'string' is not assignable to type 'number'.`）。blocked-by: union/intersection 阐释（4bo DEFER）。
+- **数组 `[]` shorthand 打印**：`type_to_string` 的 array/readonly-array/tuple shorthand 臂。blocked-by: nodebuilder array-shorthand 打印。
+- **递归深度/`maybeKeys` 限制**：`recursiveTypeRelatedToWorker` 的 depth limiter / `isDeeplyNestedType`。blocked-by: 完整 relater 递归模型。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/types/typeRelationships/typeArgumentRelationships/`（同泛型 covariant 类型实参赋值）+ `assignmentCompatibility/`（数组字面量元素不兼容 end-to-end）最基础子集——无 contravariant/invariant/variance-annotation、无 signature/tuple-variance、无 union 实参 per-constituent 阐释。
+
+**推荐下一轮（4bq）**：(a) **`getVariances` marker-probe 变型**（解锁 contravariant/invariant/bivariant + 函数参数位 + variance 注解）；(b) **signature/parameter 阐释 `2328` + 返回类型折叠**（`signaturesRelatedTo` reporting + `reportError` 的 `x()`/`x(...)` 臂）；(c) **tuple 逐元素变型 + `[]` shorthand 打印**（解锁 tuple 关系 + cov_bad 头消息对齐 Go）。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

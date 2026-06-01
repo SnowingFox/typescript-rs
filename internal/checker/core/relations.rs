@@ -605,9 +605,104 @@ impl Checker {
                 return self.properties_related_to(program, source, target, relation)
                     && self.properties_related_to(program, target, source, relation);
             }
+            // Two type references to the same generic target (`Array<X>` vs
+            // `Array<Y>`, `Foo<X>` vs `Foo<Y>`) relate by their type arguments'
+            // variance rather than structurally. For the reachable subset this is
+            // authoritative: on the covariant path a failed argument relation
+            // means the references are not related (Go does not fall back to a
+            // structural comparison for a covariant variance failure).
+            if let Some(result) =
+                self.reference_type_arguments_related_to(program, source, target, relation)
+            {
+                return result;
+            }
             return self.properties_related_to(program, source, target, relation);
         }
         false
+    }
+
+    // If `source` and `target` are type references to the SAME generic target
+    // (Go's `source.Target() == target.Target()` arm), relates them by relating
+    // their type arguments according to variance and returns `Some(result)`.
+    // Returns `None` when the pair is not two same-target references, so the
+    // caller falls back to a structural comparison.
+    //
+    // DEFER(phase-4-checker-4bp+): the full `getVariances` marker-probe variance
+    // computation (contravariant/bivariant/invariant/independent parameters,
+    // `in`/`out` annotations, and the structural fallback `relateVariances`
+    // performs for `Unmeasurable`/`Unreliable`/covariant-`void` arguments). The
+    // reachable subset defaults every type parameter to covariant, which is
+    // correct for `Array`/`ReadonlyArray` element types and the common user
+    // generic positions and fixes the `Array<number | string>` vs `Array<number>`
+    // false positive. The empty-array-literal `never[]` short-circuit and
+    // marker-type exclusion are also deferred.
+    // blocked-by: `getVariances` (variance markers) + signature-level relation.
+    // Go: internal/checker/relater.go:Checker.structuredTypeRelatedToWorker (same-target reference arm)
+    fn reference_type_arguments_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> Option<bool> {
+        let (source_target, source_args) = self.type_reference_target_and_arguments(source)?;
+        let (target_target, target_args) = self.type_reference_target_and_arguments(target)?;
+        if source_target != target_target {
+            return None;
+        }
+        Some(self.type_arguments_related_to(program, &source_args, &target_args, relation))
+    }
+
+    // Returns a type's generic target and its resolved type arguments when it is
+    // a type reference (Go's `ObjectFlagsReference` with a `target`). A tuple
+    // (`TUPLE`-flagged, no `target`) and a plain anonymous/interface object
+    // (no `target`) both yield `None`, so they are compared structurally.
+    // Go: internal/checker/types.go:Type.Target / Checker.getTypeArguments (reference subset)
+    fn type_reference_target_and_arguments(&self, t: TypeId) -> Option<(TypeId, Vec<TypeId>)> {
+        if !self
+            .get_type(t)
+            .object_flags()
+            .contains(ObjectFlags::REFERENCE)
+        {
+            return None;
+        }
+        let obj = self.get_type(t).as_object()?;
+        let target = obj.target?;
+        Some((target, obj.resolved_type_arguments.clone()))
+    }
+
+    // Pairwise-relates type arguments according to each type parameter's
+    // variance (Go's `Relater.typeArgumentsRelatedTo`). The reachable subset
+    // treats every parameter as COVARIANT — `source[i]` must relate to
+    // `target[i]` — which is correct for `Array`/`ReadonlyArray` element types
+    // and the common user-generic positions.
+    //
+    // DEFER(phase-4-checker-4bp+): contravariant (reversed), invariant (both
+    // directions), bivariant (either direction), and independent (skipped) type
+    // parameters, plus the `Unmeasurable`/`Unreliable` identity / instantiation
+    // paths. Those require `getVariances`. blocked-by: variance-marker
+    // computation + signature relation for function-parameter positions.
+    // Go: internal/checker/relater.go:Relater.typeArgumentsRelatedTo
+    fn type_arguments_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        sources: &[TypeId],
+        targets: &[TypeId],
+        relation: RelationKind,
+    ) -> bool {
+        // Go returns false for an identity check over differently-sized lists;
+        // otherwise it relates the common prefix.
+        if sources.len() != targets.len() && relation == RelationKind::Identity {
+            return false;
+        }
+        let length = sources.len().min(targets.len());
+        for i in 0..length {
+            // DEFER: variance default is covariant for the reachable subset.
+            if !self.is_type_related_to(program, sources[i], targets[i], relation) {
+                return false;
+            }
+        }
+        true
     }
 
     // For each property of `target`, `source` must have a property whose type is
@@ -633,8 +728,8 @@ impl Checker {
                 }
                 return false;
             };
-            let source_type = get_type_of_symbol(self, program, source_prop, None);
-            let target_type = get_type_of_symbol(self, program, target_prop, None);
+            let source_type = self.instantiated_property_type(program, source, source_prop);
+            let target_type = self.instantiated_property_type(program, target, target_prop);
             if !self.is_type_related_to(program, source_type, target_type, relation) {
                 return false;
             }
@@ -650,6 +745,43 @@ impl Checker {
             }
         }
         true
+    }
+
+    // Returns a property symbol's type as seen on `containing`, instantiating it
+    // through `containing`'s `type parameters -> type arguments` mapper when
+    // `containing` is a generic type reference. Go's `getPropertiesOfType`
+    // returns instantiated member symbols for a reference, so its
+    // `getTypeOfSymbol(prop)` already sees `Box<number>.v` as `number`; the port
+    // shares the target's member symbols (member-type instantiation is deferred
+    // in `create_type_reference`), so the relation engine instantiates here.
+    // For a non-reference type this is exactly `get_type_of_symbol(prop)`.
+    // Go: internal/checker/checker.go:Checker.getTypeOfSymbol (instantiated reference member)
+    fn instantiated_property_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        containing: TypeId,
+        prop: SymbolId,
+    ) -> TypeId {
+        let prop_type = get_type_of_symbol(self, program, prop, None);
+        let reference = self
+            .get_type(containing)
+            .as_object()
+            .and_then(|o| o.target.map(|t| (t, o.resolved_type_arguments.clone())));
+        if let Some((target, args)) = reference {
+            let params = self
+                .get_type(target)
+                .as_object()
+                .map(|o| o.type_parameters.clone())
+                .unwrap_or_default();
+            if !params.is_empty() && params.len() == args.len() {
+                let mapper = super::mapper::TypeMapper::Array {
+                    sources: params,
+                    targets: args,
+                };
+                return self.instantiate_type(prop_type, &mapper);
+            }
+        }
+        prop_type
     }
 
     // Reports whether a property symbol was declared optional (`a?: T`).
@@ -888,13 +1020,66 @@ impl Checker {
             && sf.contains(TypeFlags::OBJECT)
             && tf.contains(TypeFlags::OBJECT)
         {
-            self.report_properties_related_to(program, source, target, relation, reporter)
+            // Same-target generic references elaborate their type arguments (Go's
+            // variance arm), mirroring the bool path; everything else elaborates
+            // structurally.
+            match self.report_reference_type_arguments_related_to(
+                program, source, target, relation, reporter,
+            ) {
+                Some(result) => result,
+                None => {
+                    self.report_properties_related_to(program, source, target, relation, reporter)
+                }
+            }
         } else {
             // Identity and other structured/instantiable shapes: no elaboration.
             self.structured_type_related_to(program, source, target, relation)
         };
         reporter.in_progress.remove(&(source, target));
         result
+    }
+
+    // The reporting twin of [`reference_type_arguments_related_to`]: for two
+    // same-target references, relates type arguments covariantly with reporting
+    // so a failing argument's own head message becomes the child of this level's
+    // head (Go's `typeArgumentsRelatedTo` with `reportErrors=true`). Returns
+    // `None` when the pair is not two same-target references.
+    //
+    // DEFER(phase-4-checker-4bp+): same as the bool twin — full variance, plus
+    // the deeper union/intersection elaboration of a failing type argument (so a
+    // `string | number` vs `number` argument reports only its own head, not the
+    // per-constituent leaf). blocked-by: `getVariances` + union elaboration.
+    // Go: internal/checker/relater.go:Relater.typeArgumentsRelatedTo (reportErrors)
+    fn report_reference_type_arguments_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+        reporter: &mut ChainReporter,
+    ) -> Option<bool> {
+        let (source_target, source_args) = self.type_reference_target_and_arguments(source)?;
+        let (target_target, target_args) = self.type_reference_target_and_arguments(target)?;
+        if source_target != target_target {
+            return None;
+        }
+        if relation == RelationKind::Identity && source_args.len() != target_args.len() {
+            return Some(false);
+        }
+        let length = source_args.len().min(target_args.len());
+        for i in 0..length {
+            // DEFER: covariant default for the reachable subset.
+            if !self.report_is_related_to(
+                program,
+                source_args[i],
+                target_args[i],
+                relation,
+                reporter,
+            ) {
+                return Some(false);
+            }
+        }
+        Some(true)
     }
 
     // The reporting twin of [`properties_related_to`] (Go's
@@ -969,8 +1154,8 @@ impl Checker {
         reporter: &mut ChainReporter,
     ) -> bool {
         let (source, target) = parents;
-        let source_type = get_type_of_symbol(self, program, source_prop, None);
-        let target_type = get_type_of_symbol(self, program, target_prop, None);
+        let source_type = self.instantiated_property_type(program, source, source_prop);
+        let target_type = self.instantiated_property_type(program, target, target_prop);
         let related =
             self.report_is_related_to(program, source_type, target_type, relation, reporter);
         if !related {

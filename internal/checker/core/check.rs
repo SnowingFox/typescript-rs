@@ -240,6 +240,16 @@ impl Checker {
             Kind::ArrowFunction => self.check_arrow_function(program, node),
             Kind::NonNullExpression => self.check_non_null_assertion(program, node),
             Kind::AsExpression => self.check_assertion(program, node),
+            // A parenthesized expression `(expr)` has the type of its inner
+            // expression (Go's `checkParenthesizedExpression` ->
+            // `checkExpressionEx(node.Expression())`).
+            Kind::ParenthesizedExpression => {
+                let inner = match program.arena().data(node) {
+                    NodeData::ParenthesizedExpression(d) => d.expression,
+                    _ => return self.error_type,
+                };
+                self.check_expression(program, inner)
+            }
             // DEFER(phase-4-checker-4h+): remaining expression kinds are added in
             // later 4g slices / sub-phases.
             _ => self.error_type,

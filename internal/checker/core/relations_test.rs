@@ -597,3 +597,141 @@ fn build_relation_error_chain_returns_none_when_assignable() {
         .build_relation_error_chain(&p, cc, a, RelationKind::Assignable)
         .is_none());
 }
+
+// 4bp: `type_arguments_related_to` relates type arguments pairwise covariantly:
+// `source[i]` must relate to `target[i]`. For assignability `number` relates to
+// `number | string` (covariant ok) but `number | string` does not relate to
+// `number`.
+// Go: internal/checker/relater.go:Relater.typeArgumentsRelatedTo (covariant)
+#[test]
+fn type_arguments_related_to_relates_covariantly() {
+    let mut c = Checker::new();
+    let p = empty_program();
+    let n = c.number_type();
+    let s_or_n = c.string_or_number_type();
+    // `[number]` -> `[number | string]`: covariant, ok.
+    assert!(c.type_arguments_related_to(&p, &[n], &[s_or_n], RelationKind::Assignable));
+    // `[number | string]` -> `[number]`: covariant, fails (string is not number).
+    assert!(!c.type_arguments_related_to(&p, &[s_or_n], &[n], RelationKind::Assignable));
+    // Equal arguments relate.
+    assert!(c.type_arguments_related_to(&p, &[n], &[n], RelationKind::Assignable));
+    // An empty argument list trivially relates.
+    assert!(c.type_arguments_related_to(&p, &[], &[], RelationKind::Assignable));
+}
+
+// 4bp: `type_arguments_related_to` rejects an identity check over
+// differently-sized argument lists (Go's `len(sources) != len(targets) &&
+// identity` guard); a non-identity relation relates the common prefix.
+// Go: internal/checker/relater.go:Relater.typeArgumentsRelatedTo (length guard)
+#[test]
+fn type_arguments_related_to_identity_length_guard() {
+    let mut c = Checker::new();
+    let p = empty_program();
+    let n = c.number_type();
+    assert!(!c.type_arguments_related_to(&p, &[n, n], &[n], RelationKind::Identity));
+    // Identity of equal-length, equal-type arguments holds.
+    assert!(c.type_arguments_related_to(&p, &[n], &[n], RelationKind::Identity));
+}
+
+// 4bp: `reference_type_arguments_related_to` fires only for two type references
+// to the SAME generic target. Two `Box<...>` references with different element
+// types relate by their (covariant) type arguments; references to DIFFERENT
+// generic targets and non-reference object types yield `None` (so the caller
+// falls back to a structural comparison).
+// Go: internal/checker/relater.go:Checker.structuredTypeRelatedToWorker (same-target reference arm)
+#[test]
+fn reference_type_arguments_related_to_requires_same_target() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Box<T> { v: T }\ninterface Bag<T> { v: T }\ninterface Plain { v: number }",
+    );
+    let mut c = Checker::new();
+    let box_target = get_declared_type_of_symbol(&mut c, &p, sym(&p, "Box"), None);
+    let bag_target = get_declared_type_of_symbol(&mut c, &p, sym(&p, "Bag"), None);
+    let plain = get_declared_type_of_symbol(&mut c, &p, sym(&p, "Plain"), None);
+    let n = c.number_type();
+    let s_or_n = c.string_or_number_type();
+    let box_num = c.create_type_reference(box_target, vec![n]);
+    let box_num_or_str = c.create_type_reference(box_target, vec![s_or_n]);
+    let bag_num = c.create_type_reference(bag_target, vec![n]);
+    // Same target (`Box`), covariant arguments: `Box<number>` relates to
+    // `Box<number | string>` but not the reverse.
+    assert_eq!(
+        c.reference_type_arguments_related_to(
+            &p,
+            box_num,
+            box_num_or_str,
+            RelationKind::Assignable
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        c.reference_type_arguments_related_to(
+            &p,
+            box_num_or_str,
+            box_num,
+            RelationKind::Assignable
+        ),
+        Some(false)
+    );
+    // Different generic targets (`Box` vs `Bag`): not the same-target arm.
+    assert_eq!(
+        c.reference_type_arguments_related_to(&p, box_num, bag_num, RelationKind::Assignable),
+        None
+    );
+    // A non-reference object type is never the same-target arm.
+    assert_eq!(
+        c.reference_type_arguments_related_to(&p, plain, box_num, RelationKind::Assignable),
+        None
+    );
+}
+
+// 4bp: end-to-end via the public relation API — two `Array<...>` references to
+// the same global `Array` target relate by their element type's covariance.
+// `Array<number>` is assignable to `Array<number | string>` but not the reverse
+// (this is the fix for the `(number | string)[]` vs `number[]` false positive).
+// Go: internal/checker/relater.go:Checker.structuredTypeRelatedToWorker (same-target reference arm)
+#[test]
+fn array_references_relate_by_element_covariance() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}",
+    );
+    let mut c = Checker::new();
+    let array_target = get_declared_type_of_symbol(&mut c, &p, sym(&p, "Array"), None);
+    let n = c.number_type();
+    let s_or_n = c.string_or_number_type();
+    let array_num = c.create_type_reference(array_target, vec![n]);
+    let array_num_or_str = c.create_type_reference(array_target, vec![s_or_n]);
+    // Covariant: `Array<number>` -> `Array<number | string>` holds.
+    assert!(c.is_type_assignable_to(&p, array_num, array_num_or_str));
+    // Reverse fails: `Array<number | string>` -> `Array<number>`.
+    assert!(!c.is_type_assignable_to(&p, array_num_or_str, array_num));
+    // Identical references relate.
+    assert!(c.is_type_assignable_to(&p, array_num, array_num));
+}
+
+// 4bp: a generic reference's member types are instantiated through its
+// type-argument mapper for the structural relation (Go's `getPropertiesOfType`
+// returns instantiated members). `{ v: number }` is assignable to `Box<number>`
+// (the `v` member instantiates to `number`), and `Box<number>`'s type parameter
+// `T` is NOT exposed as a property (Go's `symbolIsValue` filter).
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo / checker.go:getNamedMembers
+#[test]
+fn reference_member_types_are_instantiated_for_relation() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Box<T> { v: T }\ninterface NumV { v: number }\ninterface StrV { v: string }",
+    );
+    let mut c = Checker::new();
+    let box_target = get_declared_type_of_symbol(&mut c, &p, sym(&p, "Box"), None);
+    let num_v = get_declared_type_of_symbol(&mut c, &p, sym(&p, "NumV"), None);
+    let str_v = get_declared_type_of_symbol(&mut c, &p, sym(&p, "StrV"), None);
+    let n = c.number_type();
+    let box_num = c.create_type_reference(box_target, vec![n]);
+    // `{ v: number }` is assignable to `Box<number>` (member instantiates to
+    // `number`); the type parameter `T` is not a property of `Box<number>`.
+    assert!(c.is_type_assignable_to(&p, num_v, box_num));
+    // `{ v: string }` is not assignable to `Box<number>`.
+    assert!(!c.is_type_assignable_to(&p, str_v, box_num));
+}

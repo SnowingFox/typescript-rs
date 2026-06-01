@@ -5262,11 +5262,11 @@ fn elaborate_nested_object_literal_points_at_innermost_property() {
 // signature, whose `6501` arm is DEFER).
 // Verified against `cmd/tsgo`: `a.ts(1,26): error TS2322 ...` (no related info).
 //
-// `elaborate_array_literal` is driven directly here because the var-decl bool
-// fast path does not yet reject `(number | string)[]` against `number[]` (the
-// relation engine lacks array/reference type-argument element variance), so the
-// end-to-end `checkTypeRelatedToAndOptionallyElaborate` path never reaches
-// `elaborateError` for the array case. See the 4bo worklog DEFER note.
+// `elaborate_array_literal` is driven directly here as an isolated unit of the
+// 4bo elaboration machinery. As of 4bp the same scenario is ALSO reachable
+// end-to-end through the var-decl path (the relation engine now rejects
+// `Array<number | string>` against `Array<number>` via type-argument variance);
+// see `array_literal_wrong_element_reports_2322_end_to_end` for that coverage.
 // Go: internal/checker/relater.go:Checker.elaborateArrayLiteral / elaborateElement
 #[test]
 fn elaborate_array_literal_wrong_element_points_at_element() {
@@ -5423,10 +5423,11 @@ fn last_var_init_and_decl(p: &StubProgram) -> (tsgo_ast::NodeId, tsgo_ast::NodeI
 // `{ a: number }` reports the element-wise `2322` on the inner `a`.
 // Verified against `cmd/tsgo`: `a.ts:1:29 error TS2322 ...` + related at 1:12.
 //
-// Driven directly because `check_expression` does not yet type a
-// `ParenthesizedExpression` (it yields the `error` type, which is assignable to
-// anything, so the var-decl path never reaches `elaborateError`). The unwrap
-// arm itself is exercised here. See the 4bo worklog DEFER note.
+// Driven directly as an isolated unit of the `elaborateError` parenthesized
+// unwrap arm. As of 4bp `check_expression` types a `ParenthesizedExpression` as
+// its inner expression, so the var-decl path does reach `elaborateError` for a
+// parenthesized literal RHS too (see `parenthesized_expression_takes_inner_type`
+// for the end-to-end paren typing).
 // Go: internal/checker/relater.go:Checker.elaborateError (parenthesized unwrap)
 #[test]
 fn elaborate_error_unwraps_parenthesized_object_literal() {
@@ -5568,5 +5569,218 @@ fn is_tuple_like_type_recognizes_tuples_and_zero_indexed_objects() {
     assert!(
         c.is_tuple_like_type(zero_indexed),
         "an object with a '0' member is tuple-like"
+    );
+}
+
+// The synthetic `interface Array<T>` lib stand-in used by the array-reference
+// relation tests below (mirrors the existing array tests' fixture).
+const ARRAY_LIB: &str = "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\n";
+
+// 4bp slice 1 (end-to-end, genuine RED -> GREEN): a fresh array literal whose
+// element type is not assignable to the annotation's element type now reports
+// `2322` on the offending element. Before 4bp the relation engine compared the
+// two `Array<...>` references structurally (sharing the target's members) and
+// wrongly accepted `Array<number | string>` against `Array<number>`, so the
+// var-decl path never reached `elaborateError` and produced 0 diagnostics (the
+// 4bo DEFER note). With type-argument variance the bool relation now rejects the
+// assignment, so `elaborateArrayLiteral` fires end-to-end and the leaf `2322`
+// lands on `"x"`.
+// Verified against `cmd/tsgo`: `a.ts(1,26): error TS2322: Type 'string' is not
+// assignable to type 'number'.` (no related info; the element type comes from an
+// index signature).
+// Go: internal/checker/relater.go:Checker.typeArgumentsRelatedTo / elaborateArrayLiteral
+#[test]
+fn array_literal_wrong_element_reports_2322_end_to_end() {
+    let src = format!("{ARRAY_LIB}const xs: number[] = [1, \"x\"];");
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", &src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+    // The leaf carries no further chain and anchors at the `"x"` element.
+    assert!(d.message_chain.is_empty());
+    let span = &src[d.start as usize..(d.start + d.length) as usize];
+    assert_eq!(span.trim(), "\"x\"");
+    // The element type comes from an index signature, so Go emits no `6500`.
+    assert!(d.related_information.is_empty());
+}
+
+// 4bp slice 1 (positive control): a fresh array literal whose elements are all
+// assignable to the annotation's element type reports nothing.
+// Verified against `cmd/tsgo`: `const xs: number[] = [1, 2];` -> no diagnostics.
+// Go: internal/checker/relater.go:Checker.typeArgumentsRelatedTo (covariant ok)
+#[test]
+fn array_literal_matching_elements_reports_nothing() {
+    let src = format!("{ARRAY_LIB}const xs: number[] = [1, 2];");
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", &src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(c.get_diagnostics(root).is_empty());
+}
+
+// 4bp slice 2 (covariance holds): `number[]` IS assignable to
+// `(number | string)[]` (the element type `number` is assignable to
+// `number | string`), so no diagnostic is reported.
+// Verified against `cmd/tsgo`: `const a: number[] = [1]; const b:
+// (number|string)[] = a;` -> no diagnostics.
+// Go: internal/checker/relater.go:Checker.typeArgumentsRelatedTo (covariant)
+#[test]
+fn array_reference_covariance_is_assignable() {
+    let src = format!("{ARRAY_LIB}const a: number[] = [1];\nconst b: (number | string)[] = a;");
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", &src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "number[] is assignable to (number | string)[]"
+    );
+}
+
+// 4bp slice 2 (reverse fails, genuine RED -> GREEN): `(number | string)[]` is
+// NOT assignable to `number[]`. The RHS is an identifier (not an array literal),
+// so it flows through the generic relation chain (`report_type_not_assignable`),
+// which now rejects the references via type-argument variance and produces the
+// top-level `2322` with a nested type-argument elaboration. Before 4bp this was
+// 0 diagnostics (the references were wrongly accepted structurally).
+//
+// Verified against `cmd/tsgo`: `a.ts(1,43): error TS2322: Type '(string |
+// number)[]' is not assignable to type 'number[]'.` with a nested chain "Type
+// 'string | number' is not assignable to type 'number'." -> "Type 'string' is
+// not assignable to type 'number'.".
+//
+// Known print divergences (NOT relation bugs, both pre-existing / DEFER):
+//   - the port prints an `Array<T>` reference as `Array<...>`, not the `T[]`
+//     shorthand (the array-shorthand `typeToString` arm is unported), so the
+//     head reads `Type 'Array<string | number>' is not assignable to type
+//     'Array<number>'.`;
+//   - the union-constituent leaf (`Type 'string' is not assignable to type
+//     'number'.`) is the union elaboration deferred since 4bo, so the port's
+//     chain has one nested entry where Go has two.
+// The diagnostic CODE (2322), the offending span, and the union member ordering
+// (`string | number`) match Go.
+// Go: internal/checker/relater.go:Checker.typeArgumentsRelatedTo (reportErrors)
+#[test]
+fn array_reference_reverse_reports_2322() {
+    let src = format!("{ARRAY_LIB}const c: (number | string)[] = [\"x\"];\nconst d: number[] = c;");
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", &src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type 'Array<string | number>' is not assignable to type 'Array<number>'."
+    );
+    // The type-argument failure hangs a nested elaboration under the head.
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2322);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Type 'string | number' is not assignable to type 'number'."
+    );
+    // Anchored at the `d` declaration (Go's col 43 == the `d` declaration name).
+    let span = &src[d.start as usize..(d.start + d.length) as usize];
+    assert!(span.trim_start().starts_with('d'), "span = {span:?}");
+}
+
+// 4bp slice 3 (same-target user generic, wrong property): a `Box<number>`
+// annotation with an object-literal RHS whose `v` is a `string` reports `2322`
+// on the offending `"s"` value (the reference's `v` member is instantiated to
+// `number` through the type-argument mapper, and `string` is not assignable to
+// it). The object-literal RHS elaborates element-wise (4bo).
+// Verified against `cmd/tsgo`: `a.ts(1,52): error TS2322: Type 'string' is not
+// assignable to type 'number'.`.
+// Go: internal/checker/relater.go:Checker.elaborateObjectLiteral / getTypeOfSymbol (reference member)
+#[test]
+fn generic_reference_target_wrong_property_reports_2322() {
+    let src = "interface Box<T> { v: T }\nconst x: Box<number> = { v: \"s\" };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+    // 4bo object-literal elaboration anchors at the literal property NAME `v`
+    // (Go's `a.ts(2,26)` is the `v` in the RHS `{ v: "s" }`), with a `6500`
+    // related-info pointing at the target property's declaration.
+    let span = &src[d.start as usize..(d.start + d.length) as usize];
+    assert_eq!(span.trim(), "v");
+    assert_eq!(d.related_information.len(), 1);
+    assert_eq!(d.related_information[0].code, 6500);
+    assert_eq!(
+        d.related_information[0].message,
+        "The expected type comes from property 'v' which is declared here on type 'Box<number>'"
+    );
+}
+
+// 4bp slice 3 (same-target user generic, matching property, genuine RED ->
+// GREEN): a `Box<number>` annotation with a matching `{ v: 1 }` reports nothing.
+// Before 4bp this wrongly reported `2741 "Property 'T' is missing..."` because
+// the generic interface's type parameter `T` leaked into the type's property
+// list (Go excludes it via `getNamedMembers`/`symbolIsValue`), and the `v`
+// member was compared against the un-instantiated `T`. After 4bp the type
+// parameter is filtered from the member table and the `v` member is instantiated
+// to `number`, so `{ v: 1 }` is assignable to `Box<number>`.
+// Verified against `cmd/tsgo`: `const y: Box<number> = { v: 1 };` -> no
+// diagnostics.
+// Go: internal/checker/checker.go:Checker.symbolIsValue / getTypeOfSymbol (reference member)
+#[test]
+fn generic_reference_target_matching_property_reports_nothing() {
+    let src = "interface Box<T> { v: T }\nconst y: Box<number> = { v: 1 };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "{{ v: 1 }} is assignable to Box<number>"
+    );
+}
+
+// 4bp slice 4 (parenthesized expression, genuine RED -> GREEN): `(expr)` is
+// typed as its inner expression (Go's `checkParenthesizedExpression`). Before
+// 4bp `check_expression` returned the `error` type for a `ParenthesizedExpression`
+// (assignable to anything), so `const s: string = (1);` produced 0 diagnostics.
+// After 4bp the parenthesized `(1)` is typed as `number`, so it is correctly
+// rejected against `string`.
+// Verified against `cmd/tsgo`: `const n: number = (1);` -> no diagnostics;
+// `const s: string = (1);` -> `a.ts(1,7): error TS2322: Type 'number' is not
+// assignable to type 'string'.`.
+// Go: internal/checker/checker.go:Checker.checkParenthesizedExpression
+#[test]
+fn parenthesized_expression_takes_inner_type() {
+    // Matching annotation: no diagnostic.
+    let p_ok = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const n: number = (1);",
+    ));
+    let root_ok = p_ok.root();
+    let mut c_ok = Checker::new_checker(p_ok);
+    assert!(c_ok.get_diagnostics(root_ok).is_empty());
+    // Mismatching annotation: `2322`.
+    let p_bad = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const s: string = (1);",
+    ));
+    let root_bad = p_bad.root();
+    let mut c_bad = Checker::new_checker(p_bad);
+    let diags = c_bad.get_diagnostics(root_bad);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
     );
 }

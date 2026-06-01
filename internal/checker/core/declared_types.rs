@@ -106,8 +106,25 @@ fn get_declared_type_of_class_or_interface(
     } else {
         ObjectFlags::INTERFACE
     };
-    let own_members = sym.members.clone();
+    let mut own_members = sym.members.clone();
     let declarations = sym.declarations.clone();
+
+    // The binder places a generic declaration's type parameters into the
+    // symbol's member table (the same way Go's binder does). Type parameters are
+    // NOT value members, so Go excludes them from a type's property list (and
+    // from `getPropertyOfType`) via `getNamedMembers`/`getPropertyOfObjectType`'s
+    // `symbolIsValue` check. The port's property iterators (`get_properties_of_type`)
+    // take only a `&Checker` (no program to resolve symbol flags), so the
+    // equivalent filtering happens here, when the program is in hand: drop the
+    // type-parameter symbols from the constructed member table, which yields the
+    // same observable membership (a `Box<T>` reference exposes `v`, not `T`).
+    // Go: internal/checker/checker.go:Checker.symbolIsValue / getNamedMembers
+    own_members.retain(|_, &mut member| {
+        !program
+            .symbol(member)
+            .flags
+            .contains(SymbolFlags::TYPE_PARAMETER)
+    });
 
     // Local type parameters of a generic interface/class.
     let type_parameters = collect_local_type_parameters(checker, program, &declarations);
@@ -1088,6 +1105,17 @@ pub fn get_type_from_type_node(
             get_type_from_intersection_type_node(checker, program, node, globals)
         }
         Kind::LiteralType => get_type_from_literal_type_node(checker, program, node),
+        // A parenthesized type `(T)` has the type of its inner type node (Go's
+        // `getTypeFromTypeNode` `KindParenthesizedType` arm, which recurses on
+        // `node.Type()`). This makes e.g. `(number | string)[]` resolve to
+        // `Array<number | string>` instead of `Array<error>`.
+        Kind::ParenthesizedType => {
+            let inner = match program.arena().data(node) {
+                NodeData::ParenthesizedType(d) => d.type_node,
+                _ => return checker.error_type(),
+            };
+            get_type_from_type_node(checker, program, inner, globals)
+        }
         // DEFER(phase-4-checker-4d): remaining type-node kinds.
         // blocked-by: their type constructors land across 4d+.
         _ => checker.error_type(),
