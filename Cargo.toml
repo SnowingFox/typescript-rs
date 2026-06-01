@@ -42,6 +42,7 @@ members = [
     "internal/checker",
     "internal/transformers",
     "internal/compiler",
+    "internal/execute/incremental",
     "internal/testutil/baseline",
     "internal/testutil/stringtestutil",
     "internal/testutil/race",

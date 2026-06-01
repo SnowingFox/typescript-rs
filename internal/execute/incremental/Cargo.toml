@@ -1,0 +1,24 @@
+[package]
+name = "tsgo_incremental"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+indexmap = { version = "2.14.0", features = ["serde"] }
+rustc-hash = "2.1.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+xxh3 = "0.1.1"
+tsgo_collections = { path = "../../collections" }
+tsgo_compiler = { path = "../../compiler" }
+tsgo_core = { path = "../../core" }
+tsgo_outputpaths = { path = "../../outputpaths" }
+tsgo_tspath = { path = "../../tspath" }
+tsgo_vfs = { path = "../../vfs" }
+
+[dev-dependencies]
+tsgo_parser = { path = "../../parser" }
+tsgo_tsoptions = { path = "../../tsoptions" }

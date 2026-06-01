@@ -753,6 +753,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_incremental"
+version = "0.0.0"
+dependencies = [
+ "indexmap",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "tsgo_collections",
+ "tsgo_compiler",
+ "tsgo_core",
+ "tsgo_outputpaths",
+ "tsgo_parser",
+ "tsgo_tsoptions",
+ "tsgo_tspath",
+ "tsgo_vfs",
+ "xxh3",
+]
+
+[[package]]
 name = "tsgo_jsnum"
 version = "0.0.0"
 dependencies = [
