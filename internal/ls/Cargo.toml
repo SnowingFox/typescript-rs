@@ -18,6 +18,7 @@ tsgo_lsproto = { path = "../lsp/lsproto" }
 tsgo_ls_lsconv = { path = "lsconv" }
 tsgo_ls_lsutil = { path = "lsutil" }
 tsgo_parser = { path = "../parser" }
+tsgo_scanner = { path = "../scanner" }
 tsgo_tspath = { path = "../tspath" }
 
 [dev-dependencies]

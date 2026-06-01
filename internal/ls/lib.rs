@@ -19,9 +19,11 @@ pub mod completions;
 pub mod definition;
 pub mod diagnostics;
 pub mod documenthighlights;
+pub mod folding;
 pub mod hover;
 pub mod references;
 pub mod rename;
+pub mod symbols;
 
 pub use completions::CompletionList;
 pub use documenthighlights::{DocumentHighlight, DocumentHighlightKind};
@@ -29,6 +31,7 @@ pub use host::LanguageServiceHost;
 pub use hover::QuickInfo;
 pub use languageservice::LanguageService;
 pub use rename::RenameInfo;
+pub use symbols::DocumentSymbol;
 
 #[cfg(test)]
 mod test_support;
