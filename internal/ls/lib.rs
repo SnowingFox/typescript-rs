@@ -15,8 +15,10 @@
 mod host;
 mod languageservice;
 
+pub mod definition;
 pub mod diagnostics;
 pub mod hover;
+pub mod references;
 
 pub use host::LanguageServiceHost;
 pub use hover::QuickInfo;
