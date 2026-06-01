@@ -66,6 +66,77 @@ fn program_with_bundled_libs(
     })
 }
 
+/// Builds a program from a real tsconfig file (parsed so it carries its
+/// `references[]` + `configFilePath`), the way a config-driven program is built.
+fn program_from_config(files: &[(&str, &str)], cwd: &str, config_file_name: &str) -> Program {
+    let fs: Arc<dyn Fs + Send + Sync> = Arc::new(MapFs::from_map(files.iter().copied(), true));
+    let host = Arc::new(new_compiler_host(cwd, fs, "/lib"));
+    let config = crate::get_resolved_project_reference(host.as_ref(), config_file_name)
+        .expect("root config parses");
+    new_program(ProgramOptions {
+        host,
+        config: Arc::new(config),
+        single_threaded: true,
+    })
+}
+
+/// A config-driven program resolves its `references[]`, surfaces the composite
+/// requirement (`TS6306`) for a non-composite reference, and exposes the
+/// topological build order — the machinery a `--build` (P9) drives.
+// Go: internal/compiler/program.go:NewProgram (verifyProjectReferences + GetResolvedProjectReferences)
+#[test]
+fn program_surfaces_project_reference_diagnostics_and_build_order() {
+    let program = program_from_config(
+        &[
+            (
+                "/app/tsconfig.json",
+                r#"{ "compilerOptions": { "composite": true }, "files": ["a.ts"], "references": [{ "path": "../lib" }] }"#,
+            ),
+            ("/app/a.ts", "export const a = 1;"),
+            (
+                "/lib/tsconfig.json",
+                r#"{ "compilerOptions": {}, "files": ["index.ts"] }"#,
+            ),
+            ("/lib/index.ts", "export const x = 1;"),
+        ],
+        "/app",
+        "/app/tsconfig.json",
+    );
+
+    let refs = program.get_resolved_project_references();
+    assert_eq!(refs.len(), 1, "root has one resolved reference");
+    assert!(refs[0].is_some(), "../lib resolved");
+
+    let diags = program.project_reference_diagnostics();
+    assert_eq!(diags.len(), 1, "non-composite reference reported");
+    assert_eq!(diags[0].code(), 6306);
+    assert_eq!(
+        diags[0].text(),
+        "Referenced project '/lib' must have setting \"composite\": true."
+    );
+
+    let order = program.build_order();
+    assert_eq!(
+        order.order,
+        vec![
+            "/lib/tsconfig.json".to_string(),
+            "/app/tsconfig.json".to_string(),
+        ]
+    );
+    assert!(order.circular_diagnostics.is_empty());
+}
+
+/// A program with no config file (constructed from a raw command line) has no
+/// references: the accessors are empty and construction is unchanged.
+// Go: internal/compiler/program.go:Program (no ConfigFile -> no references)
+#[test]
+fn program_without_config_file_has_no_references() {
+    let program = program_for(&[("/src/index.ts", "export const x = 1;")], "/src", &[]);
+    assert!(program.get_resolved_project_references().is_empty());
+    assert!(program.project_reference_diagnostics().is_empty());
+    assert!(program.build_order().order.is_empty());
+}
+
 /// With root files and `noLib` off (and no explicit `--lib`), the program
 /// automatically includes the default library file resolved from the emit
 /// target (`lib.d.ts` for ES5), reads it from the bundled embed, and binds it

@@ -19,6 +19,7 @@ pub mod filesparser;
 pub mod host;
 pub mod multifile;
 pub mod program;
+pub mod projectreference;
 pub mod verify_options;
 
 pub use boundfile::BoundFile;
@@ -33,5 +34,10 @@ pub use multifile::MultiFileBoundProgram;
 pub use program::{
     combine_emit_results, new_program, EmitOptions, EmitResult, Program, ProgramOptions,
     SourceMapEmitResult, WriteFileCallback, WriteFileData,
+};
+pub use projectreference::{
+    check_source_files_belong_to_root_dir, get_output_declaration_file_name,
+    get_output_js_file_name, get_resolved_project_reference, resolve_project_references,
+    BuildOrder, ProjectReferenceDiagnostic, ResolvedProjectReferences,
 };
 pub use verify_options::{verify_compiler_options, OptionsDiagnostic};

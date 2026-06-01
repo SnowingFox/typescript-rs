@@ -22,6 +22,9 @@ use crate::checkerpool::CompilerCheckerPool;
 use crate::emitter::{emit_js_text_with_source_map, EmitOnly};
 use crate::fileloader::{process_all_program_files, ProcessedFiles};
 use crate::host::{CompilerHost, ParsedFile};
+use crate::projectreference::{
+    resolve_project_references, BuildOrder, ProjectReferenceDiagnostic, ResolvedProjectReferences,
+};
 use crate::verify_options::{verify_compiler_options, OptionsDiagnostic};
 
 /// The inputs to [`new_program`]: the host, the parsed configuration, and the
@@ -60,6 +63,12 @@ pub struct Program {
     checker_pool: CompilerCheckerPool,
     compare_paths_options: ComparePathsOptions,
     program_diagnostics: Vec<OptionsDiagnostic>,
+    /// The resolved project-reference graph (`None` when the program was not
+    /// built from a config file, i.e. has no `references[]` to resolve).
+    resolved_project_references: Option<ResolvedProjectReferences>,
+    /// The project-reference consistency diagnostics (`TS6306`/`TS6310`/`TS6053`)
+    /// produced by `verify_project_references` during construction.
+    reference_diagnostics: Vec<ProjectReferenceDiagnostic>,
 }
 
 /// Builds a [`Program`]: loads and parses all files reachable from the root
@@ -110,12 +119,28 @@ pub fn new_program(opts: ProgramOptions) -> Program {
     // checkers are created on demand by `create_checkers`.
     let program_diagnostics = verify_compiler_options(opts.config.compiler_options());
 
+    // Resolve the project-reference graph and run the composite/noEmit checks
+    // (Go's `verifyProjectReferences`, part of `NewProgram`). Only programs built
+    // from a config file have references to resolve, gated on a non-empty
+    // `configFilePath` (Go gates on `Config.ConfigFile != nil`).
+    let config_file_path = opts.config.compiler_options().config_file_path.clone();
+    let (resolved_project_references, reference_diagnostics) = if config_file_path.is_empty() {
+        (None, Vec::new())
+    } else {
+        let graph =
+            resolve_project_references(opts.host.as_ref(), &config_file_path, opts.config.as_ref());
+        let diagnostics = graph.verify_project_references();
+        (Some(graph), diagnostics)
+    };
+
     Program {
         opts,
         processed,
         checker_pool,
         compare_paths_options,
         program_diagnostics,
+        resolved_project_references,
+        reference_diagnostics,
     }
 }
 
@@ -327,6 +352,45 @@ impl Program {
     // Go: internal/compiler/program.go:Program.programDiagnostics (verifyCompilerOptions subset)
     pub fn options_diagnostics(&self) -> &[OptionsDiagnostic] {
         &self.program_diagnostics
+    }
+
+    /// The root config's directly-resolved project references, in declaration
+    /// order (an entry is `None` when that referenced config could not be read).
+    ///
+    /// Empty when the program was not built from a config file.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/compiler/program.go:Program.GetResolvedProjectReferences
+    pub fn get_resolved_project_references(&self) -> Vec<Option<&ParsedCommandLine>> {
+        match &self.resolved_project_references {
+            Some(graph) => graph.get_resolved_project_references(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The project-reference consistency diagnostics (`TS6306` non-composite,
+    /// `TS6310` noEmit, `TS6053` not-found) found while constructing the program.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/compiler/program.go:verifyProjectReferences (programDiagnostics)
+    pub fn project_reference_diagnostics(&self) -> &[ProjectReferenceDiagnostic] {
+        &self.reference_diagnostics
+    }
+
+    /// The topological build order of the project-reference graph plus any
+    /// `TS6202` circular-graph diagnostics (empty/no-op when the program has no
+    /// references).
+    ///
+    /// This is the reachable input a `--build` orchestration (P9) drives; the
+    /// program itself does not build referenced projects.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/execute/build/orchestrator.go:Orchestrator.setupBuildTask
+    pub fn build_order(&self) -> BuildOrder {
+        match &self.resolved_project_references {
+            Some(graph) => graph.get_build_order(),
+            None => BuildOrder::default(),
+        }
     }
 
     /// Emits the program's source files, running each through the script
