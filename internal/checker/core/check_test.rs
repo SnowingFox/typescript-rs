@@ -8332,33 +8332,371 @@ fn require_call_in_js_file_resolves_no_cannot_find_name() {
 }
 
 // Guard: a bare `require` reference that is NOT the callee of a `require(...)`
-// call still reports 2304 — the resolution is conditioned on the parent being
-// a require call (Go gates the `RequireSymbol` branch on `IsRequireCall`).
+// call is NOT resolved to the synthetic require symbol (that branch is gated on
+// `IsRequireCall`), so it stays unresolved — and now reports the specialized
+// node-typedefs hint TS2591 (Round 7's `getCannotFindNameDiagnosticForName`
+// maps `require` to the node hint), NOT the silent `any` resolution. (Before
+// Round 7 this asserted TS2304; the guard intent — `require` is not silently
+// resolved when it is a bare reference — is unchanged.)
 // Go: internal/binder/nameresolver.go:Resolve (RequireSymbol branch / IsRequireCall)
+//     + internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName ("require")
 #[test]
-fn bare_require_reference_in_js_file_still_reports_2304() {
+fn bare_require_reference_in_js_file_reports_2591_node_typedefs() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind_js("/a.js", "require;"));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
     assert!(
-        diags.iter().any(|d| d.code == 2304),
-        "a bare `require` (not a call) is unresolved -> 2304: {diags:?}"
+        diags.iter().any(|d| d.code == 2591),
+        "a bare `require` (not a call) is unresolved -> node-typedefs hint 2591: {diags:?}"
+    );
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "the bare `require` must NOT report the generic 2304: {diags:?}"
     );
 }
 
 // Guard: a `require(...)` call in a TS file does NOT get the JS-only require
-// resolution, so the unresolved `require` still reports 2304 (Go gates the
-// `RequireSymbol` branch on `IsInJSFile`).
-// Go: internal/binder/nameresolver.go:Resolve (IsInJSFile gate)
+// resolution, so the unresolved `require` still reports the specialized
+// node-typedefs hint. `require` is in Go's node-builtin switch arm, so an
+// unresolved `require` (here, in a TS file where the JS require-call resolution
+// does not apply) reports TS2591 — not the generic TS2304. (Before Round 7 this
+// asserted TS2304; Round 7 ports `getCannotFindNameDiagnosticForName`, which
+// maps `require` to the node hint, matching tsc.)
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName ("require")
+//     + internal/binder/nameresolver.go:Resolve (IsInJSFile gate)
 #[test]
-fn require_call_in_ts_file_still_reports_2304() {
+fn require_call_in_ts_file_still_reports_cannot_find_name_2591() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "require(\"./x\");"));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
     assert!(
-        diags.iter().any(|d| d.code == 2304),
-        "require(...) in a TS file is unresolved -> 2304: {diags:?}"
+        diags.iter().any(|d| d.code == 2591),
+        "require(...) in a TS file is unresolved -> node-typedefs hint 2591: {diags:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Round 7 — getCannotFindNameDiagnosticForName: an unresolved identifier emits
+// the SAME specialized "cannot find name" diagnostic code as tsc (dispatched on
+// the name / parent kind / `UsesWildcardTypes`), instead of the generic TS2304.
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName
+// ---------------------------------------------------------------------------
+
+// Slice 1 (headline): an unresolved `module` reference reports the node
+// type-definitions hint TS2591 ("...and then add 'node' to the types field..."
+// variant, because the default options have `UsesWildcardTypes == false`), not
+// the generic TS2304.
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName ("module")
+#[test]
+fn unresolved_module_reports_2591_node_typedefs() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "module;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, 2591);
+    assert_eq!(
+        diags[0].message,
+        "Cannot find name 'module'. Do you need to install type definitions for node? Try `npm i --save-dev @types/node` and then add 'node' to the types field in your tsconfig."
+    );
+}
+
+// Slice 3: the remaining Node ambient globals (`process`, `Buffer`, `NodeJS`)
+// also report the node type-definitions hint TS2591.
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName
+//     ("process", "Buffer", "NodeJS")
+#[test]
+fn unresolved_process_reports_2591_node_typedefs() {
+    for name in ["process", "Buffer", "NodeJS"] {
+        let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", &format!("{name};")));
+        let root = p.root();
+        let mut c = Checker::new_checker(p);
+        let diags = c.get_diagnostics(root);
+        assert_eq!(diags.len(), 1, "{name}: got {diags:?}");
+        assert_eq!(diags[0].code, 2591, "{name}: expected node hint 2591");
+        assert_eq!(
+            diags[0].message,
+            format!("Cannot find name '{name}'. Do you need to install type definitions for node? Try `npm i --save-dev @types/node` and then add 'node' to the types field in your tsconfig.")
+        );
+    }
+}
+
+// Slice 4: with `types: ["*"]` (`UsesWildcardTypes` true), the Node-global hint
+// is the WILDCARD variant TS2580 ("Try `npm i --save-dev @types/node`.") with no
+// "...and then add 'node' to the types field..." tail — Go's `core.IfElse`
+// selects the first arm when `UsesWildcardTypes()` holds. Proves the wildcard
+// branch is gated on the `types` option.
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName (node arm)
+//     + internal/core/compileroptions.go:UsesWildcardTypes
+#[test]
+fn unresolved_module_with_wildcard_types_reports_2580() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    let options = CompilerOptions {
+        types: vec!["*".to_string()],
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts", "module;", options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, 2580);
+    assert_eq!(
+        diags[0].message,
+        "Cannot find name 'module'. Do you need to install type definitions for node? Try `npm i --save-dev @types/node`."
+    );
+}
+
+// Slice 5: `document` / `console` point at the dom lib (TS2584). This arm is NOT
+// gated on `UsesWildcardTypes` (Go returns the dom message unconditionally).
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName
+//     ("document", "console")
+#[test]
+fn unresolved_document_console_reports_2584_dom() {
+    for name in ["document", "console"] {
+        let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", &format!("{name};")));
+        let root = p.root();
+        let mut c = Checker::new_checker(p);
+        let diags = c.get_diagnostics(root);
+        assert_eq!(diags.len(), 1, "{name}: got {diags:?}");
+        assert_eq!(diags[0].code, 2584, "{name}: expected dom hint 2584");
+        assert_eq!(
+            diags[0].message,
+            format!("Cannot find name '{name}'. Do you need to change your target library? Try changing the 'lib' compiler option to include 'dom'.")
+        );
+    }
+}
+
+// Slice 6: a target-library name (`Map`/`Set`/`Promise`/`Symbol`/.../`BigInt`/
+// `BigUint64Array`) reports TS2583 with the `{1}` argument filled by
+// `getSuggestedLibForNonExistentName` (the first lib in the feature map for the
+// name) — e.g. `Map` -> `es2015`, `SharedArrayBuffer` -> `es2017`,
+// `AsyncGenerator` -> `es2018`, `BigInt` -> `es2020`. The `{1}` precision comes
+// from Go's `onFailedToResolveSymbol`, which reports the missing-lib variant
+// first when `getSuggestedLibForNonExistentName(name)` is non-empty.
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName (target-lib arm)
+//     + Checker.getSuggestedLibForNonExistentName + Checker.onFailedToResolveSymbol
+//     + internal/checker/utilities.go:getFeatureMap
+#[test]
+fn unresolved_target_lib_name_reports_2583_with_suggested_lib() {
+    for (name, lib) in [
+        ("Map", "es2015"),
+        ("Set", "es2015"),
+        ("Promise", "es2015"),
+        ("Symbol", "es2015"),
+        ("WeakMap", "es2015"),
+        ("WeakSet", "es2015"),
+        ("Iterator", "es2015"),
+        ("AsyncIterator", "es2015"),
+        ("Reflect", "es2015"),
+        ("SharedArrayBuffer", "es2017"),
+        ("Atomics", "es2017"),
+        ("AsyncIterable", "es2018"),
+        ("AsyncIterableIterator", "es2018"),
+        ("AsyncGenerator", "es2018"),
+        ("AsyncGeneratorFunction", "es2018"),
+        ("BigInt", "es2020"),
+        ("BigInt64Array", "es2020"),
+        ("BigUint64Array", "es2020"),
+    ] {
+        let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", &format!("{name};")));
+        let root = p.root();
+        let mut c = Checker::new_checker(p);
+        let diags = c.get_diagnostics(root);
+        assert_eq!(diags.len(), 1, "{name}: got {diags:?}");
+        assert_eq!(diags[0].code, 2583, "{name}: expected target-lib hint 2583");
+        assert_eq!(
+            diags[0].message,
+            format!("Cannot find name '{name}'. Do you need to change your target library? Try changing the 'lib' compiler option to '{lib}' or later.")
+        );
+    }
+}
+
+// Slice 7: an undefined shorthand property (`{ x }` where `x` is not in scope)
+// reports TS18004 — the default arm checks `node.Parent.Kind ==
+// ShorthandPropertyAssignment` before falling back to TS2304.
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName
+//     (default arm, ShorthandPropertyAssignment)
+#[test]
+fn undefined_shorthand_property_reports_18004() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "const o = { x };"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, 18004);
+    assert_eq!(
+        diags[0].message,
+        "No value exists in scope for the shorthand property 'x'. Either declare one or provide an initializer."
+    );
+}
+
+// Slice 8 (guard): an ordinary undefined name (not in any specialized arm and
+// not a shorthand property) STILL reports the generic TS2304 — the default arm
+// is unchanged. Proves the dispatch did not blanket-replace TS2304.
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName (default -> Cannot_find_name_0)
+#[test]
+fn ordinary_undefined_name_still_reports_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "foo;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, 2304);
+    assert_eq!(diags[0].message, "Cannot find name 'foo'.");
+}
+
+// Slice 9a: `$` points at `@types/jquery` (TS2592 default / TS2581 wildcard).
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName ("$")
+#[test]
+fn unresolved_dollar_reports_jquery_hint() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "$;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, 2592);
+    assert_eq!(
+        diags[0].message,
+        "Cannot find name '$'. Do you need to install type definitions for jQuery? Try `npm i --save-dev @types/jquery` and then add 'jquery' to the types field in your tsconfig."
+    );
+}
+
+// Slice 9a (wildcard): with `types: ["*"]`, `$` is the shorter TS2581 variant.
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName ("$")
+#[test]
+fn unresolved_dollar_with_wildcard_types_reports_2581() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    let options = CompilerOptions {
+        types: vec!["*".to_string()],
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts", "$;", options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, 2581);
+    assert_eq!(
+        diags[0].message,
+        "Cannot find name '$'. Do you need to install type definitions for jQuery? Try `npm i --save-dev @types/jquery`."
+    );
+}
+
+// Slice 9b: the test-runner globals point at `@types/jest`/`@types/mocha`
+// (TS2593 default / TS2582 wildcard).
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName
+//     ("beforeEach", "describe", "suite", "it", "test")
+#[test]
+fn unresolved_test_runner_names_report_2593() {
+    for name in ["beforeEach", "describe", "suite", "it", "test"] {
+        let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", &format!("{name};")));
+        let root = p.root();
+        let mut c = Checker::new_checker(p);
+        let diags = c.get_diagnostics(root);
+        assert_eq!(diags.len(), 1, "{name}: got {diags:?}");
+        assert_eq!(
+            diags[0].code, 2593,
+            "{name}: expected test-runner hint 2593"
+        );
+        assert_eq!(
+            diags[0].message,
+            format!("Cannot find name '{name}'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha` and then add 'jest' or 'mocha' to the types field in your tsconfig.")
+        );
+    }
+}
+
+// Slice 9c: `Bun` points at `@types/bun` (TS2868 default / TS2867 wildcard).
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName ("Bun")
+#[test]
+fn unresolved_bun_reports_2868() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "Bun;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, 2868);
+    assert_eq!(
+        diags[0].message,
+        "Cannot find name 'Bun'. Do you need to install type definitions for Bun? Try `npm i --save-dev @types/bun` and then add 'bun' to the types field in your tsconfig."
+    );
+}
+
+// Slice 9d: an unresolved `await` whose parent is a CallExpression
+// (`await(0)` in a non-async script, where `await` is an identifier callee)
+// reports TS2311 "Did you mean to write this in an async function?".
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName ("await")
+#[test]
+fn unresolved_await_callee_reports_2311() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "await(0);"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2311
+            && d.message
+                == "Cannot find name 'await'. Did you mean to write this in an async function?"),
+        "expected TS2311 for the `await` callee: {diags:?}"
+    );
+}
+
+// Slice 9d (fallthrough): an unresolved bare `await` that is NOT a call callee
+// falls through Go's `case "await"` to the default arm -> generic TS2304.
+// Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName ("await" fallthrough)
+#[test]
+fn unresolved_bare_await_falls_through_to_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "await;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2304 && d.message == "Cannot find name 'await'."),
+        "a bare `await` (not a call callee) falls through to 2304: {diags:?}"
+    );
+}
+
+// Direct unit test of the pure `getSuggestedLibForNonExistentName` port: every
+// expected `name -> first-lib` (Go literals from `getFeatureMap`), spanning each
+// distinct lib bucket, plus the empty result for an unknown name. Includes names
+// that are NOT in the TS2583 switch arm (`Array`/`Math`/`Date`) to prove the
+// function mirrors Go for ALL inputs (the lib arg is harmlessly ignored when the
+// resolved message has no `{1}`).
+// Go: internal/checker/checker.go:Checker.getSuggestedLibForNonExistentName
+//     + internal/checker/utilities.go:getFeatureMap
+#[test]
+fn get_suggested_lib_for_non_existent_name_matches_feature_map() {
+    use super::get_suggested_lib_for_non_existent_name as lib_of;
+    assert_eq!(lib_of("Array"), "es2015");
+    assert_eq!(lib_of("Map"), "es2015");
+    assert_eq!(lib_of("Promise"), "es2015");
+    assert_eq!(lib_of("Symbol"), "es2015");
+    assert_eq!(lib_of("Reflect"), "es2015");
+    assert_eq!(lib_of("Math"), "es2015");
+    assert_eq!(lib_of("Atomics"), "es2017");
+    assert_eq!(lib_of("SharedArrayBuffer"), "es2017");
+    assert_eq!(lib_of("AsyncGenerator"), "es2018");
+    assert_eq!(lib_of("Intl"), "es2018");
+    assert_eq!(lib_of("BigInt"), "es2020");
+    assert_eq!(lib_of("BigInt64Array"), "es2020");
+    assert_eq!(lib_of("DataView"), "es2020");
+    assert_eq!(lib_of("Int8Array"), "es2022");
+    assert_eq!(lib_of("Error"), "es2022");
+    assert_eq!(lib_of("MapConstructor"), "es2024");
+    assert_eq!(lib_of("ArrayBuffer"), "es2024");
+    assert_eq!(lib_of("Float16Array"), "es2025");
+    assert_eq!(lib_of("RegExpConstructor"), "es2025");
+    assert_eq!(lib_of("Date"), "esnext");
+    assert_eq!(lib_of("DisposableStack"), "esnext");
+    // Unknown / non-feature names -> empty (so the caller passes only `{0}`).
+    assert_eq!(lib_of("module"), "");
+    assert_eq!(lib_of("foo"), "");
+    assert_eq!(lib_of(""), "");
 }

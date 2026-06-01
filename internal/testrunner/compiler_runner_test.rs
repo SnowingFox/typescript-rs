@@ -700,9 +700,21 @@ fn expanded_compiler_subset_parity_smoke() {
     assert_eq!(hist.missing_all_errors, 32);
     assert_eq!(hist.divergent, 26);
 
+    // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
+    // now emits tsc's SPECIALIZED "cannot find name" code instead of the bare
+    // TS2304 — `module`/`require`/`process`/`Buffer`/`NodeJS` -> TS2591 (the
+    // "@types/node" hint), `document`/`console` -> TS2584, the target-lib
+    // globals (`Map`/`Set`/`Promise`/...) -> TS2583, and an undefined shorthand
+    // property -> TS18004 (Go's `getCannotFindNameDiagnosticForName`). On THIS
+    // subset tsc resolves `module` (via CommonJS binding), so our `module`
+    // diagnostics are still false positives — this round RELABELS them from
+    // `extra TS2304` to the Go-faithful `extra TS2591` (parity-neutral: passed
+    // stays 61), dropping `extra TS2304 ×57 -> ×44` and surfacing
+    // `extra TS2591 ×12`. The genuine fix (resolving `module`/`exports`) is the
+    // DEFERRED CommonJS-module-binding root.
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 57), (2339, 18)],
+        vec![(2304, 44), (2339, 18)],
         "top extra (false-positive) codes; histogram:\n{}",
         hist.report()
     );

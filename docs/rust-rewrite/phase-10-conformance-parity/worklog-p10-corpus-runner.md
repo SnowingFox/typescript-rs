@@ -1127,3 +1127,60 @@ No `--no-verify`; no test weakened or deleted; the byte comparison and the
 trivia-skipping emit are internal). No new dependency; root `Cargo.toml` /
 `Cargo.lock` untouched. TS2874 / TS2875 left UNIMPLEMENTED (deferred, blocked-by
 pragma scanning + implicit jsx-runtime module resolution).
+
+## Round 7 — getCannotFindNameDiagnosticForName (specialized cannot-find-name codes)
+
+**Root / Go ground truth.** An unresolved identifier was always reported as the
+bare `TS2304` "Cannot find name '{0}'.". tsc instead dispatches on the name in
+`internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName`
+(~13821), passed by `getResolvedSymbol` to `resolveName` which emits it on
+failure:
+- `process` / `require` / `Buffer` / `module` / `NodeJS` → **TS2580** when
+  `UsesWildcardTypes()` (`types: ["*"]`, `compileroptions.go:324`) else **TS2591**
+  (install `@types/node`).
+- `document` / `console` → **TS2584** (change `lib` to include `dom`).
+- `Map`/`Set`/`Promise`/`Symbol`/`WeakMap`/`WeakSet`/`Iterator`/`AsyncIterator`/
+  `SharedArrayBuffer`/`Atomics`/`AsyncIterable`/`AsyncIterableIterator`/
+  `AsyncGenerator`/`AsyncGeneratorFunction`/`BigInt`/`Reflect`/`BigInt64Array`/
+  `BigUint64Array` → **TS2583** (change target `lib` to '{1}' or later); the
+  `{1}` lib is filled from `getSuggestedLibForNonExistentName`
+  (`utilities.go:getFeatureMap` first-lib reduction).
+- `$` → jQuery hints; `beforeEach`/`describe`/`suite`/`it`/`test` → test-runner
+  hints; `Bun` → Bun hints (all wildcard-gated).
+- `await` whose parent is a `CallExpression` → "Did you mean to write this in an
+  async function"; otherwise FALLTHROUGH.
+- parent is `ShorthandPropertyAssignment` → **TS18004**; default → **TS2304**.
+
+**Rust landing.** `internal/checker/core/check.rs`:
+`Checker::get_cannot_find_name_diagnostic_for_name(program, node)` reproduces the
+switch (the emission lives in `check_identifier` because the Rust `resolve_name`
+is a pure lookup); free fn `get_suggested_lib_for_non_existent_name(name)` ports
+the feature-map first-lib table for the TS2583 `{1}` arg. `uses_wildcard_types()`
+pre-existed on `CompilerOptions`. The dead Go arm `"ast.Symbol"` (a sed artifact
+of `Symbol`) is ported as the real `"Symbol"` with a note.
+
+**RED→GREEN + guards** (checker +14 unit, 750→764): node-globals→TS2591, bare
+`require`→TS2591, wildcard→TS2580, `document`/`console`→TS2584, `Map`-family→
+TS2583 with `{1}`, shorthand→TS18004, ordinary name still TS2304 (default-arm
+guard).
+
+**Parity BEFORE→AFTER (150-case).** passed/failed/errored **61/89/0 → 61/89/0**
+(unchanged); categories `31/32/26` unchanged; `top_missing(1)==[(2874,7)]`
+unchanged. `top_extra(2)`: **`(2304, 57) → (2304, 44)`** (−13) with
+`extra TS2591 ×12` surfacing. This is a CORRECTNESS / code-fidelity round, not a
+pass-count round: on this subset tsc RESOLVES `module` (CommonJS binding), so our
+`module` diagnostics remain false positives — Round 7 relabels them from the
+generic `extra TS2304` to the Go-faithful `extra TS2591`. The genuine fix
+(resolving `module`/`exports`) is the DEFERRED CommonJS-module-binding root;
+`exports` is not in the node list and stays TS2304.
+
+## Gate results (Round 7)
+
+- `cargo test -p tsgo_checker` — GREEN (764 unit + 178 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (95 unit + 11 doctests) [real-lib path].
+- `cargo test -p tsgo_testrunner` — GREEN (150-case re-measure; snapshot updated).
+- `cargo clippy … -- -D warnings` + `cargo fmt -- --check` — GREEN.
+- `cargo build --workspace --all-targets` — GREEN.
+
+No `--no-verify`; no test weakened/deleted; additive only; no dependency / no
+`Cargo.toml`/`Cargo.lock` change. Default arm (ordinary names) stays TS2304.

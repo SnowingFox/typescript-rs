@@ -1002,16 +1002,20 @@ fn plain_js_file_is_still_checked() {
         true,
     );
     let diags = program.semantic_diagnostics();
+    // `module` maps to TS2591 (the "@types/node" hint) via
+    // getCannotFindNameDiagnosticForName (Round 7); the point of this guard is
+    // that plain JS IS bind-and-checked, so the unresolved `module` surfaces a
+    // diagnostic. (`module` resolving via CommonJS binding is a deferred root.)
     assert!(
-        diags.iter().any(|d| d.code == 2304),
-        "plain JS (checkJs unset) is checked in Go, so `module` reports 2304: {diags:?}"
+        diags.iter().any(|d| d.code == 2591),
+        "plain JS (checkJs unset) is checked in Go, so `module` reports 2591: {diags:?}"
     );
 }
 
 /// Guard: a JS file compiled with `checkJs: true` IS bind-and-checked (the
 /// `isCheckJS` branch), so the gate is conditioned on the `checkJs` state and
 /// does not blanket-skip JS. (`module` is still a deferred CommonJS-binding
-/// root, so it reports 2304 here — see the worklog.)
+/// root, so it reports the TS2591 "@types/node" hint here — see the worklog.)
 // Go: internal/ast/utilities.go:IsCheckJSEnabledForFile + Program.canIncludeBindAndCheckDiagnostics
 #[test]
 fn js_file_with_check_js_true_is_checked() {
@@ -1029,8 +1033,8 @@ fn js_file_with_check_js_true_is_checked() {
     );
     let diags = program.semantic_diagnostics();
     assert!(
-        diags.iter().any(|d| d.code == 2304),
-        "checkJs:true JS is checked: {diags:?}"
+        diags.iter().any(|d| d.code == 2591),
+        "checkJs:true JS is checked (`module` -> TS2591): {diags:?}"
     );
 }
 

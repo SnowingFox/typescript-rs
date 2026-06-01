@@ -1168,17 +1168,125 @@ impl Checker {
                         }
                     }
                 }
-                self.error(
-                    program,
-                    node,
-                    &tsgo_diagnostics::CANNOT_FIND_NAME_0,
-                    &[name.as_str()],
-                );
+                let message = self.get_cannot_find_name_diagnostic_for_name(program, node);
+                // Go's `onFailedToResolveSymbol` reports the missing-lib variant
+                // FIRST: when `getSuggestedLibForNonExistentName(name)` is
+                // non-empty it passes the suggested lib as the `{1}` argument
+                // (the TS2583 "...change the 'lib' option to '{1}' or later."
+                // message), otherwise just the name `{0}`. Every name routed to
+                // TS2583 has a feature-map entry, so the `{1}` is always present
+                // for that message (and is harmlessly ignored by the `{0}`-only
+                // messages).
+                // Go: internal/checker/checker.go:Checker.onFailedToResolveSymbol
+                let suggested_lib = get_suggested_lib_for_non_existent_name(&name);
+                if suggested_lib.is_empty() {
+                    self.error(program, node, message, &[name.as_str()]);
+                } else {
+                    self.error(program, node, message, &[name.as_str(), suggested_lib]);
+                }
                 self.error_type
             }
             Some(symbol) => {
                 let declared = get_type_of_symbol(self, program, symbol, globals);
                 self.get_flow_type_of_reference(program, node, declared)
+            }
+        }
+    }
+
+    // Returns the specialized "cannot find name" diagnostic for an unresolved
+    // identifier `node`, dispatched on the identifier text, its parent kind,
+    // and the `types: ["*"]` wildcard option — mirroring tsc, which points the
+    // user at the missing `@types/node` / dom / target-lib definitions instead
+    // of the bare TS2304. Go's `getResolvedSymbol` passes this message to
+    // `resolveName`, which emits it on resolution failure; in the port the
+    // emission lives in `check_identifier` (Rust's `resolve_name` is a pure
+    // lookup), so the dispatch is reproduced here.
+    // Go: internal/checker/checker.go:Checker.getCannotFindNameDiagnosticForName
+    fn get_cannot_find_name_diagnostic_for_name(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> &'static Message {
+        // `types: ["*"]` selects the shorter "install @types/X" variant (no
+        // "...and then add 'X' to the types field..." tail), since a wildcard
+        // `types` list already opts every `@types` package in.
+        let uses_wildcard = program.compiler_options().uses_wildcard_types();
+        match program.arena().text(node) {
+            // The dom globals point at the `dom` lib (not gated on wildcard).
+            "document" | "console" => {
+                &tsgo_diagnostics::CANNOT_FIND_NAME_0_DO_YOU_NEED_TO_CHANGE_YOUR_TARGET_LIBRARY_TRY_CHANGING_THE_LIB_COMPILER_OPTION_TO_INCLUDE_DOM
+            }
+            // `$` points at `@types/jquery`.
+            "$" => {
+                if uses_wildcard {
+                    &tsgo_diagnostics::CANNOT_FIND_NAME_0_DO_YOU_NEED_TO_INSTALL_TYPE_DEFINITIONS_FOR_JQUERY_TRY_NPM_I_SAVE_DEV_TYPES_SLASHJQUERY
+                } else {
+                    &tsgo_diagnostics::CANNOT_FIND_NAME_0_DO_YOU_NEED_TO_INSTALL_TYPE_DEFINITIONS_FOR_JQUERY_TRY_NPM_I_SAVE_DEV_TYPES_SLASHJQUERY_AND_THEN_ADD_JQUERY_TO_THE_TYPES_FIELD_IN_YOUR_TSCONFIG
+                }
+            }
+            // The test-runner globals point at `@types/jest`/`@types/mocha`.
+            "beforeEach" | "describe" | "suite" | "it" | "test" => {
+                if uses_wildcard {
+                    &tsgo_diagnostics::CANNOT_FIND_NAME_0_DO_YOU_NEED_TO_INSTALL_TYPE_DEFINITIONS_FOR_A_TEST_RUNNER_TRY_NPM_I_SAVE_DEV_TYPES_SLASHJEST_OR_NPM_I_SAVE_DEV_TYPES_SLASHMOCHA
+                } else {
+                    &tsgo_diagnostics::CANNOT_FIND_NAME_0_DO_YOU_NEED_TO_INSTALL_TYPE_DEFINITIONS_FOR_A_TEST_RUNNER_TRY_NPM_I_SAVE_DEV_TYPES_SLASHJEST_OR_NPM_I_SAVE_DEV_TYPES_SLASHMOCHA_AND_THEN_ADD_JEST_OR_MOCHA_TO_THE_TYPES_FIELD_IN_YOUR_TSCONFIG
+                }
+            }
+            // The CommonJS / Node ambient globals point at `@types/node`.
+            "process" | "require" | "Buffer" | "module" | "NodeJS" => {
+                if uses_wildcard {
+                    &tsgo_diagnostics::CANNOT_FIND_NAME_0_DO_YOU_NEED_TO_INSTALL_TYPE_DEFINITIONS_FOR_NODE_TRY_NPM_I_SAVE_DEV_TYPES_SLASHNODE
+                } else {
+                    &tsgo_diagnostics::CANNOT_FIND_NAME_0_DO_YOU_NEED_TO_INSTALL_TYPE_DEFINITIONS_FOR_NODE_TRY_NPM_I_SAVE_DEV_TYPES_SLASHNODE_AND_THEN_ADD_NODE_TO_THE_TYPES_FIELD_IN_YOUR_TSCONFIG
+                }
+            }
+            // `Bun` points at `@types/bun`.
+            "Bun" => {
+                if uses_wildcard {
+                    &tsgo_diagnostics::CANNOT_FIND_NAME_0_DO_YOU_NEED_TO_INSTALL_TYPE_DEFINITIONS_FOR_BUN_TRY_NPM_I_SAVE_DEV_TYPES_SLASHBUN
+                } else {
+                    &tsgo_diagnostics::CANNOT_FIND_NAME_0_DO_YOU_NEED_TO_INSTALL_TYPE_DEFINITIONS_FOR_BUN_TRY_NPM_I_SAVE_DEV_TYPES_SLASHBUN_AND_THEN_ADD_BUN_TO_THE_TYPES_FIELD_IN_YOUR_TSCONFIG
+                }
+            }
+            // Target-library globals point at a higher `lib` target. Go's
+            // switch literal reads `"ast.Symbol"` here, which is a
+            // search-and-replace artifact from the original `Symbol` case — a
+            // bare identifier's `Text()` is never the qualified `ast.Symbol`, so
+            // that arm is dead in Go. The port uses the real `"Symbol"` so the
+            // behavior matches `tsc` (and `getSuggestedLibForNonExistentName`,
+            // which keys on `"Symbol"`). The `{1}` lib is filled by the caller
+            // from `get_suggested_lib_for_non_existent_name`.
+            "Map" | "Set" | "Promise" | "Symbol" | "WeakMap" | "WeakSet" | "Iterator"
+            | "AsyncIterator" | "SharedArrayBuffer" | "Atomics" | "AsyncIterable"
+            | "AsyncIterableIterator" | "AsyncGenerator" | "AsyncGeneratorFunction" | "BigInt"
+            | "Reflect" | "BigInt64Array" | "BigUint64Array" => {
+                &tsgo_diagnostics::CANNOT_FIND_NAME_0_DO_YOU_NEED_TO_CHANGE_YOUR_TARGET_LIBRARY_TRY_CHANGING_THE_LIB_COMPILER_OPTION_TO_1_OR_LATER
+            }
+            // `await` used as the callee of a call (`await(x)` in a non-async
+            // context, where it parses as an identifier) suggests the enclosing
+            // function should be `async`; otherwise it FALLS THROUGH to the
+            // default arm (Go's `fallthrough`).
+            "await"
+                if program
+                    .arena()
+                    .parent(node)
+                    .is_some_and(|p| program.arena().kind(p) == Kind::CallExpression) =>
+            {
+                &tsgo_diagnostics::CANNOT_FIND_NAME_0_DID_YOU_MEAN_TO_WRITE_THIS_IN_AN_ASYNC_FUNCTION
+            }
+            _ => {
+                // Default arm: an undefined shorthand property (`{ x }`) reports
+                // TS18004 ("No value exists in scope for the shorthand
+                // property..."); everything else is the generic TS2304.
+                if program
+                    .arena()
+                    .parent(node)
+                    .is_some_and(|p| program.arena().kind(p) == Kind::ShorthandPropertyAssignment)
+                {
+                    &tsgo_diagnostics::NO_VALUE_EXISTS_IN_SCOPE_FOR_THE_SHORTHAND_PROPERTY_0_EITHER_DECLARE_ONE_OR_PROVIDE_AN_INITIALIZER
+                } else {
+                    &tsgo_diagnostics::CANNOT_FIND_NAME_0
+                }
             }
         }
     }
@@ -5737,6 +5845,53 @@ fn is_require_call(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
                 && d.arguments.nodes.len() == 1
         }
         _ => false,
+    }
+}
+
+// Returns the `lib` (e.g. `es2015`) whose feature map first introduced `name`,
+// or `""` when `name` is not a known target-library global. This is the `{1}`
+// argument of the TS2583 "...change the 'lib' compiler option to '{1}'..."
+// diagnostic.
+//
+// Ports Go's `getSuggestedLibForNonExistentName`, which returns
+// `getFeatureMap()[name][0].lib`. The Go feature map (`internal/checker/
+// utilities.go:getFeatureMap`) carries the full per-name `(lib, props)` history;
+// this consumer reads only the FIRST entry's lib, so the table is reduced to a
+// `name -> first-lib` map (a complete, faithful port of THIS function's
+// behavior for every input). The per-property `props` arrays — needed only by
+// the OTHER consumer, `getSuggestedLibForNonExistentProperty` (TS2550) — are
+// not modeled here.
+//
+// Side effects: none (pure).
+// Go: internal/checker/checker.go:Checker.getSuggestedLibForNonExistentName
+//     + internal/checker/utilities.go:getFeatureMap
+fn get_suggested_lib_for_non_existent_name(name: &str) -> &'static str {
+    match name {
+        "Array" | "Iterator" | "AsyncIterator" | "RegExp" | "Reflect" | "ArrayConstructor"
+        | "ObjectConstructor" | "NumberConstructor" | "Math" | "Map" | "Set"
+        | "PromiseConstructor" | "Symbol" | "WeakMap" | "WeakSet" | "String"
+        | "StringConstructor" | "Promise" => "es2015",
+        "Atomics" | "SharedArrayBuffer" | "DateTimeFormat" => "es2017",
+        "AsyncIterable"
+        | "AsyncIterableIterator"
+        | "AsyncGenerator"
+        | "AsyncGeneratorFunction"
+        | "RegExpMatchArray"
+        | "RegExpExecArray"
+        | "Intl"
+        | "NumberFormat" => "es2018",
+        "SymbolConstructor" | "DataView" | "BigInt" | "RelativeTimeFormat" | "BigInt64Array"
+        | "BigUint64Array" => "es2020",
+        "Int8Array" | "Uint8Array" | "Uint8ClampedArray" | "Int16Array" | "Uint16Array"
+        | "Int32Array" | "Uint32Array" | "Float32Array" | "Float64Array" | "Error" => "es2022",
+        "MapConstructor" | "ArrayBuffer" => "es2024",
+        "RegExpConstructor" | "Float16Array" => "es2025",
+        "ErrorConstructor"
+        | "Uint8ArrayConstructor"
+        | "DisposableStack"
+        | "AsyncDisposableStack"
+        | "Date" => "esnext",
+        _ => "",
     }
 }
 
