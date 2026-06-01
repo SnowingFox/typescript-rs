@@ -5,3 +5,17 @@ edition = "2021"
 
 [lib]
 path = "lib.rs"
+
+[dependencies]
+indexmap = "2.12.0"
+tsgo_bundled = { path = "../../bundled" }
+tsgo_checker = { path = "../../checker" }
+tsgo_compiler = { path = "../../compiler" }
+tsgo_core = { path = "../../core" }
+tsgo_diagnostics = { path = "../../diagnostics" }
+tsgo_diagnosticwriter = { path = "../../diagnosticwriter" }
+tsgo_locale = { path = "../../locale" }
+tsgo_parser = { path = "../../parser" }
+tsgo_tsoptions = { path = "../../tsoptions" }
+tsgo_tspath = { path = "../../tspath" }
+tsgo_vfs = { path = "../../vfs" }
