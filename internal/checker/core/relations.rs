@@ -805,7 +805,7 @@ impl Checker {
     // The resolved return type of a signature, or `any` when unresolved (Go's
     // `getReturnTypeOfSignature` for an already-resolved non-generic signature).
     // Go: internal/checker/checker.go:Checker.getReturnTypeOfSignature
-    fn signature_return_type(&self, sig: SignatureId) -> TypeId {
+    pub(crate) fn signature_return_type(&self, sig: SignatureId) -> TypeId {
         self.signature(sig)
             .resolved_return_type
             .unwrap_or(self.any_type)

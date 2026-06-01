@@ -28,7 +28,12 @@ fn inference_context_and_info_construction() {
     let info = InferenceInfo::new(TypeId(5));
     assert!(info.candidates.is_empty());
     assert!(!info.is_fixed);
-    assert_eq!(info.priority, InferencePriority::NONE);
+    // A fresh slot is seeded with the max priority (Go's `newInferenceInfo`),
+    // so the first inference of any priority replaces the seed. (Before C-B3's
+    // priority lattice this port seeded `NONE`; the seed must be the max so that
+    // a lower-priority contextual-return inference is recorded and then yielded
+    // to a higher-priority argument inference.)
+    assert_eq!(info.priority, InferencePriority::MAX_VALUE);
 }
 
 // Go: internal/checker/inference.go:inferFromTypes (bare type parameter)
@@ -310,4 +315,108 @@ fn get_inferred_types_for_call_resolves_each_slot() {
     // Second slot has no candidates -> unknown fallback.
     let result = c.get_inferred_types_for_call(&p, &mut ctx);
     assert_eq!(result, vec![one, c.unknown_type()]);
+}
+
+// ===========================================================================
+// C-B3: callback-result inference machinery (inferFromSignatures, the priority
+// lattice, and couldContainTypeVariables).
+// ===========================================================================
+
+// Builds an anonymous function type `(<param>) => <return>` for the signature
+// inference unit tests: one call signature whose single parameter symbol carries
+// `param` and whose return type is `ret`.
+fn function_type(c: &mut Checker, param: TypeId, ret: TypeId) -> TypeId {
+    use crate::core::signatures::{Signature, SignatureFlags};
+    use crate::core::types::ObjectType;
+    use tsgo_ast::CheckFlags;
+    let param_symbol = c.new_object_literal_property(
+        "x",
+        tsgo_ast::SymbolFlags::PROPERTY,
+        CheckFlags::empty(),
+        param,
+    );
+    let mut sig = Signature::new(SignatureFlags::NONE);
+    sig.parameters = vec![param_symbol];
+    sig.min_argument_count = 1;
+    sig.resolved_return_type = Some(ret);
+    let sid = c.new_signature(sig);
+    let object = ObjectType {
+        call_signatures: vec![sid],
+        ..Default::default()
+    };
+    c.new_object_type(ObjectFlags::ANONYMOUS, None, object)
+}
+
+// Go: internal/checker/inference.go:Checker.inferFromSignatures/inferFromSignature
+#[test]
+fn infer_from_signatures_infers_parameter_and_return() {
+    let mut c = Checker::new();
+    let p = empty();
+    let t = c.new_type_parameter(None);
+    let u = c.new_type_parameter(None);
+    let num = c.number_type();
+    let s = c.string_type();
+    // source: (x: number) => string ; target: (x: T) => U
+    let source = function_type(&mut c, num, s);
+    let target = function_type(&mut c, t, u);
+    // Inferring `(x: number) => string` against `(x: T) => U` infers `T = number`
+    // (from the parameter) and `U = string` (from the return).
+    let inferred = c.infer_type_arguments(&p, &[t, u], &[source], &[target]);
+    assert_eq!(inferred, vec![num, s]);
+}
+
+// Go: internal/checker/inference.go:inferFromTypes (priority `inference.priority` clear)
+#[test]
+fn infer_with_priority_stronger_replaces_weaker() {
+    let mut c = Checker::new();
+    let p = empty();
+    let tp = c.new_type_parameter(None);
+    let s = c.string_type();
+    let num = c.number_type();
+    let mut ctx = InferenceContext::new(&[tp]);
+    // A return-type (weaker) inference records `string`.
+    c.infer_types_with_priority(
+        &p,
+        &mut ctx.inferences,
+        s,
+        tp,
+        InferencePriority::RETURN_TYPE,
+    );
+    assert_eq!(ctx.inferences[0].candidates, vec![s]);
+    assert_eq!(ctx.inferences[0].priority, InferencePriority::RETURN_TYPE);
+    // A stronger (argument, `NONE`) inference clears the weaker candidate and
+    // replaces it — this is why `id(1)` infers `T = 1` even under a contextual
+    // `string` return.
+    c.infer_types_with_priority(&p, &mut ctx.inferences, num, tp, InferencePriority::NONE);
+    assert_eq!(ctx.inferences[0].candidates, vec![num]);
+    assert_eq!(ctx.inferences[0].priority, InferencePriority::NONE);
+    // A weaker inference after a stronger one is ignored.
+    c.infer_types_with_priority(
+        &p,
+        &mut ctx.inferences,
+        s,
+        tp,
+        InferencePriority::RETURN_TYPE,
+    );
+    assert_eq!(ctx.inferences[0].candidates, vec![num]);
+}
+
+// Go: internal/checker/checker.go:Checker.couldContainTypeVariables
+#[test]
+fn could_contain_type_variables_classifies_types() {
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let num = c.number_type();
+    // A bare type parameter, and a union containing one.
+    assert!(c.could_contain_type_variables(tp));
+    let union = c.get_union_type(&[num, tp]);
+    assert!(c.could_contain_type_variables(union));
+    // A generic reference whose type argument is a type parameter (`Array<T>`).
+    let array_target = c.new_object_type(ObjectFlags::INTERFACE, None, Default::default());
+    let array_of_tp = c.create_type_reference(array_target, vec![tp]);
+    assert!(c.could_contain_type_variables(array_of_tp));
+    // A plain primitive does not.
+    assert!(!c.could_contain_type_variables(num));
+    let array_of_num = c.create_type_reference(array_target, vec![num]);
+    assert!(!c.could_contain_type_variables(array_of_num));
 }

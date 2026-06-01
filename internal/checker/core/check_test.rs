@@ -6878,3 +6878,196 @@ fn generic_call_callback_parameter_inferred_accepts_matching_return() {
         c.get_diagnostics(root)
     );
 }
+
+// ===========================================================================
+// C-B3: generic call resolution completion — callback RESULT inference
+// (`inferFromSignatures`), contextual-return inference, the lazy inference
+// mapper, and instantiation caching.
+// ===========================================================================
+
+// C-B3 slice 1 (callback RESULT inference — the headline): `map<T, U>(a: T[],
+// f: (x: T) => U): U[]` called as `map([1, 2], x => x + "")` infers `T = number`
+// from the array argument, contextually types the callback parameter `x` as the
+// fixed `number`, then infers `U` from the callback's BODY return type. The body
+// `x + ""` types to `string` (string concatenation, using the contextually-typed
+// `x: number`), so `U = string` and the call result is `string[]`. Assigning
+// that to `number` reports 2322 with the result element type `string` (NOT
+// `unknown`, the C-B2 behavior before callback-return inference).
+//
+// This exercises the keystone: the second inference pass over context-sensitive
+// arguments (`inferTypeArguments`), the lazy inference mapper that fixes `T`
+// before contextually typing the callback, `getReturnTypeFromBody`, and
+// `inferFromSignatures` (covariant return-type inference of `U`).
+// Verified against `cmd/tsgo` (lib-free body equivalent): `(3,7): error TS2322:
+// Type 'string[]' is not assignable to type 'number'.` (the headline
+// `x => x.toFixed()` needs the real `Number.toFixed` lib; `x + ""` is the
+// lib-free equivalent that likewise yields a `string` element type from the
+// callback body using the contextually-typed `x: number`).
+//
+// DIVERGENCE(port): `cmd/tsgo` prints the array element form `string[]`; this
+// port has no `X[]` print sugar yet (a separate nodebuilder feature), so it
+// prints the underlying reference `Array<string>`. The element type `string`
+// is what C-B3's callback-return inference establishes (before C-B3 it was
+// `Array<unknown>`).
+// Go: internal/checker/inference.go:Checker.inferFromSignatures/inferFromSignature
+#[test]
+fn generic_call_infers_callback_result_from_body() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\nfunction map<T, U>(a: T[], f: (x: T) => U): U[] { return [] as any; }\nconst r = map([1, 2], x => x + \"\");\nconst n: number = r;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'Array<string>' is not assignable to type 'number'."
+    );
+}
+
+// C-B3 slice 2 (callback param + result together): the identity callback
+// `x => x` infers `U = T`. `T = number` is fixed from the array argument, so the
+// callback parameter `x` is `number`, and its body `x` returns `number`, hence
+// `U = number` and the result is `number[]`. Assigning that to `string[]` reports
+// 2322 (`number[]` not assignable to `string[]`), proving `U` tracks the
+// (contextually-typed) parameter through the body.
+// Verified against `cmd/tsgo`: `(3,7): error TS2322: Type 'number[]' is not
+// assignable to type 'string[]'.` (with a nested "Type 'number' is not
+// assignable to type 'string'." elaboration that this port's relation chain does
+// not yet materialize for array element mismatches — DEFER, message-chain
+// elaboration). DIVERGENCE(port): array element print `number[]`/`string[]` is
+// rendered as `Array<number>`/`Array<string>` (no `X[]` sugar yet).
+// Go: internal/checker/inference.go:Checker.inferFromSignature (identity callback)
+#[test]
+fn generic_call_callback_identity_infers_param_and_result() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\nfunction map<T, U>(a: T[], f: (x: T) => U): U[] { return [] as any; }\nconst s: string[] = map([1, 2], x => x);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'Array<number>' is not assignable to type 'Array<string>'."
+    );
+}
+
+// C-B3 unit: the lazy inference mapper (`get_fixing_inference_mapper`) maps a
+// type parameter that has inference candidates to its current inferred type
+// (fixing `T -> number`), while a parameter WITHOUT candidates is omitted from
+// the mapper so it stays itself (`U -> U`). This is what instantiates a
+// callback's parameter type `(x: T) => U` to `(x: number) => U`, leaving `U`
+// open for the subsequent callback-result inference.
+// Go: internal/checker/mapper.go:Checker.newInferenceTypeMapper (fixing)
+#[test]
+fn fixing_inference_mapper_maps_inferred_and_skips_empty() {
+    use crate::core::inference::InferenceContext;
+    let p = empty();
+    let mut c = Checker::new();
+    let t = c.new_type_parameter(None);
+    let u = c.new_type_parameter(None);
+    let num = c.number_type();
+    let mut ctx = InferenceContext::new(&[t, u]);
+    ctx.inferences[0].candidates = vec![num]; // T inferred = number
+                                              // U has no candidates.
+    let mapper = c.get_fixing_inference_mapper(&p, &mut ctx);
+    assert_eq!(c.map_type(&mapper, t), num, "T maps to its inferred number");
+    assert_eq!(c.map_type(&mapper, u), u, "U (no candidates) stays itself");
+}
+
+// C-B3 unit: `get_return_type_from_body` infers a concise arrow body's return
+// type and widens it — a string-literal body `"s"` yields the WIDENED `string`
+// (not the literal `"s"`), mirroring Go's `getReturnTypeFromBody` ->
+// `getWidenedType`. This is why `map([1,2], x => "s")` infers `U = string`.
+// Go: internal/checker/checker.go:Checker.getReturnTypeFromBody (concise body)
+#[test]
+fn get_return_type_from_body_widens_concise_literal() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const f = (x: number) => \"s\";");
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let list = match arena.data(stmts[0]) {
+        NodeData::VariableStatement(d) => d.declaration_list,
+        _ => panic!("variable statement"),
+    };
+    let decl = match arena.data(list) {
+        NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+        _ => panic!("declaration list"),
+    };
+    let arrow = match arena.data(decl) {
+        NodeData::VariableDeclaration(d) => d.initializer.expect("initializer"),
+        _ => panic!("variable declaration"),
+    };
+    let mut c = Checker::new();
+    let s = c.string_type();
+    assert_eq!(
+        c.get_return_type_from_body(&p, arrow),
+        s,
+        "the concise string-literal body widens to `string`"
+    );
+}
+
+// C-B3 slice 4 (nested generic calls): a `map` whose array argument is itself a
+// `map` call exercises the lazy inference mapper across two nested resolutions.
+// The inner `map([1, 2], x => x)` resolves to `number[]` (T = U = number); the
+// outer `map(number[], y => y + "")` then fixes `T = number` from that array,
+// types `y` as `number`, and infers `U = string` from the callback body, so the
+// whole expression is `string[]`. Assigning that to `number` reports 2322 with
+// the result element type `string`.
+// Verified against `cmd/tsgo`: `(3,7): error TS2322: Type 'string[]' is not
+// assignable to type 'number'.` (DIVERGENCE(port): `Array<string>` print form).
+// Go: internal/checker/checker.go:Checker.inferTypeArguments (nested calls)
+#[test]
+fn generic_call_nested_callbacks_infer_result() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\nfunction map<T, U>(a: T[], f: (x: T) => U): U[] { return [] as any; }\nconst r = map(map([1, 2], x => x), y => y + \"\");\nconst n: number = r;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'Array<string>' is not assignable to type 'number'."
+    );
+}
+
+// C-B3 slice 3 (contextual-return inference): a generic call with NO arguments
+// can still infer its type parameter from the call's CONTEXTUAL type, by
+// inferring from that contextual type to the signature's (generic) return type.
+// `make<T>(): T[]` called as `const xs: number[] = make()` infers `T = number`
+// from the annotation `number[]` (the contextual type) matched against the
+// return type `T[]`, so `make()` is `number[]` and the assignment is accepted.
+// An explicit `make<number>()` assigned to `string[]` reports 2322, confirming
+// the explicit (C-B1) path still wins and produces `number[]`.
+// Verified against `cmd/tsgo`: line 3 (`const xs: number[] = make()`) is accepted
+// (contextual-return inference fixes `T = number`); only line 4
+// (`const ys: string[] = make<number>()`) reports `(4,7): error TS2322: Type
+// 'number[]' is not assignable to type 'string[]'.` (DIVERGENCE(port): `Array<X>`
+// print form; message-chain elaboration deferred).
+// Go: internal/checker/checker.go:Checker.inferTypeArguments (contextual return)
+#[test]
+fn generic_call_contextual_return_inference() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\nfunction make<T>(): T[] { return [] as any; }\nconst xs: number[] = make();\nconst ys: string[] = make<number>();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'Array<number>' is not assignable to type 'Array<string>'."
+    );
+}

@@ -20,6 +20,7 @@ use super::declared_types::{
 };
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
+use super::signatures::SignatureId;
 use super::types::{TypeFlags, TypeId};
 use super::Checker;
 
@@ -46,6 +47,10 @@ impl InferencePriority {
     pub const NAKED_TYPE_VARIABLE: InferencePriority = InferencePriority(1 << 0);
     /// An inference from a generic function's return type (Go `1 << 7`).
     pub const RETURN_TYPE: InferencePriority = InferencePriority(1 << 7);
+    /// The seed for inference priority tracking — higher than every real
+    /// priority, so the first inference of any priority replaces it (Go
+    /// `1 << 11`).
+    pub const MAX_VALUE: InferencePriority = InferencePriority(1 << 11);
     /// Inference circularity (less than all other priorities).
     pub const CIRCULARITY: InferencePriority = InferencePriority(-1);
 }
@@ -60,11 +65,12 @@ impl Default for InferencePriority {
 ///
 /// # Examples
 /// ```
-/// use tsgo_checker::{InferenceInfo, TypeId};
+/// use tsgo_checker::{InferenceInfo, InferencePriority, TypeId};
 /// let info = InferenceInfo::new(TypeId(1));
 /// assert_eq!(info.type_parameter, TypeId(1));
 /// assert!(info.candidates.is_empty());
 /// assert!(!info.is_fixed);
+/// assert_eq!(info.priority, InferencePriority::MAX_VALUE);
 /// ```
 ///
 /// Side effects: none (pure value type).
@@ -104,7 +110,9 @@ impl InferenceInfo {
             candidates: Vec::new(),
             contra_candidates: Vec::new(),
             inferred_type: None,
-            priority: InferencePriority::NONE,
+            // Seeded with the max priority (Go's `newInferenceInfo`), so the
+            // first inference of any priority replaces it.
+            priority: InferencePriority::MAX_VALUE,
             top_level: true,
             is_fixed: false,
         }
@@ -176,8 +184,35 @@ impl Checker {
         source: TypeId,
         target: TypeId,
     ) {
+        self.infer_types_with_priority(
+            program,
+            inferences,
+            source,
+            target,
+            InferencePriority::NONE,
+        );
+    }
+
+    /// Like [`infer_types`](Checker::infer_types) but records the candidates with
+    /// `priority`. A lower-numbered priority is stronger: when an inference with a
+    /// stronger priority reaches a slot, it discards weaker-priority candidates
+    /// (Go's `inferWithPriority` -> `inferFromTypes` `priority < inference.priority`
+    /// clear). The reachable subset uses [`InferencePriority::NONE`] for
+    /// arguments and [`InferencePriority::RETURN_TYPE`] for contextual-return
+    /// inference, so argument inferences override return-type inferences.
+    ///
+    /// Side effects: pushes candidates into `inferences`.
+    // Go: internal/checker/inference.go:Checker.inferTypes (priority form)
+    pub(crate) fn infer_types_with_priority(
+        &mut self,
+        program: &dyn BoundProgram,
+        inferences: &mut [InferenceInfo],
+        source: TypeId,
+        target: TypeId,
+        priority: InferencePriority,
+    ) {
         let mut visited: FxHashSet<(TypeId, TypeId)> = FxHashSet::default();
-        self.infer_from_types(program, inferences, &mut visited, source, target);
+        self.infer_from_types(program, inferences, &mut visited, source, target, priority);
     }
 
     // Go: internal/checker/inference.go:Checker.inferFromTypes
@@ -188,16 +223,30 @@ impl Checker {
         visited: &mut FxHashSet<(TypeId, TypeId)>,
         source: TypeId,
         target: TypeId,
+        priority: InferencePriority,
     ) {
-        // Target is a type parameter in our inference set: add a candidate.
+        // Target is a type parameter in our inference set: add a candidate,
+        // honoring the priority lattice (the reachable subset: a stronger
+        // priority clears weaker candidates).
         if self
             .get_type(target)
             .flags()
             .contains(TypeFlags::TYPE_PARAMETER)
         {
             if let Some(idx) = inferences.iter().position(|i| i.type_parameter == target) {
-                if !inferences[idx].is_fixed && !inferences[idx].candidates.contains(&source) {
-                    inferences[idx].candidates.push(source);
+                if !inferences[idx].is_fixed {
+                    if priority < inferences[idx].priority {
+                        inferences[idx].candidates.clear();
+                        inferences[idx].contra_candidates.clear();
+                        inferences[idx].top_level = true;
+                        inferences[idx].priority = priority;
+                        inferences[idx].inferred_type = None;
+                    }
+                    if priority == inferences[idx].priority
+                        && !inferences[idx].candidates.contains(&source)
+                    {
+                        inferences[idx].candidates.push(source);
+                    }
                 }
             }
             return;
@@ -206,7 +255,7 @@ impl Checker {
         if self.get_type(target).flags().contains(TypeFlags::UNION) {
             let members = self.get_type(target).union_types().unwrap_or(&[]).to_vec();
             for m in members {
-                self.infer_from_types(program, inferences, visited, source, m);
+                self.infer_from_types(program, inferences, visited, source, m, priority);
             }
             return;
         }
@@ -214,7 +263,7 @@ impl Checker {
         if self.get_type(source).flags().contains(TypeFlags::UNION) {
             let members = self.get_type(source).union_types().unwrap_or(&[]).to_vec();
             for m in members {
-                self.infer_from_types(program, inferences, visited, m, target);
+                self.infer_from_types(program, inferences, visited, m, target, priority);
             }
             return;
         }
@@ -233,12 +282,19 @@ impl Checker {
                     return;
                 }
                 for i in 0..s_args.len().min(t_args.len()) {
-                    self.infer_from_types(program, inferences, visited, s_args[i], t_args[i]);
+                    self.infer_from_types(
+                        program, inferences, visited, s_args[i], t_args[i], priority,
+                    );
                 }
                 return;
             }
         }
-        // Two object types: infer member-by-member on matching property names.
+        // Two object types: infer member-by-member on matching property names,
+        // then from matching call/construct signatures (Go's `inferFromProperties`
+        // + `inferFromSignatures`). The signature arm is the keystone for callback
+        // result inference: a callback argument's `(x: number) => R` is matched
+        // against the parameter's `(x: T) => U`, inferring `U` from `R` covariantly
+        // (and `T` from the parameter contravariantly).
         if self.get_type(source).flags().contains(TypeFlags::OBJECT)
             && self.get_type(target).flags().contains(TypeFlags::OBJECT)
         {
@@ -254,12 +310,174 @@ impl Checker {
                 };
                 let source_type = get_type_of_symbol(self, program, source_prop, None);
                 let target_type = get_type_of_symbol(self, program, target_prop, None);
-                self.infer_from_types(program, inferences, visited, source_type, target_type);
+                self.infer_from_types(
+                    program,
+                    inferences,
+                    visited,
+                    source_type,
+                    target_type,
+                    priority,
+                );
+            }
+            self.infer_from_signatures(program, inferences, visited, source, target, priority);
+        }
+        // DEFER(phase-4-checker-C-C): index/indexed-access/conditional/template/
+        // mapped/substitution inference and the construct-signature arm.
+        // blocked-by: those type constructors + variance land later.
+    }
+
+    /// Infers candidates from the call signatures of `source` matched against
+    /// those of `target` (Go's `inferFromSignatures`, call-kind, reachable
+    /// subset). Source and target signatures are matched bottom-up; with one of
+    /// each (the reachable callback case) it infers from the single source
+    /// signature to the single target signature.
+    ///
+    /// DEFER(phase-4-checker-C-C): construct signatures, the multi-signature
+    /// bottom-up matrix beyond a single pair, and `getBaseSignature`/
+    /// `getErasedSignature` normalization. blocked-by: overload signature lists +
+    /// signature erasure.
+    // Go: internal/checker/inference.go:Checker.inferFromSignatures
+    fn infer_from_signatures(
+        &mut self,
+        program: &dyn BoundProgram,
+        inferences: &mut [InferenceInfo],
+        visited: &mut FxHashSet<(TypeId, TypeId)>,
+        source: TypeId,
+        target: TypeId,
+        priority: InferencePriority,
+    ) {
+        let source_signatures = self.get_signatures_of_type(source);
+        let source_len = source_signatures.len();
+        if source_len == 0 {
+            return;
+        }
+        let target_signatures = self.get_signatures_of_type(target);
+        let target_len = target_signatures.len();
+        for (i, &target_signature) in target_signatures.iter().enumerate() {
+            // Match source and target signatures bottom-up; when the source has
+            // fewer signatures, the first source signature matches the excess
+            // target signatures (Go: `max(sourceLen-targetLen+i, 0)`).
+            let source_index = (source_len + i)
+                .saturating_sub(target_len)
+                .min(source_len - 1);
+            self.infer_from_signature(
+                program,
+                inferences,
+                visited,
+                source_signatures[source_index],
+                target_signature,
+                priority,
+            );
+        }
+    }
+
+    /// Infers candidates from one source signature to one target signature: the
+    /// parameter types (contravariant in Go; the reachable subset re-uses the
+    /// covariant walk because the parameter type variables are already fixed when
+    /// a callback is processed, so this is a no-op re-inference) and the return
+    /// types (covariant — the `U` from a callback's return).
+    ///
+    /// DEFER(phase-4-checker-C-C): the real contravariant parameter inference
+    /// (`inferFromContravariantTypes` into `contra_candidates`), the bivariance
+    /// flip for method signatures, the `this`-parameter and rest-parameter
+    /// positions, and type-predicate inference. blocked-by: the contravariant
+    /// candidate lattice + `this`/rest/tuple types + type predicates.
+    // Go: internal/checker/inference.go:Checker.inferFromSignature
+    fn infer_from_signature(
+        &mut self,
+        program: &dyn BoundProgram,
+        inferences: &mut [InferenceInfo],
+        visited: &mut FxHashSet<(TypeId, TypeId)>,
+        source: SignatureId,
+        target: SignatureId,
+        priority: InferencePriority,
+    ) {
+        // Parameters (Go: `applyToParameterTypes` with contravariant inference).
+        let source_count = self.signature(source).parameters.len();
+        let target_count = self.signature(target).parameters.len();
+        let param_count = source_count.min(target_count);
+        for i in 0..param_count {
+            let s = self.get_type_at_position(program, source, i);
+            let t = self.get_type_at_position(program, target, i);
+            self.infer_from_types(program, inferences, visited, s, t, priority);
+        }
+        // Return types (Go: `applyToReturnTypes`, covariant): infer from the
+        // source return type to the target return type when the latter could
+        // contain type variables.
+        let target_return = self.signature_return_type(target);
+        if self.could_contain_type_variables(target_return) {
+            let source_return = self.signature_return_type(source);
+            self.infer_from_types(
+                program,
+                inferences,
+                visited,
+                source_return,
+                target_return,
+                priority,
+            );
+        }
+    }
+
+    /// Reports whether `t` could contain type variables that inference should
+    /// descend into (Go's `couldContainTypeVariables`, reachable subset): a type
+    /// parameter, a union/intersection with such a member, a generic type
+    /// reference whose type arguments could, or an anonymous object whose call
+    /// signatures' parameter/return types could.
+    ///
+    /// DEFER(phase-4-checker-C-C): the full object-flags caching, mapped/
+    /// conditional/indexed-access/substitution constructors, and property-type
+    /// scanning. blocked-by: those constructors + a couldContainTypeVariables
+    /// object-flag cache.
+    // Go: internal/checker/checker.go:Checker.couldContainTypeVariables
+    pub(crate) fn could_contain_type_variables(&self, t: TypeId) -> bool {
+        let flags = self.get_type(t).flags();
+        if flags.contains(TypeFlags::TYPE_PARAMETER) {
+            return true;
+        }
+        if flags.intersects(TypeFlags::UNION | TypeFlags::INTERSECTION) {
+            let members = if flags.contains(TypeFlags::UNION) {
+                self.get_type(t).union_types().unwrap_or(&[]).to_vec()
+            } else {
+                self.get_type(t)
+                    .intersection_types()
+                    .unwrap_or(&[])
+                    .to_vec()
+            };
+            return members
+                .iter()
+                .any(|&m| self.could_contain_type_variables(m));
+        }
+        if let Some(obj) = self.get_type(t).as_object() {
+            if obj.target.is_some() {
+                // A generic type reference could contain type variables when any
+                // of its type arguments could (Go's reference arm:
+                // `some(typeArguments, couldContainTypeVariables)`).
+                return obj
+                    .resolved_type_arguments
+                    .iter()
+                    .any(|&a| self.could_contain_type_variables(a));
+            }
+            // Anonymous object: scan its call signatures' parameter/return types.
+            let signatures = obj.call_signatures.clone();
+            for sig in signatures {
+                if self.could_contain_type_variables(self.signature_return_type(sig)) {
+                    return true;
+                }
+                let params = self.signature(sig).parameters.clone();
+                for p in params {
+                    if let Some(ty) = self
+                        .value_symbol_links
+                        .try_get(&p)
+                        .and_then(|l| l.resolved_type)
+                    {
+                        if self.could_contain_type_variables(ty) {
+                            return true;
+                        }
+                    }
+                }
             }
         }
-        // DEFER(phase-4-checker-4f+): index/indexed-access/conditional/template/
-        // mapped/substitution inference and contravariant positions.
-        // blocked-by: those type constructors + variance land later.
+        false
     }
 
     /// Resolves the inferred type for slot `index`, caching the result.

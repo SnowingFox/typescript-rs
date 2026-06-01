@@ -33,11 +33,11 @@ use super::declared_types::{
     get_property_of_type, get_type_from_type_node, get_type_of_property_of_type,
     get_type_of_symbol,
 };
-use super::inference::InferenceContext;
+use super::inference::{InferenceContext, InferencePriority};
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
 use super::relations::RelationKind;
-use super::signatures::{IndexInfo, IndexInfoId, SignatureId};
+use super::signatures::{IndexInfo, IndexInfoId, Signature, SignatureFlags, SignatureId};
 use super::symbols::resolve_name;
 use super::type_facts::TypeFacts;
 use super::types::{LiteralValue, ObjectFlags, ObjectType, TypeFlags, TypeId};
@@ -2240,10 +2240,6 @@ impl Checker {
     // inference branch: `inferTypeArguments` -> `getSignatureInstantiation`, with
     // the chosen signature stored on `signatureLinks[node].resolvedSignature`).
     //
-    // DEFER(phase-4-checker-C-B3): the contextual-return-type inference pass
-    // (inferring from a call's contextual type to the signature's return type),
-    // the lazy inference `TypeMapper`, and re-inference for nested generic
-    // return signatures. blocked-by: contextual-return inference + lazy mappers.
     // Go: internal/checker/checker.go:Checker.resolveCall (inference branch)
     fn resolve_inferred_type_argument_signature(
         &mut self,
@@ -2252,40 +2248,51 @@ impl Checker {
         signature: SignatureId,
         args: &[NodeId],
     ) -> SignatureId {
-        let inferred = self.infer_type_arguments_for_call(program, signature, args);
+        let inferred = self.infer_type_arguments_for_call(program, node, signature, args);
         let instantiated = self.get_signature_instantiation(program, signature, &inferred);
         self.resolved_signatures.insert(node, instantiated);
         instantiated
     }
 
     // Infers the type arguments of a generic `signature` from the call `args`
-    // (Go's `inferTypeArguments`, reachable subset). Each non-context-sensitive
-    // argument is typed and inferred against its (generic) parameter type; the
-    // accumulated candidates are then resolved (`getInferredTypes`).
+    // (Go's `inferTypeArguments`, reachable subset). Three phases mirror Go:
     //
-    // Context-sensitive function/arrow arguments are skipped in this pass: the
-    // type variables in their parameter positions are fixed by the other
-    // arguments first, then they are contextually typed during applicability
-    // checking (so `map([1,2], x => ...)` types `x` as `number`). Inferring a
-    // callback's *return*-type contribution (the `U` in
-    // `map<T,U>(a: T[], f: (x:T)=>U)`) is DEFERRED.
+    // 1. Contextual-return inference: when the call has a contextual type (e.g.
+    //    `const xs: number[] = make()`), infer from that contextual type to the
+    //    signature's (generic) return type, at the lower `RETURN_TYPE` priority
+    //    so argument inferences override it (Go's leading `getContextualType` /
+    //    `inferTypes(..., InferencePriorityReturnType)` block).
+    // 2. Non-context-sensitive arguments: each is typed and inferred against its
+    //    (generic) parameter type, fixing the type variables it mentions.
+    // 3. Context-sensitive arguments (arrows/functions): each is contextually
+    //    typed by its parameter type *instantiated with the inferences made so
+    //    far* (Go's lazy inference `TypeMapper`), so its un-annotated parameters
+    //    take the fixed type (e.g. `x: number`); its checked function type is
+    //    then matched against the (generic) parameter type to infer the
+    //    callback's result (the `U` in `map<T,U>(a: T[], f: (x:T)=>U)`).
     //
-    // DEFER(phase-4-checker-C-B3): inferring from context-sensitive arguments'
-    // return types (requires the anonymous function type + body-return
-    // inference), the `this`-argument inference, rest/spread argument
-    // aggregation, and the precise `isContextSensitive` test (a fully-annotated
-    // function is not context-sensitive). blocked-by: anonymous function typing
-    // + body return inference + rest/spread types.
+    // The accumulated candidates are then resolved (`getInferredTypes`).
+    //
+    // DEFER(phase-4-checker-C-C): the `this`-argument inference, rest/spread
+    // argument aggregation, the precise `isContextSensitive` test (a
+    // fully-annotated function is not context-sensitive), the
+    // `outerMapper`/`returnMapper` machinery for nested generic contextual
+    // signatures, and intra-expression inference sites. blocked-by: `this`/
+    // rest/tuple types + outer-inference threading + literal-element inference.
     // Go: internal/checker/checker.go:Checker.inferTypeArguments
     fn infer_type_arguments_for_call(
         &mut self,
         program: &dyn BoundProgram,
+        node: NodeId,
         signature: SignatureId,
         args: &[NodeId],
     ) -> Vec<TypeId> {
         let type_parameters = self.signature(signature).type_parameters.clone();
         let mut context = InferenceContext::new(&type_parameters);
+        // Phase 1: contextual-return inference (lower priority than arguments).
+        self.infer_from_contextual_return_type(program, node, signature, &mut context);
         let count = self.get_parameter_count(signature).min(args.len());
+        // Phase 2: non-context-sensitive arguments.
         for (i, &arg) in args.iter().enumerate().take(count) {
             if is_context_sensitive_argument(program, arg) {
                 continue;
@@ -2294,7 +2301,213 @@ impl Checker {
             let arg_type = self.check_expression_for_inference(program, arg);
             self.infer_types(program, &mut context.inferences, arg_type, param_type);
         }
+        // Phase 3: context-sensitive arguments (callbacks), now that the other
+        // arguments have fixed the type variables their parameters depend on.
+        for (i, &arg) in args.iter().enumerate().take(count) {
+            if !is_context_sensitive_argument(program, arg) {
+                continue;
+            }
+            let param_type = self.get_type_at_position(program, signature, i);
+            let arg_type =
+                self.infer_from_context_sensitive_argument(program, arg, param_type, &mut context);
+            self.infer_types(program, &mut context.inferences, arg_type, param_type);
+        }
         self.get_inferred_types_for_call(program, &mut context)
+    }
+
+    // Phase 1 of `inferTypeArguments`: when the call expression has a contextual
+    // type, infer from it to the signature's (generic) return type at the
+    // `RETURN_TYPE` priority. This lets `const xs: number[] = make()` (where
+    // `make<T>(): T[]`) infer `T = number` from the annotation, with no
+    // arguments to infer from. Argument inferences (priority `NONE`) override
+    // these, so `id(1)` still infers `T = 1` even under `const s: string = id(1)`.
+    //
+    // DEFER(phase-4-checker-C-C): the binding-pattern contextual type, the
+    // `outerMapper`/`returnMapper` instantiation of a generic contextual
+    // signature, and the `couldContainTypeVariables` object-flag cache.
+    // blocked-by: binding-pattern typing + outer-inference threading.
+    // Go: internal/checker/checker.go:Checker.inferTypeArguments (contextual return block)
+    fn infer_from_contextual_return_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        signature: SignatureId,
+        context: &mut InferenceContext,
+    ) {
+        let return_type = self.signature_return_type(signature);
+        if !self.could_contain_type_variables(return_type) {
+            return;
+        }
+        let Some(contextual_type) = self.get_contextual_type(program, node, ContextFlags::NONE)
+        else {
+            return;
+        };
+        self.infer_types_with_priority(
+            program,
+            &mut context.inferences,
+            contextual_type,
+            return_type,
+            InferencePriority::RETURN_TYPE,
+        );
+    }
+
+    // Phase 3 helper: contextually types a context-sensitive argument (an
+    // arrow/function expression) with `param_type` instantiated through the
+    // inferences made so far, then returns its checked function type so the
+    // caller can infer the callback's result. Mirrors the body of Go's
+    // `inferTypeArguments` argument loop for a context-sensitive argument:
+    // `checkExpressionWithContextualType(arg, paramType, context, inferential)`
+    // assigns the callback's parameter types (from the contextual signature
+    // instantiated by the fixing mapper) and infers its return type from the
+    // body, yielding the function type matched against `paramType`.
+    // Go: internal/checker/checker.go:Checker.inferTypeArguments (arg loop) +
+    // contextuallyCheckFunctionExpressionOrObjectLiteralMethod
+    fn infer_from_context_sensitive_argument(
+        &mut self,
+        program: &dyn BoundProgram,
+        arg: NodeId,
+        param_type: TypeId,
+        context: &mut InferenceContext,
+    ) -> TypeId {
+        // The lazy inference mapper fixes the type variables inferred so far
+        // (e.g. `T -> number`), leaving still-uninferred ones (e.g. `U`) as
+        // themselves, so the instantiated parameter type is `(x: number) => U`.
+        let mapper = self.get_fixing_inference_mapper(program, context);
+        let instantiated_param = self.instantiate_param_type(program, param_type, &mapper);
+        // Contextually type the callback's parameters from the instantiated
+        // parameter type's call signature, then build its function type.
+        let ctx_signature = self.get_signatures_of_type(instantiated_param);
+        if let Some(&ctx_sig) = ctx_signature.first() {
+            self.assign_contextual_parameter_types(program, arg, ctx_sig);
+        }
+        self.get_type_of_context_sensitive_arrow(program, arg)
+    }
+
+    // Builds the function type of a context-sensitive arrow/function expression
+    // argument after its parameters have been contextually typed: a fresh
+    // anonymous object type carrying a call signature whose parameter symbols are
+    // the expression's parameters (now resolved to their contextual types) and
+    // whose return type is the expression's annotated return type, else its
+    // body-inferred return type. Mirrors `getTypeOfSymbol` of a function
+    // expression (an anonymous type with one call signature) for the reachable
+    // subset.
+    //
+    // DEFER(phase-4-checker-C-C): generic arrows (their own type parameters),
+    // the `this`-parameter, rest parameters, and async/generator return
+    // unwrapping. blocked-by: those signature features.
+    // Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModule (function expr)
+    fn get_type_of_context_sensitive_arrow(
+        &mut self,
+        program: &dyn BoundProgram,
+        arg: NodeId,
+    ) -> TypeId {
+        let params = function_like_parameters(program, arg);
+        let mut parameters = Vec::with_capacity(params.len());
+        let mut min_argument_count = 0i32;
+        for &param in &params {
+            if let Some(sym) = program.symbol_of_node(param) {
+                parameters.push(sym);
+            }
+            if !is_optional_parameter(program, param) {
+                min_argument_count = parameters.len() as i32;
+            }
+        }
+        let return_type = match arrow_return_type_node(program, arg) {
+            Some(node) => get_type_from_type_node(self, program, node, None),
+            None => self.get_return_type_from_body(program, arg),
+        };
+        let mut signature = Signature::new(SignatureFlags::NONE);
+        signature.declaration = Some(arg);
+        signature.parameters = parameters;
+        signature.min_argument_count = min_argument_count;
+        signature.resolved_return_type = Some(return_type);
+        let sig = self.new_signature(signature);
+        let object = ObjectType {
+            call_signatures: vec![sig],
+            ..Default::default()
+        };
+        self.new_object_type(ObjectFlags::ANONYMOUS, None, object)
+    }
+
+    // Infers the return type of a context-sensitive arrow/function expression
+    // from its body (Go's `getReturnTypeFromBody`, reachable subset): for a
+    // concise body, the (widened) type of the body expression; for a block body,
+    // the (widened) union of its `return` expression types, else `void`. The body
+    // is checked with diagnostics rolled back, since the applicability pass
+    // re-checks and reports it once.
+    //
+    // DEFER(phase-4-checker-C-C): async/generator unwrapping, the
+    // never-returning / contextual-`undefined` arms, and the contextual-signature
+    // literal-preservation step. blocked-by: awaited/iterable types + return
+    // control-flow analysis.
+    // Go: internal/checker/checker.go:Checker.getReturnTypeFromBody
+    fn get_return_type_from_body(&mut self, program: &dyn BoundProgram, arg: NodeId) -> TypeId {
+        let body = function_like_body(program, arg);
+        let Some(body) = body else {
+            return self.error_type;
+        };
+        let handle = program.file_handle();
+        let before = self.diagnostics_by_file.get(&handle).map_or(0, Vec::len);
+        let result = if program.arena().kind(body) == Kind::Block {
+            let return_exprs = collect_return_expressions(program, body);
+            if return_exprs.is_empty() {
+                self.void_type
+            } else {
+                let types: Vec<TypeId> = return_exprs
+                    .into_iter()
+                    .map(|e| {
+                        let t = self.check_expression(program, e);
+                        self.get_widened_literal_type(t)
+                    })
+                    .collect();
+                let union = self.get_union_type(&types);
+                self.get_widened_type(union)
+            }
+        } else {
+            // A concise body's literal return type is widened to its base
+            // (Go's `getReturnTypeFromBody` -> `getWidenedType`): `() => "s"`
+            // returns `string`, not `"s"`.
+            let t = self.check_expression(program, body);
+            let widened = self.get_widened_literal_type(t);
+            self.get_widened_type(widened)
+        };
+        if let Some(diagnostics) = self.diagnostics_by_file.get_mut(&handle) {
+            diagnostics.truncate(before);
+        }
+        result
+    }
+
+    // Builds the lazy inference mapper that fixes the type variables inferred so
+    // far (Go's fixing `InferenceTypeMapper`, reachable realization): each slot
+    // with candidates maps its type parameter to its current inferred type
+    // (resolved and cached, i.e. "fixed"); slots without candidates are omitted,
+    // so they instantiate to themselves rather than being prematurely resolved
+    // to `unknown` (which would block a later inference such as a callback's
+    // result). This is what types `(x: T) => U` as `(x: number) => U` after `T`
+    // is inferred while leaving `U` open.
+    //
+    // DEFER(phase-4-checker-C-C): the genuinely on-demand variant that fixes a
+    // type parameter only when first accessed, the non-fixing mapper, and the
+    // default/constraint instantiation of un-inferred slots. blocked-by: a
+    // context-capturing mapper variant + the full `getInferredType` default path.
+    // Go: internal/checker/mapper.go:Checker.newInferenceTypeMapper (fixing)
+    fn get_fixing_inference_mapper(
+        &mut self,
+        program: &dyn BoundProgram,
+        context: &mut InferenceContext,
+    ) -> TypeMapper {
+        let mut sources = Vec::new();
+        let mut targets = Vec::new();
+        for i in 0..context.inferences.len() {
+            if context.inferences[i].candidates.is_empty() {
+                continue;
+            }
+            let tp = context.inferences[i].type_parameter;
+            let inferred = self.get_inferred_type_for_call(program, context, i);
+            sources.push(tp);
+            targets.push(inferred);
+        }
+        TypeMapper::Array { sources, targets }
     }
 
     // Types an argument expression to obtain its type for inference, rolling back
@@ -2963,7 +3176,7 @@ impl Checker {
     // DEFER(phase-4-checker-4q+): rest-parameter indexed access. blocked-by:
     // tuple/indexed-access types.
     // Go: internal/checker/relater.go:Checker.getTypeAtPosition(1754)
-    fn get_type_at_position(
+    pub(crate) fn get_type_at_position(
         &mut self,
         program: &dyn BoundProgram,
         signature: SignatureId,
@@ -5152,6 +5365,89 @@ fn is_context_sensitive_argument(program: &dyn BoundProgram, arg: NodeId) -> boo
         program.arena().kind(arg),
         Kind::ArrowFunction | Kind::FunctionExpression
     )
+}
+
+// Returns the parameter nodes of a function/arrow expression (the reachable
+// subset used by C-B3's callback-return inference).
+// Go: internal/ast: FunctionLikeData parameters
+fn function_like_parameters(program: &dyn BoundProgram, node: NodeId) -> Vec<NodeId> {
+    match program.arena().data(node) {
+        NodeData::ArrowFunction(d) => d.parameters.nodes.clone(),
+        NodeData::FunctionExpression(d) | NodeData::FunctionDeclaration(d) => {
+            d.parameters.nodes.clone()
+        }
+        _ => Vec::new(),
+    }
+}
+
+// Returns the body node of an arrow/function expression, if any.
+// Go: internal/ast: FunctionLikeData body
+fn function_like_body(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    match program.arena().data(node) {
+        NodeData::ArrowFunction(d) => Some(d.body),
+        NodeData::FunctionExpression(d) => d.body,
+        _ => None,
+    }
+}
+
+// Returns the (return-type) annotation node of an arrow/function expression.
+// Go: internal/ast: FunctionLikeData type
+fn arrow_return_type_node(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    match program.arena().data(node) {
+        NodeData::ArrowFunction(d) => d.type_node,
+        NodeData::FunctionExpression(d) => d.type_node,
+        _ => None,
+    }
+}
+
+// Reports whether a parameter declaration is optional for arity (a `?`,
+// initializer, or rest `...`), mirroring the contextual/declared-types helper.
+fn is_optional_parameter(program: &dyn BoundProgram, param: NodeId) -> bool {
+    match program.arena().data(param) {
+        NodeData::ParameterDeclaration(d) => {
+            d.question_token.is_some() || d.initializer.is_some() || d.dot_dot_dot_token.is_some()
+        }
+        _ => false,
+    }
+}
+
+// Collects the `return <expr>` expressions reachable in a function body block,
+// without descending into nested function-like declarations (whose returns
+// belong to that inner function). The reachable subset: top-level statements and
+// the immediate bodies of control-flow containers.
+// Go: internal/checker/checker.go:Checker.checkAndAggregateReturnExpressionTypes (subset)
+fn collect_return_expressions(program: &dyn BoundProgram, node: NodeId) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    collect_return_expressions_into(program, node, &mut out);
+    out
+}
+
+fn collect_return_expressions_into(
+    program: &dyn BoundProgram,
+    node: NodeId,
+    out: &mut Vec<NodeId>,
+) {
+    match program.arena().data(node) {
+        NodeData::ReturnStatement(d) => {
+            if let Some(expr) = d.expression {
+                out.push(expr);
+            }
+        }
+        NodeData::Block(d) => {
+            for &stmt in &d.list.nodes {
+                collect_return_expressions_into(program, stmt, out);
+            }
+        }
+        NodeData::IfStatement(d) => {
+            collect_return_expressions_into(program, d.then_statement, out);
+            if let Some(else_statement) = d.else_statement {
+                collect_return_expressions_into(program, else_statement, out);
+            }
+        }
+        // DEFER(phase-4-checker-C-C): loops/try/switch and nested-block return
+        // aggregation. blocked-by: full control-flow return analysis.
+        _ => {}
+    }
 }
 
 // Reports whether `node` can be an assignment target reference (Go's

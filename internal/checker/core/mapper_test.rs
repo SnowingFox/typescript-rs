@@ -140,6 +140,45 @@ fn instantiate_type_remaps_type_reference_arguments() {
     assert_eq!(obj.resolved_type_arguments, vec![c.string_type()]);
 }
 
+// C-B3: instantiation caching — the same generic instantiation returns a stable,
+// cached type id (Go's `getTypeReferenceType` interning / the reachable form of
+// the `(type, mapper)` instantiation cache). Two `create_type_reference` calls
+// with the same `(target, type arguments)` yield the same id, and instantiating
+// the same generic reference with the same mapper twice yields one id; a
+// different type argument yields a different id.
+// Go: internal/checker/checker.go:Checker.getTypeReferenceType (interning)
+#[test]
+fn create_type_reference_interns_by_target_and_arguments() {
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let target = c.new_object_type(ObjectFlags::INTERFACE, None, Default::default());
+    let num = c.number_type();
+    let s = c.string_type();
+    // Same (target, args) -> one stable id.
+    let a = c.create_type_reference(target, vec![num]);
+    let b = c.create_type_reference(target, vec![num]);
+    assert_eq!(a, b, "same instantiation is cached to one type id");
+    // Different args -> a different id.
+    let other = c.create_type_reference(target, vec![s]);
+    assert_ne!(
+        a, other,
+        "a distinct type argument is a distinct instantiation"
+    );
+    // Instantiating the same generic reference with the same mapper is cached.
+    let generic = c.create_type_reference(target, vec![tp]);
+    let m = TypeMapper::Simple {
+        source: tp,
+        target: num,
+    };
+    let i1 = c.instantiate_type(generic, &m);
+    let i2 = c.instantiate_type(generic, &m);
+    assert_eq!(i1, i2, "repeated instantiation returns the cached id");
+    assert_eq!(
+        i1, a,
+        "the instantiation matches the directly-created reference"
+    );
+}
+
 // Go: internal/checker/checker.go:instantiateTypeWorker (intersection recursion)
 #[test]
 fn instantiate_type_maps_intersection_members() {

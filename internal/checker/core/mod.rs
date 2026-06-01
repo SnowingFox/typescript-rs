@@ -216,6 +216,14 @@ pub struct Checker {
     /// context-sensitive argument's contextual typing sees the *instantiated*
     /// parameter types (e.g. `map([1,2], x => ...)` types `x` as `number`).
     resolved_signatures: FxHashMap<NodeId, SignatureId>,
+    /// Interning cache for generic type references, keyed by `(target, type
+    /// arguments)` (Go's `getTypeReferenceType` interning / instantiation cache).
+    /// Makes [`Checker::create_type_reference`] return a stable type id for the
+    /// same instantiation, so repeated `instantiate_type` of a reference (e.g.
+    /// `Array<number>` formed from an annotation and from inference) yields one
+    /// cached id rather than a fresh allocation each time. C-B3 adds this as the
+    /// reachable form of Go's `(type, mapper)` instantiation cache.
+    type_reference_cache: FxHashMap<(TypeId, Vec<TypeId>), TypeId>,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -394,6 +402,7 @@ impl Checker {
             program: None,
             checked_files: FxHashSet::default(),
             resolved_signatures: FxHashMap::default(),
+            type_reference_cache: FxHashMap::default(),
             any_type,
             auto_type,
             error_type,
@@ -968,12 +977,23 @@ impl Checker {
     /// Side effects: mutates the checker's type arena.
     // Go: internal/checker/checker.go:Checker.createTypeReference / createNormalizedTypeReference
     pub fn create_type_reference(&mut self, target: TypeId, type_arguments: Vec<TypeId>) -> TypeId {
+        // Intern by `(target, type arguments)` so the same instantiation returns
+        // one stable type id (Go's `getTypeReferenceType` interning / the
+        // reachable form of the `(type, mapper)` instantiation cache). References
+        // share their target's members and never mutate their own object data
+        // after creation, so sharing the id is safe.
+        let key = (target, type_arguments.clone());
+        if let Some(&cached) = self.type_reference_cache.get(&key) {
+            return cached;
+        }
         let object = ObjectType {
             target: Some(target),
             resolved_type_arguments: type_arguments,
             ..Default::default()
         };
-        self.new_object_type(ObjectFlags::REFERENCE, None, object)
+        let id = self.new_object_type(ObjectFlags::REFERENCE, None, object);
+        self.type_reference_cache.insert(key, id);
+        id
     }
 
     /// Creates a fixed-arity tuple type (`[A, B]`) carrying its element types by
