@@ -2445,6 +2445,10 @@ impl Checker {
             program.arena().data(node)
         {
             let members = d.members.nodes.clone();
+            // Go runs `checkClassLikeDeclaration` (heritage relations: implements
+            // satisfaction + extends compatibility) BEFORE iterating the members
+            // (`checkSourceElements(node.Members())`).
+            self.check_class_like_declaration(program, node);
             for member in members {
                 self.check_grammar_modifiers(program, member);
                 self.check_class_member(program, member);
@@ -2830,6 +2834,172 @@ impl Checker {
             current = program.arena().parent(id);
         }
         None
+    }
+
+    // Checks a class-like declaration's heritage relations (the reachable
+    // monomorphic subset of Go's `checkClassLikeDeclaration`):
+    //
+    // - `implements` satisfaction (2420): the class instance type must be
+    //   assignable to each implemented interface; else
+    //   `Class_0_incorrectly_implements_interface_1`.
+    // - `extends` compatibility (2415): the (derived) class instance type must be
+    //   assignable to its base class instance type; else
+    //   `Class_0_incorrectly_extends_base_class_1` (this surfaces an incompatible
+    //   property/method override structurally).
+    //
+    // The class instance (declared) type already merges inherited base members
+    // (`getDeclaredTypeOfClassOrInterface`), so the structural relation engine
+    // catches missing/incompatible members directly. The diagnostic prints the
+    // class and base/interface via `type_to_string` (a named class/interface
+    // instance type renders as its symbol name), matching Go's
+    // `c.TypeToString(typeWithThis)` / `c.TypeToString(baseWithThis)` arguments
+    // and the `core.OrElse(node.Name(), node)` error node.
+    //
+    // For the monomorphic case `getTypeWithThisArgument(t, nil, false)` returns
+    // `t` (the type is neither a generic reference nor an intersection, and no
+    // apparent type is requested), so `typeWithThis == classType` and
+    // `baseWithThis == baseType`.
+    //
+    // DEFER(phase-4-checker-4bm+): the member-specific elaboration
+    // (`issueMemberSpecificError` -> 2416 `Property_0_in_type_1_is_not_assignable_to_the_same_property_in_base_type_2`
+    // and the nested 2741/2322 chain), the static-side extends check (2417), the
+    // override-modifier walk (`checkKindsOfPropertyMemberOverrides` /
+    // `checkMembersForOverrideModifier`), `implements` on a non-object type
+    // (2422), the `implements`-a-class hint (2720), base-type accessibility
+    // (private constructor, 2654), mixins / type-variable base constructors,
+    // generic base classes with type arguments (the `getTypeWithThisArgument`
+    // type-argument substitution beyond the monomorphic case), abstract-class
+    // instantiation, `super()` requirements, and the index-constraint /
+    // property-initialization checks. blocked-by: a diagnostic-producing relation
+    // (`checkTypeRelatedToEx` with chains) for the member elaboration + the
+    // static/constructor type of a class value symbol + override-modifier
+    // resolution + generic type-argument instantiation through `this`.
+    // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4266)
+    fn check_class_like_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let Some(symbol) = program.symbol_of_node(node) else {
+            return;
+        };
+        let globals = program.globals();
+        let class_type = get_declared_type_of_symbol(self, program, symbol, globals);
+        // Monomorphic `getTypeWithThisArgument(classType, nil, false)`.
+        let type_with_this = class_type;
+        let class_str = super::nodebuilder::type_to_string(self, program, type_with_this);
+        // Go reports on `core.OrElse(node.Name(), node)` (the class name, else the
+        // class node).
+        let error_node = match program.arena().data(node) {
+            NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d.name.unwrap_or(node),
+            _ => node,
+        };
+
+        // `extends`-clause compatibility (2415). For a class the declared type's
+        // `base_types` come only from its `extends` heritage (the implements
+        // clause does not contribute), so a non-empty list means the class
+        // extends a base class. The monomorphic `baseWithThis` is the base type.
+        // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4287)
+        let base_types = self
+            .get_type(class_type)
+            .as_object()
+            .map(|o| o.base_types.clone())
+            .unwrap_or_default();
+        if let Some(&base_type) = base_types.first() {
+            if !self.is_type_assignable_to(program, type_with_this, base_type) {
+                let base_str = super::nodebuilder::type_to_string(self, program, base_type);
+                self.error(
+                    program,
+                    error_node,
+                    &tsgo_diagnostics::CLASS_0_INCORRECTLY_EXTENDS_BASE_CLASS_1,
+                    &[class_str.as_str(), base_str.as_str()],
+                );
+            }
+        }
+
+        // `implements`-clause satisfaction (2420). Each implemented type must be
+        // assignable from the class instance type.
+        // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4338)
+        for type_node in self.implements_heritage_elements(program, node) {
+            let Some(interface_type) = self.resolve_heritage_clause_type(program, type_node) else {
+                continue;
+            };
+            // A type that did not resolve is the error type; skip it (Go's
+            // `if !c.isErrorType(t)`).
+            if interface_type == self.error_type() {
+                continue;
+            }
+            // Monomorphic `baseWithThis` is the implemented interface type.
+            if !self.is_type_assignable_to(program, type_with_this, interface_type) {
+                let interface_str =
+                    super::nodebuilder::type_to_string(self, program, interface_type);
+                self.error(
+                    program,
+                    error_node,
+                    &tsgo_diagnostics::CLASS_0_INCORRECTLY_IMPLEMENTS_INTERFACE_1,
+                    &[class_str.as_str(), interface_str.as_str()],
+                );
+            }
+        }
+    }
+
+    // Returns the `ExpressionWithTypeArguments` elements of a class-like node's
+    // `implements` heritage clause (Go's `ast.GetImplementsHeritageClauseElements`).
+    // Go: internal/ast/utilities.go:GetImplementsHeritageClauseElements
+    fn implements_heritage_elements(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> Vec<NodeId> {
+        let heritage = match program.arena().data(node) {
+            NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => {
+                d.heritage_clauses.clone()
+            }
+            _ => None,
+        };
+        let Some(clauses) = heritage else {
+            return Vec::new();
+        };
+        let mut result = Vec::new();
+        for clause in clauses.nodes {
+            if let NodeData::HeritageClause(h) = program.arena().data(clause) {
+                if h.token == Kind::ImplementsKeyword {
+                    result.extend(h.types.nodes.iter().copied());
+                }
+            }
+        }
+        result
+    }
+
+    // Resolves an `ExpressionWithTypeArguments` heritage element to a type id
+    // (the reachable subset of Go's `getTypeFromTypeNode` over an implements
+    // element): an identifier expression resolves by name in the type meaning to
+    // its declared type. Returns `None` when the element is not a bare identifier.
+    //
+    // DEFER(phase-4-checker-4bm+): qualified-name implements targets and the
+    // type-argument-bearing form (`implements I<T>`); the `getReducedType`
+    // normalization. blocked-by: qualified-name resolution + generic reference
+    // instantiation through `this`.
+    // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (getTypeFromTypeNode(typeRefNode))
+    fn resolve_heritage_clause_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        type_node: NodeId,
+    ) -> Option<TypeId> {
+        let expression = match program.arena().data(type_node) {
+            NodeData::ExpressionWithTypeArguments(e) => e.expression,
+            _ => return None,
+        };
+        if program.arena().kind(expression) != Kind::Identifier {
+            return None;
+        }
+        let name = program.arena().text(expression).to_string();
+        let globals = program.globals();
+        let symbol = resolve_name(
+            program,
+            expression,
+            &name,
+            SymbolFlags::TYPE,
+            false,
+            globals,
+        )?;
+        Some(get_declared_type_of_symbol(self, program, symbol, globals))
     }
 
     // Checks a single class member (Go's `checkClassMember` dispatch over

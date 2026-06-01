@@ -3036,6 +3036,67 @@ impl EmitResolver {
 
 **推荐下一轮（4bm）**：(a) **重载-目标上下文实参 + 泛型 call-site 推断**（`getResolvedSignature` 的重载消歧 + 推断上下文，解锁 `arr.map(x => …)` 这类泛型回调）；(b) **return-position 上下文返回类型**（`getContextualTypeForReturnExpression` + `getReturnTypeFromBody`，解锁未注解函数体推断）；(c) **union 上下文类型 + 对象成员判别**（`getApparentTypeOfContextualType` 的 `mapType`+`discriminateContextualTypeByObjectMembers`）。强 strict 语义最终仍 blocked-by P6 真 lib.d.ts。
 
+## 4bm 落地记录（worklog 摘要）—— 类 heritage 检查（implements 满足 2420 + extends 兼容 2415）
+
+**目标**：把 Go 的 `checkClassLikeDeclaration` 的**heritage 关系检查**接入 checker。此前 `check_statement` 的 `ClassDeclaration|ClassExpression` 臂只迭代成员（4r），**完全不查 heritage**（无 implements 满足、无 extends 兼容）。本轮新增 `check_class_like_declaration`，在迭代成员**之前**调用（镜像 Go `checkClassDeclaration`：`checkClassLikeDeclaration(node)` → `checkSourceElements(node.Members())`），实现两个可达行为：
+- **行为 A — implements 满足（2420）**：对 implements 子句的每个被实现类型，若类实例类型不可赋值给它 → `Class_0_incorrectly_implements_interface_1`。
+- **行为 B — extends 兼容（2415）**：类 extends 基类时，若（派生）类实例类型不可赋值给基类实例类型（不兼容覆盖会结构性触发）→ `Class_0_incorrectly_extends_base_class_1`。
+
+**Go 真值（ground truth，已逐一核对）**：
+- `internal/checker/checker.go:Checker.checkClassDeclaration(4251)`：`c.checkClassLikeDeclaration(node)` → `c.checkSourceElements(node.Members())`（heritage 先于成员）。
+- `checkClassLikeDeclaration(4266)`：`symbol := getSymbolOfDeclaration(node)`；`classType := getDeclaredTypeOfSymbol(symbol)`；`typeWithThis := getTypeWithThisArgument(classType, nil, false)`。
+- extends 臂（4287–4335）：`baseTypeNode := GetExtendsHeritageClauseElement(node)`；`baseTypes := getBaseTypes(classType)`；`baseType := baseTypes[0]`；`baseWithThis := getTypeWithThisArgument(baseType, classTypeData.thisType, false)`；`if !checkTypeAssignableTo(typeWithThis, baseWithThis, nil, nil) { issueMemberSpecificError(node, typeWithThis, baseWithThis, Class_0_incorrectly_extends_base_class_1) }`。
+- implements 臂（4338–4359）：`for _, typeRefNode := range GetImplementsHeritageClauseElements(node)`；`t := getReducedType(getTypeFromTypeNode(typeRefNode))`；`if !isErrorType(t) && isValidBaseType(t)`：`genericDiag = class? 2720 : 2420`；`baseWithThis := getTypeWithThisArgument(t, thisType, false)`；`if !checkTypeAssignableTo(typeWithThis, baseWithThis, nil, nil) { issueMemberSpecificError(node, typeWithThis, baseWithThis, genericDiag) }`。
+- `issueMemberSpecificError(4467)`：广播臂 `checkTypeAssignableTo(typeWithThis, baseWithThis, core.OrElse(node.Name(), node), broadDiag)`——头消息 `{0}`=源（typeWithThis 即类名）、`{1}`=目标（baseWithThis 即基类/接口名）。
+- `getTypeWithThisArgument(19428)`：**单态**（非 `ObjectFlagsReference`、非 intersection、`needApparentType=false`）→ **原样返回 `t`**。故 `typeWithThis == classType`、`baseWithThis == baseType`（端口走的恰是此可达子集）。
+- 诊断常量：`diagnostics_generated.rs` 2420 `Class_0_incorrectly_implements_interface_1`="Class '{0}' incorrectly implements interface '{1}'."、2415 `Class_0_incorrectly_extends_base_class_1`="Class '{0}' incorrectly extends base class '{1}'."（exact，已核对 Go 生成物）。
+
+**可达裁剪（faithful-but-reachable）**：
+- `check_class_like_declaration`：取类符号 → `get_declared_type_of_symbol`（实例类型，已合并 base 成员）→ `type_with_this = class_type`（单态）。`error_node = node.Name() ?? node`。
+- extends：从类实例类型读 `obj.base_types`（仅 extends 贡献；implements 不进 `resolve_base_types`），`base_types[0]` 即基类实例类型 → `is_type_assignable_to(class_type, base_type)`，不可赋值 → 2415，args=[`type_to_string(class)`, `type_to_string(base)`]。
+- implements：新私有 helper `implements_heritage_elements`（取 `ImplementsKeyword` 子句的 `ExpressionWithTypeArguments` 元素）+ `resolve_heritage_clause_type`（标识符表达式 → `resolve_name(TYPE)` → `get_declared_type_of_symbol`；非标识符/未解析 → None）。逐元素：解析失败/错误类型 → skip（Go `!isErrorType`）；否则 `is_type_assignable_to(class_type, interface_type)`，不可赋值 → 2420，args=[`type_to_string(class)`, `type_to_string(interface)`]。
+- **关系引擎复用**：`is_type_assignable_to` → `properties_related_to` 已对缺失必需成员（implements）/不兼容覆盖成员（extends）结构性判否。诊断**只发广播头消息**（端口关系引擎返回 bool、不产 chain，故无 2741/2322 阐释）。
+
+**严格 TDD（逐行为 red→green，一次一个；每片单独 `cargo test -p tsgo_checker <name>` 看红/绿）**：
+
+| # | 切片 | 最小 input → observable（实测红/绿） | 实现触点 |
+|---|---|---|---|
+| 1 tracer（genuine RED）| `class_incorrectly_implements_interface_reports_diagnostic` | `interface I { x: number } class C implements I {}` → 1×**2420** "Class 'C' incorrectly implements interface 'I'."（红：旧无 heritage 检查 → `0≠1`）| `check_class_like_declaration` implements 臂 + `implements_heritage_elements` + `resolve_heritage_clause_type` + `check_statement` 调用点 |
+| 1 正控（green-on-arrival）| `class_correctly_implements_interface_reports_no_diagnostic` | `interface I { x: number } class C implements I { x: number = 1 }` → 0 诊断 | 无 |
+| 2（genuine RED）| `class_incorrectly_extends_base_class_reports_diagnostic` | `class B { x: number = 0 } class D extends B { x: string = "s" }` → 1×**2415** "Class 'D' incorrectly extends base class 'B'."（红：临时 `if false && …` 中和 extends 臂 → `0≠1`）| extends 臂 |
+| 2 正控（green-on-arrival）| `class_correctly_extends_base_class_with_compatible_override_reports_no_diagnostic` | `class B { x: number } class D extends B { x: number = 1 }` → 0 诊断 | 无 |
+| 2 正控（green-on-arrival）| `class_extends_base_class_without_override_reports_no_diagnostic` | `class B { x: number } class D extends B {}`（继承 `x`）→ 0 诊断 | 无 |
+| 3 守卫（无回归）| `plain_class_without_heritage_reports_no_heritage_diagnostic` | `class C { x: number = 1 }`（无 heritage）→ 0 诊断 | 无 |
+| 3 守卫（未解析 skip）| `class_implements_unresolved_interface_reports_no_heritage_diagnostic` | `class C implements Missing {}`（`Missing` 未声明）→ 0 诊断（`resolve_heritage_clause_type`→None → skip；`checkTypeReferenceNode` 的 unresolved-name 诊断 DEFER）| `resolve_heritage_clause_type` None 臂 |
+| 3 守卫（loop）| `class_implements_multiple_interfaces_reports_for_each_unsatisfied` | `interface I { x: number } interface J { y: string } class C implements I, J { x: number = 1 }` → 1×2420 命名 `J`（`I` 满足）| implements loop |
+| 3 守卫（双臂）| `class_extends_and_implements_both_relations_checked` | `class B { x: number } interface I { y: string } class D extends B implements I { x: string }` → 2 诊断（`[0]`=2415 extends、`[1]`=2420 implements，extends 先于 implements）| 双臂顺序 |
+
+> 红→绿证据：slice 1 **genuine RED**（初始无 heritage 检查：`0≠1`）；slice 2 **genuine RED**（临时 `if false && !is_type_assignable_to(...)` 中和 extends 臂 → `0≠1`，随后恢复变绿）。其余正控/守卫为 **green-on-arrival**——**如实记录非伪造红**（同 4bc–4bl 口径）。slice 3 双臂守卫验证 extends/implements 独立运行且 extends 先报。
+
+**本轮交付**：
+- `core/check.rs`：`check_statement` 的 `ClassDeclaration|ClassExpression` 臂在迭代成员前新增 `check_class_like_declaration(program, node)` 调用；新私有方法 `check_class_like_declaration`（heritage 双臂）/`implements_heritage_elements`/`resolve_heritage_clause_type`。
+- 测试：`check_test.rs`（+9：slice 1 tracer + 正控；slice 2 + 两正控；slice 3 无回归 + 三守卫）。
+
+**新公开 API 形状**：**无新 `pub` 项、无既有 `pub fn` 签名变更、无 `lib.rs` 改动、无新依赖、无 `.go` 改动**。新增项全为 `Checker` 私有方法（3）；`check_statement` 既有 `ClassDeclaration|ClassExpression` 臂**additive 行为扩展**（新增 heritage 检查，先前完全不查 heritage，无既有读者依赖；全套件零回归）。`cargo build -p tsgo_compiler` 绿（实测）。
+
+**测试增量**：**508 单测**（+9，相对 4bl 基线 499）+ **134 doctest**（**±0**：新增项全为私有方法，不挂 doctest）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker --lib`（508 绿）+ `--doc`（134 绿）；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。未 `--workspace`（无其它 lane）。未 `git commit`。
+
+**本轮 DEFER（带 blocked-by）**：
+- **成员特定阐释**（`issueMemberSpecificError` 的成员遍历 → 2416 `Property_0_in_type_1_is_not_assignable_to_the_same_property_in_base_type_2` + 嵌套 2741/2322 chain）：本轮只发广播头消息（2420/2415）。blocked-by: 产诊断的关系引擎（`checkTypeRelatedToEx` + diagnostic chains）+ 成员级 `getPropertyOfType` 对比。
+- **override-modifier 走查**（`checkKindsOfPropertyMemberOverrides` / `checkMembersForOverrideModifier`：2416/2603/2610/`override` 关键字诊断）：未做。blocked-by: override-modifier 解析 + per-member kind 对比。
+- **静态侧 extends（2417）+ base 构造可达性（私有构造 2654）**：未做。blocked-by: 类 value 符号的 constructor/static-side 类型 + 构造签名收集。
+- **implements 非对象类型（2422）+ implements-a-class 提示（2720）+ `isValidBaseType`/`getReducedType`**：本轮只发 2420（接口形态）；未对被实现类型做 `isValidBaseType` 分流。blocked-by: `isValidBaseType` + class-vs-interface 符号分类的诊断分流。
+- **泛型基类/接口带类型实参**（`getTypeWithThisArgument` 的 type-argument 替换、`this` 类型代入 reference）：仅单态（`getTypeWithThisArgument` 原样返回）。blocked-by: 泛型 reference 经 `this` 的实例化。
+- **mixin / type-variable base constructor（2545/2562/`Base_constructors_must_all_have_the_same_return_type`）+ 抽象类实例化（2511）+ `super()` 要求**：未做。blocked-by: 构造签名 + mixin 检测 + abstract 流。
+- **class *expression* 经 `check_expression` 的 heritage 检查**：本轮 heritage 检查挂在 `check_statement` 的 `ClassDeclaration|ClassExpression` 臂；表达式位 class expression（`const C = class implements I {}`）经 `check_expression` 未路由到此臂，故未触发。blocked-by: `check_expression` 的 ClassExpression 臂下传到 `check_class_like_declaration`。
+- **index 约束 / 属性初始化（`checkIndexConstraints` / `checkPropertyInitialization`）+ 重复声明 / 类型参数列表一致**：未做（非本轮 heritage 关系目标）。blocked-by: 各自子检查族。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/classes/classDeclarations/classHeritageSpecification/`（implements 满足 + extends 兼容最基础形态）+ `classes/members/inheritanceAndOverriding/`（不兼容覆盖结构性触发 2415）最小子集——无成员特定 2416 阐释 / override-modifier / 泛型基类 / 静态侧 / mixin / 抽象。
+
+**推荐下一轮（4bn）**：(a) **成员特定阐释 2416**（`issueMemberSpecificError` 的成员遍历 + 产诊断关系引擎 chain，把 2415/2420 的广播降级为 per-member 2416）；(b) **`isValidBaseType` 分流**（implements 非对象 2422 + implements-a-class 2720）；(c) **静态侧 extends 2417 + base 构造可达性**（需类 value 符号 static-side 类型）。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

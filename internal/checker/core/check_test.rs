@@ -1909,6 +1909,169 @@ fn class_property_unannotated_initializer_reports_no_diagnostic() {
     assert!(c.get_diagnostics(root).is_empty());
 }
 
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (implements satisfaction, 2420)
+#[test]
+fn class_incorrectly_implements_interface_reports_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I {\n  x: number;\n}\nclass C implements I {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    // `class C implements I {}`: the class instance type lacks the required `x`
+    // member, so it is not assignable to `I` and the class reports `2420`
+    // (Go's implements loop -> `Class_0_incorrectly_implements_interface_1`).
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, 2420);
+    assert_eq!(
+        diags[0].message,
+        "Class 'C' incorrectly implements interface 'I'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (implements satisfied -> ok)
+#[test]
+fn class_correctly_implements_interface_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I {\n  x: number;\n}\nclass C implements I {\n  x: number = 1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    // `class C implements I { x: number = 1 }`: the class instance type has the
+    // required `x: number`, so it is assignable to `I` and nothing is reported.
+    assert!(c.get_diagnostics(root).is_empty());
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (extends compatibility, 2415)
+#[test]
+fn class_incorrectly_extends_base_class_reports_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B {\n  x: number = 0;\n}\nclass D extends B {\n  x: string = \"s\";\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    // `class D extends B { x: string }` (B has `x: number`): the derived `x` is
+    // an incompatible override, so the derived instance type is not assignable to
+    // the base instance type and the class reports `2415` (Go's extends check ->
+    // `Class_0_incorrectly_extends_base_class_1`).
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, 2415);
+    assert_eq!(
+        diags[0].message,
+        "Class 'D' incorrectly extends base class 'B'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (compatible override -> ok)
+#[test]
+fn class_correctly_extends_base_class_with_compatible_override_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B {\n  x: number = 0;\n}\nclass D extends B {\n  x: number = 1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    // `class D extends B { x: number }`: the derived `x: number` matches the base
+    // `x: number`, so the derived instance type is assignable to the base and
+    // nothing is reported.
+    assert!(c.get_diagnostics(root).is_empty());
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (no override -> ok)
+#[test]
+fn class_extends_base_class_without_override_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B {\n  x: number = 0;\n}\nclass D extends B {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    // `class D extends B {}`: the derived instance type inherits `x: number`, so
+    // it is assignable to the base instance type and nothing is reported.
+    assert!(c.get_diagnostics(root).is_empty());
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (no heritage -> no heritage diags)
+#[test]
+fn plain_class_without_heritage_reports_no_heritage_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  x: number = 1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    // A class with no `extends`/`implements` clause must not trigger any heritage
+    // relation check, so nothing is reported.
+    assert!(c.get_diagnostics(root).is_empty());
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (implements unresolved -> skipped)
+#[test]
+fn class_implements_unresolved_interface_reports_no_heritage_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C implements Missing {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    // The implements target does not resolve to a type (the error type), so the
+    // satisfaction check is skipped (Go's `if !c.isErrorType(t)`) and no `2420`
+    // is reported. The full version also reports the unresolved-name diagnostic
+    // via `checkTypeReferenceNode`, which is deferred.
+    assert!(c.get_diagnostics(root).is_empty());
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (implements loop, per-interface)
+#[test]
+fn class_implements_multiple_interfaces_reports_for_each_unsatisfied() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I {\n  x: number;\n}\ninterface J {\n  y: string;\n}\nclass C implements I, J {\n  x: number = 1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    // `class C implements I, J { x: number = 1 }`: `I` is satisfied (C has `x`),
+    // but `J` is not (C lacks `y`), so the implements loop reports exactly one
+    // `2420` naming `J`.
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, 2420);
+    assert_eq!(
+        diags[0].message,
+        "Class 'C' incorrectly implements interface 'J'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (extends + implements both checked)
+#[test]
+fn class_extends_and_implements_both_relations_checked() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B {\n  x: number = 0;\n}\ninterface I {\n  y: string;\n}\nclass D extends B implements I {\n  x: string = \"s\";\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    // `class D extends B implements I { x: string }`: the override of `x` makes
+    // `D` incorrectly extend `B` (2415), and `D` also lacks `I`'s `y` member
+    // (2420). Both heritage relations are checked, extends before implements.
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 2);
+    assert_eq!(diags[0].code, 2415);
+    assert_eq!(
+        diags[0].message,
+        "Class 'D' incorrectly extends base class 'B'."
+    );
+    assert_eq!(diags[1].code, 2420);
+    assert_eq!(
+        diags[1].message,
+        "Class 'D' incorrectly implements interface 'I'."
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.checkReturnStatement (returned expression checked)
 #[test]
 fn return_statement_expression_in_function_body_is_checked() {
