@@ -35,6 +35,7 @@ members = [
     "internal/ls/lsconv",
     "internal/ls/lsutil",
     "internal/ls/change",
+    "internal/ls/autoimport",
     "internal/ls",
     "internal/format",
     "internal/project/dirty",
