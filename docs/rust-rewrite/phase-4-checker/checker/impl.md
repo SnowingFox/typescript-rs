@@ -3675,6 +3675,68 @@ impl EmitResolver {
 
 **C-C1 状态**：**可达子集完成**。keyof（index 类型算子）+ 索引访问 `T[K]`（具体 resolve + union-index 分配 + 泛型延迟 + 实例化）+ keyof/indexed-access/C-B 推断三者串联（头条）落地；剩余高级类型（条件 C-C2、mapped/template C-C3）按 DEFER 推进。
 
+## C-C2 落地记录（worklog 摘要）—— 条件类型 `T extends U ? X : Y` + `infer` + distributive（高级类型 part 2）
+
+> 在 C-C1 的**延迟泛型类型模式**（`Index`/`IndexedAccess`：不可即解的类型变成延迟 `TypeData` 变体，在 `instantiate_type_worker` 里随 mapper 再解析）之上，落地**条件类型**——下一个延迟变体，结构镜像 C-C1。每个行为一条 `/tdd` 红→绿垂直切片：先建类型基建（`ConditionalRoot`/`ConditionalType`/`TypeData::Conditional`）→ 泛型 alias 实例化（前置）→ 节点接线 → `get_conditional_type` 具体求值 → 实例化臂 + 分配 → `infer`。
+
+**Go 真值（`/tmp/tsgo --strict --noEmit` 实测，断言前捕获）**：
+- s1 `type IsString<T> = T extends string ? "yes" : "no"; const a: IsString<string>="yes"; const b: IsString<string>="no";` → 仅 `s1.ts(3,7): error TS2322: Type '"no"' is not assignable to type '"yes"'.`（证 `IsString<string>`=`"yes"`）。
+- s1b `... const c: IsString<number>="no"; const d: IsString<number>="yes";` → 仅 `(3,7) TS2322: Type '"yes"' is not assignable to type '"no"'.`（证 `IsString<number>`=`"no"`）。
+- s2（distributive）`type ToArray<T> = T extends unknown ? T[] : never; ToArray<string|number>` → `boolean[]` 赋值报 `TS2322: Type 'boolean[]' is not assignable to type 'string[] | number[]'.`（`string[]` 赋值通过）⇒ 分配为 `string[] | number[]`。
+- s3（infer 元素）`type ElementType<T> = T extends (infer U)[] ? U : never; ElementType<number[]>` → `"x"` 赋值报 `TS2322: Type 'string' is not assignable to type 'number'.`（证 = `number`）。
+- s4（infer 返回）`type Ret<T> = T extends (...args: any[]) => infer R ? R : never; Ret<() => number>` → `"x"` 赋值报 `TS2322: Type 'string' is not assignable to type 'number'.`（证 = `number`）。
+- s5（延迟过泛型函数）`function f<T>(x: T): T extends string ? 1 : 2 {...} const a=f<string>("a"); const bad: 2=a;` → 仅 `TS2322: Type '1' is not assignable to type '2'.`（证 `f<string>` 实例化把延迟条件解为 `1`）。
+
+**RED→GREEN 证据（每切片实测）**：
+- 切片1（具体真/假支）：临时把 `get_type_from_conditional_type_node` 桩成 `error_type` ⇒ `IsString<string>` 退化成 `any`，`b="no"` 不报错 ⇒ **genuine RED**「expected one 2322, got []」；恢复实现后绿（真支 `"yes"`、假支 `"no"`）。
+- 切片2（distributive）：首跑分配正确（恰 1 条 2322），但消息打 `Array<false | true>` 而非 `boolean[]` ⇒ 暴露两处**既有印名偏离**（array shorthand 未移植 + 本 port `boolean`=`false|true` union），目标侧打 `Array<string> | Array<number>` 证明分配为 `string[] | number[]`；断言改对齐 port 实际输出并登记偏离后绿。
+- 切片3（infer 元素）：**genuine RED**「got []」——`ElementType<number[]>` 解成 `unknown`。定位根因：真支里的 `U` 引用解析失败（binder 把 `infer U` 经 `bindAnonymousDeclaration` 匿名绑定、**不**入 conditional 节点 locals，故 `resolve_name`/`resolve_type_parameter_in_scope` 找不到 `U`）。修复：`resolve_type_parameter_in_scope` 遇 `ConditionalType` 祖先时扫其 extends 子树的 `infer` 声明匹配名字（checker-only，恢复 Go 的 locals 作用域）→ 绿。
+- 切片4（infer 返回）：**genuine RED**「got 2 条 'not assignable to never'」——`Ret<() => number>` 解成 `never`（假支）。根因：`inferred_extends_type = instantiate((...args:any[]) => R, ...)` 走**程序无关** `instantiate_type`，匿名函数类型实例化是 DEFER（原样返回），故 `R` 未代入、`isTypeAssignableTo(() => number, ...=> R)` 因 number 不可赋裸 `R` 而 false。修复：`get_conditional_type` 的 check/extends/inferred-extends/真假支实例化改走**程序感知** `instantiate_param_type`（C-B2 既有，深实例化匿名 object/函数类型的成员/返回）→ `R` 代入 `number` → 真支 → 绿。
+- 切片5（延迟过泛型函数）：直绿——`f` 返回类型是延迟条件，`f<string>` 经 `instantiate_signature`→`instantiate_type`→Conditional 臂→`getConditionalTypeInstantiation`（outer=[T]、{T->string}、distributionType=string 非 union 不分配）→`getConditionalType` 真支 `1`。
+
+**类型基建（`core/types.rs`+`core/mod.rs`）**：
+- 新 `ConditionalRoot{ node, check_type, extends_type, is_distributive, infer_type_parameters, outer_type_parameters }`（值可比，节点用 `NodeId`、类型用 `TypeId`）。
+- 新 `ConditionalType{ root, check_type, extends_type }` + `TypeData::Conditional`（`TypeFlags::CONDITIONAL` 4a 已有位）；`Type::as_conditional`。
+- mapper **不**进 `TypeData`（`TypeMapper` 含 `fn` 指针、非 `PartialEq`）：`Checker.conditional_mappers: FxHashMap<TypeId, ConditionalMappers{ mapper }>` 侧表存延迟条件的 `mapper`；`new_conditional_type(root, mapper)` 构造（按 Go `newConditionalType` 用 mapper 实例化 check/extends）。
+- `Checker.conditional_node_types`（按节点缓存解析结果，Go 的 `typeNodeLinks.resolvedType`）+ `conditional_instantiations`（按 `(node, outer-type-args)` 缓存实例化，Go 的 `root.instantiations`）。
+
+**可达裁剪（faithful-but-reachable）**：
+- **`get_conditional_type`**：单次（无 Go 的 1000 步 tail-recursion 循环）；permissive/restrictive 实例化对具体类型恒等故直用 `isTypeAssignableTo(check, inferredExtends)`；`any` check-type 的 `X | Y` 分配（`extraTypes`）、`forConstraint` distributive-constraint、wildcard、alias attribution、nested-false tail-recursion 均 DEFER。
+- **`infer`**：`getInferTypeParameters` 因 binder 匿名绑定改为**遍历 extends 子树**收集 `InferType` 的类型参数（不下探 nested conditional）；`get_outer_type_parameters` 走父链收集各泛型容器类型参数 + conditional infer 参数（省 `isTypeParameterPossiblyReferenced` 过滤——未引用项只是放大缓存键；省 `this`/context-sensitive-signature/mapped 臂）。
+- **distributive**：`getConditionalTypeInstantiation` 对 `is_distributive` 且 distributionType 为 union → 逐成员 `merge(unary(check,m), newMapper)` 调 `getConditionalType` 再 `getUnionType`；never → never。
+- **泛型 alias 实例化（前置）**：`get_type_from_type_reference` 对 `TYPE_ALIAS` 且有类型参数 → `fillMissingTypeArguments` + `newTypeMapper` + `instantiate_type`（Go `getTypeAliasInstantiation`），解锁延迟条件随 alias 实参再解析（arity 2315 诊断仍由 `check_type_reference_node` 单独管）。
+- **`is_generic_type`** = `is_generic_object_type || is_generic_index_type`（C-C1 既有），用作 `isDeferredType` 可达子集（无 simple-tuple 延迟）。
+
+**本轮交付**：
+- `core/types.rs`：`ConditionalRoot`/`ConditionalType` struct；`TypeData::Conditional`；`Type::as_conditional`。
+- `core/mod.rs`：`ConditionalMappers` 侧表 + 三张缓存字段 + init；`new_conditional_type`/`conditional_mapper`/`conditional_node_type`/`set_conditional_node_type`/`conditional_instantiation`/`set_conditional_instantiation`；程序无关 `type_to_string` 加 `Conditional` 臂（占位分支 `... : ...`）。
+- `core/declared_types.rs`：`get_type_from_type_node` 加 `ConditionalType`/`InferType` 臂；`get_type_from_conditional_type_node`/`get_type_from_infer_type_node`/`get_conditional_type`(`pub`)/`get_conditional_type_instantiation`(`pub(crate)`)/`conditional_branch_nodes`/`is_generic_type`/`get_infer_type_parameters`/`collect_infer_type_parameter_declarations`/`get_outer_type_parameters`/`is_generic_container_kind`/`append_own_type_parameters`/`find_infer_type_parameter_in_scope`；`get_type_from_type_reference` 加泛型 alias 实例化；`resolve_type_parameter_in_scope` 加 conditional `infer` 作用域。
+- `core/mapper.rs`：`instantiate_type_worker` 加 `CONDITIONAL` 臂（经 `retained_program` → `get_conditional_type_instantiation`；无 program 留延迟）。
+- `core/nodebuilder.rs`：程序感知 `type_to_string` 加 `Conditional` 臂（`check extends extends ? X : Y`，解析分支节点印名）。
+- `lib.rs`：re-export `get_conditional_type`、`ConditionalRoot`/`ConditionalType`（additive）。
+- 测试：`check_test.rs`（+6 端到端）、`declared_types_test.rs`（+4）、`mapper_test.rs`（+1）、`types_test.rs`（+1）、`mod_test.rs`（+1）、`nodebuilder_test.rs`（+1）。
+
+**新公开 API 形状（additive-only 确认）**：无既有 `pub fn` 签名变更、无 `lib.rs` 既有项移除、无依赖/`.go`/`internal/ast` 改动。新增 additive：`TypeData::Conditional`（枚举变体）、`ConditionalRoot`/`ConditionalType`（新 `pub` + lib.rs re-export）、`Type::as_conditional`/`Checker::new_conditional_type`/`get_conditional_type`（新 `pub`）。其余新增 `fn` 私有/`pub(crate)`；新字段私有。`get_type_from_type_node`/`get_type_from_type_reference`/`instantiate_type`/`resolve_type_parameter_in_scope` 公开签名不变（行为增量）。`cargo build -p tsgo_compiler` 绿。
+
+**测试增量**：**658 单测**（+14，相对 C-C1 基线 644：`check_test`+6【切片1 真/假、切片2 distributive、切片3 infer 元素、切片4 infer 返回、切片5 延迟过函数】、`declared_types_test`+4【get_conditional_type 真支/假支/distributive/infer-元素】、`mapper_test`+1【Conditional 臂无 program 留延迟】、`types_test`+1【as_conditional 访问器】、`mod_test`+1【new_conditional_type + 程序无关印名】、`nodebuilder_test`+1【程序感知条件印名】）+ **155 doctest**（+4：`ConditionalRoot`/`ConditionalType`/`new_conditional_type`/`get_conditional_type` 各 1）。
+
+**既有测试更新（Go-verified justification）**：无既有测试弱化/删除。`get_type_from_type_reference` 泛型 alias 实例化、`resolve_type_parameter_in_scope` 的 conditional `infer` 作用域均为加法式行为（旧路径对泛型 alias 返 `create_type_reference`、对 `infer` 名返 `error`，无既有测试断言其旧值）——C-C1 的 644 单测全绿不变。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker`（658 lib + 155 doc 绿）；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。
+
+**本轮 DEFER（带 blocked-by）**：
+- **mapped 类型 + template literal / string-mapping**（`{ [K in keyof T]: ... }`、`` `${T}` ``、`Uppercase`、reverse-mapped 推断、`inferTypeForHomomorphicMappedType`）：**C-C3**。blocked-by: mapped/template/string-mapping 构造子。
+- **条件类型 tail-recursion 循环**（nested-false 单构造、aliased 递归 1000 步限）、**`getConstraintOfConditionalType`/`getDefaultConstraintOfConditionalType`/`getConstraintFromConditionalType` 化简机**、**条件类型相互关系**（`relater.go` 的 conditional-vs-conditional `getTrueTypeFromConditionalType`/`combinedMapper`）：blocked-by 化简机 + 延迟条件关系（故 `ConditionalType.combinedMapper` 暂不入侧表）。
+- **`any` check-type 的 `X | Y` 分配（`extraTypes`）+ `forConstraint` distributive-constraint + wildcard/permissive/restrictive 实例化**：blocked-by wildcard 类型 + 约束分配的可达用例。
+- **`infer ... extends`（constrained infer）+ `getInferredTypeParameterConstraint`**：blocked-by 约束 infer 的可达用例。
+- **simple-tuple 延迟（`[X] extends [Y]`）+ alias attribution（`getAliasForTypeNode`）**：blocked-by 泛型 tuple + alias attribution 接线。
+- **匿名 object 深实例化的全局化**（本轮仅在 `get_conditional_type` 经 `instantiate_param_type` 局部修；`instantiate_type_worker` 的匿名 object 臂仍 DEFER 原样返回）：blocked-by 全程序感知递归 `instantiateType`（C-C3）。
+- **印名偏离（非本轮新增）**：array shorthand `T[]`（打 `Array<T>`）、`boolean`=`false|true`（打 `false | true`）。blocked-by: node builder array shorthand + `false|true`→`boolean` 折叠。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/types/conditional/*` 与 `types/infer/*` 的**具体条件真/假支、distributive over union、infer 元素/返回、延迟过泛型函数**最小子集——无 mapped/template、无 tail-recursion、无约束化简、无 conditional 相互关系。
+
+**C-C2 状态**：**可达子集完成**。条件类型（具体求值真/假支 + 泛型延迟 + 随 alias/函数实例化再解析 + distributive over union + `infer` 元素/返回）落地；剩余高级类型（mapped/template C-C3）+ 条件化简/关系/tail-recursion 按 DEFER 推进。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

@@ -229,3 +229,47 @@ fn arena_union_types_accessor() {
     assert_eq!(arena.get(u).union_types(), Some(&[a, b][..]));
     assert_eq!(arena.get(u).literal_value(), None);
 }
+
+// Go: internal/checker/types.go:ConditionalType (payload + AsConditionalType accessor)
+#[test]
+fn arena_conditional_type_accessor() {
+    use tsgo_ast::NodeId;
+    let mut arena = TypeArena::new();
+    let check = arena.alloc(
+        TypeFlags::TYPE_PARAMETER,
+        ObjectFlags::empty(),
+        None,
+        TypeData::TypeParameter(crate::core::types::TypeParameter::default()),
+    );
+    let extends = arena.alloc(
+        TypeFlags::STRING,
+        ObjectFlags::empty(),
+        None,
+        intrinsic("string"),
+    );
+    let root = ConditionalRoot {
+        node: NodeId(7),
+        check_type: check,
+        extends_type: extends,
+        is_distributive: true,
+        infer_type_parameters: vec![],
+        outer_type_parameters: vec![check],
+    };
+    let id = arena.alloc(
+        TypeFlags::CONDITIONAL,
+        ObjectFlags::empty(),
+        None,
+        TypeData::Conditional(ConditionalType {
+            root: root.clone(),
+            check_type: check,
+            extends_type: extends,
+        }),
+    );
+    let d = arena.get(id).as_conditional().expect("conditional type");
+    assert_eq!(d.check_type, check);
+    assert_eq!(d.extends_type, extends);
+    assert!(d.root.is_distributive);
+    assert_eq!(d.root.node, NodeId(7));
+    // A non-conditional type returns `None` from the accessor.
+    assert_eq!(arena.get(check).as_conditional(), None);
+}

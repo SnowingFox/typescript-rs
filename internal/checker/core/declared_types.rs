@@ -20,11 +20,14 @@ use tsgo_ast::{
     SymbolTable,
 };
 
+use super::inference::InferenceContext;
+use super::mapper::TypeMapper;
 use super::program::BoundProgram;
 use super::signatures::{IndexInfo, IndexInfoId, Signature, SignatureFlags, SignatureId};
 use super::symbols::resolve_name;
 use super::types::{
-    AccessFlags, IndexFlags, LiteralValue, ObjectFlags, ObjectType, TypeData, TypeFlags, TypeId,
+    AccessFlags, ConditionalRoot, IndexFlags, LiteralValue, ObjectFlags, ObjectType, TypeData,
+    TypeFlags, TypeId,
 };
 use super::Checker;
 
@@ -1359,6 +1362,10 @@ pub fn get_type_from_type_node(
         Kind::IndexedAccessType => {
             get_type_from_indexed_access_type_node(checker, program, node, globals)
         }
+        Kind::ConditionalType => {
+            get_type_from_conditional_type_node(checker, program, node, globals)
+        }
+        Kind::InferType => get_type_from_infer_type_node(checker, program, node),
         Kind::UnionType => get_type_from_union_type_node(checker, program, node, globals),
         Kind::IntersectionType => {
             get_type_from_intersection_type_node(checker, program, node, globals)
@@ -1540,6 +1547,405 @@ fn get_type_from_indexed_access_type_node(
     let index_type = get_type_from_type_node(checker, program, index_node, globals);
     get_indexed_access_type(checker, program, object_type, index_type)
         .unwrap_or(checker.error_type())
+}
+
+// Resolves a `ConditionalType` node (`T extends U ? X : Y`) to its conditional
+// type, memoizing the result on the node (Go's per-node
+// `typeNodeLinks.resolvedType`). A concrete check type resolves a branch
+// eagerly; a generic (type-parameter / instantiable) check type yields a
+// deferred conditional type that re-resolves on instantiation.
+//
+// DEFER(phase-4-checker-C-C3): the alias attribution (`getAliasForTypeNode`) and
+// the simple-tuple deferral (`[X] extends [Y]`). blocked-by: type-alias
+// attribution wiring + generic tuples.
+// Go: internal/checker/checker.go:Checker.getTypeFromConditionalTypeNode
+fn get_type_from_conditional_type_node(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+    globals: Option<&SymbolTable>,
+) -> TypeId {
+    if let Some(cached) = checker.conditional_node_type(node) {
+        return cached;
+    }
+    let (check_type_node, extends_type_node) = match program.arena().data(node) {
+        NodeData::ConditionalType(d) => (d.check_type, d.extends_type),
+        _ => return checker.error_type(),
+    };
+    let check_type = get_type_from_type_node(checker, program, check_type_node, globals);
+    let extends_type = get_type_from_type_node(checker, program, extends_type_node, globals);
+    // A conditional whose check type is a naked type parameter distributes over
+    // a union check type (Go: `checkType.flags&TypeFlagsTypeParameter != 0`).
+    let is_distributive = checker
+        .get_type(check_type)
+        .flags()
+        .contains(TypeFlags::TYPE_PARAMETER);
+    let infer_type_parameters = get_infer_type_parameters(checker, program, node);
+    let outer_type_parameters = get_outer_type_parameters(checker, program, node);
+    let root = ConditionalRoot {
+        node,
+        check_type,
+        extends_type,
+        is_distributive,
+        infer_type_parameters,
+        outer_type_parameters,
+    };
+    let resolved = get_conditional_type(checker, program, &root, None);
+    checker.set_conditional_node_type(node, resolved);
+    resolved
+}
+
+// Resolves an `infer R` type node to its (fresh, symbol-interned) declared type
+// parameter (Go's `getTypeFromInferTypeNode`).
+// Go: internal/checker/checker.go:Checker.getTypeFromInferTypeNode
+fn get_type_from_infer_type_node(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> TypeId {
+    let tp_decl = match program.arena().data(node) {
+        NodeData::InferType(d) => d.type_parameter,
+        _ => return checker.error_type(),
+    };
+    match program.symbol_of_node(tp_decl) {
+        Some(sym) => get_declared_type_of_type_parameter(checker, sym),
+        None => checker.error_type(),
+    }
+}
+
+/// Resolves a conditional type `T extends U ? X : Y` for `root` under an
+/// optional `mapper`.
+///
+/// Instantiates the check/extends types through `mapper`; when both are concrete
+/// (non-generic), evaluates the `extends` relation (`isTypeAssignableTo`) and
+/// returns the (instantiated) true or false branch. `infer R` type parameters in
+/// the `extends` clause are inferred by matching the check type against the
+/// extends type, and their inferences thread into the chosen branch. When the
+/// check type is still generic, a deferred conditional type is created that
+/// re-resolves on instantiation.
+///
+/// DEFER(phase-4-checker-C-C3): the tail-recursion loop for nested false-branch
+/// conditionals, the permissive/restrictive instantiations (identity for the
+/// concrete reachable subset), the `any` check-type `X | Y` distribution
+/// (`extraTypes`), the `forConstraint` distributive-constraint path, the
+/// wildcard type, and alias attribution. blocked-by: those machinery pieces +
+/// the wildcard/alias types.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{get_conditional_type, BoundProgram, Checker, ConditionalRoot};
+/// use tsgo_ast::NodeId;
+/// fn demo<P: BoundProgram>(c: &mut Checker, p: &P, root: &ConditionalRoot) {
+///     let _ = get_conditional_type(c, p, root, None);
+/// }
+/// ```
+///
+/// Side effects: may allocate branch/union/conditional types and run inference.
+// Go: internal/checker/checker.go:Checker.getConditionalType
+pub fn get_conditional_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    root: &ConditionalRoot,
+    mapper: Option<&TypeMapper>,
+) -> TypeId {
+    // Instantiation here uses the program-aware `instantiate_param_type` so an
+    // anonymous object/function-type operand (e.g. an `extends (...a: any[]) =>
+    // infer R` clause) has its member/return type variables substituted — the
+    // program-less `instantiate_type` leaves an anonymous object unchanged, which
+    // would strand an `infer R` in a function return position.
+    let check_type = match mapper {
+        Some(m) => {
+            let m = m.clone();
+            checker.instantiate_param_type(program, root.check_type, &m)
+        }
+        None => root.check_type,
+    };
+    let extends_type = match mapper {
+        Some(m) => {
+            let m = m.clone();
+            checker.instantiate_param_type(program, root.extends_type, &m)
+        }
+        None => root.extends_type,
+    };
+    let error = checker.error_type();
+    if check_type == error || extends_type == error {
+        return error;
+    }
+    let check_type_deferred = is_generic_type(checker, check_type);
+    // When the conditional declares `infer R` type parameters, infer them by
+    // matching the (concrete) check type against the extends type, building the
+    // combined mapper used to instantiate the true branch (Go's
+    // `combinedMapper = combineTypeMappers(context.mapper, mapper)`).
+    let mut combined_mapper: Option<TypeMapper> = None;
+    if !root.infer_type_parameters.is_empty() {
+        let mut context = InferenceContext::new(&root.infer_type_parameters);
+        if !check_type_deferred {
+            checker.infer_types(program, &mut context.inferences, check_type, extends_type);
+        }
+        let inference_mapper = checker.get_inference_mapper(program, &mut context);
+        combined_mapper = Some(match mapper {
+            Some(m) => TypeMapper::merge(inference_mapper, m.clone()),
+            None => inference_mapper,
+        });
+    }
+    // The extends type including `infer R` inferences (Go's `inferredExtendsType`).
+    let inferred_extends_type = match &combined_mapper {
+        Some(cm) => {
+            let cm = cm.clone();
+            checker.instantiate_param_type(program, root.extends_type, &cm)
+        }
+        None => extends_type,
+    };
+    if !check_type_deferred && !is_generic_type(checker, inferred_extends_type) {
+        let extends_any_or_unknown = checker
+            .get_type(inferred_extends_type)
+            .flags()
+            .intersects(TypeFlags::ANY_OR_UNKNOWN);
+        let (true_node, false_node) = conditional_branch_nodes(program, root.node);
+        // A definitely-false `extends` check resolves to the false branch.
+        if !extends_any_or_unknown
+            && !checker.is_type_assignable_to(program, check_type, inferred_extends_type)
+        {
+            let false_type = get_type_from_type_node(checker, program, false_node, None);
+            return match mapper {
+                Some(m) => {
+                    let m = m.clone();
+                    checker.instantiate_param_type(program, false_type, &m)
+                }
+                None => false_type,
+            };
+        }
+        // A definitely-true `extends` check resolves to the true branch,
+        // instantiated through the combined (inference) mapper so `infer R`
+        // type parameters in the branch are substituted.
+        if extends_any_or_unknown
+            || checker.is_type_assignable_to(program, check_type, inferred_extends_type)
+        {
+            let true_type = get_type_from_type_node(checker, program, true_node, None);
+            return match combined_mapper.as_ref().or(mapper) {
+                Some(m) => {
+                    let m = m.clone();
+                    checker.instantiate_param_type(program, true_type, &m)
+                }
+                None => true_type,
+            };
+        }
+    }
+    // The check is neither definitely true nor definitely false: defer. The
+    // combined inference mapper is not retained on the deferred type (see
+    // `ConditionalMappers`); it is rebuilt when the conditional re-resolves.
+    checker.new_conditional_type(root.clone(), mapper.cloned())
+}
+
+// Returns the `(trueType, falseType)` branch type nodes of a conditional type
+// node.
+fn conditional_branch_nodes(program: &dyn BoundProgram, node: NodeId) -> (NodeId, NodeId) {
+    match program.arena().data(node) {
+        NodeData::ConditionalType(d) => (d.true_type, d.false_type),
+        _ => (node, node),
+    }
+}
+
+/// Re-resolves a deferred conditional type `t` under `mapper`, mapping the
+/// conditional root's outer type parameters and (for a distributive conditional
+/// whose check type becomes a union) distributing the conditional over the
+/// union members (Go's `getConditionalTypeInstantiation`).
+///
+/// Side effects: may allocate branch/union/conditional types; caches the
+/// instantiation per `(node, type arguments)`.
+// Go: internal/checker/checker.go:Checker.getConditionalTypeInstantiation
+pub(crate) fn get_conditional_type_instantiation(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    t: TypeId,
+    mapper: &TypeMapper,
+) -> TypeId {
+    let root = checker
+        .get_type(t)
+        .as_conditional()
+        .expect("conditional type")
+        .root
+        .clone();
+    if root.outer_type_parameters.is_empty() {
+        return t;
+    }
+    let type_arguments: Vec<TypeId> = root
+        .outer_type_parameters
+        .iter()
+        .map(|&tp| checker.map_type(mapper, tp))
+        .collect();
+    if let Some(cached) = checker.conditional_instantiation(root.node, &type_arguments) {
+        return cached;
+    }
+    let new_mapper = TypeMapper::new(&root.outer_type_parameters, &type_arguments);
+    let mut result: Option<TypeId> = None;
+    // Distributive conditional types distribute over a union check type: for
+    // `T extends U ? X : Y` instantiated with `A | B` for `T`, the result is
+    // `(A extends U ? X : Y) | (B extends U ? X : Y)`.
+    if root.is_distributive {
+        let distribution_type = checker.map_type(&new_mapper, root.check_type);
+        if distribution_type != root.check_type {
+            let dflags = checker.get_type(distribution_type).flags();
+            if dflags.contains(TypeFlags::UNION) {
+                let members = checker
+                    .get_type(distribution_type)
+                    .union_types()
+                    .unwrap_or(&[])
+                    .to_vec();
+                let mut mapped = Vec::with_capacity(members.len());
+                for m in members {
+                    let inst_mapper = TypeMapper::merge(
+                        TypeMapper::unary(root.check_type, m),
+                        new_mapper.clone(),
+                    );
+                    let r = get_conditional_type(checker, program, &root, Some(&inst_mapper));
+                    mapped.push(r);
+                }
+                result = Some(checker.get_union_type(&mapped));
+            } else if dflags.contains(TypeFlags::NEVER) {
+                result = Some(checker.never_type());
+            }
+        }
+    }
+    let result =
+        result.unwrap_or_else(|| get_conditional_type(checker, program, &root, Some(&new_mapper)));
+    checker.set_conditional_instantiation(root.node, type_arguments, result);
+    result
+}
+
+// Reports whether `t` is a generic (instantiable) type — a deferred conditional
+// resolves its branches only once its check/extends types are non-generic (Go's
+// `isGenericType` / `isDeferredType` reachable subset, without the simple-tuple
+// deferral).
+// Go: internal/checker/checker.go:Checker.isGenericType / isDeferredType
+fn is_generic_type(checker: &Checker, t: TypeId) -> bool {
+    is_generic_object_type(checker, t) || is_generic_index_type(checker, t)
+}
+
+// Collects the `infer R` type parameters declared in a conditional type's
+// `extends` clause (Go's `getInferTypeParameters`, which reads `node.Locals()`).
+// The port walks the extends-type subtree instead, because the binder scopes an
+// `infer` parameter anonymously (`bindAnonymousDeclaration`) rather than into
+// the conditional node's locals.
+// Go: internal/checker/checker.go:Checker.getInferTypeParameters
+fn get_infer_type_parameters(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Vec<TypeId> {
+    let extends_type_node = match program.arena().data(node) {
+        NodeData::ConditionalType(d) => d.extends_type,
+        _ => return Vec::new(),
+    };
+    let mut decls = Vec::new();
+    collect_infer_type_parameter_declarations(program, extends_type_node, &mut decls);
+    let mut result = Vec::new();
+    for decl in decls {
+        if let Some(sym) = program.symbol_of_node(decl) {
+            let t = get_declared_type_of_type_parameter(checker, sym);
+            if !result.contains(&t) {
+                result.push(t);
+            }
+        }
+    }
+    result
+}
+
+// Walks `node`'s subtree in source order, collecting the type-parameter
+// declaration node of each `infer R` it contains. Does not descend into a
+// nested conditional type (whose `infer`s belong to that conditional's scope).
+fn collect_infer_type_parameter_declarations(
+    program: &dyn BoundProgram,
+    node: NodeId,
+    out: &mut Vec<NodeId>,
+) {
+    match program.arena().kind(node) {
+        Kind::InferType => {
+            if let NodeData::InferType(d) = program.arena().data(node) {
+                out.push(d.type_parameter);
+            }
+        }
+        // A nested conditional type opens its own `infer` scope.
+        Kind::ConditionalType => {}
+        _ => {
+            program.arena().for_each_child(node, &mut |child| {
+                collect_infer_type_parameter_declarations(program, child, out);
+                false
+            });
+        }
+    }
+}
+
+// Collects the enclosing (outer) type parameters in scope at a conditional type
+// node: the type parameters of each enclosing generic container, plus an
+// enclosing conditional's `infer` parameters (Go's `getOuterTypeParameters`,
+// reachable subset without the `this`-type, context-sensitive-signature, and
+// mapped-type arms and without the `isTypeParameterPossiblyReferenced` filter —
+// an unreferenced outer parameter only widens the instantiation cache key).
+// Go: internal/checker/checker.go:Checker.getOuterTypeParameters
+fn get_outer_type_parameters(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Vec<TypeId> {
+    let mut current = program.arena().parent(node);
+    while let Some(n) = current {
+        let kind = program.arena().kind(n);
+        if is_generic_container_kind(kind) {
+            let mut outer = get_outer_type_parameters(checker, program, n);
+            if kind == Kind::ConditionalType {
+                outer.extend(get_infer_type_parameters(checker, program, n));
+                return outer;
+            }
+            append_own_type_parameters(checker, program, n, &mut outer);
+            return outer;
+        }
+        current = program.arena().parent(n);
+    }
+    Vec::new()
+}
+
+// Reports whether `kind` is a generic-parameter-introducing container (Go's
+// `getOuterTypeParameters` switch arms).
+fn is_generic_container_kind(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::ClassDeclaration
+            | Kind::ClassExpression
+            | Kind::InterfaceDeclaration
+            | Kind::CallSignature
+            | Kind::ConstructSignature
+            | Kind::MethodSignature
+            | Kind::FunctionType
+            | Kind::ConstructorType
+            | Kind::FunctionDeclaration
+            | Kind::MethodDeclaration
+            | Kind::FunctionExpression
+            | Kind::ArrowFunction
+            | Kind::TypeAliasDeclaration
+            | Kind::MappedType
+            | Kind::ConditionalType
+    )
+}
+
+// Appends `container`'s own declared type parameters (by symbol) to `out`,
+// skipping duplicates.
+fn append_own_type_parameters(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    container: NodeId,
+    out: &mut Vec<TypeId>,
+) {
+    if let Some(list) = type_parameter_list_of(program, container) {
+        for tp in list.nodes {
+            if let Some(sym) = program.symbol_of_node(tp) {
+                let t = get_declared_type_of_type_parameter(checker, sym);
+                if !out.contains(&t) {
+                    out.push(t);
+                }
+            }
+        }
+    }
 }
 
 // Resolves a `TypeOperator` node (`keyof`/`unique`/`readonly T`). The `readonly`
@@ -1757,6 +2163,27 @@ fn get_type_from_type_reference(
             return checker.create_type_reference(target, filled);
         }
     }
+    // A generic type alias reference (`IsString<string>`) instantiates the
+    // alias's declared type: map the alias's type parameters to the supplied
+    // arguments (filling defaults/`unknown` for any missing trailing slots) and
+    // instantiate. This is what re-resolves a deferred conditional/indexed type
+    // in the alias body — `type IsString<T> = T extends string ? "yes" : "no"`
+    // applied to `string` resolves to `"yes"` (Go's `getTypeFromTypeAliasReference`
+    // -> `getTypeAliasInstantiation`). The arity/2315 diagnostic is emitted
+    // separately by `check_type_reference_node`.
+    if symbol_flags.contains(SymbolFlags::TYPE_ALIAS) {
+        let type_parameters = checker
+            .type_alias_links
+            .try_get(&symbol)
+            .map(|l| l.type_parameters.clone())
+            .unwrap_or_default();
+        if !type_parameters.is_empty() {
+            let filled =
+                fill_missing_type_arguments(checker, program, &provided_args, &type_parameters);
+            let mapper = TypeMapper::new(&type_parameters, &filled);
+            return checker.instantiate_type(target, &mapper);
+        }
+    }
     // `Foo<A, B>` (a non-generic-target or alias) with explicit arguments forms a
     // plain reference; a bare name stays the target.
     if !provided_args.is_empty() {
@@ -1770,6 +2197,12 @@ fn get_type_from_type_reference(
 // container's `<...>` list for a matching name. Mirrors the type-parameter
 // reachability Go gets for free from binding type parameters into a
 // declaration's `locals`.
+//
+// An enclosing conditional type also contributes its `infer R` parameters
+// (declared in its `extends` clause): a `R` reference in a conditional branch
+// resolves to that inferred type parameter. The Rust binder scopes an `infer`
+// parameter anonymously (`bindAnonymousDeclaration`) instead of into the
+// conditional node's locals, so this lookup recovers the Go scoping.
 // Go: internal/checker/checker.go:Checker.resolveName (type-parameter meaning)
 fn resolve_type_parameter_in_scope(
     program: &dyn BoundProgram,
@@ -1788,7 +2221,38 @@ fn resolve_type_parameter_in_scope(
                 }
             }
         }
+        if arena.kind(n) == Kind::ConditionalType {
+            if let Some(sym) = find_infer_type_parameter_in_scope(program, n, name) {
+                return Some(sym);
+            }
+        }
         current = arena.parent(n);
+    }
+    None
+}
+
+// Finds an `infer R` type parameter named `name` declared in a conditional
+// type's `extends` clause, returning its symbol (so a `R` reference in a branch
+// resolves to it).
+fn find_infer_type_parameter_in_scope(
+    program: &dyn BoundProgram,
+    conditional_node: tsgo_ast::NodeId,
+    name: &str,
+) -> Option<SymbolId> {
+    let extends_node = match program.arena().data(conditional_node) {
+        NodeData::ConditionalType(d) => d.extends_type,
+        _ => return None,
+    };
+    let mut decls = Vec::new();
+    collect_infer_type_parameter_declarations(program, extends_node, &mut decls);
+    for decl in decls {
+        if let NodeData::TypeParameterDeclaration(d) = program.arena().data(decl) {
+            if program.arena().kind(d.name) == Kind::Identifier
+                && program.arena().text(d.name) == name
+            {
+                return program.symbol_of_node(decl);
+            }
+        }
     }
     None
 }

@@ -66,11 +66,12 @@ pub mod tracer;
 
 pub use core::check::{Diagnostic, DiagnosticMessageChain};
 pub use core::declared_types::{
-    fill_missing_type_arguments, get_apparent_type, get_constraint_of_type_parameter,
-    get_declared_type_of_symbol, get_default_from_type_parameter, get_global_type,
-    get_index_infos_of_type, get_index_type, get_indexed_access_type, get_min_type_argument_count,
-    get_properties_of_type, get_property_of_type, get_type_from_type_node,
-    get_type_of_property_of_type, get_type_of_symbol, resolve_structured_type_members,
+    fill_missing_type_arguments, get_apparent_type, get_conditional_type,
+    get_constraint_of_type_parameter, get_declared_type_of_symbol, get_default_from_type_parameter,
+    get_global_type, get_index_infos_of_type, get_index_type, get_indexed_access_type,
+    get_min_type_argument_count, get_properties_of_type, get_property_of_type,
+    get_type_from_type_node, get_type_of_property_of_type, get_type_of_symbol,
+    resolve_structured_type_members,
 };
 pub use core::emit_resolver::{EmitResolver, SerializedTypeNode, TypeReferenceSerializationKind};
 pub use core::inference::{InferenceContext, InferenceInfo, InferencePriority};
@@ -88,9 +89,9 @@ pub use core::symbols::{
 pub use core::symbols_query::{get_symbol_at_location, get_symbol_of_declaration};
 pub use core::type_facts::TypeFacts;
 pub use core::types::{
-    format_type_flags, AccessFlags, IndexFlags, IndexType, IndexedAccessType, IntersectionType,
-    IntrinsicType, LiteralType, LiteralValue, ObjectFlags, ObjectType, Type, TypeArena, TypeData,
-    TypeFlags, TypeId, TypeParameter, UnionType,
+    format_type_flags, AccessFlags, ConditionalRoot, ConditionalType, IndexFlags, IndexType,
+    IndexedAccessType, IntersectionType, IntrinsicType, LiteralType, LiteralValue, ObjectFlags,
+    ObjectType, Type, TypeArena, TypeData, TypeFlags, TypeId, TypeParameter, UnionType,
 };
 pub use core::Checker;
 pub use tracer::Tracer;

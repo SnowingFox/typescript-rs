@@ -37,6 +37,7 @@ use tsgo_core::compileroptions::CompilerOptions;
 use tsgo_core::tristate::Tristate;
 
 use emit_resolver::EmitResolver;
+use mapper::TypeMapper;
 use program::{default_compiler_options, BoundProgram};
 use relations::RelationCache;
 use signatures::{IndexInfo, IndexInfoArena, IndexInfoId, Signature, SignatureArena, SignatureId};
@@ -44,8 +45,9 @@ use symbols::{
     DeclaredTypeLinks, SymbolLinks, SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
 };
 use types::{
-    IntersectionType, IntrinsicType, LiteralType, LiteralValue, ObjectFlags, ObjectType, Type,
-    TypeArena, TypeData, TypeFlags, TypeId, TypeParameter, UnionType,
+    ConditionalRoot, ConditionalType, IntersectionType, IntrinsicType, LiteralType, LiteralValue,
+    ObjectFlags, ObjectType, Type, TypeArena, TypeData, TypeFlags, TypeId, TypeParameter,
+    UnionType,
 };
 
 /// The bound program a checker retains (Go's `c.program` pointer field).
@@ -60,6 +62,26 @@ impl std::fmt::Debug for RetainedProgram {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("BoundProgram")
     }
+}
+
+/// The substitution mapper attached to a deferred conditional type.
+///
+/// Kept in a [`Checker`] side table (not on the value-comparable
+/// [`ConditionalType`] payload) because [`TypeMapper`] holds an `fn` pointer and
+/// is not `PartialEq`. Mirrors Go's `ConditionalType.mapper`.
+///
+/// DEFER(phase-4-checker-C-C3): Go also stores `combinedMapper` (the inference
+/// mapper threaded into the deferred conditional, used by
+/// `getInferredTrueTypeFromConditionalType` during relation checking of two
+/// deferred conditionals). That path is not reachable yet — a deferred
+/// conditional always re-resolves freshly through
+/// `get_conditional_type_instantiation` (which rebuilds the inference context)
+/// before being used — so it is not stored.
+/// blocked-by: deferred-conditional-vs-conditional relation comparison.
+#[derive(Clone, Debug, Default)]
+struct ConditionalMappers {
+    /// The mapper that produced this conditional's check/extends types.
+    mapper: Option<TypeMapper>,
 }
 
 /// High bit set on the [`SymbolId`] of a checker-synthesized symbol, so its id
@@ -233,6 +255,20 @@ pub struct Checker {
     /// subset always has `AccessFlags::NONE`, so the flags are not part of the
     /// key.
     indexed_access_types: FxHashMap<(TypeId, TypeId), TypeId>,
+    /// The resolved type of each conditional-type *node* (Go's per-node
+    /// `typeNodeLinks.resolvedType`), so the same `T extends U ? X : Y` node
+    /// yields one stable deferred conditional type (keeping its root identity
+    /// stable for the instantiation cache).
+    conditional_node_types: FxHashMap<NodeId, TypeId>,
+    /// The substitution mappers of each deferred conditional type, kept out of
+    /// the value-comparable `TypeData` because [`TypeMapper`] is not comparable
+    /// (Go stores `mapper`/`combinedMapper` on the `ConditionalType`).
+    conditional_mappers: FxHashMap<TypeId, ConditionalMappers>,
+    /// Per-conditional-root instantiation cache, keyed by the conditional node
+    /// plus the mapped outer type arguments (Go's `root.instantiations` keyed by
+    /// `getConditionalTypeKey`). The reachable subset keys on `forConstraint =
+    /// false` only.
+    conditional_instantiations: FxHashMap<(NodeId, Vec<TypeId>), TypeId>,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -391,6 +427,9 @@ impl Checker {
             global_types: FxHashMap::default(),
             index_types: FxHashMap::default(),
             indexed_access_types: FxHashMap::default(),
+            conditional_node_types: FxHashMap::default(),
+            conditional_mappers: FxHashMap::default(),
+            conditional_instantiations: FxHashMap::default(),
             type_parameter_constraints: FxHashMap::default(),
             type_parameter_defaults: FxHashMap::default(),
             union_types,
@@ -795,6 +834,15 @@ impl Checker {
                 self.type_to_string(d.object_type),
                 self.type_to_string(d.index_type)
             ),
+            // A deferred conditional type. The program-less printer cannot read
+            // the branch type nodes, so it renders the check/extends operands
+            // with placeholder branches; the program-aware `nodebuilder::
+            // type_to_string` renders the full `T extends U ? X : Y`.
+            TypeData::Conditional(d) => format!(
+                "{} extends {} ? ... : ...",
+                self.type_to_string(d.check_type),
+                self.type_to_string(d.extends_type)
+            ),
         }
     }
 
@@ -879,6 +927,112 @@ impl Checker {
                 access_flags,
             }),
         )
+    }
+
+    /// Allocates a deferred conditional type for `root`, instantiating its
+    /// check/extends types through `mapper` (Go's `newConditionalType`).
+    ///
+    /// The `mapper` (and the `combined_mapper` used to resolve `infer` branches)
+    /// are stored in a side table so the type's value-comparable payload stays
+    /// free of the non-comparable [`TypeMapper`].
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{Checker, ConditionalRoot, TypeFlags};
+    /// use tsgo_ast::NodeId;
+    /// let mut c = Checker::new();
+    /// let tp = c.new_type_parameter(None);
+    /// let root = ConditionalRoot {
+    ///     node: NodeId(0),
+    ///     check_type: tp,
+    ///     extends_type: c.string_type(),
+    ///     is_distributive: true,
+    ///     infer_type_parameters: vec![],
+    ///     outer_type_parameters: vec![tp],
+    /// };
+    /// let cond = c.new_conditional_type(root, None);
+    /// assert!(c.get_type(cond).flags().contains(TypeFlags::CONDITIONAL));
+    /// ```
+    ///
+    /// Side effects: mutates the checker's type arena and conditional side table.
+    // Go: internal/checker/checker.go:Checker.newConditionalType
+    pub fn new_conditional_type(
+        &mut self,
+        root: ConditionalRoot,
+        mapper: Option<TypeMapper>,
+    ) -> TypeId {
+        let check_type = match &mapper {
+            Some(m) => self.instantiate_type(root.check_type, m),
+            None => root.check_type,
+        };
+        let extends_type = match &mapper {
+            Some(m) => self.instantiate_type(root.extends_type, m),
+            None => root.extends_type,
+        };
+        let t = self.types.alloc(
+            TypeFlags::CONDITIONAL,
+            ObjectFlags::empty(),
+            None,
+            TypeData::Conditional(ConditionalType {
+                root,
+                check_type,
+                extends_type,
+            }),
+        );
+        self.conditional_mappers
+            .insert(t, ConditionalMappers { mapper });
+        t
+    }
+
+    /// Returns the mapper that produced conditional type `t`, if any (Go's
+    /// `ConditionalType.mapper`).
+    ///
+    /// Side effects: none (pure).
+    pub(crate) fn conditional_mapper(&self, t: TypeId) -> Option<TypeMapper> {
+        self.conditional_mappers
+            .get(&t)
+            .and_then(|m| m.mapper.clone())
+    }
+
+    /// Returns the cached resolved type of conditional-type node `node`, if it
+    /// has been resolved (Go's per-node `typeNodeLinks.resolvedType`).
+    ///
+    /// Side effects: none (pure).
+    pub(crate) fn conditional_node_type(&self, node: NodeId) -> Option<TypeId> {
+        self.conditional_node_types.get(&node).copied()
+    }
+
+    /// Records the resolved type of conditional-type node `node`.
+    ///
+    /// Side effects: mutates the conditional node-type cache.
+    pub(crate) fn set_conditional_node_type(&mut self, node: NodeId, t: TypeId) {
+        self.conditional_node_types.insert(node, t);
+    }
+
+    /// Returns the cached conditional instantiation for `(node, type_args)`, if
+    /// present (Go's `root.instantiations`).
+    ///
+    /// Side effects: none (pure).
+    pub(crate) fn conditional_instantiation(
+        &self,
+        node: NodeId,
+        type_args: &[TypeId],
+    ) -> Option<TypeId> {
+        self.conditional_instantiations
+            .get(&(node, type_args.to_vec()))
+            .copied()
+    }
+
+    /// Records a conditional instantiation for `(node, type_args)`.
+    ///
+    /// Side effects: mutates the conditional instantiation cache.
+    pub(crate) fn set_conditional_instantiation(
+        &mut self,
+        node: NodeId,
+        type_args: Vec<TypeId>,
+        t: TypeId,
+    ) {
+        self.conditional_instantiations.insert((node, type_args), t);
     }
 
     /// Mints a synthesized (transient) property symbol carrying `name`,

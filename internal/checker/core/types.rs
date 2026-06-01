@@ -5,7 +5,7 @@
 //! [`TypeId`] handle; Go's `*Type` pointers and the `Type.checker` back-pointer
 //! are dropped in favor of arena indexing (PORTING, section 5).
 
-use tsgo_ast::SymbolTable;
+use tsgo_ast::{NodeId, SymbolTable};
 
 use super::signatures::{IndexInfoId, SignatureId};
 
@@ -764,6 +764,89 @@ pub struct IndexedAccessType {
     pub access_flags: AccessFlags,
 }
 
+/// The shared "root" of a conditional type `T extends U ? X : Y`
+/// (`TypeFlags::CONDITIONAL`), mirroring Go's `ConditionalRoot`.
+///
+/// Every instantiation of the same conditional-type *node* shares a root: it
+/// carries the un-instantiated check/extends types, the `infer` and outer type
+/// parameters, and whether the conditional is distributive (its check type is a
+/// naked type parameter). The branch (true/false) type *nodes* are read back
+/// from `node` on demand, so they are not stored here.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{ConditionalRoot, TypeId};
+/// use tsgo_ast::NodeId;
+/// let r = ConditionalRoot {
+///     node: NodeId(1),
+///     check_type: TypeId(1),
+///     extends_type: TypeId(2),
+///     is_distributive: true,
+///     infer_type_parameters: vec![],
+///     outer_type_parameters: vec![TypeId(1)],
+/// };
+/// assert!(r.is_distributive);
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go:ConditionalRoot
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConditionalRoot {
+    /// The `ConditionalType` AST node this root was built from.
+    pub node: NodeId,
+    /// The un-instantiated check type (`T` in `T extends U ? X : Y`).
+    pub check_type: TypeId,
+    /// The un-instantiated `extends` type (`U`).
+    pub extends_type: TypeId,
+    /// Whether the conditional distributes over a union check type (its check
+    /// type is a naked type parameter).
+    pub is_distributive: bool,
+    /// The `infer R` type parameters declared in the `extends` clause.
+    pub infer_type_parameters: Vec<TypeId>,
+    /// The enclosing (in-scope) type parameters this conditional may reference.
+    pub outer_type_parameters: Vec<TypeId>,
+}
+
+/// The payload of a conditional type `T extends U ? X : Y`
+/// (`TypeFlags::CONDITIONAL`).
+///
+/// A deferred conditional kept until its check type is concrete enough to
+/// resolve a branch: it stores the shared [`ConditionalRoot`] plus the
+/// *instantiated* check/extends types for this particular instantiation (Go's
+/// `ConditionalType.checkType`/`extendsType`). Its substitution mappers are
+/// held in a checker side table keyed by the type id (so this payload stays
+/// comparable; the mappers are not value-comparable). A conditional over a
+/// concrete check type resolves eagerly to its true or false branch and never
+/// produces a `ConditionalType`.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{ConditionalRoot, ConditionalType, TypeId};
+/// use tsgo_ast::NodeId;
+/// let root = ConditionalRoot {
+///     node: NodeId(1),
+///     check_type: TypeId(1),
+///     extends_type: TypeId(2),
+///     is_distributive: true,
+///     infer_type_parameters: vec![],
+///     outer_type_parameters: vec![TypeId(1)],
+/// };
+/// let d = ConditionalType { root, check_type: TypeId(1), extends_type: TypeId(2) };
+/// assert_eq!(d.check_type, TypeId(1));
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go:ConditionalType
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConditionalType {
+    /// The shared conditional root.
+    pub root: ConditionalRoot,
+    /// The instantiated check type for this conditional.
+    pub check_type: TypeId,
+    /// The instantiated `extends` type for this conditional.
+    pub extends_type: TypeId,
+}
+
 /// Type-specific data, the discriminated-union form of Go's `TypeData`
 /// interface (PORTING, section 3).
 ///
@@ -798,6 +881,8 @@ pub enum TypeData {
     Index(IndexType),
     /// A deferred `T[K]` indexed-access type over generic operands.
     IndexedAccess(IndexedAccessType),
+    /// A deferred conditional type `T extends U ? X : Y`.
+    Conditional(ConditionalType),
 }
 
 /// A checker type: the common header (Go's `Type` struct fields) plus its
@@ -972,6 +1057,17 @@ impl Type {
     pub fn as_indexed_access(&self) -> Option<&IndexedAccessType> {
         match &self.data {
             TypeData::IndexedAccess(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Returns the conditional payload, if this is a deferred conditional type.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/types.go:Type.AsConditionalType
+    pub fn as_conditional(&self) -> Option<&ConditionalType> {
+        match &self.data {
+            TypeData::Conditional(d) => Some(d),
             _ => None,
         }
     }

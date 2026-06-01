@@ -103,6 +103,24 @@ pub fn type_to_string(checker: &mut Checker, program: &dyn BoundProgram, ty: Typ
         let index = type_to_string(checker, program, d.index_type);
         return format!("{object}[{index}]");
     }
+    // A deferred conditional type prints `<check> extends <extends> ? X : Y`,
+    // naming the instantiated check/extends operands and resolving the branch
+    // type nodes through the program (Go's node-builder conditional arm).
+    if let Some(d) = checker.get_type(ty).as_conditional().cloned() {
+        let check = type_to_string(checker, program, d.check_type);
+        let extends = type_to_string(checker, program, d.extends_type);
+        let (true_node, false_node) = match program.arena().data(d.root.node) {
+            tsgo_ast::NodeData::ConditionalType(c) => (c.true_type, c.false_type),
+            _ => return format!("{check} extends {extends} ? ... : ..."),
+        };
+        let true_ty =
+            super::declared_types::get_type_from_type_node(checker, program, true_node, None);
+        let false_ty =
+            super::declared_types::get_type_from_type_node(checker, program, false_node, None);
+        let true_str = type_to_string(checker, program, true_ty);
+        let false_str = type_to_string(checker, program, false_ty);
+        return format!("{check} extends {extends} ? {true_str} : {false_str}");
+    }
     let symbol = checker.get_type(ty).symbol;
     let object_info = match &checker.get_type(ty).data {
         TypeData::Object(o) => Some((o.target, o.resolved_type_arguments.clone())),

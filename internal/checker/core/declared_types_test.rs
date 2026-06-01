@@ -875,3 +875,116 @@ fn bare_type_parameter_reference_resolves_to_enclosing_type_parameter() {
         "value should resolve to the interface type parameter"
     );
 }
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (definitely-true branch)
+// A concrete conditional resolves its true branch: `IsString<string>` is `"yes"`.
+#[test]
+fn get_conditional_type_resolves_true_branch() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type IsString<T> = T extends string ? \"yes\" : \"no\";",
+    ));
+    let prog: std::rc::Rc<dyn crate::core::program::BoundProgram> = p.clone();
+    let mut c = Checker::new_checker(prog);
+    let declared = get_declared_type_of_symbol(&mut c, p.as_ref(), local(&p, "IsString"), None);
+    // The alias body is a deferred conditional (its check type `T` is generic).
+    assert!(c
+        .get_type(declared)
+        .flags()
+        .contains(TypeFlags::CONDITIONAL));
+    let tp = c
+        .get_type(declared)
+        .as_conditional()
+        .expect("conditional")
+        .root
+        .check_type;
+    let mapper = crate::core::mapper::TypeMapper::unary(tp, c.string_type());
+    let resolved = c.instantiate_type(declared, &mapper);
+    assert_eq!(c.type_to_string(resolved), "\"yes\"");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (definitely-false branch)
+// A concrete conditional resolves its false branch: `IsString<number>` is `"no"`.
+#[test]
+fn get_conditional_type_resolves_false_branch() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type IsString<T> = T extends string ? \"yes\" : \"no\";",
+    ));
+    let prog: std::rc::Rc<dyn crate::core::program::BoundProgram> = p.clone();
+    let mut c = Checker::new_checker(prog);
+    let declared = get_declared_type_of_symbol(&mut c, p.as_ref(), local(&p, "IsString"), None);
+    let tp = c
+        .get_type(declared)
+        .as_conditional()
+        .expect("conditional")
+        .root
+        .check_type;
+    let mapper = crate::core::mapper::TypeMapper::unary(tp, c.number_type());
+    let resolved = c.instantiate_type(declared, &mapper);
+    assert_eq!(c.type_to_string(resolved), "\"no\"");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalTypeInstantiation (distribution)
+// A distributive conditional distributes over a union check type:
+// `ToArray<string | number>` is `string[] | number[]`.
+#[test]
+fn get_conditional_type_distributes_over_union() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         type ToArray<T> = T extends unknown ? T[] : never;",
+    ));
+    let prog: std::rc::Rc<dyn crate::core::program::BoundProgram> = p.clone();
+    let mut c = Checker::new_checker(prog);
+    let declared = get_declared_type_of_symbol(&mut c, p.as_ref(), local(&p, "ToArray"), None);
+    let tp = c
+        .get_type(declared)
+        .as_conditional()
+        .expect("conditional")
+        .root
+        .check_type;
+    let s = c.string_type();
+    let n = c.number_type();
+    let union = c.get_union_type(&[s, n]);
+    let mapper = crate::core::mapper::TypeMapper::unary(tp, union);
+    let resolved = c.instantiate_type(declared, &mapper);
+    assert!(c.get_type(resolved).flags().contains(TypeFlags::UNION));
+    let members = c.get_type(resolved).union_types().expect("union").to_vec();
+    assert_eq!(members.len(), 2);
+    // Each distributed member is an `Array<...>` reference (a `T[]`).
+    for m in members {
+        assert!(c
+            .get_type(m)
+            .as_object()
+            .expect("array reference")
+            .target
+            .is_some());
+    }
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (infer inference)
+// `infer U` is inferred from the check type: `ElementType<number[]>` is `number`.
+#[test]
+fn get_conditional_type_infers_element_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         type ElementType<T> = T extends (infer U)[] ? U : never;",
+    ));
+    let prog: std::rc::Rc<dyn crate::core::program::BoundProgram> = p.clone();
+    let mut c = Checker::new_checker(prog);
+    let element = get_declared_type_of_symbol(&mut c, p.as_ref(), local(&p, "ElementType"), None);
+    let tp = c
+        .get_type(element)
+        .as_conditional()
+        .expect("conditional")
+        .root
+        .check_type;
+    let array = get_declared_type_of_symbol(&mut c, p.as_ref(), local(&p, "Array"), None);
+    let n = c.number_type();
+    let array_number = c.create_type_reference(array, vec![n]);
+    let mapper = crate::core::mapper::TypeMapper::unary(tp, array_number);
+    let resolved = c.instantiate_type(element, &mapper);
+    assert_eq!(resolved, n, "ElementType<number[]> should be number");
+}

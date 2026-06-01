@@ -537,3 +537,28 @@ fn strict_null_checks_reads_option() {
     );
     assert!(!Checker::new_checker(r).strict_null_checks());
 }
+
+// Go: internal/checker/checker.go:Checker.newConditionalType + printer.go:typeToString
+// `new_conditional_type` allocates a `CONDITIONAL`-flagged type, and the
+// program-less printer renders it with placeholder branches.
+#[test]
+fn new_conditional_type_and_program_less_printing() {
+    use crate::core::types::ConditionalRoot;
+    use tsgo_ast::NodeId;
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let root = ConditionalRoot {
+        node: NodeId(0),
+        check_type: tp,
+        extends_type: c.string_type(),
+        is_distributive: true,
+        infer_type_parameters: vec![],
+        outer_type_parameters: vec![tp],
+    };
+    let cond = c.new_conditional_type(root, None);
+    assert!(c.get_type(cond).flags().contains(TypeFlags::CONDITIONAL));
+    let d = c.get_type(cond).as_conditional().expect("conditional");
+    assert_eq!(d.check_type, tp);
+    assert_eq!(d.extends_type, c.string_type());
+    assert_eq!(c.type_to_string(cond), "T extends string ? ... : ...");
+}

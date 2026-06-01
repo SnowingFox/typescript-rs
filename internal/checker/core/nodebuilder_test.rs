@@ -150,3 +150,20 @@ fn type_to_string_intrinsics_and_literals_delegate() {
     );
     assert_eq!(type_to_string(&mut c, &p, lit), "\"x\"");
 }
+
+// Go: internal/checker/nodebuilderimpl.go (conditional type node serialization)
+// A deferred conditional type prints `<check> extends <extends> ? X : Y`, naming
+// the operands and resolving the branch type nodes through the program.
+#[test]
+fn type_to_string_conditional_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "type IsString<T> = T extends string ? \"yes\" : \"no\";",
+    );
+    let mut c = Checker::new();
+    let declared = get_declared_type_of_symbol(&mut c, &p, sym(&p, "IsString"), None);
+    assert_eq!(
+        type_to_string(&mut c, &p, declared),
+        "T extends string ? \"yes\" : \"no\""
+    );
+}

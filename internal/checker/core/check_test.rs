@@ -7164,3 +7164,171 @@ fn generic_keyof_index_with_non_key_reports_2345_e2e() {
         "Argument of type '\"b\"' is not assignable to parameter of type '\"a\"'."
     );
 }
+
+// C-C2 slice 1: a concrete conditional type `T extends string ? "yes" : "no"`
+// resolves to a branch once the alias is instantiated. `IsString<string>` is
+// `"yes"`, so assigning `"no"` to it reports 2322.
+// Verified against `cmd/tsgo --strict`: only line 3 (`const b: IsString<string>
+// = "no"`) reports `(3,7): error TS2322: Type '"no"' is not assignable to type
+// '"yes"'.` (line 2 `const a: IsString<string> = "yes"` is accepted).
+// Go: internal/checker/checker.go:Checker.getConditionalType (definitely-true branch)
+#[test]
+fn conditional_concrete_true_branch_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type IsString<T> = T extends string ? \"yes\" : \"no\";\nconst a: IsString<string> = \"yes\";\nconst b: IsString<string> = \"no\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '\"no\"' is not assignable to type '\"yes\"'."
+    );
+}
+
+// C-C2 slice 1 (false branch): a concrete conditional whose check fails resolves
+// to the false branch. `IsString<number>` is `"no"`, so assigning `"yes"` to it
+// reports 2322.
+// Verified against `cmd/tsgo --strict`: only line 3 (`const d: IsString<number>
+// = "yes"`) reports `(3,7): error TS2322: Type '"yes"' is not assignable to type
+// '"no"'.` (line 2 `const c: IsString<number> = "no"` is accepted).
+// Go: internal/checker/checker.go:Checker.getConditionalType (definitely-false branch)
+#[test]
+fn conditional_concrete_false_branch_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type IsString<T> = T extends string ? \"yes\" : \"no\";\nconst c: IsString<number> = \"no\";\nconst d: IsString<number> = \"yes\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '\"yes\"' is not assignable to type '\"no\"'."
+    );
+}
+
+// C-C2 slice 2: a distributive conditional `T extends unknown ? T[] : never`
+// distributes over a union check type. `ToArray<string | number>` is
+// `string[] | number[]`, so a `string[]` is assignable but a `boolean[]` is not.
+// Verified against `cmd/tsgo --strict`: only the `boolean[]` assignment reports
+// `error TS2322: Type 'boolean[]' is not assignable to type 'string[] |
+// number[]'.` (the `string[]` assignment is accepted).
+//
+// DIVERGENCE(port): two pre-existing printing divergences appear in the message
+// (the distribution *behavior* — exactly the `boolean[]` assignment errors —
+// matches Go):
+//   1. the port prints an array type as `Array<T>` (it models `T[]` as a
+//      reference to the synthetic global `Array`), not Go's `T[]` shorthand; and
+//   2. the port models `boolean` as the union `false | true` (no `BOOLEAN`
+//      bit), so a `boolean[]` source prints `Array<false | true>`.
+// The instantiated target prints `Array<string> | Array<number>`, proving the
+// distribution produced `string[] | number[]`.
+// blocked-by: array-type shorthand printing + `false | true` -> `boolean`
+// collapse in the node builder.
+// Go: internal/checker/checker.go:Checker.getConditionalTypeInstantiation (distribution)
+#[test]
+fn conditional_distributive_over_union_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         type ToArray<T> = T extends unknown ? T[] : never;\n\
+         declare const sa: string[];\n\
+         declare const ba: boolean[];\n\
+         const x: ToArray<string | number> = sa;\n\
+         const y: ToArray<string | number> = ba;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'Array<false | true>' is not assignable to type 'Array<string> | Array<number>'."
+    );
+}
+
+// C-C2 slice 3: `infer U` in an array-element position. `type ElementType<T> = T
+// extends (infer U)[] ? U : never` applied to `number[]` infers `U = number`, so
+// the conditional resolves to `number`; a `"x"` initializer reports 2322.
+// Verified against `cmd/tsgo --strict`: only line 4 (`const s: ElementType<...>
+// = "x"`) reports `error TS2322: Type 'string' is not assignable to type
+// 'number'.` (line 3 `const n: ElementType<...> = 1` is accepted).
+// Go: internal/checker/checker.go:Checker.getConditionalType (infer inference) + getInferTypeParameters
+#[test]
+fn conditional_infer_element_type_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         type ElementType<T> = T extends (infer U)[] ? U : never;\n\
+         const n: ElementType<number[]> = 1;\n\
+         const s: ElementType<number[]> = \"x\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// C-C2 slice 4: `infer R` in a function return-type position. `type Ret<T> = T
+// extends (...args: any[]) => infer R ? R : never` applied to `() => number`
+// infers `R = number`, so the conditional resolves to `number`; a `"x"`
+// initializer reports 2322.
+// Verified against `cmd/tsgo --strict`: only line 4 (`const r2: Ret<...> = "x"`)
+// reports `error TS2322: Type 'string' is not assignable to type 'number'.`
+// (line 3 `const r: Ret<...> = 1` is accepted).
+// Go: internal/checker/checker.go:Checker.getConditionalType (infer from signature return) + inferFromSignatures
+#[test]
+fn conditional_infer_return_type_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         type Ret<T> = T extends (...args: any[]) => infer R ? R : never;\n\
+         const r: Ret<() => number> = 1;\n\
+         const r2: Ret<() => number> = \"x\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// C-C2 slice 5: a conditional return type stays deferred until a generic
+// function is instantiated. `function f<T>(x: T): T extends string ? 1 : 2` has
+// a deferred conditional return type; `f<string>("a")` instantiates the
+// signature with `T = string`, re-resolving the return type to `1`, so assigning
+// the call result to `2` reports 2322.
+// Verified against `cmd/tsgo --strict`: only the `const bad: 2 = a` line reports
+// `error TS2322: Type '1' is not assignable to type '2'.`
+// Go: internal/checker/checker.go:Checker.instantiateSignature + getConditionalTypeInstantiation
+#[test]
+fn conditional_deferred_through_generic_function_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T>(x: T): T extends string ? 1 : 2 { return null as any; }\n\
+         const a = f<string>(\"a\");\n\
+         const bad: 2 = a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(diags[0].message, "Type '1' is not assignable to type '2'.");
+}

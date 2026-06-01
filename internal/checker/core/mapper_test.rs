@@ -362,3 +362,28 @@ fn instantiate_type_indexed_access_resolves_property() {
         "T[K] with T -> I, K -> \"a\" is number"
     );
 }
+
+// Go: internal/checker/checker.go:instantiateTypeWorker (TypeFlagsConditional arm)
+// Instantiating a deferred conditional without a retained program (an
+// intrinsic-only checker that cannot read the branch type nodes) leaves it
+// deferred — the branch is re-resolved only once a program is available.
+#[test]
+fn instantiate_type_conditional_without_program_is_deferred() {
+    use crate::core::types::ConditionalRoot;
+    use tsgo_ast::NodeId;
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let root = ConditionalRoot {
+        node: NodeId(0),
+        check_type: tp,
+        extends_type: c.string_type(),
+        is_distributive: true,
+        infer_type_parameters: vec![],
+        outer_type_parameters: vec![tp],
+    };
+    let cond = c.new_conditional_type(root, None);
+    assert!(c.get_type(cond).flags().contains(TypeFlags::CONDITIONAL));
+    let mapper = TypeMapper::unary(tp, c.string_type());
+    // No retained program: stays the same deferred conditional id.
+    assert_eq!(c.instantiate_type(cond, &mapper), cond);
+}

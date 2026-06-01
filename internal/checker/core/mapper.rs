@@ -360,9 +360,28 @@ impl Checker {
                 None => self.new_indexed_access_type(object_type, index_type, d.access_flags),
             };
         }
-        // DEFER(phase-4-checker-C-C2+): conditional/template-literal/substitution
-        // and string-mapping instantiation.
-        // blocked-by: those type constructors land across C-C2/C-C3.
+        // A conditional type `T extends U ? X : Y`: re-resolve it under the
+        // combined (own + incoming) mapper, distributing over a union check type
+        // and resolving a branch once the check/extends types become concrete
+        // (Go's `getConditionalTypeInstantiation`).
+        if flags.contains(TypeFlags::CONDITIONAL) {
+            let own_mapper = self.conditional_mapper(t);
+            let combined = TypeMapper::combine(own_mapper, mapper.clone());
+            return match self.retained_program() {
+                Some(program) => super::declared_types::get_conditional_type_instantiation(
+                    self,
+                    program.as_ref(),
+                    t,
+                    &combined,
+                ),
+                // No retained program (intrinsic-only checker): the branch type
+                // nodes cannot be read, so leave the conditional deferred.
+                None => t,
+            };
+        }
+        // DEFER(phase-4-checker-C-C3): template-literal/substitution and
+        // string-mapping instantiation.
+        // blocked-by: those type constructors land in C-C3.
         t
     }
 
