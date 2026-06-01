@@ -3172,6 +3172,70 @@ impl EmitResolver {
 
 **推荐下一轮（4bo）**：(a) **`elaborateObjectLiteral`/`elaborateArrayLiteral`**（让字面量源在具体成员节点位报叶诊断，对齐 Go 字面量路径——当前字面量走链路径是已知偏离）；(b) **signature/parameter 阐释 `2328` + 返回类型折叠**（`signaturesRelatedTo` reporting + `reportError` 的 `x()`/`x(...)` 臂）；(c) **heritage 成员特定 2416**（`issueMemberSpecificError` 接 `report_type_not_assignable` + headMessage 通道，把 4bm 的 2415/2420 广播降级）。
 
+## 4bo 落地记录（worklog 摘要）—— 对象/数组**字面量** RHS 的 element-wise 阐释（`elaborateError`/`elaborateObjectLiteral`/`elaborateArrayLiteral`/`elaborateElement`）
+
+**目标**：4bn 的链路径把**字面量源**（`const o:{...}={...}`）也走通用关系链（诊断挂在整条赋值上、头是整对象消息）——这是 4bn 记录的**已知偏离**。本轮接入 Go `relater.go` 的 `elaborateError` 分流：对**对象/数组字面量**右值，`checkTypeRelatedToAndOptionallyElaborate` 先调 `elaborateError(expr)` 逐成员走结构，把不兼容报在**具体成员节点**（属性名 / 元素节点）上、并挂 **6500** "The expected type comes from property 'x'..." related-info，比挂在整条赋值上的链**更精确**（且这是最常见情形）。bool 快路径与 4bn 通用链（非字面量 RHS 的兜底）**完全不动**。逐行为红→绿。单 lane。cargo 仅 `-p tsgo_checker`（+ `cargo build -p tsgo_compiler` 验 additive）。未 `git commit`。
+
+**Go 真值（ground truth，用 `go build ./cmd/tsgo` 实跑快照逐一核对，非凭空推断）**：
+- 对象字面量错类型（`const o:{a:number}={a:"x"}`）：`a.ts(1,28)` `2322` "Type 'string' is not assignable to type 'number'." **指在字面量属性名 `a`**（NOT 整 `{a:"x"}`、NOT 赋值），+ related `a.ts(1,12)` **6500** "The expected type comes from property 'a' which is declared here on type '{ a: number; }'"（指目标属性签名的**名字**节点）。
+- 嵌套对象（`{a:{b:number}}={a:{b:"x"}}`）：`a.ts(1,40)` `2322` 指在**最内层 `b`**（递归到内层字面量），+ related `a.ts(1,17)` 6500 "...property 'b'... on type '{ b: number; }'"。
+- 数组元素（`const xs:number[]=[1,"x"]`）：`a.ts(1,26)` `2322` 指在 `"x"` 元素（`1` 静默），**无** related-info（元素类型来自 index signature，6501/`target.symbol` 臂在 lib 文件被 `IsSourceFileDefaultLibrary` 抑制）。
+- 字面量字面类型不匹配（`{a:"x"}={a:1}`）：`a.ts(1,25)` `2322` "Type 'number' is not assignable to type '"x"'." + 6500 "...on type '{ a: "x"; }'"。
+- 括号包裹（`={ ( {a:"x"} ) }`）：`a.ts(1,29)` `2322` 指内层 `a` + 6500（`elaborateError` 解包 `KindParenthesizedExpression`）。
+- 错类型 + excess（`{a:number}={a:"x",b:1}`）：**仅** `2322` 报在 `a`，**无** `2353`（Go `checkTypeRelatedToAndOptionallyElaborate` 先 `elaborateError`，报了就 return，不再走 `checkTypeRelatedToEx`，excess 检查在关系内、被短路）。
+- 纯 excess（`{a:number}={a:1,b:2}`）：`2353` 报在 `b`（结构可赋值，仅 excess）。
+- 缺失必需属性（`{a:number;b:number}={a:1}`）：`2741` 报在声明（字面量无缺失成员对应节点，`elaborateObjectLiteral` 不报 → 走 4bn 通用链 `2741`）。
+
+**Go 函数镜像（`// Go:` 锚）**：`elaborateError`（分流 + parenthesized 解包）、`elaborateObjectLiteral`（属性遍历）、`elaborateArrayLiteral`（force-tuple 重检 + 元素遍历）、`elaborateElement`（共享驱动：`getBestMatchIndexedAccessTypeOrUndefined`→`getIndexedAccessTypeOrUndefined`、`checkExpressionForMutableLocationWithContextualType`、`checkTypeRelatedToEx`、6500 related-info）、`isTupleLikeType`、`GetNameOfDeclaration`/`GetErrorRangeForNode`（related-info 指名字节点）。
+
+**严格 TDD（逐行为 red→green）**：
+
+| # | 切片 | 最小 input → observable（实测红/绿） | 实现触点 |
+|---|---|---|---|
+| 1 tracer（genuine RED）| `elaborate_object_literal_wrong_property_type_points_at_property_name` | `const o:{a:number}={a:"x"}` → `2322` 在字面量 `a` + 6500（红：实测 message=`Type '{ a: string; }' is not assignable to type '{ a: number; }'.`，走 4bn 整对象链）| `elaborate_error`+`elaborate_object_literal`+`elaborate_element`+`elaboration_member_type`+6500 + var-decl 接线 |
+| 2（recursion）| `elaborate_nested_object_literal_points_at_innermost_property` | `{a:{b:number}}={a:{b:"x"}}` → `2322` 在最内 `b` + 6500 'b'（green-on-arrival：slice 1 的 `next` 递归即覆盖，记录前/后：4bn 走 dotted `2200` "a.b"）| `elaborate_element` 的 `next` 递归 |
+| 3（genuine RED）| `elaborate_array_literal_wrong_element_points_at_element` | `const xs:number[]=[1,"x"]` → `2322` 在 `"x"`、无 related（红：临时 `if true {return false}` 禁 `elaborate_array_literal` → 实测 **0** 诊断——见下"可达裁剪"）| `elaborate_array_literal`+`is_tuple_like_type`+force-tuple |
+| 4 守卫 | `elaborate_object_literal_wrong_type_suppresses_excess_property` | `{a:number}={a:"x",b:1}` → 仅 `2322` 在 `a`、无 `2353` | var-decl 三步重排（elaborate 先于 excess）|
+| 4 守卫 | `object_literal_missing_property_falls_back_to_2741_chain` | `{a:number;b:number}={a:1}` → `2741`（elaborate 不报 → 4bn 链兜底）| 兜底 `report_type_not_assignable` |
+| 4 守卫 | `non_literal_rhs_keeps_4bn_generic_chain` | `const o:A=b`（b 是 identifier）→ `2322`+`message_chain`[2326]（非字面量 RHS 仍走 4bn 链）| `elaborate_error` 默认臂 false |
+| 附 | `elaborate_error_unwraps_parenthesized_object_literal` | `=({a:"x"})` → 内层 `a` 报（direct-driver，见下）| `elaborate_error` parenthesized 臂 |
+| 附 | `elaborate_simple_assignment_object_literal_rhs` | `x={a:"y"}` → `2322` 在 RHS `a` + 6500 指 `x` 声明 | `check_assignment_operator` 接线 |
+| 单测 | `elaborate_error_returns_false_for_non_literal_expression` | identifier 节点 → false、无诊断 | dispatch 默认臂 |
+| 单测 | `elaborate_object_literal_primitive_target_returns_false` | 对象字面量 vs `number` target → false | primitive/never 守卫 |
+| 单测 | `is_tuple_like_type_recognizes_tuples_and_zero_indexed_objects` | tuple→true / 空对象→false / `{0:1}`→true | `is_tuple_like_type` 两臂 |
+| 改 | `object_literal_property_mismatch_reports_2322` / `..._mismatched_literal_kind_still_reports_2322`（4bf/4bk）| 旧断言整对象链消息 → 改为 4bo element-wise 叶消息（对齐 Go，**非弱化**：旧值是 4bn 记录的偏离）| — |
+
+> 红→绿证据：slice 1 **genuine RED**（实测整对象链消息 `Type '{ a: string; }'...` ≠ element-wise `Type 'string'...`）；slice 3 **genuine RED**（临时 `if true {return false}` 禁 `elaborate_array_literal` → 实测 **0** 诊断，因 bool 路径误判 `(number|string)[]` 可赋值给 `number[]`，见下）。两处 RED 实测后已恢复并复绿。slice 2 是 slice 1 机器的递归臂（green-on-arrival，如实记录，同 4bn 口径）。
+
+**可达裁剪（faithful-but-reachable）**：
+- **目标成员类型**：Go `getBestMatchIndexedAccessTypeOrUndefined`→（非 union）`getIndexedAccessTypeOrUndefined`。port `get_indexed_access_type` **仅**处理 index-signature/tuple（不解析命名属性），故新 `elaboration_member_type` = 先 `get_type_of_property_of_type`（命名属性 / `length`）再 `get_indexed_access_type`（index/tuple），等价于 Go 对可达子集（对象命名属性 + 数组 index 签名 + tuple 位）。
+- **related-info 仅 `targetProp.Declarations[0]` 臂**：DEFER `6501`（index-signature）+ `target.symbol` 兜底臂——二者 Go 都 gated 在 `!IsSourceFileDefaultLibrary`，而 port 无"默认库文件"判定（lib 未加载，P6）。对可达对象字面量目标，`targetProp` 恒为用户声明的命名属性 → 命中本臂；对数组（`number[]`）`targetProp==nil` → 无 related，正好对齐 Go 实测（数组元素来自 lib index 签名、被抑制）。related-info 指**声明的名字节点**（`declaration_name_node` ≈ `GetNameOfDeclaration`），匹配 Go `GetErrorRangeForNode` 对 `PropertySignature` 的窄化。
+- **数组 force-tuple**：Go `checkArrayLiteral(node, CheckModeForceTuple)`。port 的 `check_array_literal` 无 ForceTuple（4bi DEFER），故 `elaborate_array_literal` 直接用各元素 `check_expression_for_mutable_location`（widened）建 `create_tuple_type_ex`（无 contextual push——可达子集目标元素类型不细化源）。
+- **`specificSource`**：Go `checkExpressionForMutableLocationWithContextualType(next, sourcePropType)`（pushContextualType）→ port `check_expression_for_mutable_location(next)`（无 contextual push）。可达子集叶值（基元字面量）widened 后类型一致（`"x"`→string）。
+- **var-decl 三步重排（match Go ordering）**：Go 把 excess 折进关系（`hasExcessProperties` ∈ `recursiveTypeRelatedToWorker`），port 把 excess 建模成 call-site 独立检查。本轮把 var-decl 改为镜像 Go 三步：(A) 关系成立 → 仅剩 excess（结构可赋值时跑 excess，命中报 `2353`）；(B) 关系失败 → `elaborateError` 先行，报了元素就 return（**抑制 excess 与通用链**，对齐 `{a:"x",b:1}` 仅报 `2322`）；(C) 没报元素 → excess、再通用链。既有 5 个 excess 测试源都结构可赋值（走 A）→ 无回归。
+
+**本轮交付**：
+- `core/check.rs`：新 `pub(crate) elaborate_error`（dispatch + parenthesized 解包；object/array 臂）+ 私有 `elaborate_object_literal`/`elaborate_array_literal`/`elaborate_element`/`elaboration_member_type`/`is_tuple_like_type` + 自由 fn `declaration_name_node`；`check_variable_declaration`/`check_property_declaration` 失败位改走 `elaborate_error`-先行；`check_assignment_operator` 加 `expr: Option<NodeId>` 参数（简单赋值传 `Some(right)`、复合传 `None`）+ 5 处调用点更新；var-decl 三步重排（excess 与 elaborate 顺序）；import `get_indexed_access_type`。
+- 测试：`check_test.rs`（+11 新测 + 改 2 既有断言为 element-wise）。
+
+**新公开 API 形状（additive-only 确认）**：唯一新 pub 面是 `pub(crate) fn elaborate_error`（crate 内可见，非 `pub`）。其余 `elaborate_object_literal`/`elaborate_array_literal`/`elaborate_element`/`elaboration_member_type`/`is_tuple_like_type` 均私有 fn；`declaration_name_node` 私有自由 fn。**无既有 `pub fn` 签名变更**（`check_assignment_operator` 是私有 fn，加参不影响公开 API）、无 `.go` 改动、无 `internal/ast` 改动、无新依赖、无 `lib.rs` 改动。复用 4bn `DiagnosticMessageChain`/`build_relation_error_chain`、4aj `add_related_info`、4bk `get_type_of_property_of_type`。`cargo build -p tsgo_compiler` 绿。
+
+**测试增量**：**537 单测**（+11，相对 4bn 基线 526：全在 `check_test`）+ **135 doctest**（+0）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker --lib`（537 绿）+ `--doc`（135 绿）；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。未触 `internal/ast`，故未跑 `--workspace`。未 `git commit`。
+
+**本轮 DEFER（带 blocked-by）**：
+- **数组/括号字面量的 end-to-end 不可达（关键）**：`elaborate_array_literal` 与 `elaborateError` 的 parenthesized 臂**实现忠实且单测覆盖（direct-driver）**，但经 var-decl/assignment **不可达**——(数组) port 的 bool 关系把 `(number|string)[]` 误判为可赋值给 `number[]`（缺 array/reference 类型实参 element 变型，`structured_type_related_to` 仅比对象属性、未比 index/类型实参），故 `is_type_assignable_to` 返 true、`elaborateError` 永不触发；(括号) `check_expression` 未给 `ParenthesizedExpression` 定型（返 error type → 可赋值 → 不触发）。两测用 direct-driver 驱动 `elaborate_error` 验证机器正确。blocked-by: 关系引擎 array/reference 类型实参变型；`check_expression` 的 `ParenthesizedExpression` 定型。
+- **`elaborateError` 其余分流臂**：`isOrHasGenericConditional` 早退、`elaborateDidYouMeanToCallOrConstruct`（call/construct 建议）、binary（`=`/`,`）/`as const`/JsxExpression 解包、`elaborateArrowFunction`（返回类型）、`elaborateJsxComponents`（JSX 属性）。blocked-by: 条件类型、产诊断签名关系、arrow/JSX 阐释。
+- **`elaborateObjectLiteral` 成员臂**：spread、shorthand/method/accessor、computed（非字面量）名（`Type_of_computed_property_s_value_is_0...`）。blocked-by: spread/accessor/method 定型 + computed-name 字面量类型。
+- **`elaborateArrayLiteral`**：spread/omitted 元素、force-tuple 的 contextual push、tuple-target optional/rest 元素跳过（仅做了"present-property"跳过）。blocked-by: spread 定型、contextual 传播、variadic/optional tuple 目标。
+- **`elaborateElement` 高级臂**：union-target `getBestMatchingType`、`exactOptionalPropertyTypes` 消息、JSX 自定义诊断工厂、`removeMissingType` optional 调整、`6501`(index-signature)/`target.symbol` 兜底 related-info。blocked-by: union best-match、exact-optional、JSX、默认库文件判定。
+- **`isTupleLikeType`**：array-like + numeric-literal-`length` 臂。blocked-by: `isArrayLikeType`（`ReadonlyArray<any>` 可赋值，需 lib globals）。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/types/typeRelationships/assignmentCompatibility/`（对象字面量成员不兼容指元素节点 + 6500）最基础子集——无数组/括号 end-to-end（blocked-by 上述）、无 union/signature/index/JSX/computed/spread 阐释。
+
+**推荐下一轮（4bp）**：(a) **关系引擎 array/reference 类型实参变型**（解锁数组字面量 elaborate 的 end-to-end 可达 + 修 `(number|string)[]`↔`number[]` 误判）；(b) **signature/parameter 阐释 `2328` + 返回类型折叠**（`signaturesRelatedTo` reporting + `reportError` 的 `x()`/`x(...)` 臂）；(c) **`elaborateElement` 的 `6501`/`target.symbol` related-info 臂 + 默认库文件判定**。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

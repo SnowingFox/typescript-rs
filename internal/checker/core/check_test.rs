@@ -4135,7 +4135,13 @@ fn object_literal_assignable_to_matching_annotation() {
 // `a: string`, which is not assignable to the target's `a: number`. Before
 // slice 1 the literal was the `error` type (0 diagnostics); slice 1's
 // object-literal typing makes the structural mismatch observable.
-// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) + relater
+//
+// 4bo update: a fresh object-literal RHS now elaborates element-wise (Go's
+// `elaborateError`), so the message is the per-element leaf "Type 'string' is
+// not assignable to type 'number'." (was the whole-object chain head before
+// 4bo). See `elaborate_object_literal_wrong_property_type_points_at_property_name`
+// for the full anchor + related-info assertions.
+// Go: internal/checker/relater.go:Checker.elaborateObjectLiteral / elaborateElement
 #[test]
 fn object_literal_property_mismatch_reports_2322() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
@@ -4149,7 +4155,7 @@ fn object_literal_property_mismatch_reports_2322() {
     assert_eq!(diags[0].code, 2322);
     assert_eq!(
         diags[0].message,
-        "Type '{ a: string; }' is not assignable to type '{ a: number; }'."
+        "Type 'string' is not assignable to type 'number'."
     );
 }
 
@@ -4791,22 +4797,35 @@ fn object_literal_property_literal_preserved_by_contextual_type() {
 // preservation only keeps a literal whose KIND matches the context. `{ a: 1 }`
 // typed by `{ a: "x" }`: `1` is a number literal, the context `"x"` is a string
 // literal, so `is_literal_of_contextual_type` is false, `1` widens to `number`,
-// and `{ a: number; }` is not assignable to `{ a: "x"; }`.
-// Go: internal/checker/checker.go:Checker.isLiteralOfContextualType(25381)
+// and the `a` member is not assignable to `"x"`.
+//
+// 4bo update: the fresh object-literal RHS elaborates element-wise, so the
+// message is the per-element leaf "Type 'number' is not assignable to type
+// '"x"'." (was the whole-object chain head before 4bo), with a `6500` related
+// info pointing at the target property declaration. Verified against `cmd/tsgo`.
+// Go: internal/checker/relater.go:Checker.elaborateElement
 #[test]
 fn object_literal_property_mismatched_literal_kind_still_reports_2322() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
-        "/a.ts",
-        "const o: { a: \"x\" } = { a: 1 };",
-    ));
+    let src = "const o: { a: \"x\" } = { a: 1 };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
     assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
-    assert_eq!(diags[0].code, 2322);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
     assert_eq!(
-        diags[0].message,
-        "Type '{ a: number; }' is not assignable to type '{ a: \"x\"; }'."
+        d.message,
+        "Type 'number' is not assignable to type '\"x\"'."
+    );
+    // Anchored at the literal's `a` (in the RHS), with the `6500` related info.
+    let eq = src.find('=').unwrap();
+    assert!(d.start as usize > eq);
+    assert_eq!(d.related_information.len(), 1);
+    assert_eq!(d.related_information[0].code, 6500);
+    assert_eq!(
+        d.related_information[0].message,
+        "The expected type comes from property 'a' which is declared here on type '{ a: \"x\"; }'"
     );
 }
 
@@ -5142,4 +5161,412 @@ fn assignability_chain_optional_source_required_target_reports_2327() {
         "Property 'a' is optional in type 'S' but required in type 'T'."
     );
     assert!(opt.next.is_empty());
+}
+
+// 4bo slice 1: a fresh object-literal RHS with a wrong property type elaborates
+// element-wise onto the offending property's name node (Go's `elaborateError` ->
+// `elaborateObjectLiteral` -> `elaborateElement`), reporting `2322`
+// "Type 'string' is not assignable to type 'number'." anchored at the literal's
+// `a` (NOT the whole assignment / object), with a `6500` related-info "The
+// expected type comes from property 'a' which is declared here on type
+// '{ a: number; }'" pointing at the target property's declaration.
+// Verified against `cmd/tsgo`: `a.ts(1,28): error TS2322 ...` + related at 1:12.
+// Go: internal/checker/relater.go:Checker.elaborateObjectLiteral / elaborateElement
+#[test]
+fn elaborate_object_literal_wrong_property_type_points_at_property_name() {
+    let src = "const o: { a: number } = { a: \"x\" };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+    // The element-wise leaf carries no further chain.
+    assert!(d.message_chain.is_empty());
+    // The error is anchored at the literal's property name `a` (in the RHS),
+    // not at the whole assignment / object literal.
+    let eq = src.find('=').unwrap();
+    let span = &src[d.start as usize..(d.start + d.length) as usize];
+    assert_eq!(span.trim(), "a");
+    assert!(d.start as usize > eq, "error should be in the RHS literal");
+    // The `6500` related info points at the target property's declaration (the
+    // `a` in the `{ a: number }` annotation, before the `=`).
+    assert_eq!(d.related_information.len(), 1);
+    let rel = &d.related_information[0];
+    assert_eq!(rel.code, 6500);
+    assert_eq!(
+        rel.message,
+        "The expected type comes from property 'a' which is declared here on type '{ a: number; }'"
+    );
+    let rel_span = &src[rel.start as usize..(rel.start + rel.length) as usize];
+    assert_eq!(rel_span.trim(), "a");
+    assert!(
+        (rel.start as usize) < eq,
+        "related info should point at the type annotation"
+    );
+}
+
+// 4bo slice 2: a nested object-literal value recurses (Go's `elaborateElement`
+// calls `elaborateError` on the value node), so the error lands on the
+// innermost offending property `b` rather than the outer `a`. Before 4bo this
+// took the 4bn generic chain (a dotted `2200` "a.b" hung on the whole
+// assignment); after 4bo the diagnostic is anchored at the inner `b` with a
+// `6500` "...property 'b'... on type '{ b: number; }'".
+// Verified against `cmd/tsgo`: `a.ts(1,40): error TS2322 ...` + related at 1:17.
+// Go: internal/checker/relater.go:Checker.elaborateElement (next != nil recursion)
+#[test]
+fn elaborate_nested_object_literal_points_at_innermost_property() {
+    let src = "const o: { a: { b: number } } = { a: { b: \"x\" } };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+    assert!(d.message_chain.is_empty());
+    // The error anchors at the inner `b` (in the RHS literal), the innermost
+    // offending element, not the outer `a` and not the whole assignment.
+    let eq = src.find('=').unwrap();
+    let span = &src[d.start as usize..(d.start + d.length) as usize];
+    assert_eq!(span.trim(), "b");
+    assert!(d.start as usize > eq, "error should be in the RHS literal");
+    // The `6500` related info points at the inner target property `b`.
+    assert_eq!(d.related_information.len(), 1);
+    let rel = &d.related_information[0];
+    assert_eq!(rel.code, 6500);
+    assert_eq!(
+        rel.message,
+        "The expected type comes from property 'b' which is declared here on type '{ b: number; }'"
+    );
+    let rel_span = &src[rel.start as usize..(rel.start + rel.length) as usize];
+    assert_eq!(rel_span.trim(), "b");
+    assert!((rel.start as usize) < eq);
+}
+
+// 4bo slice 3: a fresh array-literal RHS elaborates element-wise (Go's
+// `elaborateError` -> `elaborateArrayLiteral`): the literal is re-typed as a
+// fixed-arity tuple `[number, string]`, and the offending element `"x"` (index
+// 1) reports `2322` "Type 'string' is not assignable to type 'number'." anchored
+// at that element. The matching element `1` (index 0) is silent. There is NO
+// `6500` related info (the target `number[]` element type comes from an index
+// signature, whose `6501` arm is DEFER).
+// Verified against `cmd/tsgo`: `a.ts(1,26): error TS2322 ...` (no related info).
+//
+// `elaborate_array_literal` is driven directly here because the var-decl bool
+// fast path does not yet reject `(number | string)[]` against `number[]` (the
+// relation engine lacks array/reference type-argument element variance), so the
+// end-to-end `checkTypeRelatedToAndOptionallyElaborate` path never reaches
+// `elaborateError` for the array case. See the 4bo worklog DEFER note.
+// Go: internal/checker/relater.go:Checker.elaborateArrayLiteral / elaborateElement
+#[test]
+fn elaborate_array_literal_wrong_element_points_at_element() {
+    let src = "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\nconst xs: number[] = [1, \"x\"];";
+    let p = StubProgram::parse_and_bind("/a.ts", src);
+    let (init, decl) = last_var_init_and_decl(&p);
+    let mut c = Checker::new();
+    let sym = p.symbol_of_node(decl).expect("symbol");
+    let declared = crate::core::declared_types::get_type_of_symbol(&mut c, &p, sym, p.globals());
+    let initializer_type = c.check_expression(&p, init);
+    // Drive the element-wise elaboration directly (the bool fast path wrongly
+    // accepts this assignment, so the var-decl wiring never gets here).
+    let elaborated = c.elaborate_error(
+        &p,
+        init,
+        initializer_type,
+        declared,
+        crate::RelationKind::Assignable,
+    );
+    assert!(
+        elaborated,
+        "the array literal should elaborate element-wise"
+    );
+    let diags = c
+        .diagnostics_by_file
+        .get(&p.file_handle())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+    assert!(d.message_chain.is_empty());
+    // The error anchors at the `"x"` element, not the matching `1`.
+    let span = &src[d.start as usize..(d.start + d.length) as usize];
+    assert_eq!(span.trim(), "\"x\"");
+    // The array element type is an index-signature type, so Go emits no `6500`.
+    assert!(d.related_information.is_empty());
+}
+
+// 4bo slice 4 (interplay): a fresh object literal with BOTH a wrong-type
+// property and an excess property reports ONLY the element-wise `2322` on the
+// wrong-type member; the `2353` excess message is suppressed. Go's
+// `checkTypeRelatedToAndOptionallyElaborate` calls `elaborateError` before
+// `checkTypeRelatedToEx`, so once an element reports, the relation (which is
+// where excess checking lives in Go) never runs.
+// Verified against `cmd/tsgo`: only `a.ts:1:28 error TS2322 ...` (no `2353`).
+// Go: internal/checker/relater.go:Checker.checkTypeRelatedToAndOptionallyElaborate
+#[test]
+fn elaborate_object_literal_wrong_type_suppresses_excess_property() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { a: number } = { a: \"x\", b: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(
+        diags.len(),
+        1,
+        "expected only the element 2322, got {diags:?}"
+    );
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// 4bo slice 4 (no regression): a fresh object literal MISSING a required target
+// property is not flagged element-wise (the literal has no node for the absent
+// member), so `elaborateError` reports nothing and the generic 4bn relation
+// chain fires `2741` at the declaration. The fallback path is unchanged.
+// Verified against `cmd/tsgo`: `a.ts:1:7 error TS2741: Property 'b' is missing
+// ...`.
+// Go: internal/checker/relater.go:Checker.elaborateObjectLiteral (no element) -> checkTypeRelatedToEx
+#[test]
+fn object_literal_missing_property_falls_back_to_2741_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { a: number; b: number } = { a: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2741);
+    assert_eq!(
+        d.message,
+        "Property 'b' is missing in type '{ a: number; }' but required in type '{ a: number; b: number; }'."
+    );
+    // The generic-chain fallback has no element-anchored related info.
+    assert!(d.related_information.is_empty());
+}
+
+// 4bo slice 4 (no regression): a NON-literal RHS (an identifier) is not an
+// object/array literal, so `elaborateError` returns false immediately and the
+// 4bn generic relation chain still reports at the declaration with its nested
+// `2326` "Types of property 'a' are incompatible." chain. elaborateError does
+// not hijack non-literal right-hand sides.
+// Go: internal/checker/relater.go:Checker.elaborateError (no literal arm) -> checkTypeRelatedToEx
+#[test]
+fn non_literal_rhs_keeps_4bn_generic_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { a: number }\ninterface B { a: string }\ndeclare const b: B;\nconst o: A = b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message, "Type 'B' is not assignable to type 'A'.");
+    // The nested chain is preserved (not the element-wise leaf), and there is no
+    // element-anchored related info.
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2326);
+    assert!(d.related_information.is_empty());
+}
+
+// Returns the initializer node and variable-declaration node of the LAST
+// top-level `const`/`var` declaration (used by elaboration fixtures to grab the
+// literal RHS and its declaration directly).
+fn last_var_init_and_decl(p: &StubProgram) -> (tsgo_ast::NodeId, tsgo_ast::NodeId) {
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let last = *stmts.last().unwrap();
+    let list = match arena.data(last) {
+        NodeData::VariableStatement(d) => d.declaration_list,
+        _ => panic!("variable statement"),
+    };
+    let decl = match arena.data(list) {
+        NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+        _ => panic!("declaration list"),
+    };
+    let init = match arena.data(decl) {
+        NodeData::VariableDeclaration(d) => d.initializer.expect("initializer"),
+        _ => panic!("variable declaration"),
+    };
+    (init, decl)
+}
+
+// 4bo: `elaborate_error` unwraps a parenthesized expression and elaborates its
+// inner literal (Go's `KindParenthesizedExpression` arm). `({ a: "x" })` against
+// `{ a: number }` reports the element-wise `2322` on the inner `a`.
+// Verified against `cmd/tsgo`: `a.ts:1:29 error TS2322 ...` + related at 1:12.
+//
+// Driven directly because `check_expression` does not yet type a
+// `ParenthesizedExpression` (it yields the `error` type, which is assignable to
+// anything, so the var-decl path never reaches `elaborateError`). The unwrap
+// arm itself is exercised here. See the 4bo worklog DEFER note.
+// Go: internal/checker/relater.go:Checker.elaborateError (parenthesized unwrap)
+#[test]
+fn elaborate_error_unwraps_parenthesized_object_literal() {
+    let src = "const o: { a: number } = ({ a: \"x\" });";
+    let p = StubProgram::parse_and_bind("/a.ts", src);
+    let (paren, decl) = last_var_init_and_decl(&p);
+    let inner = match p.arena().data(paren) {
+        NodeData::ParenthesizedExpression(d) => d.expression,
+        other => panic!("expected parenthesized expression, got {other:?}"),
+    };
+    let mut c = Checker::new();
+    let sym = p.symbol_of_node(decl).expect("symbol");
+    let declared = crate::core::declared_types::get_type_of_symbol(&mut c, &p, sym, p.globals());
+    let source = c.check_expression(&p, inner);
+    // Drive the unwrap arm: `elaborate_error(paren)` -> inner object literal.
+    let reported = c.elaborate_error(&p, paren, source, declared, crate::RelationKind::Assignable);
+    assert!(reported, "the parenthesized literal should elaborate");
+    let diags = c
+        .diagnostics_by_file
+        .get(&p.file_handle())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+    let eq = src.find('=').unwrap();
+    assert!(
+        d.start as usize > eq,
+        "error in the parenthesized RHS literal"
+    );
+    assert_eq!(d.related_information.len(), 1);
+    assert_eq!(d.related_information[0].code, 6500);
+}
+
+// 4bo: a simple-assignment RHS that is a fresh object literal elaborates
+// element-wise at the assignment site too (Go wires
+// `checkTypeAssignableToAndOptionallyElaborate(rightType, leftType, left,
+// right, ...)` in `checkAssignmentOperator`). `x = { a: "y" }` reports `2322`
+// on the literal's `a` with a `6500` related-info pointing at `x`'s declared
+// property.
+// Verified against `cmd/tsgo`: `a.ts:2:7 error TS2322 ...` + related at 1:10.
+// Go: internal/checker/checker.go:Checker.checkAssignmentOperator(12701)
+#[test]
+fn elaborate_simple_assignment_object_literal_rhs() {
+    let src = "let x: { a: number } = { a: 1 };\nx = { a: \"y\" };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+    // The error is on the RHS literal's `a` (line 2); the related info points at
+    // `x`'s declared property `a` (line 1).
+    let nl = src.find('\n').unwrap();
+    assert!(
+        d.start as usize > nl,
+        "error should be on the assignment RHS"
+    );
+    assert_eq!(d.related_information.len(), 1);
+    let rel = &d.related_information[0];
+    assert_eq!(rel.code, 6500);
+    assert!((rel.start as usize) < nl, "related info on the declaration");
+}
+
+// 4bo unit: `elaborate_error` returns false for a non-object/array-literal
+// expression (here an identifier), reporting nothing — the dispatch's default
+// arm. This is what lets a non-literal RHS fall through to the generic chain.
+// Go: internal/checker/relater.go:Checker.elaborateError (default: return false)
+#[test]
+fn elaborate_error_returns_false_for_non_literal_expression() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: string;\nx;");
+    let ident = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let n = c.number_type();
+    let reported = c.elaborate_error(&p, ident, s, n, crate::RelationKind::Assignable);
+    assert!(!reported, "a non-literal expression must not elaborate");
+    let diags = c
+        .diagnostics_by_file
+        .get(&p.file_handle())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    assert!(diags.is_empty(), "no diagnostic should be reported");
+}
+
+// 4bo unit: `elaborate_object_literal` returns false for a primitive (or
+// `never`) target, since a primitive has no member structure to elaborate
+// (Go's early `target.flags & (Primitive|Never)` guard). Driven directly with a
+// `number` target so the var-decl path's structural check is bypassed.
+// Go: internal/checker/relater.go:Checker.elaborateObjectLiteral (primitive guard)
+#[test]
+fn elaborate_object_literal_primitive_target_returns_false() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1 };");
+    let (init, _) = last_var_init_and_decl(&p);
+    let mut c = Checker::new();
+    let source = c.check_expression(&p, init);
+    let number = c.number_type();
+    let reported = c.elaborate_error(&p, init, source, number, crate::RelationKind::Assignable);
+    assert!(!reported, "a primitive target has nothing to elaborate");
+    let diags = c
+        .diagnostics_by_file
+        .get(&p.file_handle())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    assert!(diags.is_empty());
+}
+
+// 4bo unit: `is_tuple_like_type` recognizes a fixed-arity tuple (the `TUPLE`
+// object-flag arm) and an object with a `"0"` member (the `getPropertyOfType(t,
+// "0")` arm), and rejects a plain object with neither.
+// Go: internal/checker/checker.go:Checker.isTupleLikeType(23405)
+#[test]
+fn is_tuple_like_type_recognizes_tuples_and_zero_indexed_objects() {
+    let mut c = Checker::new();
+    let n = c.number_type();
+    let tuple = c.create_tuple_type_ex(vec![n], false);
+    assert!(
+        c.is_tuple_like_type(tuple),
+        "a fixed-arity tuple is tuple-like"
+    );
+    let empty = c.new_object_type(ObjectFlags::ANONYMOUS, None, ObjectType::default());
+    assert!(
+        !c.is_tuple_like_type(empty),
+        "a plain object with no '0' is not tuple-like"
+    );
+    // An object literal with a `0` member exposes a `"0"` property.
+    let p = StubProgram::parse_and_bind("/a.ts", "const t = { 0: 1 };");
+    let (init, _) = last_var_init_and_decl(&p);
+    let zero_indexed = c.check_expression(&p, init);
+    assert!(
+        c.is_tuple_like_type(zero_indexed),
+        "an object with a '0' member is tuple-like"
+    );
 }

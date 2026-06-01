@@ -28,7 +28,7 @@ use tsgo_diagnostics::{Category, Message};
 
 use super::contextual::ContextFlags;
 use super::declared_types::{
-    get_apparent_type, get_declared_type_of_symbol, get_property_of_type,
+    get_apparent_type, get_declared_type_of_symbol, get_indexed_access_type, get_property_of_type,
     get_type_of_property_of_type, get_type_of_symbol,
 };
 use super::mapper::TypeMapper;
@@ -1256,7 +1256,7 @@ impl Checker {
         let operator = program.arena().kind(operator_token);
         match operator {
             Kind::EqualsToken => {
-                self.check_assignment_operator(program, left, left_type, right_type);
+                self.check_assignment_operator(program, left, left_type, right_type, Some(right));
                 right_type
             }
             // Relational operators (`<`/`>`/`<=`/`>=`) yield `boolean`; the
@@ -1356,7 +1356,7 @@ impl Checker {
                 // be assignable to the (reference) left-hand side, but only once
                 // both operands type-checked (Go guards on `leftOk && rightOk`).
                 if left_ok && right_ok && is_compound_assignment(operator) {
-                    self.check_assignment_operator(program, left, left_type, result_type);
+                    self.check_assignment_operator(program, left, left_type, result_type, None);
                 }
                 result_type
             }
@@ -1375,7 +1375,7 @@ impl Checker {
                     result = self.get_union_dropping_never(&[truthy, right_type]);
                 }
                 if operator == Kind::BarBarEqualsToken {
-                    self.check_assignment_operator(program, left, left_type, right_type);
+                    self.check_assignment_operator(program, left, left_type, right_type, None);
                 }
                 result
             }
@@ -1398,7 +1398,7 @@ impl Checker {
                     result = self.get_union_dropping_never(&[falsy, right_type]);
                 }
                 if operator == Kind::AmpersandAmpersandEqualsToken {
-                    self.check_assignment_operator(program, left, left_type, right_type);
+                    self.check_assignment_operator(program, left, left_type, right_type, None);
                 }
                 result
             }
@@ -1431,7 +1431,7 @@ impl Checker {
                     result = self.get_union_type(&reduced);
                 }
                 if operator == Kind::QuestionQuestionEqualsToken {
-                    self.check_assignment_operator(program, left, left_type, right_type);
+                    self.check_assignment_operator(program, left, left_type, right_type, None);
                 }
                 result
             }
@@ -1498,7 +1498,7 @@ impl Checker {
                         // (reference) left-hand side (Go runs `checkAssignmentOperator`
                         // only when a valid result exists).
                         if operator == Kind::PlusEqualsToken {
-                            self.check_assignment_operator(program, left, left_type, rt);
+                            self.check_assignment_operator(program, left, left_type, rt, None);
                         }
                         rt
                     }
@@ -1708,13 +1708,30 @@ impl Checker {
         left: NodeId,
         left_type: TypeId,
         right_type: TypeId,
+        expr: Option<NodeId>,
     ) {
         // A reference target is an identifier or an access expression (Go's
         // `checkReferenceExpression`); other targets are skipped here.
         if !is_reference_expression(program, left) {
             return;
         }
+        // Go's `checkTypeAssignableToAndOptionallyElaborate(rightType, leftType,
+        // left, right, ...)`: a fresh object/array-literal RHS elaborates onto
+        // its offending element first; otherwise the generic chain reports at
+        // the LHS. `expr` is `None` for compound assignments, whose result type
+        // is not a literal RHS (elaboration DEFER).
         if !self.is_type_assignable_to(program, right_type, left_type) {
+            if let Some(expr) = expr {
+                if self.elaborate_error(
+                    program,
+                    expr,
+                    right_type,
+                    left_type,
+                    RelationKind::Assignable,
+                ) {
+                    return;
+                }
+            }
             self.report_type_not_assignable(program, left, right_type, left_type);
         }
     }
@@ -3121,7 +3138,17 @@ impl Checker {
         let globals = program.globals();
         let declared = get_type_of_symbol(self, program, symbol, globals);
         let initializer_type = self.check_expression(program, initializer);
-        if !self.is_type_assignable_to(program, initializer_type, declared) {
+        // Go's `checkTypeAssignableToAndOptionallyElaborate(initializerType, t,
+        // node, initializer, ...)`: elaborate the initializer literal first.
+        if !self.is_type_assignable_to(program, initializer_type, declared)
+            && !self.elaborate_error(
+                program,
+                initializer,
+                initializer_type,
+                declared,
+                RelationKind::Assignable,
+            )
+        {
             self.report_type_not_assignable(program, node, initializer_type, declared);
         }
     }
@@ -3190,9 +3217,36 @@ impl Checker {
             return;
         }
         let initializer_type = self.check_expression(program, initializer);
-        // A fresh object-literal initializer is excess-property checked first
-        // (Go's `hasExcessProperties`); on a hit it reports `2353` and the `2322`
-        // head message is suppressed.
+        // Go's `checkTypeAssignableToAndOptionallyElaborate(initializerType, t,
+        // node, initializer, ...)`. Go folds excess-property checking into the
+        // relation (`hasExcessProperties` inside `recursiveTypeRelatedToWorker`);
+        // the port models it as a separate call here, so the ordering mirrors
+        // Go's three steps:
+        //   (A) relation holds: the only remaining failure Go's relation would
+        //       have raised is excess properties, so run that check.
+        //   (B) relation failed: `elaborateError` first. A reported element
+        //       suppresses BOTH the excess message and the generic chain (Go
+        //       never reaches `checkTypeRelatedToEx` once `elaborateError`
+        //       reports), e.g. `{ a: "x", b: 1 }` reports only the `a` mismatch.
+        //   (C) no element reported: the excess message, then the generic chain.
+        if self.is_type_assignable_to(program, initializer_type, declared) {
+            self.check_object_literal_excess_properties(
+                program,
+                initializer,
+                initializer_type,
+                declared,
+            );
+            return;
+        }
+        if self.elaborate_error(
+            program,
+            initializer,
+            initializer_type,
+            declared,
+            RelationKind::Assignable,
+        ) {
+            return;
+        }
         if self.check_object_literal_excess_properties(
             program,
             initializer,
@@ -3201,9 +3255,7 @@ impl Checker {
         ) {
             return;
         }
-        if !self.is_type_assignable_to(program, initializer_type, declared) {
-            self.report_type_not_assignable(program, node, initializer_type, declared);
-        }
+        self.report_type_not_assignable(program, node, initializer_type, declared);
     }
 
     // Types each un-annotated identifier loop variable of a for-of declaration
@@ -3975,6 +4027,318 @@ impl Checker {
         self.add_diagnostic(program, diagnostic);
     }
 
+    // Tries to elaborate an assignability failure element-wise onto the
+    // offending member of a fresh object/array-literal `node`, reporting a
+    // precise leaf diagnostic on that element instead of a chain hung on the
+    // whole assignment (Go's `elaborateError`). Returns whether it reported.
+    //
+    // This is Go's "try `elaborateError` first" step of
+    // `checkTypeRelatedToAndOptionallyElaborate`: when `node` is a fresh
+    // object/array literal and an element is the source of the mismatch, the
+    // error points at that element's node (with a `6500` related-info), which is
+    // more precise than the 4bn generic relation chain. The caller falls back to
+    // the generic chain ([`report_type_not_assignable`]) only when this returns
+    // `false` (non-literal RHS, or no element-level mismatch found).
+    //
+    // DEFER(phase-4-checker-4bp+): the `isOrHasGenericConditional` early-out, the
+    // `elaborateDidYouMeanToCallOrConstruct` call/construct suggestion, the
+    // binary (`=`/`,`) and `as const` / JSX-expression unwrap arms, and the
+    // arrow-function (`elaborateArrowFunction`) and JSX-attributes
+    // (`elaborateJsxComponents`) dispatch. blocked-by: conditional types,
+    // signature-return suggestion reporting, and arrow/JSX elaboration.
+    // Go: internal/checker/relater.go:Checker.elaborateError
+    pub(crate) fn elaborate_error(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> bool {
+        match program.arena().kind(node) {
+            // Unwrap a parenthesized expression and elaborate its inner
+            // expression (Go's `KindParenthesizedExpression` arm).
+            Kind::ParenthesizedExpression => {
+                let inner = match program.arena().data(node) {
+                    NodeData::ParenthesizedExpression(d) => d.expression,
+                    _ => return false,
+                };
+                self.elaborate_error(program, inner, source, target, relation)
+            }
+            Kind::ObjectLiteralExpression => {
+                self.elaborate_object_literal(program, node, source, target, relation)
+            }
+            Kind::ArrayLiteralExpression => {
+                self.elaborate_array_literal(program, node, source, target, relation)
+            }
+            _ => false,
+        }
+    }
+
+    // Elaborates an object-literal `node` against `target` element-by-element
+    // (Go's `elaborateObjectLiteral`): each `name: value` property is checked via
+    // [`elaborate_element`], reporting on the offending property when its value
+    // type does not relate to the contextual target property type. Returns
+    // whether any element reported.
+    //
+    // DEFER(phase-4-checker-4bp+): spread assignments, shorthand-property /
+    // method / accessor members, and computed (non-literal) property names (the
+    // `Type_of_computed_property_s_value_is_0...` message). blocked-by: spread
+    // typing, accessor/method member typing, and computed-name literal types.
+    // Go: internal/checker/relater.go:Checker.elaborateObjectLiteral
+    fn elaborate_object_literal(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> bool {
+        // Go: a primitive/never target has no member structure to elaborate.
+        if self
+            .get_type(target)
+            .flags()
+            .intersects(TypeFlags::PRIMITIVE | TypeFlags::NEVER)
+        {
+            return false;
+        }
+        let members = match program.arena().data(node) {
+            NodeData::ObjectLiteralExpression(d) => d.list.nodes.clone(),
+            _ => return false,
+        };
+        let mut reported = false;
+        for member in members {
+            let (name_node, value_node) = match program.arena().data(member) {
+                NodeData::PropertyAssignment(d) => (d.name, d.initializer),
+                // DEFER: spread / shorthand / method / accessor members.
+                _ => continue,
+            };
+            // A `PropertyAssignment` always has an initializer; skip defensively.
+            let Some(value_node) = value_node else {
+                continue;
+            };
+            // DEFER: computed (non-literal) property names.
+            let Some(name) = property_name_text(program, name_node) else {
+                continue;
+            };
+            let name_type = self.get_string_literal_type(&name);
+            reported = self.elaborate_element(
+                program,
+                source,
+                target,
+                relation,
+                name_node,
+                Some(value_node),
+                &name,
+                name_type,
+            ) || reported;
+        }
+        reported
+    }
+
+    // Elaborates an array-literal `node` against `target` element-by-element
+    // (Go's `elaborateArrayLiteral`): the literal is re-typed as a fixed-arity
+    // tuple (Go's `checkArrayLiteral(node, CheckModeForceTuple)`), then each
+    // element is checked via [`elaborate_element`] against the target's element
+    // type at that index. Returns whether any element reported.
+    //
+    // DEFER(phase-4-checker-4bp+): spread / omitted elements, the contextual
+    // push during the force-tuple re-check, and the tuple-target optional/rest
+    // element skipping beyond the present-property check. blocked-by: spread
+    // typing, contextual-type propagation, and variadic/optional tuple targets.
+    // Go: internal/checker/relater.go:Checker.elaborateArrayLiteral
+    fn elaborate_array_literal(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> bool {
+        if self
+            .get_type(target)
+            .flags()
+            .intersects(TypeFlags::PRIMITIVE | TypeFlags::NEVER)
+        {
+            return false;
+        }
+        let elements = match program.arena().data(node) {
+            NodeData::ArrayLiteralExpression(d) => d.list.nodes.clone(),
+            _ => return false,
+        };
+        // Go re-checks with `CheckModeForceTuple` when the source is not already
+        // tuple-like; the reachable subset builds the fixed-arity tuple directly
+        // from each element's mutable-location (widened) type. (No contextual
+        // push: the reachable target element types do not refine the source.)
+        let source = if self.is_tuple_like_type(source) {
+            source
+        } else {
+            let element_types: Vec<TypeId> = elements
+                .iter()
+                .map(|&element| self.check_expression_for_mutable_location(program, element))
+                .collect();
+            let tuple = self.create_tuple_type_ex(element_types, false);
+            if !self.is_tuple_like_type(tuple) {
+                return false;
+            }
+            tuple
+        };
+        let target_is_tuple_like = self.is_tuple_like_type(target);
+        let mut reported = false;
+        for (i, element) in elements.iter().enumerate() {
+            let element = *element;
+            // Go skips omitted elements and tuple-target positions with no
+            // corresponding property.
+            if program.arena().kind(element) == Kind::OmittedExpression
+                || (target_is_tuple_like
+                    && get_property_of_type(self, target, &i.to_string()).is_none())
+            {
+                continue;
+            }
+            let name_type = self.get_number_literal_type(tsgo_jsnum::Number::from(i as f64));
+            let index_name = i.to_string();
+            reported = self.elaborate_element(
+                program,
+                source,
+                target,
+                relation,
+                element,
+                Some(element),
+                &index_name,
+                name_type,
+            ) || reported;
+        }
+        reported
+    }
+
+    // Checks one literal member's source type against the contextual target type
+    // at `name` and, on failure, reports the leaf diagnostic on `prop_node`
+    // (Go's `elaborateElement`). When the member value is itself an
+    // object/array literal, the error recurses into it via [`elaborate_error`]
+    // so the innermost offending element is flagged; otherwise the diagnostic is
+    // anchored at `prop_node` with the relation engine's chain plus a `6500`
+    // "The expected type comes from property ..." related-info. Returns whether
+    // it reported.
+    //
+    // DEFER(phase-4-checker-4bp+): the union-target `getBestMatchingType` arm of
+    // `getBestMatchIndexedAccessTypeOrUndefined`, the `exactOptionalPropertyTypes`
+    // message, the custom JSX diagnostic factory, the `removeMissingType`
+    // optional adjustment, and the `6501` (index-signature) / `target.symbol`
+    // fallback related-info arms (which need default-library source detection).
+    // blocked-by: union best-match, exact-optional types, JSX, and
+    // default-library file detection.
+    // Go: internal/checker/relater.go:Checker.elaborateElement
+    #[allow(clippy::too_many_arguments)]
+    fn elaborate_element(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+        prop_node: NodeId,
+        next: Option<NodeId>,
+        name: &str,
+        name_type: TypeId,
+    ) -> bool {
+        // Go: `getBestMatchIndexedAccessTypeOrUndefined` reduced to a non-union
+        // target's `getIndexedAccessTypeOrUndefined`. A missing target member (no
+        // index either) yields no elaboration.
+        let Some(target_prop_type) = self.elaboration_member_type(program, target, name, name_type)
+        else {
+            return false;
+        };
+        let Some(source_prop_type) = self.elaboration_member_type(program, source, name, name_type)
+        else {
+            return false;
+        };
+        if self.is_type_related_to(program, source_prop_type, target_prop_type, relation) {
+            return false;
+        }
+        // A nested object/array literal value elaborates its own offending
+        // element instead of reporting on this one.
+        if let Some(next) = next {
+            if self.elaborate_error(program, next, source_prop_type, target_prop_type, relation) {
+                return true;
+            }
+        }
+        // Use the expression's (widened) type for the leaf message, mirroring
+        // Go's `checkExpressionForMutableLocationWithContextualType` (the
+        // contextual push is unmodeled in the reachable subset).
+        let specific_source = match next {
+            Some(next) => self.check_expression_for_mutable_location(program, next),
+            None => source_prop_type,
+        };
+        let Some(report) =
+            self.build_relation_error_chain(program, specific_source, target_prop_type, relation)
+        else {
+            return false;
+        };
+        let loc = program.arena().loc(prop_node);
+        let mut diagnostic = Diagnostic {
+            code: report.code,
+            category: report.category,
+            message: report.message,
+            start: loc.pos(),
+            length: loc.end() - loc.pos(),
+            related_information: Vec::new(),
+            message_chain: report.message_chain,
+        };
+        // The `6500` "The expected type comes from property '0' ..." related-info
+        // points at the target property's declaration. Go also has the `6501`
+        // index-signature arm and a `target.symbol` fallback, both gated on the
+        // declaration not being in a default library — DEFER (the reachable
+        // object-literal target always resolves a user-declared property here).
+        // A synthesized (object-literal) target property carries no program
+        // declaration node; only a real program symbol has one to point at.
+        if let Some(target_prop) =
+            get_property_of_type(self, target, name).filter(|&p| !super::is_synthesized_symbol(p))
+        {
+            if let Some(decl) = program.symbol(target_prop).declarations.first().copied() {
+                let decl_name = declaration_name_node(program, decl).unwrap_or(decl);
+                let target_str = super::nodebuilder::type_to_string(self, program, target);
+                let related = self.diagnostic_for_node(
+                    program,
+                    decl_name,
+                    &tsgo_diagnostics::THE_EXPECTED_TYPE_COMES_FROM_PROPERTY_0_WHICH_IS_DECLARED_HERE_ON_TYPE_1,
+                    &[name, target_str.as_str()],
+                );
+                diagnostic.add_related_info(related);
+            }
+        }
+        self.add_diagnostic(program, diagnostic);
+        true
+    }
+
+    // Resolves the member type of `obj` at `name`/`name_type` for elaboration,
+    // mirroring Go's `getIndexedAccessTypeOrUndefined`: a named property by its
+    // literal name, else an index-signature / tuple-element access. Returns
+    // `None` when the member is absent (Go's "don't elaborate" sentinel).
+    // Go: internal/checker/checker.go:Checker.getIndexedAccessTypeOrUndefined
+    fn elaboration_member_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        obj: TypeId,
+        name: &str,
+        name_type: TypeId,
+    ) -> Option<TypeId> {
+        if let Some(t) = get_type_of_property_of_type(self, program, obj, name) {
+            return Some(t);
+        }
+        get_indexed_access_type(self, program, obj, name_type)
+    }
+
+    // Reports whether `t` is tuple-like (Go's `isTupleLikeType` reachable
+    // subset): a fixed-arity tuple object, or an object with a `"0"` property.
+    //
+    // DEFER(phase-4-checker-4bp+): the array-like + numeric-literal-`length`
+    // arm. blocked-by: `isArrayLikeType` (`ReadonlyArray<any>` assignability,
+    // which needs lib globals).
+    // Go: internal/checker/checker.go:Checker.isTupleLikeType(23405)
+    fn is_tuple_like_type(&mut self, t: TypeId) -> bool {
+        self.get_type(t).object_flags().contains(ObjectFlags::TUPLE)
+            || get_property_of_type(self, t, "0").is_some()
+    }
+
     // Records an already-built diagnostic into the per-file collection, keyed by
     // the file `program` is a view of (Go's `c.diagnostics.Add`).
     fn add_diagnostic(&mut self, program: &dyn BoundProgram, diagnostic: Diagnostic) {
@@ -4136,6 +4500,22 @@ fn is_numeric_literal_name(name: &str) -> bool {
 // DEFER(phase-4-checker-4bg+): shorthand/spread/accessor/method members and
 // computed names; only `name: value` assignments are matched.
 // Go: internal/checker/relater.go:Relater.hasExcessProperties (errorNode = name)
+// Returns the name node of a member declaration so a related-info diagnostic
+// points at the property's name (Go's `GetErrorRangeForNode` narrows a
+// `PropertySignature`/`PropertyDeclaration` error span to its name via
+// `GetNameOfDeclaration`). The reachable subset covers the type-literal /
+// interface / class property kinds an elaboration target resolves.
+//
+// DEFER(phase-4-checker-4bp+): the remaining declaration kinds. blocked-by:
+// those declarations appearing as elaboration targets.
+// Go: internal/ast/utilities.go:GetNameOfDeclaration / scanner.GetErrorRangeForNode
+fn declaration_name_node(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    match program.arena().data(node) {
+        NodeData::PropertySignature(d) | NodeData::PropertyDeclaration(d) => Some(d.name),
+        _ => None,
+    }
+}
+
 fn object_literal_property_name_node(
     program: &dyn BoundProgram,
     literal_node: NodeId,
