@@ -460,6 +460,33 @@
 
 > 上述行为级 expected 取自 TS/Go 已知降级形态；精确字节由 P10 兜底。const enum/declaration 等依赖 checker（P4），未就绪则该行 `—`。
 
+### declarations D-F1（注解声明核心，34 Rust 单测 + 8 doctest）
+
+> `declarations` Go 侧无 `*_test.go`；expected 全部取自 `tsgo --declaration --emitDeclarationOnly` 实测（见 impl.md「Go ground truth」表）。每条经 `parse_shared`→`new_declarations_transformer`→`emit` 重 emit `.d.ts` 文本对比。
+
+| Rust 测试（`declarations::transform::tests` / `::util::tests`）| 验证内容 | input → expected | 依据 | 完成 |
+|---|---|---|---|---|
+| `function_declaration_becomes_declare_signature` | 函数 body 删 → `declare` 签名 | `function f(x: number): void {…}` → `declare function f(x: number): void;` | `transformFunctionDeclaration` | ✓ |
+| `exported_function_becomes_export_declare_signature` | export 保留 + ambient 叠加 | `export function f(…)` → `export declare function f(…)` | `ensureModifierFlags` | ✓ |
+| `function_parameter_forms_are_preserved` | `?`/rest 保留；默认→`?` | `x?`/`...args: number[]`/`x: number = 5`→`x?` | `ensureParameter`/`isOptionalParameter` | ✓ |
+| `function_type_parameters_are_kept` | 泛型 type-params 保留 | `f<T>(x: T): T` → `…f<T>(x: T): T;` | `ensureTypeParams` | ✓ |
+| `async_modifier_is_dropped` | async 删，返回注解保 | `export async function f(): Promise<void>{}` → `export declare function f(): Promise<void>;` | `ensureModifierFlags` mask | ✓ |
+| `exported_const_drops_initializer_keeps_annotation` | initializer 删、注解保 | `export const x: number = 1;` → `export declare const x: number;` | `transformVariableStatement` | ✓ |
+| `nonexported_const_becomes_declare_const` | 非导出 const→`declare const`（const flags 保）| `const x: number = 1;` → `declare const x: number;` | flags 保 + `ensureModifierFlags` | ✓ |
+| `multiple_declarators_each_keep_annotation` | 多 declarator 各保注解 | `export const a: number = 1, b: string = "x";` → `…const a: number, b: string;` | `transformVariableDeclaration` | ✓ |
+| `class_declaration_becomes_ambient_class` | 成员 body/initializer 删、注解保 | `export class C { x: number = 1; m(): number {…} }` → 见 ground truth | `transformClassDeclaration` | ✓ |
+| `nonexported_class_gains_declare` | 非导出 class 加 declare | `class C { x: number = 1; }` → `declare class C {…}` | `ensureModifierFlags` | ✓ |
+| `class_member_modifiers_and_visibility` | private 仅名 / public 删 / static·readonly 保 | 见 ground truth 3 例 | `transformPropertyDeclaration`/`ensureType`(private) | ✓ |
+| `class_constructor_and_parameter_properties` | ctor 签名 + 参数属性提升到 ctor 前 | 见 ground truth 2 例 | `transformConstructorDeclaration` + 参数属性提升 | ✓ |
+| `class_accessors_keep_signatures` | get/set 签名（body 删）| `get x(): number {…} set x(v: number){}` → `get x(): number;\n    set x(v: number);` | `transformGet/SetAccessorDeclaration`/`updateAccessorParamList` | ✓ |
+| `interface_passes_through` | 接口直通（不加 declare、extends/成员保）| `interface I { a: number; }` + method/extends 例 | `transformInterfaceDeclaration` | ✓ |
+| `type_alias_passes_through` | 类型别名直通（不加 declare）| `type T = number;` + object 类型例 | `transformTypeAliasDeclaration` | ✓ |
+| `declare_is_added_once_not_doubled` | `declare` 不翻倍；bodyless 顶层函数保为签名 | `declare function f(…)` 原样；`function f(){}`→`declare function f(…)` | `ensureModifierFlags` 幂等 | ✓ |
+| `multiple_top_level_statements` | 多语句独立变换 | const + function | `visitSourceFile` 循环 | ✓ |
+| `overload_implementation_is_elided_via_resolver` | 重载实现（带 body）省略，签名保（resolver）| 2 签名 + 1 实现 → 2 `export declare function` | `IsImplementationOfOverload`（`EmitReferenceResolver`）| ✓ |
+| `lone_function_with_body_is_kept_as_signature` | 单声明带 body 函数仍保为签名（无 resolver）| `export function f(x:number):number{return x}` → 签名 | resolver 接线对照 | ✓ |
+| `util::tests::*`（13）| util 纯函数 | `is_always_type`/`is_modifier`/`modifier_kinds_from_flags`/`modifiers_to_flags`/`mask_modifier_flags`(+default fixups)/`combined_modifier_flags`(own + 变量语句折叠)/`effective_declaration_flags`/`has_parameter_property_modifier`/`is_optional_parameter`/`this`-参/`get_first_constructor_with_body`/`node_modifiers` | util.go + ast/checker 可达子集 | ✓ |
+
 ## tstransforms conformance 切片（P10 端到端兜底）
 
 `tstransforms` 各 stage 的字节级正确性由 **P10 conformance parity** 对拍（`tsc` baseline）。6b 的单测覆盖 `typeeraser` 剥类型子集；下列 `tests/cases/conformance/` 子集是 6b–6c 完整化后 P10 必须绿的目标（本轮仅登记，不在 6b 跑）：
@@ -535,4 +562,7 @@
 | estransforms 各 target 降级字节级 | 需 `tsc --target` baseline | P10 |
 | moduletransforms CJS/ESM/AMD parity | 需 `tsc --module` baseline | P10 |
 | jsxtransforms classic/automatic runtime | 需 `tsc --jsx` baseline | P10 |
-| declarations `.d.ts` 全量（含 isolatedDeclarations 诊断） | 依赖 nodebuilder/modulespecifiers + checker | P10 |
+| declarations `.d.ts` **注解声明核心**（函数/变量/类/接口/类型别名 + 修饰符 + 重载省略）| ~~依赖 checker~~ → **D-F1 已落地**（34 单测，注解直通）| ✅ 完成 |
+| declarations 推断类型 node 合成（无注解 → `createTypeOfDeclaration`）| 依赖 `EmitResolver::create_type_of_declaration` + 句法 type-node builder + `SymbolTracker` | D-F2 |
+| declarations 可见性/可访问性 gating + isolatedDeclarations 诊断（`tracker.go`/`diagnostics.go`）| 依赖 `is_declaration_visible` 脚本案 + `PrecalculateDeclarationEmitVisibility` + `SymbolTracker` | D-F3 |
+| declarations `.d.ts` 全量（enum/namespace/import·export/`export=`/index sig/literal-const/declaration-map/triple-slash）| 依赖 nodebuilder/modulespecifiers + checker host | P10 |

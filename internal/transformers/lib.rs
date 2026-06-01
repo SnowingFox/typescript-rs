@@ -21,6 +21,7 @@ use tsgo_checker::{
 use tsgo_printer::EmitContext;
 
 pub mod chain;
+pub mod declarations;
 pub mod destructuring;
 pub mod estransforms;
 pub mod jsxtransforms;
@@ -134,6 +135,31 @@ impl EmitReferenceResolver {
     // Go: internal/checker/checker.go:Checker.isReferenced (via EmitResolver.IsReferencedAliasDeclaration)
     pub fn is_referenced(&self, node: NodeId) -> bool {
         self.resolver.is_referenced(self.program.as_ref(), node)
+    }
+
+    /// Reports whether the function-like declaration `node` is the
+    /// *implementation* of an overload set — a body-bearing declaration whose
+    /// symbol has more than one declaration — which declaration emit elides (the
+    /// bodyless overload signatures are the ones kept).
+    ///
+    /// Delegates to [`EmitResolver::is_implementation_of_overload`] against the
+    /// bound program (Go's `emitResolver.IsImplementationOfOverload`). `node`'s
+    /// id must be the original (pre-transform) declaration node so it resolves to
+    /// the same syntactic node in the bound program.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// # fn demo(r: &EmitReferenceResolver, decl: tsgo_ast::NodeId) -> bool {
+    /// r.is_implementation_of_overload(decl)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/checker/emitresolver.go:EmitResolver.IsImplementationOfOverload
+    pub fn is_implementation_of_overload(&self, node: NodeId) -> bool {
+        self.resolver
+            .is_implementation_of_overload(self.program.as_ref(), node)
     }
 
     /// Resolves an identifier *use* (`node`, in value position) to the

@@ -154,10 +154,10 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 |---|---|---|
 | `jsxtransforms/jsx.go` | `jsxtransforms/jsx.rs` | ✅ 6f + 6e-3 子集：`new_jsx_transformer`（classic `React.createElement`；**6e-3** automatic runtime 选择经 `compiler_options.jsx`：`<div/>`→`jsx("div", {})`）；DEFER automatic 的 children-in-props/`jsxs`/implicit import 注入、pragma、spread-attr |
 | `inliners/constenum.go` | `inliners/lib.rs` | `ConstEnumInliningTransformer` / `NewConstEnumInliningTransformer` |
-| `declarations/transform.go` | `declarations/transform.rs`（crate 根聚合于 `lib.rs`） | `DeclarationTransformer` / `NewDeclarationTransformer` / `DeclarationEmitHost`/`OutputPaths` |
-| `declarations/tracker.go` | `declarations/tracker.rs` | `SymbolTrackerImpl` / `NewSymbolTracker` / 可访问性追踪 |
-| `declarations/diagnostics.go` | `declarations/diagnostics.rs` | `SymbolAccessibilityDiagnostic` + 诊断回调表 |
-| `declarations/util.go` | `declarations/util.rs` | 子包工具 |
+| `declarations/transform.go` | `declarations/transform.rs`（子 module `declarations/mod.rs` 聚合）| ✅ **D-F1 CORE** `DeclarationsTransformer` / `new_declarations_transformer`（注解声明核心：函数/变量/类/接口/类型别名 → `.d.ts`）；DEFER `DeclarationEmitHost`/`OutputPaths`（host 抽象，P6） |
+| `declarations/tracker.go` | `declarations/tracker.rs`（**未创建**）| DEFER-D-F3 `SymbolTrackerImpl` / `NewSymbolTracker` / 可访问性追踪 |
+| `declarations/diagnostics.go` | `declarations/diagnostics.rs`（**未创建**）| DEFER-D-F3 `SymbolAccessibilityDiagnostic` + 诊断回调表 |
+| `declarations/util.go` | `declarations/util.rs` | ✅ **D-F1** 修饰符 flag / 结构谓词 可达子集 |
 
 ## 依赖白名单（本包新增的 crate）
 
@@ -198,9 +198,12 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 
 ### `declarations`
 
-- [ ] `pub trait DeclarationEmitHost` / `OutputPaths` + `pub struct DeclarationTransformer` + `new_declaration_transformer(host, context, options, decl_path, decl_map_path)`　`// Go: transform.go:NewDeclarationTransformer`
-- [ ] `SymbolTrackerImpl` + `new_symbol_tracker` + `SymbolTrackerSharedState`　`// Go: tracker.go:NewSymbolTracker`
-- [ ] `SymbolAccessibilityDiagnostic` + `GetSymbolAccessibilityDiagnostic` 回调表　`// Go: diagnostics.go:*`
+- [x] **D-F1 CORE**：`pub struct DeclarationsTransformer` + `new_declarations_transformer(opt, resolver: Option<EmitReferenceResolver>) -> Transformer`（注解声明核心）—— `visit_source_file`（顶层语句逐条变换 + 重建 `is_declaration_file` 源文件）、`transform_top_level_statement` 路由、`transform_function_declaration`（删 body→签名）、`transform_variable_statement`/`transform_variable_declaration`（删 initializer、保 const/let flags）、`transform_class_declaration`（成员 body/initializer 删、参数属性提升、accessor/ctor、private 仅名）、`transform_interface_declaration`/`transform_type_alias_declaration`（直通，不加 declare）、成员臂（property/method/constructor/get·set accessor + `omit_private_method_type`）、`ensure_modifiers`/`ensure_modifier_flags`（export 保留、declare 顶层加一次、public/async/override 删）、`ensure_type`（注解直通 / 推断 DEFER-D-F2）、`ensure_type_params`/`update_param_list`/`ensure_parameter`（`?`、rest、默认→可选）/`update_accessor_param_list`、`ensure_no_initializer`　`// Go: transform.go:DeclarationTransformer.{visitSourceFile,transformSourceFile,transformFunctionDeclaration,transformVariableStatement,transformClassDeclaration,transformInterfaceDeclaration,transformTypeAliasDeclaration,ensureModifiers,ensureType,...}`
+- [x] **D-F1 CORE** util：`is_always_type`/`node_modifiers`/`combined_modifier_flags`/`effective_declaration_flags`/`mask_modifier_flags`/`is_modifier`/`modifiers_to_flags`/`modifier_kinds_from_flags`/`is_this_parameter`/`get_this_parameter`/`get_first_constructor_with_body`/`has_parameter_property_modifier`/`is_optional_parameter`　`// Go: util.go + ast/utilities.go + checker/checker.go（可达子集）`
+- [x] **D-F1 CORE** resolver 接线：`EmitReferenceResolver::is_implementation_of_overload`（加法式，重载实现签名省略）`// Go: emitresolver.go:IsImplementationOfOverload`
+- [ ] **DEFER-D-F2**：推断类型 node 合成（`ensure_type` 当前注解直通；无注解返 `None`）　blocked-by：`EmitResolver::create_type_of_declaration` + 句法 type-node builder + `SymbolTracker`
+- [ ] **DEFER-D-F3**：`SymbolTrackerImpl` + `new_symbol_tracker` + `SymbolTrackerSharedState`（`tracker.go`）；`SymbolAccessibilityDiagnostic` + `GetSymbolAccessibilityDiagnostic` 回调表（`diagnostics.go`）；可见性/可访问性 gating（非导出脚本声明 vs module、late-painted import alias）+ isolatedDeclarations 诊断　blocked-by：`EmitResolver::is_declaration_visible` 脚本文件案 + `PrecalculateDeclarationEmitVisibility`
+- [ ] **DEFER**：`DeclarationEmitHost`/`OutputPaths`（host 抽象，需 `compiler.Program` P6）；enum/namespace/import·export/`export =`/`export default`/index signature/literal-const initializer/binding-pattern var·param-prop/JS·expando/declaration-map/triple-slash　`// Go: transform.go:NewDeclarationTransformer`
 
 ### Cargo / crate 接线（Round 6 修订）
 
@@ -1765,6 +1768,66 @@ checker 4aw 的 `get_type_reference_serialization_kind(&self, checker: &mut Chec
 - **`export` / `export default` 装饰类**：尾随 `export { C };`（`NewExternalModuleExport`）/ `export default C;`（`NewExportDefault`）语句、匿名默认导出的 `default_1` 重命名、modifier 过滤（`isNotExportOrDefaultOrDecorator`）保留 export/default。可达子集无 export/default；blocked-by：export/default modifier 处理 + `GetLocalName`/生成名 emit-name 形 + 默认导出 `GetGeneratedNameForNode`。
 - **`this`-参数偏移**（构造函数首个 `this` 参跳过 + index 调整）：可达子集无 `this` 参；`serialize_constructor_parameter_types` 已复刻 `IsThisParameter` 跳过（metadata 路径），但 `append_constructor_param_decorators` 的 index 偏移 DEFER；blocked-by：`getDecoratorsOfParameters` 的 `firstParameterOffset` 完整移植。
 - **计算/私有成员名、装饰器内私有标识符（`hasClassElementWithDecoratorContainingPrivateIdentifierInExpression` → static block 包裹）、`ClassExpression` 装饰（Go 不支持，原样）、async 方法 `Promise`、`TypeReference` lib-globals/qualified-name**：同 6aq/6ap DEFER。
+
+## D-F1 worklog（declarations CORE — red→green 推进记录）
+
+> **目标**：声明（`.d.ts`）transformer **CORE** —— 骨架 + EmitResolver 接线 + **注解声明**的 value-declaration 剥离到 `.d.ts`。注解声明（类型 node 已在源中）直接拷贝；推断类型（无注解）= D-F2；可见性/可访问性诊断 = D-F3。
+
+### Go ground truth（`tsgo --declaration --emitDeclarationOnly` 实测，逐 snippet）
+
+| 输入 | `.d.ts` 输出 |
+|---|---|
+| `function f(x: number): void { … }` | `declare function f(x: number): void;` |
+| `export function f(x: number): void {}` | `export declare function f(x: number): void;` |
+| `export const x: number = 1;` | `export declare const x: number;` |
+| `const x: number = 1;` | `declare const x: number;` |
+| `export const a: number = 1, b: string = "x";` | `export declare const a: number, b: string;` |
+| `export class C { x: number = 1; m(): number {…} }` | `export declare class C {\n    x: number;\n    m(): number;\n}` |
+| `class C { x: number = 1; }` | `declare class C {\n    x: number;\n}` |
+| `export class C { private p: number = 1; public q: string = "a"; m(): void {} }` | `…{\n    private p;\n    q: string;\n    m(): void;\n}` |
+| `export class C { static m(x: number): void {} }` | `…{\n    static m(x: number): void;\n}` |
+| `export class C { readonly x: number = 1; }` | `…{\n    readonly x: number;\n}` |
+| `export class C { constructor(x: number) {} y: number = 2; }` | `…{\n    constructor(x: number);\n    y: number;\n}` |
+| `export class C { constructor(public x: number, private y: string) {} }` | `…{\n    x: number;\n    private y;\n    constructor(x: number, y: string);\n}` |
+| `export class C { get x(): number {…} set x(v: number) {} }` | `…{\n    get x(): number;\n    set x(v: number);\n}` |
+| `interface I { a: number; }` | `interface I {\n    a: number;\n}` |
+| `type T = number;` | `type T = number;` |
+| `export type T = { a: number; b: string };` | `export type T = {\n    a: number;\n    b: string;\n};` |
+| `declare function f(x: number): void;` | `declare function f(x: number): void;`（declare 加一次，不翻倍）|
+| `export function f(x?: number): void {}` | `export declare function f(x?: number): void;` |
+| `export function f(...args: number[]): void {}` | `export declare function f(...args: number[]): void;` |
+| `export function f(x: number = 5): void {}` | `export declare function f(x?: number): void;`（默认→可选）|
+| `export async function f(): Promise<void> {}` | `export declare function f(): Promise<void>;`（async 删）|
+| overload（2 签名 + 1 实现）| 两 `export declare function f(...)`，实现签名省略 |
+
+### red→green 垂直切片（每片：测试 → 实测 → 最小实现）
+
+1. **函数声明 → 签名**（tracer）：`function f(x: number): void {}` → `declare function f(x: number): void;`。建骨架 `visit_source_file`+`transform_top_level_statement`+`transform_function_declaration`+`ensure_modifiers`/`ensure_modifier_flags`/`ensure_type`/`update_param_list`/`ensure_parameter`。症状（实现前）：模块不存在 → 编译失败；最小绿后输出匹配。
+2. **导出函数**：`export function f(…)` → `export declare function f(…)`。验 `ensure_modifier_flags` export 保留 + ambient 叠加。+ 参数形（`?`/rest/默认→`?`）、泛型 type-params 保留、async 删 各一片。
+3. **变量语句**：`export const x: number = 1;` → `export declare const x: number;`（删 initializer、保注解、保 `const` flags）。+ 非导出 `const`→`declare const`、多 declarator 各一片。
+4. **类声明 → ambient class**：成员 body/initializer 删、注解保；private 仅名、public 删、static/readonly 保；ctor 签名 + 参数属性提升到 ctor 前；get/set accessor 签名。逐片对齐实测。
+5. **接口直通**：`interface I { a: number; }`（不加 declare，extends/成员保留）。
+6. **类型别名直通**：`type T = number;`（`needs_declare=false`，不加 declare；object 类型多行）。
+7. **修饰符幂等**：`declare function f(…)` 保持单 `declare`（`ensure_modifier_flags` 不翻倍）；多语句独立变换。
+8. **重载实现省略（resolver 接线）**：`is_implementation_of_overload`（经加法式 `EmitReferenceResolver::is_implementation_of_overload`）省略带 body 的实现签名，保留 bodyless 重载签名。无 resolver 时单声明带 body 函数仍保留为签名（验接线确实生效）。
+
+### 交付（全部 `internal/transformers/**` + docs）
+
+- **新建** `declarations/mod.rs`（子 module 聚合）、`declarations/transform.rs` + `transform_test.rs`、`declarations/util.rs` + `util_test.rs`。
+- `lib.rs`：`pub mod declarations;`（加法）+ `EmitReferenceResolver::is_implementation_of_overload`（加法 pub 方法，passthrough 到既有 `EmitResolver::is_implementation_of_overload`）。
+- **ZERO** `internal/ast`/`internal/checker`/`internal/binder`/`printer` 改动；ZERO 既有 `pub fn` 签名变更；ZERO `.go` 改动。源文件重建走既有 arena 构造器（`new_function_declaration`/`new_variable_statement`/`new_variable_declaration_list`+`set_flags`/`new_class_like`/`new_property_declaration`/`new_constructor_declaration`/`new_accessor_declaration`/`new_interface_declaration`/`new_type_alias_declaration`/`new_source_file`+`data_mut`(`is_declaration_file=true)`/`new_token`/`new_keyword_expression`/`new_parameter_declaration`）。
+
+### 测试计数
+
+- `tsgo_transformers` **252→286 unit**（+34：transform_test 21 + util_test 13）+ doctest **45→53**（+8：util 4 runnable + transform/lib hidden-fn doctest）。**无既有测试弱化/删除**。
+- gate（实测，均 RUN）：`cargo test -p tsgo_transformers`（286 unit + 53 doctest 全绿）；`cargo clippy -p tsgo_transformers --all-targets -- -D warnings` 干净（修 1 处 `manual_map`）；`cargo fmt -p tsgo_transformers -- --check` 干净；`cargo build -p tsgo_compiler` 绿（确认公共 API 加法）。未 `git commit`（父级提交）。
+
+### DEFER（本轮确认 blocked-by）
+
+- **DEFER-D-F2 推断类型 node 合成**：`ensure_type` 注解直通；无注解返 `None`（不发类型）。blocked-by：`EmitResolver::create_type_of_declaration` + 句法 type-node builder + `SymbolTracker`（C-E 握手已记此交接）。
+- **DEFER-D-F3 可见性/可访问性 gating + 诊断**：所有可达顶层声明均发；非导出声明不省略（脚本 vs module 可见性分流 + late-painted import-alias 未建模）；无诊断。`tracker.rs`/`diagnostics.rs` 未创建。blocked-by：`EmitResolver::is_declaration_visible` 脚本文件案 + `PrecalculateDeclarationEmitVisibility` + `SymbolTracker`。
+- **DEFER 字面 const initializer**（`declare const x = 1`）：`shouldPrintWithInitializer` 视作 false，initializer 恒删。blocked-by：`EmitResolver::is_literal_const_declaration` + `CreateLiteralConstValue`。
+- **DEFER 其它顶层/成员种类**：enum、namespace/module、import/export、`export =`/`export default`、index signature、binding-pattern 变量/参数属性、JS/expando、declaration-map（`.d.ts.map`）、triple-slash 指令、heritage base-expression 提升、type-node 内的 entity-name 可见性检查 / import-type module-specifier 重写。blocked-by：enum 常量折叠接线 / module-specifier 重写 / resolver host / nodebuilder。
 
 ## TDD 推进顺序（tracer bullet → 增量）
 
