@@ -14,7 +14,10 @@
 
 use rustc_hash::FxHashSet;
 
-use super::declared_types::{get_properties_of_type, get_property_of_type, get_type_of_symbol};
+use super::declared_types::{
+    get_constraint_of_type_parameter, get_default_from_type_parameter, get_properties_of_type,
+    get_property_of_type, get_type_of_symbol,
+};
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
 use super::types::{TypeFlags, TypeId};
@@ -378,6 +381,155 @@ impl Checker {
             sources: context.type_parameters.clone(),
             targets: inferred,
         }
+    }
+
+    /// Resolves every inference slot of a *call* inference context to its
+    /// inferred type, applying the call-resolution rules (Go's `getInferredTypes`
+    /// reachable subset, distinct from the eager 4e [`get_inferred_types`]).
+    ///
+    /// Side effects: caches each slot's inferred type in `context`.
+    // Go: internal/checker/inference.go:Checker.getInferredTypes
+    pub(crate) fn get_inferred_types_for_call(
+        &mut self,
+        program: &dyn BoundProgram,
+        context: &mut InferenceContext,
+    ) -> Vec<TypeId> {
+        (0..context.inferences.len())
+            .map(|i| self.get_inferred_type_for_call(program, context, i))
+            .collect()
+    }
+
+    /// Resolves the inferred type for one slot of a call inference context.
+    ///
+    /// With covariant candidates, returns their covariant inference (Go's
+    /// `getCovariantInference`: `getCommonSupertype` then `getWidenedType`). With
+    /// none, falls back to the type parameter's default, else `unknown` (Go's
+    /// `InferenceFlagsNone` path). Finally, if the inferred type violates the
+    /// type parameter's constraint, the constraint is inferred instead (Go's
+    /// `getInferredType` constraint branch).
+    ///
+    /// Side effects: caches the inferred type in `context`.
+    // Go: internal/checker/inference.go:Checker.getInferredType (reachable subset)
+    pub(crate) fn get_inferred_type_for_call(
+        &mut self,
+        program: &dyn BoundProgram,
+        context: &mut InferenceContext,
+        index: usize,
+    ) -> TypeId {
+        if let Some(cached) = context.inferences[index].inferred_type {
+            return cached;
+        }
+        let candidates = context.inferences[index].candidates.clone();
+        let type_parameter = context.inferences[index].type_parameter;
+        // Covariant inference, or the default/`unknown` fallback when no
+        // inferences were made. Contravariant candidates and the co-/contra
+        // preference logic are DEFERRED (no contravariant call inference yet).
+        let mut inferred = if !candidates.is_empty() {
+            self.get_covariant_inference(program, &candidates)
+        } else {
+            get_default_from_type_parameter(self, program, type_parameter)
+                .unwrap_or(self.unknown_type)
+        };
+        // Apply the constraint: a covariantly-inferred type that violates the
+        // constraint is replaced by the (instantiated) constraint type.
+        // DEFER(phase-4-checker-C-C): `getTypeWithThisArgument`, the
+        // return-type `filteredByConstraint` speculation, and the
+        // `nonFixingMapper` constraint instantiation. blocked-by: `this`-types +
+        // return-type inference + lazy inference mappers.
+        if let Some(constraint) = get_constraint_of_type_parameter(self, program, type_parameter) {
+            if !self.is_type_assignable_to(program, inferred, constraint) {
+                inferred = constraint;
+            }
+        }
+        context.inferences[index].inferred_type = Some(inferred);
+        inferred
+    }
+
+    /// The covariant inference for a non-empty candidate set: the common
+    /// supertype of the candidates, widened (Go's `getCovariantInference`
+    /// reachable subset — without the `widenLiteralTypes` /
+    /// `PriorityImpliesCombination` paths, which the reachable `: T`-return
+    /// signatures never trigger).
+    // Go: internal/checker/inference.go:Checker.getCovariantInference
+    fn get_covariant_inference(
+        &mut self,
+        program: &dyn BoundProgram,
+        candidates: &[TypeId],
+    ) -> TypeId {
+        let unwidened = self.get_common_supertype(program, candidates);
+        self.get_widened_type(unwidened)
+    }
+
+    /// The common supertype of `types` (Go's `getCommonSupertype`): a union when
+    /// every candidate is a literal of the same base type, otherwise the single
+    /// common supertype.
+    ///
+    /// DEFER(phase-4-checker-C-C): the `strictNullChecks` nullable strip/restore
+    /// (`filterType` + `getNullableType`); the reachable call candidates are
+    /// non-nullable. blocked-by: `filterType`-over-candidates.
+    // Go: internal/checker/inference.go:Checker.getCommonSupertype
+    fn get_common_supertype(&mut self, program: &dyn BoundProgram, types: &[TypeId]) -> TypeId {
+        if types.len() == 1 {
+            return types[0];
+        }
+        if self.literal_types_with_same_base_type(types) {
+            self.get_union_type(types)
+        } else {
+            self.get_single_common_supertype(program, types)
+        }
+    }
+
+    /// The leftmost candidate for which no later candidate is a supertype (Go's
+    /// `getSingleCommonSupertype`).
+    ///
+    /// Go first tries strict-subtype, then falls back to subtype; for the
+    /// reachable call candidates (literals/primitives, never `any`) the strict
+    /// and non-strict relations coincide, so both passes use
+    /// [`is_type_subtype_of`](Checker::is_type_subtype_of).
+    // Go: internal/checker/inference.go:Checker.getSingleCommonSupertype
+    fn get_single_common_supertype(
+        &mut self,
+        program: &dyn BoundProgram,
+        types: &[TypeId],
+    ) -> TypeId {
+        let candidate = self.find_leftmost_supertype(program, types);
+        if types
+            .iter()
+            .all(|&t| t == candidate || self.is_type_subtype_of(program, t, candidate))
+        {
+            return candidate;
+        }
+        self.find_leftmost_supertype(program, types)
+    }
+
+    /// The leftmost type for which no later type is a (strict) supertype (Go's
+    /// `findLeftmostType` with a subtype predicate): scan left-to-right,
+    /// replacing the running candidate whenever it is a subtype of the next type.
+    // Go: internal/checker/inference.go:findLeftmostType
+    fn find_leftmost_supertype(&mut self, program: &dyn BoundProgram, types: &[TypeId]) -> TypeId {
+        let mut candidate = types[0];
+        for &t in &types[1..] {
+            if self.is_type_subtype_of(program, candidate, t) {
+                candidate = t;
+            }
+        }
+        candidate
+    }
+
+    /// Reports whether every type in `types` is a literal type and they all
+    /// share the same base type (Go's `literalTypesWithSameBaseType`). A
+    /// non-literal candidate (whose base type equals itself) makes this false.
+    // Go: internal/checker/inference.go:Checker.literalTypesWithSameBaseType
+    fn literal_types_with_same_base_type(&self, types: &[TypeId]) -> bool {
+        let mut common_base: Option<TypeId> = None;
+        for &t in types {
+            let base = self.get_base_type_of_literal_type(t);
+            let common = *common_base.get_or_insert(base);
+            if base == t || base != common {
+                return false;
+            }
+        }
+        true
     }
 
     /// Returns the best common type of `types`: a member that all others are

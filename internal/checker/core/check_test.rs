@@ -6559,3 +6559,322 @@ fn generic_function_explicit_type_argument_assignable_to_match() {
         "id<number>(1) is number; assignment to number holds"
     );
 }
+
+// ===========================================================================
+// C-B2: type-argument INFERENCE from call arguments (no explicit type args).
+// ===========================================================================
+
+// C-B2 slice 1: a generic call WITHOUT explicit type arguments infers the type
+// parameter from the argument. `id(1)` infers `T = 1` (a fresh literal that
+// widens to `number` in the assignability message), so `const s: string = r`
+// reports 2322. Before C-B2 the call inferred `unknown` (empty sources), which
+// produced a `Type 'unknown' is not assignable...` 2322 instead.
+// Verified against `cmd/tsgo`: `s1.ts(3,7): error TS2322: Type 'number' is not
+// assignable to type 'string'.`
+// Go: internal/checker/checker.go:Checker.inferTypeArguments + getSignatureInstantiation
+#[test]
+fn generic_call_infers_type_argument_from_argument() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function id<T>(x: T): T { return x; }\nconst r = id(1);\nconst s: string = r;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-B2 slice 2 (cross-base candidates): two arguments matched to the same type
+// parameter accumulate two candidates. When the candidates are literals of
+// DIFFERENT base types, `getCommonSupertype` returns the leftmost (no later
+// candidate is a supertype), so `pick(1, "x")` infers `T = 1` and the second
+// argument `"x"` is then not assignable to the instantiated parameter `1`
+// (2345). NOTE: this is the REAL `cmd/tsgo` behavior — it does NOT infer a
+// `string | number` union (the union only forms for same-base literals; see the
+// next test). A literal target suppresses literal generalization, so the source
+// prints as `"x"`, not `string`.
+// Verified against `cmd/tsgo`: `s2b.ts(2,19): error TS2345: Argument of type
+// '"x"' is not assignable to parameter of type '1'.`
+// Go: internal/checker/inference.go:getCommonSupertype/getSingleCommonSupertype
+#[test]
+fn generic_call_cross_base_candidates_infer_leftmost() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function pick<T>(a: T, b: T): T { return a; }\nconst r = pick(1, \"x\");",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+    assert_eq!(
+        diags[0].message,
+        "Argument of type '\"x\"' is not assignable to parameter of type '1'."
+    );
+}
+
+// C-B2 slice 2 (same-base candidates): when both candidates are literals of the
+// SAME base type, `getCommonSupertype` returns their union, so `pick(1, 2)`
+// infers `T = 1 | 2`. Assigning that to the literal `1` reports 2322 (`2` is not
+// assignable to `1`), confirming the inferred type is the union `1 | 2` (not the
+// widened `number`, and not the leftmost `1`).
+// Verified against `cmd/tsgo`: `probe.ts(2,7): error TS2322: Type '1 | 2' is not
+// assignable to type '1'.`
+// Go: internal/checker/inference.go:getCommonSupertype (literalTypesWithSameBaseType)
+#[test]
+fn generic_call_same_base_candidates_infer_union() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function pick<T>(a: T, b: T): T { return a; }\nconst n: 1 = pick(1, 2);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '1 | 2' is not assignable to type '1'."
+    );
+}
+
+// C-B2 slice 2 (same-base union accepted): `pick(1, 2)` infers `T = 1 | 2`, which
+// IS assignable to `number`, so `const n: number = pick(1, 2)` is accepted.
+// Verified against `cmd/tsgo`: no diagnostics.
+// Go: internal/checker/inference.go:getCommonSupertype
+#[test]
+fn generic_call_same_base_union_assignable_to_base() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function pick<T>(a: T, b: T): T { return a; }\nconst n: number = pick(1, 2);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "1 | 2 is assignable to number"
+    );
+}
+
+// C-B2 slice 4 (inference through an object property): `f<T>(o: { v: T })` called
+// with `{ v: 1 }` infers `T` from the matching member's type (object-wise
+// inference: `inferFromObjectTypes`/`inferFromProperties`). The result `r` is
+// then a `number`-based type, so `const s: string = r` reports 2322.
+// Verified against `cmd/tsgo`: `s4.ts(3,7): error TS2322: Type 'number' is not
+// assignable to type 'string'.`
+// Go: internal/checker/inference.go:Checker.inferFromObjectTypes/inferFromProperties
+#[test]
+fn generic_call_infers_through_object_property() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T>(o: { v: T }): T { return o.v; }\nconst r = f({ v: 1 });\nconst s: string = r;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-B2 slice 4 (positive): the same call assigned to the matching type is
+// accepted, confirming `T` was inferred (not left as `unknown`/error).
+// Verified against `cmd/tsgo`: no diagnostics.
+// Go: internal/checker/inference.go:Checker.inferFromObjectTypes
+#[test]
+fn generic_call_infers_through_object_property_assignable() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T>(o: { v: T }): T { return o.v; }\nconst r = f({ v: 1 });\nconst n: number = r;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "f of an object literal infers T from the property; r is number"
+    );
+}
+
+// C-B2 slice 5 (constraint satisfied): `f<T extends number>(x: T)` called with a
+// `number` literal infers `T = 1`, which satisfies the constraint, so `f(1)` is
+// accepted (no diagnostics).
+// Verified against `cmd/tsgo`: no diagnostics.
+// Go: internal/checker/inference.go:Checker.getInferredType (constraint branch)
+#[test]
+fn generic_call_inference_satisfies_constraint() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T extends number>(x: T): T { return x; }\nf(1);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "1 satisfies `T extends number`"
+    );
+}
+
+// C-B2 slice 5 (constraint violated): when the covariantly-inferred type violates
+// the type parameter's constraint, Go infers the CONSTRAINT instead. So
+// `f<T extends number>(x: T)` called with `"x"` infers `T = number` (not the
+// `string`-based candidate), and the argument `"x"` is then not assignable to the
+// instantiated parameter `number` (2345, with the source generalized to
+// `string`).
+// Verified against `cmd/tsgo`: `s5b.ts(2,3): error TS2345: Argument of type
+// 'string' is not assignable to parameter of type 'number'.`
+// Go: internal/checker/inference.go:Checker.getInferredType (constraint branch)
+#[test]
+fn generic_call_inference_violates_constraint_infers_constraint() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T extends number>(x: T): T { return x; }\nf(\"x\");",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+    assert_eq!(
+        diags[0].message,
+        "Argument of type 'string' is not assignable to parameter of type 'number'."
+    );
+}
+
+// C-B2 slice 6 (no-candidate fallback): a generic call from which no inferences
+// can be made falls back to `unknown` (Go's `getInferredType` with no candidates
+// and no default, `InferenceFlagsNone`). `f<T>(): T` called as `f()` infers
+// `T = unknown`, so the bare call alone is not an error.
+// Verified against `cmd/tsgo`: no diagnostics.
+// Go: internal/checker/inference.go:Checker.getInferredType (no candidates)
+#[test]
+fn generic_call_no_candidate_infers_unknown() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T>(): T { return undefined as any; }\nconst r = f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "f() with no candidate infers unknown; the bare call is not an error"
+    );
+}
+
+// C-B2 slice 6 (no-candidate reveal): `f()` infers `T = unknown`, so a property
+// access on the result diagnoses against the type `unknown`, confirming the
+// result type is `unknown` (not `any`/error). NOTE: this is the
+// no-contextual-type path; an annotated context (`const n: number = f()`) would
+// in Go infer `T` from the contextual return type — that contextual-return
+// inference is DEFERRED to C-B3.
+//
+// DIVERGENCE(port): `cmd/tsgo` reports 2571 `Object is of type 'unknown'.` for
+// any property access on `unknown` (it checks the object type first); this port
+// reaches the property lookup and reports 2339 `Property '0' does not exist on
+// type 'unknown'.`. That is a pre-existing property-access-on-`unknown`
+// difference outside C-B2's inference scope; either way the diagnosed type is
+// `unknown`, which is what this slice asserts.
+// Go: internal/checker/inference.go:Checker.getInferredType (no candidates)
+#[test]
+fn generic_call_no_candidate_result_is_unknown() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T>(): T { return undefined as any; }\nf().toFixed();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert!(
+        diags[0].message.contains("type 'unknown'"),
+        "the result of `f()` is diagnosed as `unknown`: {:?}",
+        diags[0].message
+    );
+}
+
+// C-B2 slice 7 (explicit type arguments still win): when a generic call supplies
+// explicit type arguments, the C-B1 explicit path takes precedence over
+// inference — the type parameters are bound to the EXPLICIT arguments, not
+// inferred from the call arguments. `id<string>(1)` binds `T = string`, so the
+// argument `1` is not assignable to the instantiated parameter `string` (2345),
+// exactly as before C-B2 (no inference for this call).
+// Verified against `cmd/tsgo`: `s7.ts(2,12): error TS2345: Argument of type
+// 'number' is not assignable to parameter of type 'string'.`
+// Go: internal/checker/checker.go:Checker.resolveCall (typeArguments branch)
+#[test]
+fn generic_call_explicit_type_argument_wins_over_inference() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function id<T>(x: T): T { return x; }\nid<string>(1);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+    assert_eq!(
+        diags[0].message,
+        "Argument of type 'number' is not assignable to parameter of type 'string'."
+    );
+}
+
+// C-B2 slice 3 (callback inference — the keystone): `map<T, U>(a: T[], f: (x: T)
+// => U)` called as `map([1, 2], (x) => ...)` infers `T = number` from the FIRST
+// (non-context-sensitive) argument, then contextually types the (deferred)
+// callback argument by the INSTANTIATED parameter type `(x: number) => U`, so the
+// callback's un-annotated parameter `x` is `number`. The concise body `x`
+// checked against the explicit return annotation `string` then reports 2322.
+//
+// This exercises the two-pass: array-argument inference fixes `T`, the resolved
+// (instantiated) signature is memoized on the call node, and the callback's
+// contextual signature is read from it (`(x: T) => U` deep-instantiated to
+// `(x: number) => U`). Inferring `U` from the callback's return type (so the
+// result is `string[]`) is DEFERRED to C-B3.
+// Verified against `cmd/tsgo`: `(3,28): error TS2322: Type 'number' is not
+// assignable to type 'string'.` (the synthetic `Array` lib stand-in clashes with
+// cmd/tsgo's real lib, adding 2374s there; this port loads no real lib).
+// Go: internal/checker/checker.go:Checker.inferTypeArguments (context-sensitive args)
+#[test]
+fn generic_call_callback_parameter_inferred_from_array_argument() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\nfunction map<T, U>(a: T[], f: (x: T) => U): U[] { return [] as any; }\nmap([1, 2], (x): string => x);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-B2 slice 3 (positive): the same callback whose explicit return annotation
+// MATCHES the inferred parameter type produces no diagnostics, confirming `x` is
+// genuinely `number` (so `(x): number => x` type-checks).
+// Verified against `cmd/tsgo`: no relevant diagnostics (only the synthetic-`Array`
+// lib-clash 2374s, absent in this port).
+// Go: internal/checker/checker.go:Checker.inferTypeArguments
+#[test]
+fn generic_call_callback_parameter_inferred_accepts_matching_return() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\nfunction map<T, U>(a: T[], f: (x: T) => U): U[] { return [] as any; }\nmap([1, 2], (x): number => x);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "x is inferred as number, so (x): number => x type-checks: {:?}",
+        c.get_diagnostics(root)
+    );
+}

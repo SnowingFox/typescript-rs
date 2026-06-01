@@ -329,6 +329,14 @@ impl Checker {
         program: &dyn BoundProgram,
         call_target: NodeId,
     ) -> Option<SignatureId> {
+        // A generic call whose type arguments were inferred (C-B2) memoized its
+        // instantiated signature on the call node; return that so a callback
+        // argument is contextually typed by the *instantiated* parameter type
+        // (e.g. `map([1,2], x => ...)` types `x` as `number`). Go reaches the
+        // same instantiated signature through `getResolvedSignature`'s memo.
+        if let Some(&resolved) = self.resolved_signatures.get(&call_target) {
+            return Some(resolved);
+        }
         let callee = match program.arena().data(call_target) {
             NodeData::CallExpression(d) => d.expression,
             NodeData::NewExpression(d) => d.expression,
@@ -627,9 +635,11 @@ impl Checker {
         let symbol = self.signature(signature).parameters.get(pos).copied()?;
         let base = get_type_of_symbol(self, program, symbol, None);
         // An instantiated signature substitutes its parameter types through its
-        // mapper (matching `get_type_at_position`).
+        // mapper (matching `get_type_at_position`), deep-instantiating an
+        // anonymous object/function-type parameter so a callback argument is
+        // contextually typed by the substituted parameter type.
         Some(match self.signature(signature).mapper.clone() {
-            Some(mapper) => self.instantiate_type(base, &mapper),
+            Some(mapper) => self.instantiate_param_type(program, base, &mapper),
             None => base,
         })
     }

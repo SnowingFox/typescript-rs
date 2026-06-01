@@ -191,3 +191,123 @@ fn subtype_reduce_removes_subsumed() {
     // The literal is subsumed by `string`.
     assert_eq!(c.subtype_reduce(&p, &[str_lit, s]), vec![s]);
 }
+
+// ===========================================================================
+// C-B2: call-resolution inference engine (getInferredTypes / getCovariantInference
+// / getCommonSupertype reachable subset).
+// ===========================================================================
+
+fn number_literal(c: &mut Checker, n: f64) -> TypeId {
+    c.get_number_literal_type(tsgo_jsnum::Number::from(n))
+}
+
+fn string_literal(c: &mut Checker, s: &str) -> TypeId {
+    c.get_string_literal_type(s)
+}
+
+// Go: internal/checker/inference.go:Checker.literalTypesWithSameBaseType
+#[test]
+fn literal_types_with_same_base_type_classifies_candidates() {
+    let mut c = Checker::new();
+    let one = number_literal(&mut c, 1.0);
+    let two = number_literal(&mut c, 2.0);
+    let x = string_literal(&mut c, "x");
+    let num = c.number_type();
+    // Two number literals share the `number` base.
+    assert!(c.literal_types_with_same_base_type(&[one, two]));
+    // A number literal and a string literal do not.
+    assert!(!c.literal_types_with_same_base_type(&[one, x]));
+    // A non-literal (its base equals itself) disqualifies the set.
+    assert!(!c.literal_types_with_same_base_type(&[one, num]));
+    assert!(!c.literal_types_with_same_base_type(&[num, num]));
+}
+
+// Go: internal/checker/inference.go:findLeftmostType
+#[test]
+fn find_leftmost_supertype_keeps_leftmost_when_unrelated() {
+    let mut c = Checker::new();
+    let p = empty();
+    let one = number_literal(&mut c, 1.0);
+    let x = string_literal(&mut c, "x");
+    let num = c.number_type();
+    // Unrelated literals: the leftmost is kept.
+    assert_eq!(c.find_leftmost_supertype(&p, &[one, x]), one);
+    // A literal then its base: the base is a supertype, so it replaces the
+    // running candidate.
+    assert_eq!(c.find_leftmost_supertype(&p, &[one, num]), num);
+}
+
+// Go: internal/checker/inference.go:Checker.getCommonSupertype
+#[test]
+fn get_common_supertype_unions_same_base_and_picks_leftmost_otherwise() {
+    let mut c = Checker::new();
+    let p = empty();
+    let one = number_literal(&mut c, 1.0);
+    let two = number_literal(&mut c, 2.0);
+    let x = string_literal(&mut c, "x");
+    // Single candidate is returned directly.
+    assert_eq!(c.get_common_supertype(&p, &[one]), one);
+    // Same-base literals union.
+    let union = c.get_union_type(&[one, two]);
+    assert_eq!(c.get_common_supertype(&p, &[one, two]), union);
+    // Cross-base literals collapse to the leftmost (no later supertype).
+    assert_eq!(c.get_common_supertype(&p, &[one, x]), one);
+}
+
+// Go: internal/checker/inference.go:Checker.getCovariantInference (reachable subset)
+#[test]
+fn get_covariant_inference_widens_and_combines() {
+    let mut c = Checker::new();
+    let p = empty();
+    let one = number_literal(&mut c, 1.0);
+    let two = number_literal(&mut c, 2.0);
+    // A single literal candidate is preserved (getWidenedType is identity here).
+    assert_eq!(c.get_covariant_inference(&p, &[one]), one);
+    // Same-base candidates combine into the union.
+    let union = c.get_union_type(&[one, two]);
+    assert_eq!(c.get_covariant_inference(&p, &[one, two]), union);
+}
+
+// Go: internal/checker/inference.go:Checker.getInferredType (no candidates -> unknown)
+#[test]
+fn get_inferred_type_for_call_no_candidate_is_unknown() {
+    let mut c = Checker::new();
+    let p = empty();
+    let tp = c.new_type_parameter(None);
+    let mut ctx = InferenceContext::new(&[tp]);
+    assert_eq!(
+        c.get_inferred_type_for_call(&p, &mut ctx, 0),
+        c.unknown_type()
+    );
+    // The result is cached.
+    assert_eq!(ctx.inferences[0].inferred_type, Some(c.unknown_type()));
+}
+
+// Go: internal/checker/inference.go:Checker.getInferredType (covariant candidates)
+#[test]
+fn get_inferred_type_for_call_resolves_covariant_candidates() {
+    let mut c = Checker::new();
+    let p = empty();
+    let tp = c.new_type_parameter(None);
+    let one = number_literal(&mut c, 1.0);
+    let two = number_literal(&mut c, 2.0);
+    let mut ctx = InferenceContext::new(&[tp]);
+    ctx.inferences[0].candidates = vec![one, two];
+    let union = c.get_union_type(&[one, two]);
+    assert_eq!(c.get_inferred_type_for_call(&p, &mut ctx, 0), union);
+}
+
+// Go: internal/checker/inference.go:Checker.getInferredTypes (one slot per parameter)
+#[test]
+fn get_inferred_types_for_call_resolves_each_slot() {
+    let mut c = Checker::new();
+    let p = empty();
+    let t = c.new_type_parameter(None);
+    let u = c.new_type_parameter(None);
+    let one = number_literal(&mut c, 1.0);
+    let mut ctx = InferenceContext::new(&[t, u]);
+    ctx.inferences[0].candidates = vec![one];
+    // Second slot has no candidates -> unknown fallback.
+    let result = c.get_inferred_types_for_call(&p, &mut ctx);
+    assert_eq!(result, vec![one, c.unknown_type()]);
+}

@@ -33,6 +33,7 @@ use super::declared_types::{
     get_property_of_type, get_type_from_type_node, get_type_of_property_of_type,
     get_type_of_symbol,
 };
+use super::inference::InferenceContext;
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
 use super::relations::RelationKind;
@@ -2028,6 +2029,12 @@ impl Checker {
                         return self.error_type;
                     }
                 }
+            } else if !self.signature(signature).type_parameters.is_empty() {
+                // A generic call WITHOUT explicit type arguments: infer the type
+                // arguments from the call arguments, then instantiate the
+                // signature so the parameter and return types are the substituted
+                // types (Go's `resolveCall` -> `chooseOverload` inference branch).
+                self.resolve_inferred_type_argument_signature(program, node, signature, &args)
             } else {
                 signature
             };
@@ -2224,6 +2231,88 @@ impl Checker {
             .type_parameters
             .clear();
         instantiated
+    }
+
+    // Infers a generic signature's type arguments from the call arguments and
+    // returns the instantiated (concrete) signature, memoizing it on the call
+    // node so a context-sensitive argument's contextual typing sees the
+    // instantiated parameter types (Go's `resolveCall` -> `chooseOverload`
+    // inference branch: `inferTypeArguments` -> `getSignatureInstantiation`, with
+    // the chosen signature stored on `signatureLinks[node].resolvedSignature`).
+    //
+    // DEFER(phase-4-checker-C-B3): the contextual-return-type inference pass
+    // (inferring from a call's contextual type to the signature's return type),
+    // the lazy inference `TypeMapper`, and re-inference for nested generic
+    // return signatures. blocked-by: contextual-return inference + lazy mappers.
+    // Go: internal/checker/checker.go:Checker.resolveCall (inference branch)
+    fn resolve_inferred_type_argument_signature(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        signature: SignatureId,
+        args: &[NodeId],
+    ) -> SignatureId {
+        let inferred = self.infer_type_arguments_for_call(program, signature, args);
+        let instantiated = self.get_signature_instantiation(program, signature, &inferred);
+        self.resolved_signatures.insert(node, instantiated);
+        instantiated
+    }
+
+    // Infers the type arguments of a generic `signature` from the call `args`
+    // (Go's `inferTypeArguments`, reachable subset). Each non-context-sensitive
+    // argument is typed and inferred against its (generic) parameter type; the
+    // accumulated candidates are then resolved (`getInferredTypes`).
+    //
+    // Context-sensitive function/arrow arguments are skipped in this pass: the
+    // type variables in their parameter positions are fixed by the other
+    // arguments first, then they are contextually typed during applicability
+    // checking (so `map([1,2], x => ...)` types `x` as `number`). Inferring a
+    // callback's *return*-type contribution (the `U` in
+    // `map<T,U>(a: T[], f: (x:T)=>U)`) is DEFERRED.
+    //
+    // DEFER(phase-4-checker-C-B3): inferring from context-sensitive arguments'
+    // return types (requires the anonymous function type + body-return
+    // inference), the `this`-argument inference, rest/spread argument
+    // aggregation, and the precise `isContextSensitive` test (a fully-annotated
+    // function is not context-sensitive). blocked-by: anonymous function typing
+    // + body return inference + rest/spread types.
+    // Go: internal/checker/checker.go:Checker.inferTypeArguments
+    fn infer_type_arguments_for_call(
+        &mut self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+        args: &[NodeId],
+    ) -> Vec<TypeId> {
+        let type_parameters = self.signature(signature).type_parameters.clone();
+        let mut context = InferenceContext::new(&type_parameters);
+        let count = self.get_parameter_count(signature).min(args.len());
+        for (i, &arg) in args.iter().enumerate().take(count) {
+            if is_context_sensitive_argument(program, arg) {
+                continue;
+            }
+            let param_type = self.get_type_at_position(program, signature, i);
+            let arg_type = self.check_expression_for_inference(program, arg);
+            self.infer_types(program, &mut context.inferences, arg_type, param_type);
+        }
+        self.get_inferred_types_for_call(program, &mut context)
+    }
+
+    // Types an argument expression to obtain its type for inference, rolling back
+    // any diagnostics it emits: the applicability pass re-checks the argument and
+    // reports them once (Go reuses `checkExpressionCached`, whose memoized type is
+    // reused without re-reporting).
+    fn check_expression_for_inference(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
+        let handle = program.file_handle();
+        let before = self.diagnostics_by_file.get(&handle).map_or(0, Vec::len);
+        let t = self.check_expression(program, node);
+        if let Some(diagnostics) = self.diagnostics_by_file.get_mut(&handle) {
+            diagnostics.truncate(before);
+        }
+        t
     }
 
     // Descends into a type node, validating each contained type-reference node
@@ -2887,12 +2976,134 @@ impl Checker {
                 // substituted through the signature's mapper (Go re-instantiates
                 // the parameter symbols in `instantiateSignature`).
                 match self.signature(signature).mapper.clone() {
-                    Some(mapper) => self.instantiate_type(base, &mapper),
+                    Some(mapper) => self.instantiate_param_type(program, base, &mapper),
                     None => base,
                 }
             }
             None => self.any_type,
         }
+    }
+
+    // Instantiates a parameter type through `mapper`, deep-instantiating an
+    // anonymous object/function-type parameter using `program` to resolve its
+    // member types (which the program-less [`Checker::instantiate_type`] cannot
+    // do, hence its anonymous-object DEFER). Everything else delegates to
+    // `instantiate_type`. This is the program-aware hook the call/contextual
+    // parameter-read path needs so an instantiated signature's object/callback
+    // parameter (`{ v: T }` -> `{ v: number }`, `(x: T) => U` -> `(x: number)
+    // => U`) has its type variables substituted.
+    //
+    // DEFER(phase-4-checker-C-C): nested anonymous objects inside a member type
+    // (the recursive member instantiation still goes through the program-less
+    // `instantiate_type`, which leaves a nested anonymous object unchanged), and
+    // member optionality beyond the meaning flags. blocked-by: a fully
+    // program-aware recursive `instantiateType`.
+    // Go: internal/checker/checker.go:Checker.instantiateType (anonymous object arm)
+    pub(crate) fn instantiate_param_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        mapper: &TypeMapper,
+    ) -> TypeId {
+        let Some(obj) = self.get_type(t).as_object() else {
+            return self.instantiate_type(t, mapper);
+        };
+        // A generic type reference instantiates its type arguments through the
+        // program-less path already.
+        if obj.target.is_some() {
+            return self.instantiate_type(t, mapper);
+        }
+        // An anonymous object with no members/signatures has nothing to
+        // instantiate.
+        if obj.properties.is_empty()
+            && obj.call_signatures.is_empty()
+            && obj.construct_signatures.is_empty()
+            && obj.index_infos.is_empty()
+        {
+            return self.instantiate_type(t, mapper);
+        }
+        self.instantiate_anonymous_object_type(program, t, mapper)
+    }
+
+    // Deep-instantiates an anonymous object/function type: re-create each
+    // property with its (program-resolved) type mapped through `mapper`, and
+    // instantiate the call/construct signatures and index infos. Returns the
+    // original type unchanged when nothing depends on the mapper.
+    // Go: internal/checker/checker.go:Checker.instantiateAnonymousType
+    fn instantiate_anonymous_object_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        mapper: &TypeMapper,
+    ) -> TypeId {
+        let (properties, call_signatures, construct_signatures, index_infos) = {
+            let obj = self.get_type(t).as_object().expect("anonymous object");
+            (
+                obj.properties.clone(),
+                obj.call_signatures.clone(),
+                obj.construct_signatures.clone(),
+                obj.index_infos.clone(),
+            )
+        };
+        let globals = program.globals();
+        let mut changed = false;
+        let mut new_members = SymbolTable::default();
+        let mut new_properties = Vec::with_capacity(properties.len());
+        for symbol in properties {
+            let name = if super::is_synthesized_symbol(symbol) {
+                self.synthesized_symbol_name(symbol)
+            } else {
+                program.symbol(symbol).name.clone()
+            };
+            let member_type = get_type_of_symbol(self, program, symbol, globals);
+            let instantiated = self.instantiate_type(member_type, mapper);
+            if instantiated != member_type {
+                changed = true;
+            }
+            let flags = self.resolved_symbol_flags(program, symbol);
+            let new_symbol = self.new_object_literal_property(
+                &name,
+                flags,
+                tsgo_ast::CheckFlags::empty(),
+                instantiated,
+            );
+            new_members.insert(name, new_symbol);
+            new_properties.push(new_symbol);
+        }
+        let new_call = self.instantiate_signature_list(&call_signatures, mapper, &mut changed);
+        let new_construct =
+            self.instantiate_signature_list(&construct_signatures, mapper, &mut changed);
+        if !changed {
+            return t;
+        }
+        let object = ObjectType {
+            members: new_members,
+            properties: new_properties,
+            call_signatures: new_call,
+            construct_signatures: new_construct,
+            index_infos,
+            ..Default::default()
+        };
+        self.new_object_type(ObjectFlags::ANONYMOUS, None, object)
+    }
+
+    // Instantiates each signature in `list` through `mapper`, setting `changed`
+    // when any signature carries type variables to substitute.
+    fn instantiate_signature_list(
+        &mut self,
+        list: &[SignatureId],
+        mapper: &TypeMapper,
+        changed: &mut bool,
+    ) -> Vec<SignatureId> {
+        list.iter()
+            .map(|&s| {
+                let instantiated = self.instantiate_signature(s, mapper);
+                if instantiated != s {
+                    *changed = true;
+                }
+                instantiated
+            })
+            .collect()
     }
 
     /// Returns the call signatures of `t` (Go's `getSignaturesOfType` for the
@@ -4446,7 +4657,7 @@ impl Checker {
     // DEFER(phase-4-checker-4m+): enum-like base types and union mapping.
     // blocked-by: enum base-type resolution + union mapping.
     // Go: internal/checker/checker.go:Checker.getBaseTypeOfLiteralType(25293)
-    fn get_base_type_of_literal_type(&self, t: TypeId) -> TypeId {
+    pub(crate) fn get_base_type_of_literal_type(&self, t: TypeId) -> TypeId {
         let f = self.get_type(t).flags();
         if f.intersects(TypeFlags::STRING_LITERAL) {
             return self.string_type;
@@ -4924,6 +5135,23 @@ fn call_error_node(program: &dyn BoundProgram, node: NodeId) -> NodeId {
         NodeData::PropertyAccessExpression(d) => d.name,
         _ => callee,
     }
+}
+
+// Reports whether a call argument is context-sensitive for inference purposes
+// (the reachable subset of Go's `isContextSensitive`): a function or arrow
+// expression argument, whose parameter type variables are fixed by the other
+// arguments before it is contextually typed.
+//
+// DEFER(phase-4-checker-C-B3): the precise test — a fully type-annotated
+// function is NOT context-sensitive, and object/array literals containing
+// context-sensitive elements are. blocked-by: per-parameter annotation analysis
+// + literal element recursion.
+// Go: internal/checker/checker.go:Checker.isContextSensitive
+fn is_context_sensitive_argument(program: &dyn BoundProgram, arg: NodeId) -> bool {
+    matches!(
+        program.arena().kind(arg),
+        Kind::ArrowFunction | Kind::FunctionExpression
+    )
 }
 
 // Reports whether `node` can be an assignment target reference (Go's

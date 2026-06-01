@@ -210,6 +210,12 @@ pub struct Checker {
     /// `sourceFileLinks.typeChecked`). Keeps diagnostics from doubling when a
     /// file is checked then re-requested through [`Checker::get_diagnostics`].
     checked_files: FxHashSet<NodeId>,
+    /// The signature resolved for a call/new expression, keyed by the call node
+    /// (Go memoizes this on `signatureLinks[node].resolvedSignature`). C-B2
+    /// populates it for a generic call whose type arguments were inferred, so a
+    /// context-sensitive argument's contextual typing sees the *instantiated*
+    /// parameter types (e.g. `map([1,2], x => ...)` types `x` as `number`).
+    resolved_signatures: FxHashMap<NodeId, SignatureId>,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -387,6 +393,7 @@ impl Checker {
             emit_resolver: OnceCell::new(),
             program: None,
             checked_files: FxHashSet::default(),
+            resolved_signatures: FxHashMap::default(),
             any_type,
             auto_type,
             error_type,
