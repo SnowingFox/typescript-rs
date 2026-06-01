@@ -105,6 +105,41 @@ impl Checker {
                 );
                 return true;
             }
+            // The `abstract` modifier may appear on a class declaration (and a
+            // constructor type), or on a class member (method/property/accessor)
+            // whose enclosing class is itself `abstract`; otherwise it reports
+            // 1244 "Abstract methods can only appear within an abstract class."
+            // (Go's `checkGrammarModifiers` abstract arm, reachable subset).
+            //
+            // DEFER(phase-4-checker-C-D2+): the "abstract modifier can only
+            // appear on a class, method, or property declaration" (1242), the
+            // `abstract` + `static`/`private`/`async`/`readonly`/`accessor`/
+            // `override`/`declare` incompatibilities, and the abstract-property
+            // initializer / abstract-constructor checks. blocked-by: the full
+            // modifier-compatibility matrix.
+            if kind == Kind::AbstractKeyword
+                && node_kind != Kind::ClassDeclaration
+                && node_kind != Kind::ConstructorType
+            {
+                let parent_is_abstract_class = program
+                    .arena()
+                    .parent(node)
+                    .filter(|&p| program.arena().kind(p) == Kind::ClassDeclaration)
+                    .is_some_and(|p| {
+                        modifier_nodes(program.arena(), p)
+                            .iter()
+                            .any(|&m| program.arena().kind(m) == Kind::AbstractKeyword)
+                    });
+                if !parent_is_abstract_class {
+                    self.error(
+                        program,
+                        modifier,
+                        &tsgo_diagnostics::ABSTRACT_METHODS_CAN_ONLY_APPEAR_WITHIN_AN_ABSTRACT_CLASS,
+                        &[],
+                    );
+                    return true;
+                }
+            }
             // `readonly` may only appear on a property declaration or index
             // signature (a parameter property is handled by `checkParameter`).
             if kind == Kind::ReadonlyKeyword

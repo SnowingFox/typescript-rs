@@ -1286,3 +1286,67 @@ fn get_string_mapping_type_distributes_and_defers() {
         StringMappingKind::Uppercase
     );
 }
+
+// C-D2: a namespace/module value symbol's type is an anonymous object whose
+// members are the namespace's exports, so reading `get_type_of_symbol(N)`
+// exposes the exported value `x` (and `get_property_of_type` resolves it to a
+// `number`).
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModuleWorker (module)
+#[test]
+fn namespace_value_type_exposes_exports() {
+    let p = StubProgram::parse_and_bind("/a.ts", "namespace N { export const x = 1; }");
+    let mut c = Checker::new();
+    let n = local(&p, "N");
+    assert!(p.symbol(n).flags.intersects(SymbolFlags::VALUE_MODULE));
+    let n_type = get_type_of_symbol(&mut c, &p, n, None);
+    // The value type carries the export `x`. Its type is the `number` literal
+    // `1` (an `export const` keeps the literal type, like any const binding).
+    let x = get_property_of_type(&c, n_type, "x").expect("namespace member x");
+    let x_type = get_type_of_symbol(&mut c, &p, x, None);
+    assert!(c
+        .get_type(x_type)
+        .flags()
+        .contains(TypeFlags::NUMBER_LITERAL));
+    assert_eq!(c.get_base_type_of_literal_type(x_type), c.number_type());
+    // A non-existent member does not resolve.
+    assert!(get_property_of_type(&c, n_type, "y").is_none());
+}
+
+// C-D2: `resolve_entity_name` resolves a qualified type name `N.T` to the
+// namespace's exported type alias symbol.
+// Go: internal/checker/checker.go:Checker.resolveEntityName / resolveQualifiedName
+#[test]
+fn resolve_entity_name_resolves_qualified_namespace_member() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace N { export type T = number; }\nconst t: N.T = 1;",
+    );
+    // Find the `N.T` qualified-name node in the annotation of `const t: N.T`.
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let var_list = match arena.data(stmts[1]) {
+        NodeData::VariableStatement(d) => d.declaration_list,
+        _ => panic!("variable statement"),
+    };
+    let decl = match arena.data(var_list) {
+        NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+        _ => panic!("declaration list"),
+    };
+    let type_node = match arena.data(decl) {
+        NodeData::VariableDeclaration(d) => d.type_node.expect("annotation"),
+        _ => panic!("variable declaration"),
+    };
+    let qualified = match arena.data(type_node) {
+        NodeData::TypeReference(d) => d.type_name,
+        _ => panic!("type reference"),
+    };
+    assert_eq!(arena.kind(qualified), tsgo_ast::Kind::QualifiedName);
+    let resolved = resolve_entity_name(&p, qualified, SymbolFlags::TYPE, None)
+        .expect("N.T resolves to a type symbol");
+    // The resolved symbol is the exported alias `T`.
+    assert_eq!(p.symbol(resolved).name, "T");
+    assert!(p.symbol(resolved).flags.intersects(SymbolFlags::TYPE_ALIAS));
+}

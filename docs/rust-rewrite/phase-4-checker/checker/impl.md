@@ -3887,6 +3887,86 @@ impl EmitResolver {
 
 **C-D1 状态**：**可达子集完成**。strictNullChecks 完成可达面（可选属性/参数注 `| undefined` + TypeFacts symbol/object 补全；2454 DEFER）+ 枚举（成员字面量类型 + 联合 + 数值/字符串/auto-increment/常量表达式求值 + 成员引用值 + const enum + 关系位标志规则 + 印名）落地。**C-D2 余项**（任务点名）：namespaces、this-type、overload-elaboration、exhaustiveness（判别联合穷尽）、exactOptionalPropertyTypes、definite-assignment(2454)、类型位枚举成员引用、枚举合并/computed 成员/枚举诊断。
 
+## C-D2 落地记录（worklog 摘要）—— namespaces/module checker + this-type + abstract + overload-elaboration + switch exhaustiveness（**收口 C-D**）
+
+> 在 C-D1（strictNull + 枚举的值+类型双侧符号模式）之上，落地任务点名的 C-D2 五个行为，逐行为一条 `/tdd` 红→绿垂直切片。所有 Go 真值经 `go build -o /tmp/tsgo ./cmd/tsgo` 实跑 `--noEmit --strict` 逐一捕获后才断言；与设想不符或受 parser/binder 限制处一律以 cmd/tsgo 为准并记录。单 lane；cargo 仅 `-p tsgo_checker`（+ `cargo build -p tsgo_compiler` 验 additive）；未 `git commit`。
+
+**Go 真值（ground truth，实跑捕获）**：
+- A 命名空间值成员 `namespace N { export const x = 1; } const n: string = N.x;` → `ns1.ts(2,7) 2322`「Type 'number' is not assignable to type 'string'.」；`const y = N.y;`（不存在）→ `ns1b.ts(2,13) 2339`「Property 'y' does not exist on type **'typeof N'**.」（命名空间值类型印 `typeof N`）。
+- A 命名空间类型成员 `namespace N { export type T = number; } const t: N.T = 1; const u: N.T = "x";` → 仅 `ns2.ts(3,7) 2322`「...'string'...'number'.」（`t` ok）。
+- A 嵌套 `namespace A { export namespace B { export const x = 1; } } const n: string = A.B.x;` → `ns3.ts(2,7) 2322`。
+- A namespace+namespace 合并 `namespace N{export const x=1} namespace N{export const y=2} ...N.x/N.y...const c:string=N.x;` → 仅 `nsmerge.ts(5,7) 2322`（x、y 均可达 ⇒ 合并 exports）。
+- B this-type `class C { x = 1; m() { const n: string = this.x; } }` → `this1.ts(1,30) 2322`（`this.x` 为 `number`）；多态 `this` 返回 `m(): this`，`const d: string = c.m();` → `this2.ts(3,7) 2322`「Type 'C' is not assignable to type 'string'.」。
+- C abstract `abstract class A {} new A();` → `2511`「Cannot create an instance of an abstract class.」；abstract method 在非 abstract class `class B { abstract n(): void; }` → `1244`「Abstract methods can only appear within an abstract class.」。
+- D overload 失败 elaboration `function f(x:number):void; function f(x:string):void; function f(x:any){} f(true);` → `overload1.ts(4,3) 2769`「No overload matches this call.」+ 链「The last overload gave the following error.」(2770) → 「Argument of type 'boolean' is not assignable to parameter of type 'string'.」(2345)。
+- E switch 穷尽：`function f(x:"a"|"b"):number { switch(x){case "a":return 1;case "b":return 2;} }`（无 trailing return）→ **0**（穷尽 ⇒ 不报 2366）；非穷尽（仅 case "a"）→ `switch2.ts(1,27) 2366`「Function lacks ending return statement and return type does not include 'undefined'.」。穷尽 default narrows 判别为 `never`（assertNever）：`default: const y: never = x` 穷尽 → **0**，非穷尽（`"a"|"b"|"c"` 缺 c）→ `2322`「Type '"c"' is not assignable to type 'never'.」。穷尽 all-throw 后 trailing ref `const y: number = x` → **0**（`x`=`never`），非穷尽 → `2322`「Type 'string' is not assignable to type 'number'.」（leftover `"c"` 经非-unit target 加宽印 `string`）。
+
+**Go 函数镜像（`// Go:` 锚）**：`getTypeOfFuncClassEnumModuleWorker`(module 臂)、`getExportsOfSymbol`、`resolveEntityName`/`resolveQualifiedName`/`getSymbol`、`getTypeFromTypeReference`(qualified)、`checkThisExpression`/`tryGetThisTypeAtEx`/`getThisType`/`getThisContainer`、`getTypeForVariableLikeDeclaration`(property initializer 推断)、`resolveNewExpression`(abstract 2511)、`checkGrammarModifiers`(abstract 1244)、`getSignaturesOfSymbol`(overload/impl 去重)、`reportCallResolutionErrors`(2769/2770/2345 链)、`narrowTypeBySwitchOnDiscriminant`(default/no-match 补集 → never)。
+
+**严格 TDD（逐切片 red→green；每片先实测红的对的原因，再最小绿）**：
+
+| # | 切片 | 最小 input → observable（实测红）| 实现触点 |
+|---|---|---|---|
+| A1 | `namespace_value_member_read_is_number` | `N.x` 红：`2339`（module 值类型无成员）| `get_type_of_symbol` MODULE 臂 + `get_type_of_module`（members=exports）|
+| A1b | `namespace_value_missing_member_prints_typeof_n` | `N.y` 红：印 `'N'`，应 `'typeof N'` | `nodebuilder::type_to_string` MODULE 臂印 `typeof N` |
+| A2 | `namespace_type_member_resolves_qualified_name` | `N.T` 红：0 诊断（qualified name → error_type）| `get_type_from_type_reference` qualified 分支 + `resolve_entity_name`/`resolve_qualified_name`/`get_symbol_from_table` |
+| A3/A4 | nested `A.B.x` / merged `N.x`+`N.y` | 验证（建立在 A1 之上）| 嵌套/合并 exports 复用 `get_type_of_module` |
+| B1 | `this_in_method_is_class_instance_type` | `this.x` 红：先 `2339`（`this`=error），加 this 后 0（`x`=`any`，property initializer 未推断），再 2322 | `check_this_expression`/`try_get_this_type_at` + `variable_declaration_initializer` 加 `PropertyDeclaration` |
+| B2 | `this_type_return_annotation_is_class_instance_type` | `m(): this` → `c.m()`=`C` | `get_type_from_type_node` `ThisType` 臂 → `get_this_type_from_node` |
+| C1 | `new_abstract_class_reports_2511` | `new A()` 红：（parser 限制见下）| `check_new_expression` + abstract 检查 |
+| C2 | `abstract_method_in_non_abstract_class_reports_1244` | `class B { abstract n() }` 红：0 诊断 | `check_grammar_modifiers` abstract 臂 |
+| D1 | `overload_failure_reports_2769_with_elaboration_chain` | `f(true)` 红：先 0 诊断（impl 签名 `f(any)` 匹配），去重后 bare 2769（无链）| `get_signatures_of_symbol` overload/impl 去重 + `report_no_overload_matches`（2769→2770→2345 链）|
+| E1 | `exhaustive_switch_default_narrows...`/`..._trailing_..._never` | 穷尽→never / 非穷尽→leftover | 既有 4t `narrow_type_by_switch_on_discriminant`（green-on-arrival，本轮锁定 + 对 Go）|
+| 单测 | `namespace_value_type_exposes_exports`/`resolve_entity_name_resolves_qualified_namespace_member` | 见 tests.md | `get_type_of_module` + `resolve_entity_name` 直测 |
+
+> 红→绿证据：A1/A2 **genuine RED**（module 值类型无成员报 2339 / qualified name 落 error_type 0 诊断）；A1b **genuine RED**（印 `N` 非 `typeof N`）；B1 **two-stage genuine RED**（先 `this`=error→2339；加 this-type 后暴露 `x = 1` 属性初值未推断为 `any`→0 诊断，驱动 property-initializer 推断）；D1 **two-stage genuine RED**（先 impl 签名 `f(any)` 吞掉调用→0 诊断，驱动 overload/impl 去重；去重后 bare 2769 无链，驱动链构建）；C1/C2 genuine RED（受 parser 限制，见下）。A3/A4/E1 green-on-arrival（建立在 A1 机器 / 既有 4t 流分析之上），如实记录。
+
+**可达裁剪与受限处（faithful-but-reachable）**：
+- **namespace 值类型 = anonymous object + members=exports**：`get_type_of_module` 镜像 `getTypeOfFuncClassEnumModuleWorker` 的 module 臂（成员来自 `symbol.exports`），与枚举值对象同手法。`typeof N` 印名：`nodebuilder` 对带 `MODULE` flag 符号的 anonymous object 印 `typeof <name>`（Go `typeToTypeNodeWorker` 对 value-module 符号发 `typeQuery` 节点）。
+- **qualified-name 解析**：`resolve_entity_name`（Identifier → `resolve_name`；QualifiedName → `resolve_qualified_name`：左侧按 NAMESPACE 解析 → 右侧在 exports 按 meaning 查 `get_symbol_from_table`）。alias 链/`require`/`export =`/2694 未找到诊断/PropertyAccess entity-name DEFER。
+- **this-type 可达子集**：`this` 表达式/`this` 类型节点均解析为**类实例类型**（`get_declared_type_of_symbol(classSymbol)`），static 成员解析为类值类型。多态 `this` 类型参数本身、`noImplicitThis`、arrow-capture/computed/module/enum 容器诊断、global-this 兜底 DEFER。多态 `this` 返回（`m(): this`）因「this 类型节点 = 类实例类型」自然得 `C`（可达子集等价）。
+- **property-initializer 推断**：`variable_declaration_initializer` 加 `PropertyDeclaration` 臂，使 `x = 1` 推为（加宽后）`number`（Go `getTypeForVariableLikeDeclaration` 的 `widenTypeInferredFromInitializer`），解锁 `this.x`=`number` 头条。
+- **abstract 2511**：`check_new_expression` 可达子集——callee 为类标识符时返类实例类型，类声明带 `abstract` 修饰 → 2511。construct 签名解析/重载/实参适用性/构造可访问性(2673/2674)/`new` 非可构造值(2351)/类型实参 DEFER。
+- **overload/impl 去重**：`get_signatures_of_symbol` 镜像 Go：带 body 且紧邻同 parent/同 kind 的前驱声明的实现节点不计入可调用签名——使 `f(true)` 仅对 2 个 overload elaborate 而非被 `f(any)` 实现吞掉。
+- **2769 elaboration 链**：`report_no_overload_matches` 取**最后**一个 arity-匹配候选的首个失败实参，建链 `2769`(head) → `2770`「The last overload gave the following error.」→ `2345`，定位在失败实参（Go `reportCallResolutionErrors` 的 `candidatesForArgumentError`、`len > 1` 分支）。「Overload N of M」逐 overload 变体 / `The_last_overload_is_declared_here` related-info / implementation-success elaboration DEFER。
+- **switch 穷尽（never-narrowing）**：既有 4t `narrow_type_by_switch_on_discriminant` 的 no-match/default 补集已对穷尽 union 产 `never`、非穷尽产 leftover；本轮**对 Go 锁定**（assertNever default + 穷尽 all-throw 后 trailing ref 均经 `get_flow_type_of_reference`）。`is_reachable_flow_node` 的 SWITCH_CLAUSE 穷尽臂 + `isExhaustiveSwitchStatement` **未新增**（其唯一消费者 2366 受阻，见下）。
+
+**受 parser/binder 限制（记录在案，均非 checker 可解，out-of-scope）**：
+- **bare `abstract class A {}` 不被 parser 识别**：port 的 `parse_statement` 声明派发 guard 缺前导修饰符关键字（`abstract`/`static`/`public`/`private`/`protected`/`readonly`/`accessor`），故 bare `abstract class` 被误解析为游离 `abstract` 标识符表达式 + 非-abstract `class A {}`。改用 `declare abstract class A {}`（经 present 的 `DeclareKeyword` guard 路由 + 保持脚本，`A` 留 locals）测 2511——checker 行为（2511）一致且对 Go。`export abstract class` 虽能解析出 abstract 修饰但使文件成 module 后 `A` 不在 locals（resolve 失败）故未用。blocked-by: `internal/parser` `parse_statement` guard（out-of-scope）。
+- **switch 2366（function lacks ending return）受阻**：Go `functionHasImplicitReturn` 读函数体 `BodyData.EndFlowNode` 再 `isReachableFlowNode`（穷尽 switch 使其不可达）。port binder **不暴露 `EndFlowNode`**（仅设 `HAS_IMPLICIT_RETURN`/`HAS_EXPLICIT_RETURN` flag，对穷尽/非穷尽 switch 一致 ⇒ 无法区分）；且 `is_reachable_flow_node` 为 `&self`（穷尽精化需 `&mut` 定型 clause 表达式，改签名违反 additive-only）。故 2366 DEFER。穷尽场景（switch1）port 本就 0 诊断 ⇒ 与 Go 一致；非穷尽（switch2）port 缺 2366 ⇒ 记录偏离。blocked-by: binder 暴露 `EndFlowNode`（`internal/binder` out-of-scope）+ `is_reachable_flow_node` 可变化。
+
+**本轮交付（全部 `internal/checker/**`）**：
+- `core/declared_types.rs`：`get_type_of_symbol` MODULE 臂 + `get_type_of_module`；`get_type_from_type_reference` qualified 分支 + `resolve_entity_name`(`pub(crate)`)/`resolve_qualified_name`/`get_symbol_from_table`/`qualified_name_right_text`；`get_type_from_type_node` `ThisType` 臂；`get_signatures_of_symbol` overload/impl 去重 + `function_like_has_body`；`variable_declaration_initializer` 加 `PropertyDeclaration`。
+- `core/check.rs`：`check_expression` 加 `ThisKeyword`/`NewExpression` 派发；`check_this_expression`/`try_get_this_type_at`/`get_this_type_from_node`(`pub(crate)`)/`check_new_expression`/`new_expression_class_symbol`；`resolve_overloaded_call` 多候选分支改建链 + `first_failing_argument`/`report_no_overload_matches`；自由函数 `is_function_like_kind`/`is_class_like`/`modifier_flags_of`/`has_static_modifier`/`has_abstract_modifier`/`get_this_container`。
+- `core/grammar.rs`：`check_grammar_modifiers` 加 abstract(1244)臂。
+- `core/nodebuilder.rs`：`type_to_string` 对 MODULE 符号 anonymous object 印 `typeof N`。
+- 测试：`check_test.rs`（+16 端到端）、`declared_types_test.rs`（+2 单测）。
+
+**新公开 API 形状（additive-only 确认）**：无既有 `pub fn` 签名变更、无 `lib.rs` 既有项移除、无依赖/`.go`/`internal/ast`/`internal/binder` 改动。新增项全 `pub(crate)`/私有：`resolve_entity_name`/`get_this_type_from_node`（`pub(crate)`），其余 `get_type_of_module`/`check_this_expression`/`check_new_expression`/`first_failing_argument`/`report_no_overload_matches`/自由 helper 全私有 `fn`。`get_type_from_type_reference`/`get_type_from_type_node`/`get_signatures_of_symbol`/`resolve_overloaded_call`/`check_grammar_modifiers` 公开/既有签名不变（行为增量）。`cargo build -p tsgo_compiler` 绿。
+
+**测试增量**：**714 单测**（+18，相对 C-D1 基线 696：`check_test`+16【A×5、B×2、C×3、D×1、E×5】、`declared_types_test`+2）+ **165 doctest**（±0：新增项全 `pub(crate)`/私有，无 runnable doctest）。**无既有测试弱化/删除**（C-D1 696 全绿不变）。
+
+**既有测试更新（Go-verified justification）**：**无**。property-initializer 推断（`x = 1`→`number`）、overload/impl 去重、abstract grammar、qualified-name 解析、`ThisKeyword`/`NewExpression` 派发均为加法式行为（旧路径分别返 `any`/包含 impl 签名/0 诊断/error_type，无既有测试断言其旧值）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker --lib`（714 绿）+ `--doc`（165 绿）；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。
+
+**与 Go 的已知偏离（本轮，记录在案）**：
+- **2769 链 leaf 印 `false | true`**：port `boolean` = `false | true` union，nodebuilder 不折叠回 `boolean`（C-C2 既有偏离）。语义一致（字面量 `true` 加宽到 boolean 基底）；链 shape/codes(2769/2770/2345)/target 文本全对 Go。
+- **abstract 测试用 `declare abstract class`**：parser 不识别 bare `abstract class`（见上）。
+- **switch 非穷尽缺 2366**：binder 不暴露 `EndFlowNode`（见上）。穷尽场景与 Go 一致。
+
+**本轮 DEFER（带 blocked-by）**：
+- **switch 2366/2367/`noImplicitReturns`(7027) 实现-返回分析**：blocked-by binder `EndFlowNode` + `is_reachable_flow_node` 可变化（均 out-of-scope）。
+- **bare `abstract class` / 前导修饰符声明**：blocked-by `internal/parser` `parse_statement` guard（out-of-scope）。
+- **复杂声明合并**（interface+namespace、class+namespace 静态成员、enum+namespace）：blocked-by 跨 meaning 符号合并 + 静态侧类型。
+- **多态 `this` 类型参数深用例**（`this`-约束、`this`-参数签名、`ThisType<T>`）、**abstract-method-must-be-implemented 全检查(2515)**、**construct 签名/`new` 重载/可访问性**、**泛型 overload elaboration + 「Overload N of M」逐 overload 链 + related-info**、**namespace alias/`import =`/`export =`/ambient module**、**类型位枚举成员引用 `let x: E.A`**：blocked-by 各自基建（见各 `// DEFER` 锚）。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/`：`internalModules/*`（namespace 值/类型成员、嵌套、合并）、`expressions/thisKeyword/*`（this-type）、`classes/classDeclarations/classAbstractKeyword/*`（2511/1244）、`functions/overloadResolution*`（2769 elaboration）、`controlFlow/*` + `statements/switchStatements/*`（判别联合穷尽 never-narrowing）最小子集——无复杂合并、无多态 this 深用例、无 2366 实现-返回、无泛型 overload 链。
+
+**C-D2 状态**：**可达子集完成**。namespaces（值/类型成员 + 嵌套 + namespace+namespace 合并 + `typeof N` 印名）+ this-type（类实例类型 + 多态 this 返回可达子集 + property-initializer 推断）+ abstract（2511 + 1244）+ overload-elaboration（2769→2770→2345 链 + overload/impl 去重）+ switch exhaustiveness（never-narrowing：default + 穷尽 all-throw trailing；2366 受 binder 阻 DEFER）落地。
+
+**C-D（umbrella）状态**：**可达子集完成**。C-D1（strictNullChecks 完成面 + 枚举）+ C-D2（namespaces + this-type + abstract + overload-elaboration + exhaustiveness）收口 C-D 的可达路径；剩余（2454 definite-assignment、2366 实现-返回、exactOptionalPropertyTypes、复杂声明合并、多态 this 深用例、泛型 overload 链、ambient/import-equals/export-equals namespace）按各 DEFER 推进。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

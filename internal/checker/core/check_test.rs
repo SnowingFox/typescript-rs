@@ -7813,3 +7813,410 @@ fn enum_constant_expression_members_via_evaluator() {
         "Type 'E.B' is not assignable to type '4'."
     );
 }
+
+// ---------------------------------------------------------------------------
+// C-D2: namespaces / this-type / abstract / overload elaboration / exhaustiveness
+// ---------------------------------------------------------------------------
+
+// C-D2 behavior A, slice 1 (namespace value member): a namespace with a value
+// export is itself a value whose type carries the export as a member, so
+// `N.x` reads its type. `const n: string = N.x;` reports 2322 because `N.x`
+// is `number`.
+// Verified against `cmd/tsgo --noEmit --strict`: only `const n: string = N.x;`
+// reports `ns1.ts(2,7): error TS2322: Type 'number' is not assignable to type
+// 'string'.`
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModuleWorker (module)
+#[test]
+fn namespace_value_member_read_is_number() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace N { export const x = 1; }\nconst n: string = N.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-D2 behavior A, slice 1b (namespace value type prints `typeof N`): reading a
+// non-existent member off a namespace value reports 2339 against the namespace
+// value type, which the node builder prints as `typeof N`.
+// Verified against `cmd/tsgo --noEmit --strict`:
+// `ns1b.ts(2,13): error TS2339: Property 'y' does not exist on type 'typeof N'.`
+// Go: internal/checker/nodebuilderimpl.go:typeToTypeNodeWorker (typeof query for a module value)
+#[test]
+fn namespace_value_missing_member_prints_typeof_n() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace N { export const x = 1; }\nconst y = N.y;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+    assert_eq!(
+        diags[0].message,
+        "Property 'y' does not exist on type 'typeof N'."
+    );
+}
+
+// C-D2 behavior A, slice 2 (namespace type member): a qualified name `N.T` in
+// type position resolves the exported type alias `T` of namespace `N`, so
+// `const t: N.T = 1;` is OK and `const u: N.T = "x";` reports 2322.
+// Verified against `cmd/tsgo --noEmit --strict`: only `const u: N.T = "x";`
+// reports `ns2.ts(3,7): error TS2322: Type 'string' is not assignable to type
+// 'number'.`
+// Go: internal/checker/checker.go:Checker.resolveEntityName (qualified name) / getTypeFromTypeReference
+#[test]
+fn namespace_type_member_resolves_qualified_name() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace N { export type T = number; }\nconst t: N.T = 1;\nconst u: N.T = \"x\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// C-D2 behavior A, slice 3 (nested namespace value member): an exported nested
+// namespace `A.B` is itself a value member of `A`, so `A.B.x` reaches the inner
+// export. `const n: string = A.B.x;` reports 2322 (`A.B.x` is `number`).
+// Verified against `cmd/tsgo --noEmit --strict`:
+// `ns3.ts(2,7): error TS2322: Type 'number' is not assignable to type 'string'.`
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModuleWorker (nested module)
+#[test]
+fn nested_namespace_value_member_read_is_number() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace A { export namespace B { export const x = 1; } }\nconst n: string = A.B.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-D2 behavior A, slice 4 (namespace + namespace merge accumulates exports):
+// two namespace declarations with the same name merge their exports into one
+// symbol, so both `N.x` and `N.y` are reachable. Only `const c: string = N.x;`
+// errors.
+// Verified against `cmd/tsgo --noEmit --strict`:
+// `nsmerge.ts(5,7): error TS2322: Type 'number' is not assignable to type
+// 'string'.`
+// Go: internal/checker/checker.go:Checker.getExportsOfSymbol (merged module symbol)
+#[test]
+fn merged_namespace_accumulates_exports() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace N { export const x = 1; }\nnamespace N { export const y = 2; }\nconst a: number = N.x;\nconst b: number = N.y;\nconst c: string = N.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-D2 behavior B, slice 1 (`this` in a class method is the instance type):
+// inside a non-static method, `this` resolves to the class instance type, so
+// `this.x` reads property `x`. `const n: string = this.x;` reports 2322.
+// Verified against `cmd/tsgo --noEmit --strict`:
+// `this1.ts(1,30): error TS2322: Type 'number' is not assignable to type
+// 'string'.`
+// Go: internal/checker/checker.go:Checker.checkThisExpression / tryGetThisTypeAtEx
+#[test]
+fn this_in_method_is_class_instance_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { x = 1; m() { const n: string = this.x; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-D2 behavior B, slice 2 (polymorphic `this` return resolves to the class):
+// a method declared `m(): this` returns the class instance type at a concrete
+// call site, so `const d: string = c.m();` reports 2322 against `C`.
+// Verified against `cmd/tsgo --noEmit --strict`:
+// `this2.ts(3,7): error TS2322: Type 'C' is not assignable to type 'string'.`
+// Go: internal/checker/checker.go:Checker.getThisType (this-type node)
+#[test]
+fn this_type_return_annotation_is_class_instance_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { x = 1; m(): this { return this; } }\nconst c = new C();\nconst d: string = c.m();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'C' is not assignable to type 'string'."
+    );
+}
+
+// C-D2 behavior C, slice 1 (instantiating an abstract class reports 2511):
+// `new A()` where `A` is an `abstract class` reports 2511 "Cannot create an
+// instance of an abstract class.".
+//
+// NOTE: the source uses `declare abstract class A {}` rather than the bare
+// `abstract class A {}` of the task's headline because the port's
+// `parse_statement` is missing the leading-modifier keywords
+// (`abstract`/`static`/`public`/...) in its declaration-dispatch guard, so the
+// bare form is mis-parsed as a stray `abstract` identifier expression followed
+// by a non-abstract `class A {}`. The `declare` form routes through the present
+// `DeclareKeyword` guard (and keeps the file a script, so `A` stays in
+// `locals`), so the `abstract` modifier is parsed onto the class. The checker
+// behavior (2511) is identical and matches `cmd/tsgo`. Fixing `parse_statement`
+// is out of scope (`internal/parser`).
+// Verified against `cmd/tsgo --noEmit --strict` (`declare abstract class A {}`):
+// `dabs.ts(2,1): error TS2511: Cannot create an instance of an abstract class.`
+// Go: internal/checker/checker.go:Checker.resolveNewExpression (abstract construct)
+#[test]
+fn new_abstract_class_reports_2511() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare abstract class A {}\nnew A();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2511, got {diags:?}");
+    assert_eq!(diags[0].code, 2511);
+    assert_eq!(
+        diags[0].message,
+        "Cannot create an instance of an abstract class."
+    );
+}
+
+// C-D2 behavior C, slice 1b (instantiating a concrete class is OK): `new C()`
+// where `C` is a non-abstract class reports no diagnostic.
+// Verified against `cmd/tsgo --noEmit --strict`: no diagnostics.
+// Go: internal/checker/checker.go:Checker.resolveNewExpression (non-abstract)
+#[test]
+fn new_concrete_class_is_ok() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "class C {}\nnew C();"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// C-D2 behavior E, slice 1d (trailing code after an exhaustive switch is
+// `never`): when every case of a `switch` over a discriminated union throws,
+// the implicit no-match path is unreachable, so a reference to the discriminant
+// after the switch has type `never` — assignable to anything. `const y: number
+// = x;` after such a switch is therefore OK.
+// Verified against `cmd/tsgo --noEmit --strict`: no diagnostics.
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminant (no-match complement)
+#[test]
+fn trailing_reference_after_exhaustive_throw_switch_is_never() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(x: \"a\" | \"b\"): void {\n  switch (x) {\n    case \"a\": throw 0;\n    case \"b\": throw 0;\n  }\n  const y: number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// C-D2 behavior E, slice 1e (trailing code after a non-exhaustive throw switch
+// keeps the unhandled member): when a case is missing, the unhandled member
+// falls through, so the trailing reference is that member and the assignment
+// `const y: number = x;` reports 2322 (the literal source generalized to its
+// base for a non-unit target, matching Go).
+// Verified against `cmd/tsgo --noEmit --strict`:
+// `sw_throw2.ts(6,9): error TS2322: Type 'string' is not assignable to type
+// 'number'.`
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminant (no-match complement)
+#[test]
+fn trailing_reference_after_non_exhaustive_throw_switch_is_leftover() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(x: \"a\" | \"b\" | \"c\"): void {\n  switch (x) {\n    case \"a\": throw 0;\n    case \"b\": throw 0;\n  }\n  const y: number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// C-D2 behavior C, slice 2 (abstract method in a non-abstract class -> 1244):
+// an `abstract` method modifier is only allowed in an `abstract class`, so
+// `class B { abstract n(): void; }` reports 1244.
+// Verified against `cmd/tsgo --noEmit --strict`:
+// `abstract2.ts(2,11): error TS1244: Abstract methods can only appear within an
+// abstract class.`
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers (abstract)
+#[test]
+fn abstract_method_in_non_abstract_class_reports_1244() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B { abstract n(): void; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1244, got {diags:?}");
+    assert_eq!(diags[0].code, 1244);
+    assert_eq!(
+        diags[0].message,
+        "Abstract methods can only appear within an abstract class."
+    );
+}
+
+// C-D2 behavior D, slice 1 (overload-failure elaboration 2769): a call matching
+// no overload of an overloaded function reports 2769 "No overload matches this
+// call." with a message chain "The last overload gave the following error."
+// (2770) wrapping the last overload's argument error (2345).
+// Verified against `cmd/tsgo --noEmit --strict`:
+// `overload1.ts(4,3): error TS2769: No overload matches this call.`
+// `  The last overload gave the following error.`
+// `    Argument of type 'boolean' is not assignable to parameter of type 'string'.`
+//
+// DIVERGENCE (pre-existing, documented since C-C2): the port models `boolean`
+// as the union `false | true` and the node builder prints it as `false | true`
+// rather than folding it back to `boolean`. The *semantics* match Go (the
+// literal argument `true` is generalized to its boolean base type for the
+// message); only the printed base-type name differs. The chain shape, codes
+// (2769 / 2770 / 2345), and target text all match Go exactly.
+// Go: internal/checker/checker.go:Checker.reportCallResolutionErrors
+#[test]
+fn overload_failure_reports_2769_with_elaboration_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(x: number): void;\nfunction f(x: string): void;\nfunction f(x: any) {}\nf(true);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2769, got {diags:?}");
+    assert_eq!(diags[0].code, 2769);
+    assert_eq!(diags[0].message, "No overload matches this call.");
+    let chain = &diags[0].message_chain;
+    assert_eq!(chain.len(), 1, "expected one chain entry, got {chain:?}");
+    assert_eq!(chain[0].code, 2770);
+    assert_eq!(
+        chain[0].message,
+        "The last overload gave the following error."
+    );
+    assert_eq!(
+        chain[0].next.len(),
+        1,
+        "expected leaf, got {:?}",
+        chain[0].next
+    );
+    assert_eq!(chain[0].next[0].code, 2345);
+    // Go prints `boolean`; the port prints the `false | true` union (documented
+    // node-builder divergence above). The target/text are otherwise identical.
+    assert_eq!(
+        chain[0].next[0].message,
+        "Argument of type 'false | true' is not assignable to parameter of type 'string'."
+    );
+}
+
+// C-D2 behavior E, slice 1 (exhaustive switch narrows the discriminant to
+// `never` in the default clause): in a `switch` over a discriminated union that
+// covers every case, the `default` clause narrows the discriminant to `never`
+// (the assert-never exhaustiveness pattern), so `const y: never = x;` is OK.
+// Verified against `cmd/tsgo --noEmit --strict`: no diagnostics.
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminant (default complement)
+#[test]
+fn exhaustive_switch_default_narrows_discriminant_to_never() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(x: \"a\" | \"b\"): number {\n  switch (x) {\n    case \"a\": return 1;\n    case \"b\": return 2;\n    default: const y: never = x; return y;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// C-D2 behavior E, slice 1b (non-exhaustive switch leaves the leftover member in
+// the default clause): when a case is missing, the `default` clause narrows the
+// discriminant to the unhandled member, so `const y: never = x;` reports 2322
+// against that member.
+// Verified against `cmd/tsgo --noEmit --strict`:
+// `sw_def_nonexhaustive.ts(5,20): error TS2322: Type '"c"' is not assignable to
+// type 'never'.`
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminant (default complement)
+#[test]
+fn non_exhaustive_switch_default_narrows_to_leftover_member() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(x: \"a\" | \"b\" | \"c\"): number {\n  switch (x) {\n    case \"a\": return 1;\n    case \"b\": return 2;\n    default: const y: never = x; return y;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '\"c\"' is not assignable to type 'never'."
+    );
+}
+
+// C-D2 behavior E, slice 1c (the task-headline exhaustive switch is OK): a
+// function whose `switch` over a discriminated union covers every case and
+// returns from each case has no trailing-return error, because the implicit
+// fall-through is unreachable (the union has narrowed to `never`).
+// Verified against `cmd/tsgo --noEmit --strict`: no diagnostics.
+//
+// DIVERGENCE (documented, blocked): for the *non-exhaustive* counterpart Go
+// reports 2366 "Function lacks ending return statement ..."; the port does not,
+// because the implicit-return analysis (`checkAllCodePathsInNonVoidFunctionReturn
+// OrThrow` -> `functionHasImplicitReturn`) requires the function body's
+// `EndFlowNode`, which the port's binder does not expose, and
+// `is_reachable_flow_node` is `&self` (the switch-exhaustiveness refinement
+// needs `&mut` to type the clause expressions; changing its signature is barred
+// by the additive-only rule). The headline exhaustive case matches Go.
+// Go: internal/checker/checker.go:Checker.checkAllCodePathsInNonVoidFunctionReturnOrThrow
+#[test]
+fn exhaustive_switch_without_trailing_return_is_ok() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(x: \"a\" | \"b\"): number {\n  switch (x) {\n    case \"a\": return 1;\n    case \"b\": return 2;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

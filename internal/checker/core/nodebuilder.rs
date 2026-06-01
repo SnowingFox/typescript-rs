@@ -202,6 +202,13 @@ pub fn type_to_string(checker: &mut Checker, program: &dyn BoundProgram, ty: Typ
         if let Some(symbol) = symbol {
             let name = symbol_to_string(program, symbol);
             if !name.starts_with(tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_PREFIX) {
+                // A namespace/module value type prints as `typeof N` (Go emits a
+                // `typeQuery` node for a value-module symbol's anonymous type in
+                // `typeToTypeNodeWorker`), distinguishing the value side from the
+                // namespace's type side.
+                if program.symbol(symbol).flags.intersects(SymbolFlags::MODULE) {
+                    return format!("typeof {name}");
+                }
                 return name;
             }
         }

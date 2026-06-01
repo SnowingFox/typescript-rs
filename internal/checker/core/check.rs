@@ -230,9 +230,11 @@ impl Checker {
             Kind::TrueKeyword => self.true_type,
             Kind::FalseKeyword => self.false_type,
             Kind::NullKeyword => self.null_type,
+            Kind::ThisKeyword => self.check_this_expression(program, node),
             Kind::PropertyAccessExpression => self.check_property_access(program, node),
             Kind::ElementAccessExpression => self.check_element_access(program, node),
             Kind::CallExpression => self.check_call_expression(program, node),
+            Kind::NewExpression => self.check_new_expression(program, node),
             Kind::BinaryExpression => self.check_binary_expression(program, node),
             Kind::JsxSelfClosingElement => self.check_jsx_self_closing_element(program, node),
             Kind::JsxElement => self.check_jsx_element(program, node),
@@ -1156,6 +1158,156 @@ impl Checker {
                 let declared = get_type_of_symbol(self, program, symbol, globals);
                 self.get_flow_type_of_reference(program, node, declared)
             }
+        }
+    }
+
+    // Checks a `this` expression (Go's `checkThisExpression`), returning the
+    // type of `this` at this location. The reachable subset resolves `this`
+    // inside a non-static class member to the class instance type (so `this.x`
+    // reads an instance property); a `this` with no class container yields
+    // `any`.
+    //
+    // DEFER(phase-4-checker-C-D2+): the polymorphic `this` *type parameter*
+    // (`getDeclaredTypeOfClassOrInterface(...).thisType`), the static-side
+    // typing flow narrowing, the `noImplicitThis` diagnostics, the
+    // arrow-capture / computed-property / module / enum container errors, and
+    // the global-`this` fallback. blocked-by: polymorphic `this` type
+    // parameter + `this`-parameter signatures + `noImplicitThis` option +
+    // global `this` symbol.
+    // Go: internal/checker/checker.go:Checker.checkThisExpression / tryGetThisTypeAtEx
+    fn check_this_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        match self.try_get_this_type_at(program, node) {
+            Some(t) => t,
+            None => self.any_type(),
+        }
+    }
+
+    // Resolves a `this` *type node* (`m(): this`) to the enclosing class's
+    // instance type (Go's `getThisType`, reachable subset). Returns the error
+    // type when `this` is not inside a non-static class/interface member.
+    //
+    // DEFER(phase-4-checker-C-D2+): the polymorphic `this` type parameter and
+    // the 2526 "A 'this' type is available only in a non-static member of a
+    // class or interface" diagnostic. blocked-by: polymorphic `this` type
+    // parameter + grammar diagnostic wiring.
+    // Go: internal/checker/checker.go:Checker.getThisType
+    pub(crate) fn get_this_type_from_node(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
+        if let Some(container) = get_this_container(program, node) {
+            if let Some(parent) = program.arena().parent(container) {
+                if is_class_like(program.arena(), parent)
+                    && !has_static_modifier(program.arena(), container)
+                {
+                    if let Some(symbol) = program.symbol_of_node(parent) {
+                        let globals = program.globals();
+                        return get_declared_type_of_symbol(self, program, symbol, globals);
+                    }
+                }
+            }
+        }
+        self.error_type
+    }
+
+    // Resolves the type of `this` at `node` by walking to the enclosing
+    // (non-arrow) function-like container: if its parent is a class, `this` is
+    // the class instance type for a non-static member, or the class value
+    // (static side) type for a static member (Go's `tryGetThisTypeAtEx`, class
+    // branch). Returns `None` when there is no class container.
+    // Go: internal/checker/checker.go:Checker.tryGetThisTypeAtEx
+    fn try_get_this_type_at(&mut self, program: &dyn BoundProgram, node: NodeId) -> Option<TypeId> {
+        let container = get_this_container(program, node)?;
+        let parent = program.arena().parent(container)?;
+        if !is_class_like(program.arena(), parent) {
+            return None;
+        }
+        let symbol = program.symbol_of_node(parent)?;
+        let globals = program.globals();
+        if has_static_modifier(program.arena(), container) {
+            // The static side: the class value type (its constructor/static
+            // members object), mirrored by the namespace/enum value path.
+            Some(super::declared_types::get_type_of_symbol(
+                self, program, symbol, globals,
+            ))
+        } else {
+            // The instance type (`this` in a non-static member).
+            Some(super::declared_types::get_declared_type_of_symbol(
+                self, program, symbol, globals,
+            ))
+        }
+    }
+
+    // Checks a `new C(...)` expression (Go's `checkNewExpression` ->
+    // `resolveNewExpression`), returning the constructed instance type.
+    //
+    // Reachable subset: a class-identifier callee, whose constructed type is the
+    // class's declared (instance) type. Constructing an `abstract` class reports
+    // 2511 "Cannot create an instance of an abstract class.".
+    //
+    // DEFER(phase-4-checker-C-D2+): construct-signature resolution + overloads +
+    // argument applicability, constructor accessibility (private/protected,
+    // 2673/2674), `new` on a non-constructable value (2351), type-argument
+    // instantiation, and the construct-signature-level `abstract` flag path.
+    // blocked-by: construct signatures on the class value type + `new`-signature
+    // applicability.
+    // Go: internal/checker/checker.go:Checker.checkNewExpression / resolveNewExpression
+    fn check_new_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let (callee, args) = match program.arena().data(node) {
+            NodeData::NewExpression(d) => (
+                d.expression,
+                d.arguments
+                    .as_ref()
+                    .map(|l| l.nodes.clone())
+                    .unwrap_or_default(),
+            ),
+            _ => return self.error_type,
+        };
+        // Type the callee and arguments so nested diagnostics surface.
+        let _ = self.check_expression(program, callee);
+        for &arg in &args {
+            self.check_expression(program, arg);
+        }
+        let Some(class_symbol) = self.new_expression_class_symbol(program, callee) else {
+            // DEFER: `new` on a non-class value (construct signatures / 2351).
+            return self.error_type;
+        };
+        // Constructing an abstract class is an error (2511). Go checks the
+        // chosen construct signature's `abstract` flag; the reachable subset
+        // reads the `abstract` modifier off the class declaration directly.
+        if let Some(decl) = program.symbol(class_symbol).value_declaration {
+            if has_abstract_modifier(program.arena(), decl) {
+                self.error(
+                    program,
+                    node,
+                    &tsgo_diagnostics::CANNOT_CREATE_AN_INSTANCE_OF_AN_ABSTRACT_CLASS,
+                    &[],
+                );
+            }
+        }
+        let globals = program.globals();
+        get_declared_type_of_symbol(self, program, class_symbol, globals)
+    }
+
+    // Resolves the class symbol a `new C(...)` callee refers to (reachable
+    // subset: a plain identifier referencing a class value), or `None` when the
+    // callee is not a class identifier.
+    fn new_expression_class_symbol(
+        &self,
+        program: &dyn BoundProgram,
+        callee: NodeId,
+    ) -> Option<tsgo_ast::SymbolId> {
+        if program.arena().kind(callee) != Kind::Identifier {
+            return None;
+        }
+        let name = program.arena().text(callee).to_string();
+        let globals = program.globals();
+        let symbol = resolve_name(program, callee, &name, SymbolFlags::VALUE, false, globals)?;
+        if program.symbol(symbol).flags.intersects(SymbolFlags::CLASS) {
+            Some(symbol)
+        } else {
+            None
         }
     }
 
@@ -3022,16 +3174,31 @@ impl Checker {
             1 => self.report_inapplicable_argument(program, arity_matched[0], args, &arg_types),
             _ => {
                 // More than one correct-arity candidate failed on argument types:
-                // Go wraps the last candidate's argument error in the
-                // `No_overload_matches_this_call` chain. 4r reports just the
-                // top-level `2769` at the call's error node (chain deferred).
-                let error_node = call_error_node(program, node);
-                self.error(
-                    program,
-                    error_node,
-                    &tsgo_diagnostics::NO_OVERLOAD_MATCHES_THIS_CALL,
-                    &[],
-                );
+                // Go wraps the LAST candidate's argument error in a chain under
+                // the `No_overload_matches_this_call` (2769) head:
+                //   2769 No overload matches this call.
+                //     2770 The last overload gave the following error.
+                //       2345 Argument of type 'X' is not assignable to ...
+                // located at the failing argument (Go's
+                // `reportCallResolutionErrors`, `candidatesForArgumentError`
+                // branch with `len > 1`).
+                let last = *arity_matched.last().unwrap();
+                if let Some((arg_node, source_str, target_str)) =
+                    self.first_failing_argument(program, last, args, &arg_types)
+                {
+                    self.report_no_overload_matches(program, arg_node, &source_str, &target_str);
+                } else {
+                    // Defensive: the multi-candidate branch is reached only when
+                    // every arity-matched candidate failed, so a failing
+                    // argument is expected; fall back to a bare 2769.
+                    let error_node = call_error_node(program, node);
+                    self.error(
+                        program,
+                        error_node,
+                        &tsgo_diagnostics::NO_OVERLOAD_MATCHES_THIS_CALL,
+                        &[],
+                    );
+                }
             }
         }
         // The overload-failure result type is the last candidate's return type
@@ -3093,6 +3260,81 @@ impl Checker {
                 return;
             }
         }
+    }
+
+    // Returns the first argument of `signature` whose type is not assignable to
+    // its parameter, as `(arg_node, generalized_source_str, target_str)`, or
+    // `None` when every overlapping argument is assignable (the silent form of
+    // `report_inapplicable_argument` returning the offending pair instead of
+    // recording a `2345`). Used to build the overload-failure elaboration.
+    // Go: internal/checker/checker.go:Checker.isSignatureApplicable (first failure)
+    fn first_failing_argument(
+        &mut self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+        args: &[NodeId],
+        arg_types: &[TypeId],
+    ) -> Option<(NodeId, String, String)> {
+        let count = self.get_parameter_count(signature).min(args.len());
+        for i in 0..count {
+            let arg_type = arg_types[i];
+            let param_type = self.get_type_at_position(program, signature, i);
+            if !self.is_type_assignable_to(program, arg_type, param_type) {
+                let generalized = self.generalized_source_for_error(arg_type, param_type);
+                let source_str = super::nodebuilder::type_to_string(self, program, generalized);
+                let target_str = super::nodebuilder::type_to_string(self, program, param_type);
+                return Some((args[i], source_str, target_str));
+            }
+        }
+        None
+    }
+
+    // Records the overload-failure diagnostic `2769` "No overload matches this
+    // call." at `arg_node`, with the nested elaboration chain `2770` "The last
+    // overload gave the following error." wrapping the last overload's `2345`
+    // argument error (Go's `reportCallResolutionErrors` ->
+    // `NewDiagnosticChain(NewDiagnosticChain(argDiag, 2770), 2769)`).
+    //
+    // DEFER(phase-4-checker-C-D2+): the per-overload "Overload N of M, '(sig)',
+    // gave the following error." variant (used when the best candidate is not
+    // the last), the `The_last_overload_is_declared_here` related info, and the
+    // implementation-success elaboration. blocked-by: per-overload signature
+    // printing + `getCandidateForOverloadFailure` best-match selection.
+    // Go: internal/checker/checker.go:Checker.reportCallResolutionErrors
+    fn report_no_overload_matches(
+        &mut self,
+        program: &dyn BoundProgram,
+        arg_node: NodeId,
+        source_str: &str,
+        target_str: &str,
+    ) {
+        let arg_message =
+            &tsgo_diagnostics::ARGUMENT_OF_TYPE_0_IS_NOT_ASSIGNABLE_TO_PARAMETER_OF_TYPE_1;
+        let last_message = &tsgo_diagnostics::THE_LAST_OVERLOAD_GAVE_THE_FOLLOWING_ERROR;
+        let head_message = &tsgo_diagnostics::NO_OVERLOAD_MATCHES_THIS_CALL;
+        let leaf = DiagnosticMessageChain {
+            code: arg_message.code(),
+            category: arg_message.category(),
+            message: tsgo_diagnostics::format(&arg_message.to_string(), &[source_str, target_str]),
+            next: Vec::new(),
+        };
+        let mid = DiagnosticMessageChain {
+            code: last_message.code(),
+            category: last_message.category(),
+            message: tsgo_diagnostics::format(&last_message.to_string(), &[]),
+            next: vec![leaf],
+        };
+        let loc = program.arena().loc(arg_node);
+        let diagnostic = Diagnostic {
+            code: head_message.code(),
+            category: head_message.category(),
+            message: tsgo_diagnostics::format(&head_message.to_string(), &[]),
+            start: loc.pos(),
+            length: loc.end() - loc.pos(),
+            related_information: Vec::new(),
+            message_chain: vec![mid],
+        };
+        self.add_diagnostic(program, diagnostic);
     }
 
     // Reports a wrong-argument-count error for an overloaded call where no
@@ -5367,6 +5609,89 @@ fn call_error_node(program: &dyn BoundProgram, node: NodeId) -> NodeId {
         NodeData::PropertyAccessExpression(d) => d.name,
         _ => callee,
     }
+}
+
+// Reports whether `kind` is a function-like declaration (the reachable subset
+// of Go's `ast.IsFunctionLikeKind`), used to find the `this` container.
+fn is_function_like_kind(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::FunctionDeclaration
+            | Kind::FunctionExpression
+            | Kind::ArrowFunction
+            | Kind::MethodDeclaration
+            | Kind::MethodSignature
+            | Kind::Constructor
+            | Kind::GetAccessor
+            | Kind::SetAccessor
+            | Kind::CallSignature
+            | Kind::ConstructSignature
+            | Kind::IndexSignature
+    )
+}
+
+// Reports whether `node` is a class declaration or class expression (Go's
+// `ast.IsClassLike`).
+fn is_class_like(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    matches!(
+        arena.kind(node),
+        Kind::ClassDeclaration | Kind::ClassExpression
+    )
+}
+
+// Returns the modifier flags of `node` (its `modifiers` list union), or empty
+// when the node bears no modifier list.
+fn modifier_flags_of(arena: &tsgo_ast::NodeArena, node: NodeId) -> tsgo_ast::ModifierFlags {
+    let modifiers = match arena.data(node) {
+        NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d.modifiers.as_ref(),
+        NodeData::MethodDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::PropertyDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+            d.modifiers.as_ref()
+        }
+        NodeData::ConstructorDeclaration(d) => d.modifiers.as_ref(),
+        _ => None,
+    };
+    modifiers
+        .map(|m| m.modifier_flags)
+        .unwrap_or(tsgo_ast::ModifierFlags::empty())
+}
+
+// Reports whether `node` carries the `static` modifier (Go's `ast.IsStatic`,
+// class-element subset).
+fn has_static_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    modifier_flags_of(arena, node).contains(tsgo_ast::ModifierFlags::STATIC)
+}
+
+// Reports whether `node` carries the `abstract` modifier.
+fn has_abstract_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    modifier_flags_of(arena, node).contains(tsgo_ast::ModifierFlags::ABSTRACT)
+}
+
+// Returns the nearest enclosing (non-arrow) function-like container of `node`
+// (the reachable subset of Go's `ast.GetThisContainer`): walks the parent
+// chain, skipping arrow functions so a lexical `this` resolves to its real
+// owner. Returns `None` when no function-like ancestor exists.
+//
+// DEFER(phase-4-checker-C-D2+): computed-property-name / decorator / module
+// containers and the `includeClassComputedPropertyName` handling. blocked-by:
+// the full `getThisContainer` walk.
+// Go: internal/ast/utilities.go:GetThisContainer
+fn get_this_container(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    let arena = program.arena();
+    let mut current = arena.parent(node);
+    while let Some(n) = current {
+        let kind = arena.kind(n);
+        if kind == Kind::ArrowFunction {
+            current = arena.parent(n);
+            continue;
+        }
+        if is_function_like_kind(kind) {
+            return Some(n);
+        }
+        current = arena.parent(n);
+    }
+    None
 }
 
 // Reports whether a call argument is context-sensitive for inference purposes

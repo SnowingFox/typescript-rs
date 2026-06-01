@@ -1146,10 +1146,53 @@ pub fn get_type_of_symbol(
     if flags.intersects(SymbolFlags::FUNCTION | SymbolFlags::METHOD) {
         return get_type_of_func_class_enum_module(checker, program, symbol);
     }
-    // DEFER(phase-4-checker-4q+): accessor/class-value/alias/module value types.
+    // A namespace/module symbol's value type is an anonymous object whose
+    // members are the namespace's exports, so `N.x` reads an exported member's
+    // type (Go's `getTypeOfFuncClassEnumModuleWorker`, module case). A merged
+    // namespace (`namespace N {...} namespace N {...}`) has the binder
+    // accumulate every export into the one symbol's `exports` table, so its
+    // value type sees the combined members.
+    if flags.intersects(SymbolFlags::MODULE) {
+        return get_type_of_module(checker, program, symbol);
+    }
+    // DEFER(phase-4-checker-C-D2+): accessor/class-value/alias value types.
     // blocked-by: accessor signature collection, the constructor/static-side
-    // type of a class value symbol, and alias/module resolution.
+    // type of a class value symbol, and alias resolution.
     checker.error_type()
+}
+
+// Builds (or returns the cached) value type of a namespace/module symbol: an
+// anonymous object type whose members are the namespace's exports (Go's
+// `getTypeOfFuncClassEnumModuleWorker` module case, which delegates member
+// resolution to `getExportsOfSymbol`). The object's symbol is the namespace,
+// so it prints as `typeof N`.
+//
+// DEFER(phase-4-checker-C-D2+): the shorthand-ambient-module `any`, the
+// CommonJS `export =` re-resolution, and `strictNullChecks` optional widening.
+// blocked-by: ambient/CommonJS module resolution + alias targets.
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModuleWorker
+fn get_type_of_module(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> TypeId {
+    if let Some(cached) = checker
+        .value_symbol_links
+        .try_get(&symbol)
+        .and_then(|l| l.resolved_type)
+    {
+        return cached;
+    }
+    let members = program.symbol(symbol).exports.clone();
+    let properties: Vec<SymbolId> = members.values().copied().collect();
+    let object = ObjectType {
+        members,
+        properties,
+        ..Default::default()
+    };
+    let t = checker.new_object_type(ObjectFlags::ANONYMOUS, Some(symbol), object);
+    checker.value_symbol_links.get(symbol).resolved_type = Some(t);
+    t
 }
 
 // Builds (or returns the cached) type of a function symbol: an anonymous object
@@ -1202,7 +1245,7 @@ fn get_signatures_of_symbol(
     declarations: &[NodeId],
 ) -> Vec<SignatureId> {
     let mut result = Vec::new();
-    for &decl in declarations {
+    for (i, &decl) in declarations.iter().enumerate() {
         // A method member contributes its `MethodSignature`/`MethodDeclaration`
         // call signature (4ah), alongside the function-declaration case (4q). A
         // function/constructor *type* node (`(x: number) => void`) contributes
@@ -1218,9 +1261,41 @@ fn get_signatures_of_symbol(
         ) {
             continue;
         }
+        // Skip the *implementation* of an overloaded function/method: a node
+        // with a body whose immediately-preceding sibling declaration has the
+        // same parent and kind and ends where this one begins is the
+        // implementation that follows the overload signatures, and is not a
+        // callable signature (Go's `getSignaturesOfSymbol`). This is what makes
+        // `function f(x:number):void; function f(x:string):void; function f(x:any){}`
+        // expose exactly the two overloads, so an unmatched call elaborates
+        // against them rather than silently resolving against the `any`
+        // implementation.
+        if i > 0 && function_like_has_body(program, decl) {
+            let previous = declarations[i - 1];
+            if program.arena().parent(decl) == program.arena().parent(previous)
+                && program.arena().kind(decl) == program.arena().kind(previous)
+                && program.arena().loc(decl).pos() == program.arena().loc(previous).end()
+            {
+                continue;
+            }
+        }
         result.push(get_signature_from_declaration(checker, program, decl));
     }
     result
+}
+
+// Reports whether a function-like declaration has a body (Go's `decl.Body() !=
+// nil`), used to detect an overload implementation node.
+fn function_like_has_body(program: &dyn BoundProgram, decl: NodeId) -> bool {
+    match program.arena().data(decl) {
+        NodeData::FunctionDeclaration(d) | NodeData::FunctionExpression(d) => d.body.is_some(),
+        NodeData::MethodDeclaration(d) => d.body.is_some(),
+        NodeData::ConstructorDeclaration(d) => d.body.is_some(),
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+            d.body.is_some()
+        }
+        _ => false,
+    }
 }
 
 // Builds a [`Signature`] from a function-like declaration (Go's
@@ -1508,15 +1583,18 @@ fn get_type_of_variable_or_property(
     t
 }
 
-// Returns the initializer node of a variable declaration, if it has one (the
-// reachable subset of Go's variable-like initializer handling). Property and
-// parameter initializer inference is deferred.
+// Returns the initializer node of a variable or class-property declaration, if
+// it has one (the reachable subset of Go's variable-like initializer handling).
+// An un-annotated class field `x = 1` infers its (widened) initializer type
+// `number`, so `this.x` reads `number` (the C-D2 this-type headline).
 //
-// DEFER(phase-4-checker-later): property/parameter initializer inference.
-// blocked-by: contextual typing + class member initializer inference.
+// DEFER(phase-4-checker-later): parameter initializer inference and binding
+// patterns. blocked-by: parameter contextual/default inference + binding-element
+// typing.
 fn variable_declaration_initializer(program: &dyn BoundProgram, decl: NodeId) -> Option<NodeId> {
     match program.arena().data(decl) {
         NodeData::VariableDeclaration(d) => d.initializer,
+        NodeData::PropertyDeclaration(d) => d.initializer,
         _ => None,
     }
 }
@@ -1600,6 +1678,7 @@ pub fn get_type_from_type_node(
         Kind::UndefinedKeyword => checker.undefined_type(),
         Kind::NeverKeyword => checker.never_type(),
         Kind::ObjectKeyword => checker.non_primitive_type(),
+        Kind::ThisType => checker.get_this_type_from_node(program, node),
         Kind::TypeReference => get_type_from_type_reference(checker, program, node, globals),
         Kind::ArrayType => get_type_from_array_type_node(checker, program, node, globals),
         Kind::TupleType => get_type_from_tuple_type_node(checker, program, node, globals),
@@ -2965,29 +3044,43 @@ fn get_type_from_type_reference(
         NodeData::TypeReference(d) => d.type_name,
         _ => return checker.error_type(),
     };
-    if program.arena().kind(type_name) != Kind::Identifier {
-        // DEFER(phase-4-checker-4d): qualified-name type references.
-        // blocked-by: namespace member resolution (4d).
-        return checker.error_type();
-    }
     let type_arguments = match program.arena().data(node) {
         NodeData::TypeReference(d) => d.type_arguments.clone(),
         _ => None,
     };
-    let name = program.arena().text(type_name).to_string();
-    let symbol = match resolve_name(program, node, &name, SymbolFlags::TYPE, false, globals) {
-        Some(symbol) => symbol,
-        // The binder does not place a generic declaration's type parameters in
-        // its `locals`, so a bare `T` reference inside a generic interface/class/
-        // method/function body is resolved by scanning the enclosing
-        // type-parameter lists for a matching name (Go's `resolveName` finds
-        // these in `locals`). This lets a `value: T` member of `Iterator<T>`
-        // carry the type parameter (4ah), which is then instantiated through the
-        // enclosing reference's type-argument mapper.
-        None => match resolve_type_parameter_in_scope(program, node, &name) {
-            Some(tp) => tp,
+    // A qualified name (`N.T`) resolves the member type `T` of namespace `N`
+    // through the entity-name resolver (Go's `getTypeFromTypeReference` ->
+    // `resolveEntityName` for a non-identifier type name), so `const t: N.T` is
+    // typed as the exported alias/interface/class of `N`.
+    let name = if program.arena().kind(type_name) == Kind::Identifier {
+        program.arena().text(type_name).to_string()
+    } else {
+        // The printed name of the rightmost identifier, used for the
+        // intrinsic/string-mapping name dispatch below.
+        let right = qualified_name_right_text(program, type_name);
+        right.unwrap_or_default()
+    };
+    let symbol = if program.arena().kind(type_name) == Kind::Identifier {
+        match resolve_name(program, node, &name, SymbolFlags::TYPE, false, globals) {
+            Some(symbol) => symbol,
+            // The binder does not place a generic declaration's type parameters
+            // in its `locals`, so a bare `T` reference inside a generic
+            // interface/class/method/function body is resolved by scanning the
+            // enclosing type-parameter lists for a matching name (Go's
+            // `resolveName` finds these in `locals`). This lets a `value: T`
+            // member of `Iterator<T>` carry the type parameter (4ah), which is
+            // then instantiated through the enclosing reference's type-argument
+            // mapper.
+            None => match resolve_type_parameter_in_scope(program, node, &name) {
+                Some(tp) => tp,
+                None => return checker.error_type(),
+            },
+        }
+    } else {
+        match resolve_entity_name(program, type_name, SymbolFlags::TYPE, globals) {
+            Some(symbol) => symbol,
             None => return checker.error_type(),
-        },
+        }
     };
     let symbol_flags = program.symbol(symbol).flags;
     let target = get_declared_type_of_symbol(checker, program, symbol, globals);
@@ -3057,6 +3150,86 @@ fn get_type_from_type_reference(
         return checker.create_type_reference(target, provided_args);
     }
     target
+}
+
+// Resolves an entity name (an `Identifier` or a `QualifiedName`) to the symbol
+// matching `meaning` (Go's `resolveEntityName`). An identifier resolves by name
+// in scope; a qualified name `N.x` resolves `N` as a namespace then looks the
+// rightmost name up in its exports. Used by qualified-name type references
+// (`N.T`).
+//
+// DEFER(phase-4-checker-C-D2+): alias-chain resolution (`resolveAlias`),
+// CommonJS `require`/`export =` re-resolution, the not-found diagnostics
+// (2694 `Namespace_0_has_no_exported_member_1` etc.), and `PropertyAccess`
+// entity names. blocked-by: alias targets + import-equals + the suggestion
+// machinery.
+// Go: internal/checker/checker.go:Checker.resolveEntityName
+pub(crate) fn resolve_entity_name(
+    program: &dyn BoundProgram,
+    name_node: tsgo_ast::NodeId,
+    meaning: SymbolFlags,
+    globals: Option<&SymbolTable>,
+) -> Option<SymbolId> {
+    match program.arena().kind(name_node) {
+        Kind::Identifier => {
+            let text = program.arena().text(name_node).to_string();
+            resolve_name(program, name_node, &text, meaning, false, globals)
+        }
+        Kind::QualifiedName => {
+            let (left, right) = match program.arena().data(name_node) {
+                NodeData::QualifiedName(d) => (d.left, d.right),
+                _ => return None,
+            };
+            resolve_qualified_name(program, left, right, meaning, globals)
+        }
+        _ => None,
+    }
+}
+
+// Resolves a qualified name `left.right` (Go's `resolveQualifiedName`): the
+// `left` entity is resolved as a namespace, then `right` is looked up in that
+// namespace's exports filtered by `meaning`.
+// Go: internal/checker/checker.go:Checker.resolveQualifiedName
+fn resolve_qualified_name(
+    program: &dyn BoundProgram,
+    left: tsgo_ast::NodeId,
+    right: tsgo_ast::NodeId,
+    meaning: SymbolFlags,
+    globals: Option<&SymbolTable>,
+) -> Option<SymbolId> {
+    let namespace = resolve_entity_name(program, left, SymbolFlags::NAMESPACE, globals)?;
+    let text = program.arena().text(right).to_string();
+    get_symbol_from_table(program, &program.symbol(namespace).exports, &text, meaning)
+}
+
+// Looks a name up in a symbol table filtered by `meaning` (Go's `getSymbol`):
+// returns the symbol only if it carries one of the requested meaning flags.
+// Go: internal/checker/checker.go:Checker.getSymbol
+fn get_symbol_from_table(
+    program: &dyn BoundProgram,
+    table: &SymbolTable,
+    name: &str,
+    meaning: SymbolFlags,
+) -> Option<SymbolId> {
+    let symbol = *table.get(name)?;
+    if program.symbol(symbol).flags.intersects(meaning) {
+        Some(symbol)
+    } else {
+        None
+    }
+}
+
+// Returns the printed text of the rightmost identifier of a qualified name
+// (`A.B.c` -> `"c"`), used for the intrinsic-name dispatch in
+// `get_type_from_type_reference`.
+fn qualified_name_right_text(
+    program: &dyn BoundProgram,
+    name_node: tsgo_ast::NodeId,
+) -> Option<String> {
+    match program.arena().data(name_node) {
+        NodeData::QualifiedName(d) => Some(program.arena().text(d.right).to_string()),
+        _ => None,
+    }
 }
 
 // Resolves a bare type-reference name to an enclosing generic declaration's
