@@ -505,6 +505,33 @@
 
 > **checker 侧单测**（`tsgo_checker`，见 checker `tests.md`）：`emit_resolver_test` +8（`create_type_of_declaration` widen number/string/boolean/const、array、object、`create_return_type_of_signature_declaration`、`is_literal_const_declaration`、`create_literal_const_value`），`nodebuilder_test` +7（`type_to_type_node` keyword/literal/array/type-ref/union/object/tuple）。
 
+### declarations D-F3（可见性/可访问性 + import/export + 诊断，+16 Rust 单测 + 12 doctest；`check_with_resolver`/`check_diagnostics_opts`）
+
+> expected 全部取自 `/tmp/tsgo -p tsconfig{declaration,emitDeclarationOnly,strict[,isolatedDeclarations],pretty:false}` 实测（python `repr`，见 impl.md「D-F3 Go ground truth」表）。elision/import/4025 经 `check_with_resolver`/`check_diagnostics_opts`（同源 `build_reference_resolver`）。
+
+| Rust 测试（`declarations::transform::tests`）| 验证内容 | input → expected | 依据 | 完成 |
+|---|---|---|---|---|
+| `nonexported_const_is_elided_in_a_module` | module 内非导出 const elide | `export const a = 1;\nconst b = 2;` → `export declare const a = 1;` | `transformVariableStatement`+`getBindingNameVisible` | ✓ |
+| `nonexported_function_is_elided_in_a_module` | module 内非导出 fn elide | `export const a = 1;\nfunction g(): void {}` → `export declare const a = 1;` | `isDeclarationAndNotVisible` | ✓ |
+| `script_keeps_nonexported_const` | script 保留非导出 const | `const b = 2;` → `declare const b = 2;` | `IsGlobalSourceFile`（checker de-defer）| ✓ |
+| `script_keeps_multiple_nonexported_declarations` | script 保留多非导出 | `const b = 2;\nfunction g(): void {}` → 两者保留 | 同上 | ✓ |
+| `referenced_import_is_kept` | import 被 emit 类型引用 → 保留 | `import { T } from "./m";\nexport const x: T = null as any;` → import 保留 + `export declare const x: T;` | `transformImportDeclaration`+`is_referenced` | ✓ |
+| `unreferenced_import_is_elided` | import 未引用 → elide | `import { T } from "./m";\nexport const x = 1;` → `export declare const x = 1;` | 同上 | ✓ |
+| `only_referenced_named_import_specifier_is_kept` | 仅引用的 specifier 留 | `import { T, U } from "./m";\nexport const x: T = null as any;` → `import { T } from "./m";` | 同上（per-specifier 过滤）| ✓ |
+| `export_named_reexport_keeps_referenced_import` | re-export 保留 + 续命 import | `import { T } from "./m";\nexport { T };` → 原样 | `transformExportDeclaration` + `is_referenced` | ✓ |
+| `typeof_private_name_reports_4025` | `typeof a`（block-scoped）不可见 → 4025 | `{ var a=""; }\nexport let b: typeof a;` → `(4025, "Exported variable 'b' has or is using private name 'a'.")` | `checkEntityNameVisibility`+`entity_name_accessibility`+`getVariableDeclarationTypeVisibilityDiagnosticMessage` | ✓ |
+| `typeof_visible_name_reports_nothing` | 可见名无诊断 | `export const a = "";\nexport let b: typeof a;` → `[]` | 同上（visible）| ✓ |
+| `isolated_declarations_void_function_reports_9007` | void fn 无注解 → 9007 | `export function noReturn() {}`（isolatedDeclarations）→ `(9007, "Function must have…")` | `report_isolated_declarations_return_type`+`getErrorByDeclarationKind` | ✓ |
+| `isolated_declarations_void_method_reports_9008` | void method → 9008 | `export class C { m() {} }`（isolatedDeclarations）→ `(9008, "Method must have…")` | 同上 | ✓ |
+| `isolated_declarations_literal_return_is_ok` | 字面 return 句法可推 → 无诊断 | `export function f() { return 1; }`（isolatedDeclarations）→ `[]` | `body_has_value_return` | ✓ |
+| `isolated_declarations_annotated_void_is_ok` | 显式返回注解抑制 | `export function f(): void {}`（isolatedDeclarations）→ `[]` | `node_type_annotation` 守卫 | ✓ |
+| `void_function_without_isolated_declarations_reports_nothing` | 非 isolatedDeclarations 不报 | `export function noReturn() {}`（无 flag）→ `[]` | `isolated_declarations` 门控 | ✓ |
+| `isolated_declarations_9007_has_related_suggestion` | 9007 带 9031 related | `export function noReturn() {}` → related `(9031, "Add a return type to the function declaration.")` | `getRelatedSuggestionByDeclarationKind`+`add_related_info` | ✓ |
+
+> **checker 侧单测**（`tsgo_checker`，见 checker `tests.md`）：`emit_resolver_test` +2（`nonexported_declaration_is_visible_in_a_script` / `nonexported_declaration_is_not_visible_in_a_module`，de-defer `IsGlobalSourceFile` 脚本案）。
+>
+> **FOLLOW GO 偏离**：briefing 切片 4（`class P {} export const x = new P();` → 4025）与切片 5（`function f(){return 1}` → 9007）经实测**不成立**（前者 late-painting 保留非导出 P 不报；后者字面 return 句法可推不报）。改测真实触发：`typeof a`（block-scoped）→ 4025、`noReturn(){}`（void body）→ 9007/9008。详见 impl.md「D-F3 worklog · 关键发现」。
+
 ## tstransforms conformance 切片（P10 端到端兜底）
 
 `tstransforms` 各 stage 的字节级正确性由 **P10 conformance parity** 对拍（`tsc` baseline）。6b 的单测覆盖 `typeeraser` 剥类型子集；下列 `tests/cases/conformance/` 子集是 6b–6c 完整化后 P10 必须绿的目标（本轮仅登记，不在 6b 跑）：
@@ -582,5 +609,6 @@
 | jsxtransforms classic/automatic runtime | 需 `tsc --jsx` baseline | P10 |
 | declarations `.d.ts` **注解声明核心**（函数/变量/类/接口/类型别名 + 修饰符 + 重载省略）| ~~依赖 checker~~ → **D-F1 已落地**（34 单测，注解直通）| ✅ 完成 |
 | declarations 推断类型 node 合成（无注解 → `createTypeOfDeclaration`）| ~~依赖 `EmitResolver::create_type_of_declaration` + 句法 type-node builder~~ → **D-F2 已落地**（9 单测 + checker 15 单测；keyword/字面/array/object/函数返回 + 字面 const 保初始化器）| ✅ 完成（异域 type-node + `SymbolTracker` → D-F3）|
-| declarations 可见性/可访问性 gating + isolatedDeclarations 诊断（`tracker.go`/`diagnostics.go`）| 依赖 `is_declaration_visible` 脚本案 + `PrecalculateDeclarationEmitVisibility` + `SymbolTracker` | D-F3 |
-| declarations `.d.ts` 全量（enum/namespace/import·export/`export=`/index sig/literal-const/declaration-map/triple-slash）| 依赖 nodebuilder/modulespecifiers + checker host | P10 |
+| declarations 可见性/可访问性 gating + isolatedDeclarations 诊断（`tracker.go`/`diagnostics.go`）| ~~依赖 `is_declaration_visible` 脚本案 + `SymbolTracker`~~ → **D-F3 已落地**（16 单测 + checker 2 单测；module/script elision、import/export `.d.ts`、4025 私名、9007/9008 isolatedDeclarations）| ✅ 完成（late-painted 完整图 / 4023·4024·成员可访问性臂 / 9013·9011·9039 → P6/pseudo-builder）|
+| declarations late-painted statements 完整图（module 内被 emit 类型引用的非导出顶层声明保留）| 依赖 visibility-link 标记 + 跨语句依赖图（program graph）| P6 |
+| declarations `.d.ts` 全量（enum/namespace/`export=` 非 identifier/index sig/declaration-map/triple-slash）| 依赖 nodebuilder/modulespecifiers + checker host | P10 |

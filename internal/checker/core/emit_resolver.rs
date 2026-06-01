@@ -219,13 +219,15 @@ impl EmitResolver {
     /// `NamespaceExportDeclaration`, and `TypeParameter` are always visible;
     /// import clauses/specifiers/namespace imports and `export =` are not.
     ///
-    /// DEFER(phase-4-checker-post): the global-script-file case (a non-exported
-    /// declaration is visible in a non-module script) is approximated as "not
-    /// visible" (the file is conservatively treated as a module); ambient-module
-    /// augmentation, the empty-binding-pattern variable carve-out, JS typedef
-    /// tags, and the property/method/accessor arms (which need
-    /// `GetEffectiveDeclarationFlags`) are also deferred.
-    /// blocked-by: external-module detection + `compiler.Program` (P6) +
+    /// The global-script-file case is modelled (D-F3): a non-exported top-level
+    /// declaration is visible in a non-module script (no external-module
+    /// indicator) and not visible in a module, via [`is_global_source_file`].
+    ///
+    /// DEFER(phase-4-checker-post): ambient-module augmentation, the
+    /// empty-binding-pattern variable carve-out, JS typedef tags, CommonJS
+    /// module detection, and the property/method/accessor arms (which need
+    /// `GetEffectiveDeclarationFlags`) are deferred.
+    /// blocked-by: `compiler.Program` (P6) + CommonJS indicator +
     /// `GetEffectiveDeclarationFlags` (private/protected member visibility).
     ///
     /// # Examples
@@ -1242,10 +1244,11 @@ fn determine_if_declaration_is_visible(arena: &tsgo_ast::NodeArena, node: NodeId
             // Go: if combinedModifierFlags & Export == 0 && !(ambient module
             // element exception) { return IsGlobalSourceFile(parent) }. The
             // single-file reachable subset has no ambient modules, so a
-            // non-exported declaration falls to `IsGlobalSourceFile(parent)`,
-            // approximated as `false` (DEFER: external-module detection).
+            // non-exported declaration falls to `IsGlobalSourceFile(parent)`:
+            // visible in a global script (no external-module indicator),
+            // not visible in a module.
             if !combined_modifier_flags(arena, node).contains(ModifierFlags::EXPORT) {
-                return false;
+                return is_global_source_file(arena, get_declaration_container(arena, node));
             }
             // Go: return isDeclarationVisible(GetDeclarationContainer(node)).
             let container = get_declaration_container(arena, node);
@@ -1264,6 +1267,19 @@ fn determine_if_declaration_is_visible(arena: &tsgo_ast::NodeArena, node: NodeId
         | Kind::ExportAssignment => false,
         // Go's `default: return false` (plus the DEFERred property/method/
         // accessor and structural-type arms).
+        _ => false,
+    }
+}
+
+// Reports whether `node` is a *global* source file — a `SourceFile` that is not
+// an external (or CommonJS) module, i.e. a script whose top-level declarations
+// are globals. The reachable subset detects module-ness via the parser's
+// external-module indicator (CommonJS detection is deferred with the JS file
+// support).
+// Go: internal/ast/utilities.go:IsGlobalSourceFile(2443) / IsExternalOrCommonJSModule(1630)
+fn is_global_source_file(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    match arena.data(node) {
+        NodeData::SourceFile(d) => d.external_module_indicator.is_none(),
         _ => false,
     }
 }

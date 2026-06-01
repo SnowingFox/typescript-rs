@@ -58,17 +58,32 @@
 //!   constant folding wiring / module-specifier rewriting / the resolver host.
 
 use crate::{new_transformer, EmitReferenceResolver, TransformOptions, Transformer};
+use std::cell::RefCell;
+use std::rc::Rc;
 use tsgo_ast::{
     Kind, ModifierFlags, ModifierList, NodeArena, NodeData, NodeId, NodeList, TokenFlags,
 };
-use tsgo_checker::{LiteralConstValue, SynthesizedProperty, SynthesizedTypeNode};
+use tsgo_checker::{Diagnostic, LiteralConstValue, SynthesizedProperty, SynthesizedTypeNode};
 use tsgo_printer::EmitContext;
 
-use super::util::{
-    effective_declaration_flags, get_first_constructor_with_body, get_this_parameter,
-    has_parameter_property_modifier, is_always_type, is_modifier, is_optional_parameter,
-    mask_modifier_flags, modifier_kinds_from_flags, modifiers_to_flags, node_modifiers,
+use super::diagnostics::{
+    get_error_by_declaration_kind, get_related_suggestion_by_declaration_kind,
+    get_symbol_accessibility_diagnostic_message,
 };
+use super::tracker::{create_diagnostic_for_node, SymbolTracker};
+use super::util::{
+    effective_declaration_flags, get_binding_name_visible, get_first_constructor_with_body,
+    get_this_parameter, has_parameter_property_modifier, is_always_type,
+    is_declaration_and_not_visible, is_external_module, is_external_module_indicator, is_modifier,
+    is_optional_parameter, is_scope_marker, mask_modifier_flags, modifier_kinds_from_flags,
+    modifiers_to_flags, needs_scope_marker, node_modifiers,
+};
+
+/// A shared handle over the declaration-emit diagnostics the transform produces
+/// (Go's `DeclarationTransformer.GetDiagnostics` backing slice).
+///
+/// Side effects: none (a type alias).
+pub type DeclarationDiagnostics = Rc<RefCell<Vec<Diagnostic>>>;
 
 /// The stateful declaration (`.d.ts`) transform (Go's `DeclarationTransformer`).
 ///
@@ -86,11 +101,29 @@ pub struct DeclarationsTransformer {
     /// The reachable emit-resolver handle, when wired (Go threads the resolver
     /// through the `DeclarationEmitHost`).
     resolver: Option<EmitReferenceResolver>,
+    /// Whether the output already carries an external-module indicator (an
+    /// import/export declaration, an export assignment, or an `export`-modified
+    /// statement). Drives the trailing `export {};` scope-fix marker.
+    result_has_external_module_indicator: bool,
+    /// Whether the output already carries a scope marker (an export declaration
+    /// or export assignment), Go's `resultHasScopeMarker`.
+    result_has_scope_marker: bool,
+    /// Whether the output contains a non-exported (and non-import) statement
+    /// that needs a scope-fix marker to stay module-local, Go's
+    /// `needsScopeFixMarker`.
+    needs_scope_fix_marker: bool,
+    /// Whether `--isolatedDeclarations` is enabled (drives the
+    /// explicit-annotation diagnostics).
+    isolated_declarations: bool,
+    /// The accessibility / inference-fallback diagnostics sink (Go's
+    /// `SymbolTrackerImpl` + shared state).
+    tracker: SymbolTracker,
 }
 
 /// Builds a [`Transformer`] that lowers a source file to its `.d.ts` shape,
 /// sharing the pipeline's emit context. `resolver`, when present, drives the
-/// reachable emit-resolver queries (overload-implementation elision).
+/// reachable emit-resolver queries (overload-implementation elision, non-exported
+/// elision, import/export visibility, accessibility diagnostics).
 ///
 /// # Examples
 /// ```
@@ -105,16 +138,46 @@ pub fn new_declarations_transformer(
     opt: &TransformOptions,
     resolver: Option<EmitReferenceResolver>,
 ) -> Transformer {
+    new_declarations_transformer_with_diagnostics(opt, resolver).0
+}
+
+/// Like [`new_declarations_transformer`], but additionally returns the shared
+/// [`DeclarationDiagnostics`] sink the transform records accessibility /
+/// `--isolatedDeclarations` diagnostics into (Go's
+/// `DeclarationTransformer.GetDiagnostics`). `--isolatedDeclarations` is read
+/// from `opt.compiler_options.isolated_declarations`.
+///
+/// # Examples
+/// ```
+/// use tsgo_transformers::{declarations::transform::new_declarations_transformer_with_diagnostics, TransformOptions};
+/// let (_tx, diags) = new_declarations_transformer_with_diagnostics(&TransformOptions::default(), None);
+/// assert!(diags.borrow().is_empty());
+/// ```
+///
+/// Side effects: allocates a transformer over the shared context plus a shared
+/// diagnostics sink.
+// Go: internal/transformers/declarations/transform.go:NewDeclarationTransformer + GetDiagnostics
+pub fn new_declarations_transformer_with_diagnostics(
+    opt: &TransformOptions,
+    resolver: Option<EmitReferenceResolver>,
+) -> (Transformer, DeclarationDiagnostics) {
+    let diagnostics: DeclarationDiagnostics = Rc::new(RefCell::new(Vec::new()));
     let mut state = DeclarationsTransformer {
         needs_declare: false,
         resolver,
+        result_has_external_module_indicator: false,
+        result_has_scope_marker: false,
+        needs_scope_fix_marker: false,
+        isolated_declarations: opt.compiler_options.isolated_declarations.is_true(),
+        tracker: SymbolTracker::new(Rc::clone(&diagnostics)),
     };
-    new_transformer(
+    let transformer = new_transformer(
         Box::new(move |ec: &mut EmitContext, node: NodeId| {
             state.visit_source_file(ec.arena_mut(), node)
         }),
         opt.context.clone(),
-    )
+    );
+    (transformer, diagnostics)
 }
 
 impl DeclarationsTransformer {
@@ -141,6 +204,11 @@ impl DeclarationsTransformer {
         if is_dts {
             return node;
         }
+        // Reset the per-file scope/module-marker bookkeeping (Go's visitSourceFile).
+        self.result_has_external_module_indicator = false;
+        self.result_has_scope_marker = false;
+        self.needs_scope_fix_marker = false;
+        let is_module = is_external_module(arena, node);
         let mut out: Vec<NodeId> = Vec::with_capacity(statements.nodes.len());
         for &stmt in &statements.nodes {
             // Go: visitSourceFile sets needsDeclare = true; each top-level
@@ -150,10 +218,28 @@ impl DeclarationsTransformer {
                 match arena.data(result) {
                     // A transform that produced multiple statements bundles them
                     // in a SyntaxList; flatten it into the output.
-                    NodeData::SyntaxList(d) => out.extend(d.list.nodes.iter().copied()),
-                    _ => out.push(result),
+                    NodeData::SyntaxList(d) => {
+                        for elem in d.list.nodes.clone() {
+                            self.record_marker_flags(arena, elem);
+                            out.push(elem);
+                        }
+                    }
+                    _ => {
+                        self.record_marker_flags(arena, result);
+                        out.push(result);
+                    }
                 }
             }
+        }
+        // Go: transformSourceFile appends an empty `export {};` marker to a
+        // module whose output has no external-module indicator, or whose
+        // non-exported (scope-fixed) statements need one to stay module-local.
+        if is_module
+            && (!self.result_has_external_module_indicator
+                || (self.needs_scope_fix_marker && !self.result_has_scope_marker))
+        {
+            let marker = create_empty_exports(arena);
+            out.push(marker);
         }
         let new_sf = arena.new_source_file(
             &file_name,
@@ -168,6 +254,23 @@ impl DeclarationsTransformer {
         new_sf
     }
 
+    /// Records the scope/module-marker flags contributed by emitted statement
+    /// `stmt` (Go's per-statement inspection in
+    /// `transformAndReplaceLatePaintedStatements`).
+    ///
+    /// Side effects: updates the transformer's marker flags.
+    fn record_marker_flags(&mut self, arena: &NodeArena, stmt: NodeId) {
+        if is_external_module_indicator(arena, stmt) {
+            self.result_has_external_module_indicator = true;
+        }
+        if needs_scope_marker(arena, stmt) {
+            self.needs_scope_fix_marker = true;
+        }
+        if is_scope_marker(arena, stmt) {
+            self.result_has_scope_marker = true;
+        }
+    }
+
     /// Transforms a direct child of the source file into its replacement
     /// declaration statement, or `None` when it has no `.d.ts` form.
     ///
@@ -178,6 +281,16 @@ impl DeclarationsTransformer {
         arena: &mut NodeArena,
         node: NodeId,
     ) -> Option<NodeId> {
+        // Go: transformTopLevelDeclaration elides a declaration that exists but
+        // is not visible to declaration emit (a non-exported top-level
+        // declaration in a module; a global script keeps it). Only applied when
+        // a resolver is wired — the bare-context path keeps every declaration
+        // (the pre-D-F3 behavior).
+        if let Some(resolver) = self.resolver.as_ref() {
+            if is_declaration_and_not_visible(arena, resolver, node) {
+                return None;
+            }
+        }
         match arena.kind(node) {
             Kind::FunctionDeclaration => {
                 // Go: transformTopLevelDeclaration elides the implementation
@@ -195,6 +308,9 @@ impl DeclarationsTransformer {
             Kind::ClassDeclaration => Some(self.transform_class_declaration(arena, node)),
             Kind::InterfaceDeclaration => Some(self.transform_interface_declaration(arena, node)),
             Kind::TypeAliasDeclaration => Some(self.transform_type_alias_declaration(arena, node)),
+            Kind::ImportDeclaration => self.transform_import_declaration(arena, node),
+            Kind::ExportDeclaration => Some(self.transform_export_declaration(arena, node)),
+            Kind::ExportAssignment => self.transform_export_assignment(arena, node),
             // Statements with no declaration form are elided (Go's `visit`
             // elision list).
             _ => None,
@@ -216,6 +332,10 @@ impl DeclarationsTransformer {
             }
             _ => unreachable!("kind/data mismatch"),
         };
+        // Go: transformFunctionDeclaration -> ensureType -> the node builder
+        // reports an inference fallback under --isolatedDeclarations when the
+        // return type needs an explicit annotation.
+        self.report_isolated_declarations_return_type(arena, node);
         let modifiers = self.ensure_modifiers(arena, node);
         let type_parameters = self.ensure_type_params(arena, node, type_parameters);
         let parameters = self.update_param_list(arena, node, &parameters);
@@ -230,6 +350,47 @@ impl DeclarationsTransformer {
             None,
             None,
         )
+    }
+
+    /// Reports the `--isolatedDeclarations` "must have an explicit return type
+    /// annotation" diagnostic (`9007` for a function, `9008` for a method) when
+    /// `node` (a function-like declaration) has no return-type annotation and a
+    /// body whose return type is not syntactically derivable.
+    ///
+    /// Reachable subset: a body with no value-returning `return` statement (a
+    /// `void` body). DEFER(D-F3): the conditional / multiple-return cases (Go
+    /// still reports `9007`), the non-literal single-return `9013`, and the
+    /// private-name-in-return `9039`/parameter `9011` family — those need the
+    /// pseudo-type node builder's per-construct inference-fallback reporting.
+    ///
+    /// Side effects: may record a diagnostic (with a related suggestion) on the
+    /// tracker.
+    // Go: internal/transformers/declarations/{tracker.go:ReportInferenceFallback, diagnostics.go:createReturnTypeError}
+    fn report_isolated_declarations_return_type(&self, arena: &NodeArena, node: NodeId) {
+        if !self.isolated_declarations {
+            return;
+        }
+        // An explicit return-type annotation suppresses the diagnostic.
+        if node_type_annotation(arena, node).is_some() {
+            return;
+        }
+        // Only a body-bearing declaration infers a return type.
+        let Some(body) = function_body(arena, node) else {
+            return;
+        };
+        // A value-returning body yields a (possibly serializable) type; the
+        // reachable subset reports only the void / no-value-return case.
+        if body_has_value_return(arena, body) {
+            return;
+        }
+        let Some(message) = get_error_by_declaration_kind(arena.kind(node)) else {
+            return;
+        };
+        let mut diag = create_diagnostic_for_node(arena, node, message, &[]);
+        if let Some(suggestion) = get_related_suggestion_by_declaration_kind(arena.kind(node)) {
+            diag.add_related_info(create_diagnostic_for_node(arena, node, suggestion, &[]));
+        }
+        self.tracker.add_diagnostic(diag);
     }
 
     /// Transforms a variable statement into its declared form: initializers
@@ -249,6 +410,18 @@ impl DeclarationsTransformer {
             }
             _ => unreachable!("kind/data mismatch"),
         };
+        // Go: transformVariableStatement elides the whole statement when none of
+        // its declarations binds a name visible to declaration emit (so a
+        // non-exported `const b = 2;` in a module is dropped). Gated on a wired
+        // resolver — the bare-context path keeps every declaration.
+        if let Some(resolver) = self.resolver.as_ref() {
+            let any_visible = decls
+                .iter()
+                .any(|&decl| get_binding_name_visible(arena, resolver, decl));
+            if !any_visible {
+                return None;
+            }
+        }
         let new_decls: Vec<NodeId> = decls
             .iter()
             .map(|&decl| self.transform_variable_declaration(arena, decl))
@@ -276,7 +449,80 @@ impl DeclarationsTransformer {
         };
         let type_node = self.ensure_type(arena, node, false);
         let initializer = self.ensure_no_initializer(arena, node);
+        // Go: ensureType visits the annotation, whose entity-name nodes run
+        // through checkEntityNameVisibility (reporting a private-name error).
+        self.check_declaration_type_visibility(arena, node);
         arena.new_variable_declaration(name, None, type_node, initializer)
+    }
+
+    /// Checks the entity names of `node`'s type annotation for accessibility,
+    /// recording a "has or is using private name" diagnostic when one references
+    /// a symbol not visible to declaration emit (Go's `checkEntityNameVisibility`
+    /// reached through `ensureType`'s annotation visit). Reachable subset:
+    /// `typeof <name>` type queries.
+    ///
+    /// Side effects: may record diagnostics on the tracker.
+    // Go: internal/transformers/declarations/transform.go:DeclarationTransformer.checkEntityNameVisibility
+    fn check_declaration_type_visibility(&self, arena: &NodeArena, node: NodeId) {
+        let Some(resolver) = self.resolver.as_ref() else {
+            return;
+        };
+        let Some(annotation) = node_type_annotation(arena, node) else {
+            return;
+        };
+        self.walk_type_entity_names(arena, resolver, annotation, node);
+    }
+
+    /// Walks type node `type_node`, checking each `typeof <name>` query's entity
+    /// name for visibility against the declaration `context` (whose name and
+    /// kind select the diagnostic). DEFER(D-F3): type references / heritage /
+    /// import types (top-level type references late-paint rather than error).
+    ///
+    /// Side effects: may record diagnostics on the tracker.
+    fn walk_type_entity_names(
+        &self,
+        arena: &NodeArena,
+        resolver: &EmitReferenceResolver,
+        type_node: NodeId,
+        context: NodeId,
+    ) {
+        if arena.kind(type_node) == Kind::TypeQuery {
+            let expr_name = match arena.data(type_node) {
+                NodeData::TypeQuery(d) => d.expr_name,
+                _ => return,
+            };
+            if let Some(first) = first_identifier(arena, expr_name) {
+                if let Some(error_name) = resolver.entity_name_accessibility(first) {
+                    self.report_inaccessible_entity_name(arena, expr_name, context, &error_name);
+                }
+            }
+            return;
+        }
+        for child in collect_children(arena, type_node) {
+            self.walk_type_entity_names(arena, resolver, child, context);
+        }
+    }
+
+    /// Records the "has or is using private name" diagnostic for declaration
+    /// `context` whose annotation references the inaccessible entity name at
+    /// `error_node` (named `error_name`), Go's
+    /// `handleSymbolAccessibilityError` reachable subset.
+    ///
+    /// Side effects: may record a diagnostic on the tracker.
+    fn report_inaccessible_entity_name(
+        &self,
+        arena: &NodeArena,
+        error_node: NodeId,
+        context: NodeId,
+        error_name: &str,
+    ) {
+        let Some(message) = get_symbol_accessibility_diagnostic_message(arena, context) else {
+            return;
+        };
+        let type_name = declaration_name_text(arena, context);
+        let diag =
+            create_diagnostic_for_node(arena, error_node, message, &[&type_name, error_name]);
+        self.tracker.add_diagnostic(diag);
     }
 
     /// Transforms a class declaration into an ambient class: member bodies and
@@ -381,6 +627,152 @@ impl DeclarationsTransformer {
         arena.new_type_alias_declaration(modifiers, name, type_parameters, type_node)
     }
 
+    /// Transforms an import declaration for `.d.ts` emit: each binding is kept
+    /// iff it is *referenced* (via the resolver's `is_referenced`, the reachable
+    /// stand-in for Go's on-demand `IsDeclarationVisible` link), and the whole
+    /// import is elided when nothing visible remains. A side-effect import
+    /// (`import "m";`) is kept as-is. Without a resolver every binding is kept
+    /// (pass-through, the bare-context path).
+    ///
+    /// Side effects: may push rebuilt nodes onto `arena`.
+    // Go: internal/transformers/declarations/transform.go:DeclarationTransformer.transformImportDeclaration
+    fn transform_import_declaration(&self, arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
+        let (modifiers, import_clause, module_specifier, attributes) = match arena.data(node) {
+            NodeData::ImportDeclaration(d) => (
+                d.modifiers.clone(),
+                d.import_clause,
+                d.module_specifier,
+                d.attributes,
+            ),
+            _ => unreachable!("kind/data mismatch"),
+        };
+        // `import "mod";` (no clause) — kept for side effects.
+        let Some(clause) = import_clause else {
+            return Some(arena.new_import_declaration(
+                modifiers,
+                None,
+                module_specifier,
+                attributes,
+            ));
+        };
+        let (phase_modifier, name, named_bindings) = match arena.data(clause) {
+            NodeData::ImportClause(d) => (d.phase_modifier, d.name, d.named_bindings),
+            _ => unreachable!("kind/data mismatch"),
+        };
+        // Go: visitDeclaration sets the phase modifier `defer` back to none.
+        let phase_modifier = if phase_modifier == Kind::DeferKeyword {
+            Kind::Unknown
+        } else {
+            phase_modifier
+        };
+        let resolver = self.resolver.as_ref();
+        // The default binding's visibility tracks the import clause itself.
+        let visible_default = name.filter(|_| resolver.is_none_or(|r| r.is_referenced(clause)));
+
+        match named_bindings {
+            // No named bindings: default-only (or elided).
+            None => {
+                visible_default?;
+                let new_clause = arena.new_import_clause(phase_modifier, visible_default, None);
+                Some(arena.new_import_declaration(
+                    modifiers,
+                    Some(new_clause),
+                    module_specifier,
+                    attributes,
+                ))
+            }
+            // `import * as ns from "m"` (optionally with a default).
+            Some(nb) if arena.kind(nb) == Kind::NamespaceImport => {
+                let ns_visible = resolver.is_none_or(|r| r.is_referenced(nb));
+                let kept_ns = ns_visible.then_some(nb);
+                if visible_default.is_none() && kept_ns.is_none() {
+                    return None;
+                }
+                let new_clause = arena.new_import_clause(phase_modifier, visible_default, kept_ns);
+                Some(arena.new_import_declaration(
+                    modifiers,
+                    Some(new_clause),
+                    module_specifier,
+                    attributes,
+                ))
+            }
+            // `import { a, b } from "m"` (optionally with a default).
+            Some(nb) => {
+                let specifiers = match arena.data(nb) {
+                    NodeData::NamedImports(d) => d.elements.nodes.clone(),
+                    _ => unreachable!("kind/data mismatch"),
+                };
+                let kept: Vec<NodeId> = specifiers
+                    .into_iter()
+                    .filter(|&s| resolver.is_none_or(|r| r.is_referenced(s)))
+                    .collect();
+                if kept.is_empty() && visible_default.is_none() {
+                    return None;
+                }
+                let named_imports =
+                    (!kept.is_empty()).then(|| arena.new_named_imports(NodeList::new(kept)));
+                let new_clause =
+                    arena.new_import_clause(phase_modifier, visible_default, named_imports);
+                Some(arena.new_import_declaration(
+                    modifiers,
+                    Some(new_clause),
+                    module_specifier,
+                    attributes,
+                ))
+            }
+        }
+    }
+
+    /// Transforms an export declaration (`export { x };` / `export * from "m";`)
+    /// for `.d.ts` emit: kept as-is in the reachable subset (Go rewrites the
+    /// module specifier, a no-op here, and records the scope/module markers).
+    ///
+    /// Side effects: may push a rebuilt node onto `arena`.
+    // Go: internal/transformers/declarations/transform.go:DeclarationTransformer.visitDeclarationStatements (ExportDeclaration arm)
+    fn transform_export_declaration(&self, arena: &mut NodeArena, node: NodeId) -> NodeId {
+        let (modifiers, is_type_only, export_clause, module_specifier, attributes) =
+            match arena.data(node) {
+                NodeData::ExportDeclaration(d) => (
+                    d.modifiers.clone(),
+                    d.is_type_only,
+                    d.export_clause,
+                    d.module_specifier,
+                    d.attributes,
+                ),
+                _ => unreachable!("kind/data mismatch"),
+            };
+        arena.new_export_declaration(
+            modifiers,
+            is_type_only,
+            export_clause,
+            module_specifier,
+            attributes,
+        )
+    }
+
+    /// Transforms an export assignment (`export = e;` / `export default e;`) for
+    /// `.d.ts` emit. The reachable subset keeps an identifier expression as-is
+    /// (Go's `transformExportAssignment` identifier fast path); a non-identifier
+    /// expression (which Go rewrites into a synthesized `_default` variable) is
+    /// deferred.
+    ///
+    /// Side effects: may push a rebuilt node onto `arena`.
+    // Go: internal/transformers/declarations/transform.go:DeclarationTransformer.transformExportAssignment
+    fn transform_export_assignment(&self, arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
+        let (modifiers, is_export_equals, expression) = match arena.data(node) {
+            NodeData::ExportAssignment(d) => {
+                (d.modifiers.clone(), d.is_export_equals, d.expression)
+            }
+            _ => unreachable!("kind/data mismatch"),
+        };
+        // DEFER(D-F3): a non-identifier export expression is rewritten by Go into
+        // a synthesized `declare const _default: T; export default _default;`
+        // (needs the `_default` unique-name + type synthesis dance). The
+        // reachable subset keeps both the identifier fast path and (unchanged)
+        // the non-identifier expression.
+        Some(arena.new_export_assignment(modifiers, is_export_equals, None, expression))
+    }
+
     // --- class members ---------------------------------------------------
 
     /// Transforms a class member into its `.d.ts` form, or `None` when it has no
@@ -453,6 +845,9 @@ impl DeclarationsTransformer {
         if arena.kind(name) == Kind::PrivateIdentifier {
             return None;
         }
+        // Go: a non-private method's return type is inferred via ensureType, so
+        // it reports the --isolatedDeclarations explicit-annotation diagnostic.
+        self.report_isolated_declarations_return_type(arena, node);
         let modifiers = self.ensure_modifiers(arena, node);
         let type_parameters = self.ensure_type_params(arena, node, type_parameters);
         let parameters = self.update_param_list(arena, node, &parameters);
@@ -822,6 +1217,96 @@ impl DeclarationsTransformer {
         // DEFER: `IsImplicitlyExportedJSTypeAlias` (JS files) adds `export`.
         mask_modifier_flags(arena, node, mask, additions)
     }
+}
+
+/// Builds the empty re-export marker `export {};` declaration emit appends to a
+/// module whose output would otherwise look like a script (Go's
+/// `createEmptyExports`).
+///
+/// Side effects: pushes the rebuilt nodes onto `arena`.
+// Go: internal/transformers/declarations/transform.go:createEmptyExports
+fn create_empty_exports(arena: &mut NodeArena) -> NodeId {
+    let named_exports = arena.new_named_exports(NodeList::new(vec![]));
+    arena.new_export_declaration(None, false, Some(named_exports), None, None)
+}
+
+/// Returns the body block of a function-like declaration, for the kinds the
+/// `--isolatedDeclarations` return-type check inspects (Go's `node.Body()`).
+///
+/// Side effects: none (pure).
+fn function_body(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
+    match arena.data(node) {
+        NodeData::FunctionDeclaration(d) => d.body,
+        NodeData::MethodDeclaration(d) => d.body,
+        _ => None,
+    }
+}
+
+/// Reports whether `node`'s subtree contains a `return <expr>;` (a value
+/// return), not descending into nested function scopes (whose returns belong to
+/// them). Used as the reachable stand-in for "the body yields a syntactically
+/// derivable return type" in the `--isolatedDeclarations` check.
+///
+/// Side effects: none (reads `arena`).
+fn body_has_value_return(arena: &NodeArena, node: NodeId) -> bool {
+    match arena.kind(node) {
+        Kind::ReturnStatement => {
+            matches!(arena.data(node), NodeData::ReturnStatement(d) if d.expression.is_some())
+        }
+        // Nested function scopes have their own return-type inference.
+        Kind::FunctionDeclaration
+        | Kind::FunctionExpression
+        | Kind::ArrowFunction
+        | Kind::MethodDeclaration
+        | Kind::GetAccessor
+        | Kind::SetAccessor
+        | Kind::Constructor => false,
+        _ => collect_children(arena, node)
+            .iter()
+            .any(|&child| body_has_value_return(arena, child)),
+    }
+}
+
+/// Returns the leftmost identifier of an entity name (`a` of `a.b.c`), Go's
+/// `ast.GetFirstIdentifier`. Reachable subset: identifiers and qualified names.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:GetFirstIdentifier
+fn first_identifier(arena: &NodeArena, entity: NodeId) -> Option<NodeId> {
+    match arena.data(entity) {
+        NodeData::Identifier(_) => Some(entity),
+        NodeData::QualifiedName(d) => first_identifier(arena, d.left),
+        _ => None,
+    }
+}
+
+/// Collects the direct child node ids of `node` (in source order) via the
+/// arena's child walk, so callers can recurse without a borrow-conflicting
+/// closure.
+///
+/// Side effects: none (reads `arena`).
+fn collect_children(arena: &NodeArena, node: NodeId) -> Vec<NodeId> {
+    let mut children = Vec::new();
+    arena.for_each_child(node, &mut |child| {
+        children.push(child);
+        false
+    });
+    children
+}
+
+/// Returns the printed text of declaration `node`'s name (Go's
+/// `GetTextOfNode(GetNameOfDeclaration(node))`), for the diagnostic's exported-
+/// name argument. Reachable subset: a variable declaration's identifier name.
+///
+/// Side effects: none (reads `arena`).
+fn declaration_name_text(arena: &NodeArena, node: NodeId) -> String {
+    let name = match arena.data(node) {
+        NodeData::VariableDeclaration(d) => Some(d.name),
+        NodeData::PropertyDeclaration(d) => Some(d.name),
+        NodeData::FunctionDeclaration(d) => d.name,
+        _ => None,
+    };
+    name.map(|n| arena.text(n).to_string()).unwrap_or_default()
 }
 
 /// Returns the type annotation node of declaration `node`, for the kinds the

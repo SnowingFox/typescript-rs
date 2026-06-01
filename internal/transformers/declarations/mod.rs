@@ -9,15 +9,24 @@
 //! - `transform.go` → [`transform`] (the `DeclarationsTransformer` driver +
 //!   per-declaration-kind handlers).
 //! - `util.go` → [`util`] (the pure modifier-flag / structural helpers).
+//! - `tracker.go` → [`tracker`] (the accessibility / inference-fallback
+//!   diagnostic recorder, Go's `SymbolTrackerImpl`).
+//! - `diagnostics.go` → [`diagnostics`] (the declaration-emit diagnostic
+//!   message-selection tables).
 //!
-//! Round D-F1 ports the *annotated-declaration core* (see [`transform`]'s
-//! module docs for the covered behaviors and the DEFER list). The
-//! `SymbolTracker` (`tracker.go`) and the declaration-emit diagnostics
-//! (`diagnostics.go`) are deferred to D-F3 (visibility / accessibility error
-//! tracking + isolatedDeclarations), and the inferred-type node synthesis is
-//! deferred to D-F2.
+//! Round D-F1 ports the *annotated-declaration core*, D-F2 the inferred-type
+//! node synthesis, and D-F3 (this round) the visibility / accessibility gating
+//! (module-vs-script elision, import/export `.d.ts` handling), the
+//! `SymbolTracker` private-name family, and the `--isolatedDeclarations`
+//! explicit-annotation diagnostics — see [`transform`]'s module docs for the
+//! covered behaviors and the DEFER list.
 
+pub mod diagnostics;
+pub mod tracker;
 pub mod transform;
 pub mod util;
 
-pub use transform::{new_declarations_transformer, DeclarationsTransformer};
+pub use transform::{
+    new_declarations_transformer, new_declarations_transformer_with_diagnostics,
+    DeclarationsTransformer,
+};

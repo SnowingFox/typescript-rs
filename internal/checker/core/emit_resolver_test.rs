@@ -69,8 +69,37 @@ fn exported_declaration_is_visible() {
     let resolver = c.get_emit_resolver();
     let f = statement(&p, 0);
     let g = statement(&p, 1);
-    // The exported `f` is visible to declaration emit; the bare `g` is not.
+    // The exported `f` is visible to declaration emit; the bare `g` is not
+    // (the file is an external module because of `export function f`).
     assert!(resolver.is_declaration_visible(&p, f));
+    assert!(!resolver.is_declaration_visible(&p, g));
+}
+
+// Go: internal/checker/emitresolver.go:EmitResolver.determineIfDeclarationIsVisible
+// (the non-exported branch returns `IsGlobalSourceFile(parent)`). In a SCRIPT
+// (no `import`/`export`, so no external-module indicator) every top-level
+// declaration is a global and therefore visible to declaration emit, even
+// without an `export` modifier.
+#[test]
+fn nonexported_declaration_is_visible_in_a_script() {
+    // No module syntax -> the file is a global script.
+    let p = StubProgram::parse_and_bind("/a.ts", "function g() {}\nconst y = 2;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let g = statement(&p, 0);
+    assert!(resolver.is_declaration_visible(&p, g));
+    let y = first_var_declaration(&p, 1);
+    assert!(resolver.is_declaration_visible(&p, y));
+}
+
+// In a MODULE (here made one by a top-level `export`), a non-exported top-level
+// declaration is NOT a global, so it is not visible to declaration emit.
+#[test]
+fn nonexported_declaration_is_not_visible_in_a_module() {
+    let p = StubProgram::parse_and_bind("/a.ts", "export const e = 1;\nfunction g() {}");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let g = statement(&p, 1);
     assert!(!resolver.is_declaration_visible(&p, g));
 }
 

@@ -138,6 +138,75 @@ impl EmitReferenceResolver {
         self.resolver.is_referenced(self.program.as_ref(), node)
     }
 
+    /// Reports whether the declaration `node` is *visible* to declaration emit
+    /// (Go's `EmitResolver.IsDeclarationVisible`): a top-level declaration is
+    /// visible iff it is exported (by its combined modifier flags and a visible
+    /// container) or it lives in a global script (a non-module source file).
+    ///
+    /// Delegates to [`EmitResolver::is_declaration_visible`] against the bound
+    /// program. The declaration transform consults this to elide non-exported
+    /// declarations from a module's `.d.ts` (a non-module script keeps them, as
+    /// globals). `node`'s id must be the original (pre-transform) declaration
+    /// node so it resolves to the same syntactic node in the bound program.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// # fn demo(r: &EmitReferenceResolver, decl: tsgo_ast::NodeId) -> bool {
+    /// r.is_declaration_visible(decl)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/checker/emitresolver.go:EmitResolver.IsDeclarationVisible
+    pub fn is_declaration_visible(&self, node: NodeId) -> bool {
+        self.resolver
+            .is_declaration_visible(self.program.as_ref(), node)
+    }
+
+    /// Reports the accessibility of the entity name whose first identifier is
+    /// `identifier` (e.g. the `a` of a `typeof a` type query), the reachable
+    /// subset of Go's `EmitResolver.IsEntityNameVisible` declaration emit
+    /// consults to flag a "has or is using private name" error.
+    ///
+    /// Resolves `identifier` to its declaration symbol
+    /// ([`resolve_reference`](Self::resolve_reference)); the name is accessible
+    /// iff any of that symbol's declarations is visible to declaration emit
+    /// ([`is_declaration_visible`](Self::is_declaration_visible)). Returns
+    /// `Some(name)` — the inaccessible symbol's name, for the diagnostic's
+    /// error-symbol argument — when the name resolves but is *not* visible
+    /// (e.g. a block-scoped `var` referenced by an exported `typeof`); returns
+    /// `None` when the name is visible or does not resolve (an unresolvable name
+    /// is the checker's own error, not a declaration-emit private-name error).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// # fn demo(r: &EmitReferenceResolver, id: tsgo_ast::NodeId) -> Option<String> {
+    /// r.entity_name_accessibility(id)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (pure read over the bound program).
+    // Go: internal/checker/emitresolver.go:EmitResolver.IsEntityNameVisible (reachable subset)
+    pub fn entity_name_accessibility(&self, identifier: NodeId) -> Option<String> {
+        let symbol = self.resolve_reference(identifier)?;
+        let visible = self
+            .program
+            .symbol(symbol)
+            .declarations
+            .iter()
+            .any(|&decl| {
+                self.resolver
+                    .is_declaration_visible(self.program.as_ref(), decl)
+            });
+        if visible {
+            None
+        } else {
+            Some(self.program.arena().text(identifier).to_string())
+        }
+    }
+
     /// Reports whether the function-like declaration `node` is the
     /// *implementation* of an overload set — a body-bearing declaration whose
     /// symbol has more than one declaration — which declaration emit elides (the

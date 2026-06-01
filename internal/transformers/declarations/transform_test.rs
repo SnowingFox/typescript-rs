@@ -31,6 +31,37 @@ fn check_with_resolver(input: &str, expected: &str) {
     assert_eq!(emit(&ec, result, input), expected, "declaration({input:?})");
 }
 
+// Runs the declaration transform with a resolver and the given compiler options,
+// returning the produced diagnostics as `(code, message)` pairs. Ground truth is
+// captured from `tsgo --declaration --emitDeclarationOnly [--isolatedDeclarations]`.
+fn check_diagnostics_opts(input: &str, isolated: bool) -> Vec<(i32, String)> {
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+    let (ec, source_file) = parse_shared(input);
+    let resolver = build_reference_resolver(input);
+    let isolated_declarations = if isolated {
+        Tristate::True
+    } else {
+        Tristate::default()
+    };
+    let compiler_options = CompilerOptions {
+        isolated_declarations,
+        ..Default::default()
+    };
+    let opts = TransformOptions {
+        context: Some(Rc::clone(&ec)),
+        compiler_options,
+    };
+    let (mut tx, diags) = new_declarations_transformer_with_diagnostics(&opts, Some(resolver));
+    let _ = tx.transform_source_file(source_file);
+    let out = diags
+        .borrow()
+        .iter()
+        .map(|d| (d.code, d.message.clone()))
+        .collect();
+    out
+}
+
 // ── Slice 1: function declaration → ambient signature ──────────────────────
 // Go: transform.go:DeclarationTransformer.transformFunctionDeclaration
 // tsgo --declaration: `function f(x: number): void {}` -> `declare function f(x: number): void;`
@@ -379,5 +410,219 @@ fn annotated_const_with_resolver_keeps_annotation() {
     check_with_resolver(
         "export function f(x: number): void {}",
         "export declare function f(x: number): void;",
+    );
+}
+
+// ── D-F3 slice 1: non-exported elision in a module ─────────────────────────
+// Go: transform.go:transformVariableStatement (getBindingNameVisible) +
+// isDeclarationAndNotVisible. In a MODULE (the file is one because of the
+// top-level `export`), a non-exported top-level `const b = 2;` is not visible
+// to declaration emit and is elided; only the exported `a` survives.
+// tsgo --declaration: `export const a = 1;\nconst b = 2;` -> `export declare const a = 1;`.
+// (RED before D-F3: the transform emitted both `a` and `b`.)
+#[test]
+fn nonexported_const_is_elided_in_a_module() {
+    check_with_resolver(
+        "export const a = 1;\nconst b = 2;",
+        "export declare const a = 1;",
+    );
+}
+
+// A non-exported top-level function / class / interface in a module is likewise
+// elided (Go: isDeclarationAndNotVisible -> !IsDeclarationVisible).
+// tsgo --declaration: `export const a = 1;\nfunction g() {}` -> `export declare const a = 1;`.
+#[test]
+fn nonexported_function_is_elided_in_a_module() {
+    check_with_resolver(
+        "export const a = 1;\nfunction g(): void {}",
+        "export declare const a = 1;",
+    );
+}
+
+// ── D-F3 slice 2: a global script keeps every top-level declaration ────────
+// Go: isDeclarationAndNotVisible -> IsDeclarationVisible -> IsGlobalSourceFile.
+// A file with NO `import`/`export` is a global script, so a non-exported
+// `const b = 2;` stays (it is a global).
+// tsgo --declaration: `const b = 2;` -> `declare const b = 2;`.
+#[test]
+fn script_keeps_nonexported_const() {
+    check_with_resolver("const b = 2;", "declare const b = 2;");
+}
+
+// A script keeps several non-exported declarations (all are globals).
+// tsgo --declaration: `const b = 2;\nfunction g(): void {}` ->
+//   `declare const b = 2;\ndeclare function g(): void;`.
+#[test]
+fn script_keeps_multiple_nonexported_declarations() {
+    check_with_resolver(
+        "const b = 2;\nfunction g(): void {}",
+        "declare const b = 2;\ndeclare function g(): void;",
+    );
+}
+
+// ── D-F3 slice 3: import kept iff referenced in an emitted type position ────
+// Go: transformImportDeclaration filters named bindings by visibility; the
+// reachable port uses the resolver's `is_referenced` (an import referenced in
+// an emitted type annotation is kept). The unreferenced import is elided.
+// tsgo --declaration:
+//   `import { T } from "./m"; export const x: T = null as any;`
+//     -> `import { T } from "./m";\nexport declare const x: T;`
+//   `import { T } from "./m"; export const x = 1;`
+//     -> `export declare const x = 1;`
+#[test]
+fn referenced_import_is_kept() {
+    check_with_resolver(
+        "import { T } from \"./m\";\nexport const x: T = null as any;",
+        "import { T } from \"./m\";\nexport declare const x: T;",
+    );
+}
+
+#[test]
+fn unreferenced_import_is_elided() {
+    check_with_resolver(
+        "import { T } from \"./m\";\nexport const x = 1;",
+        "export declare const x = 1;",
+    );
+}
+
+// Only the referenced specifier of a multi-name import is kept.
+// tsgo --declaration: `import { T, U } from "./m"; export const x: T = null as any;`
+//   -> `import { T } from "./m";\nexport declare const x: T;`.
+#[test]
+fn only_referenced_named_import_specifier_is_kept() {
+    check_with_resolver(
+        "import { T, U } from \"./m\";\nexport const x: T = null as any;",
+        "import { T } from \"./m\";\nexport declare const x: T;",
+    );
+}
+
+// An `export { T };` re-export is kept as-is, and the import it references is
+// kept (the export use marks the import referenced).
+// tsgo --declaration: `import { T } from "./m"; export { T };`
+//   -> `import { T } from "./m";\nexport { T };`.
+#[test]
+fn export_named_reexport_keeps_referenced_import() {
+    check_with_resolver(
+        "import { T } from \"./m\";\nexport { T };",
+        "import { T } from \"./m\";\nexport { T };",
+    );
+}
+
+// ── D-F3 slice 4: private-name accessibility diagnostic (4025) ─────────────
+// Go: transform.go:visitDeclarationSubtree (KindTypeQuery) -> checkEntityNameVisibility
+// -> tracker.handleSymbolAccessibilityError -> getVariableDeclarationTypeVisibilityDiagnosticMessage.
+// `export let b: typeof a;` where `a` is a block-scoped (not visible) `var`
+// references a private name in the emitted type, reported as 4025.
+// tsgo --declaration: `{ var a = ""; }\nexport let b: typeof a;` ->
+//   a.ts(4,22): error TS4025: Exported variable 'b' has or is using private name 'a'.
+// (RED before D-F3: no diagnostics were produced.)
+#[test]
+fn typeof_private_name_reports_4025() {
+    let diags = check_diagnostics_opts("{\n    var a = \"\";\n}\nexport let b: typeof a;", false);
+    assert_eq!(
+        diags,
+        vec![(
+            4025,
+            "Exported variable 'b' has or is using private name 'a'.".to_string()
+        )]
+    );
+}
+
+// A visible (exported) referenced name produces no private-name diagnostic.
+#[test]
+fn typeof_visible_name_reports_nothing() {
+    let diags = check_diagnostics_opts("export const a = \"\";\nexport let b: typeof a;", false);
+    assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+}
+
+// ── D-F3 slice 5: --isolatedDeclarations explicit-return-type (9007/9008) ──
+// Go: transform.go:ensureType -> CreateReturnTypeOfSignatureDeclaration ->
+// tracker.ReportInferenceFallback -> getIsolatedDeclarationError ->
+// createReturnTypeError. A function/method with no return-type annotation whose
+// body yields no syntactically-derivable type (here: a void body, no value
+// return) needs an explicit annotation.
+// tsgo --declaration --isolatedDeclarations:
+//   `export function noReturn() {}` -> a.ts(1,17): error TS9007: Function must
+//     have an explicit return type annotation with --isolatedDeclarations.
+// (RED before D-F3: no diagnostics were produced.)
+#[test]
+fn isolated_declarations_void_function_reports_9007() {
+    let diags = check_diagnostics_opts("export function noReturn() {}", true);
+    assert_eq!(
+        diags,
+        vec![(
+            9007,
+            "Function must have an explicit return type annotation with --isolatedDeclarations."
+                .to_string()
+        )]
+    );
+}
+
+// A method with a void body (no value return, no annotation) reports 9008.
+// tsgo --declaration --isolatedDeclarations: `export class C { m() {} }`
+//   -> a.ts(1,18): error TS9008: Method must have an explicit return type
+//      annotation with --isolatedDeclarations.
+#[test]
+fn isolated_declarations_void_method_reports_9008() {
+    let diags = check_diagnostics_opts("export class C { m() {} }", true);
+    assert_eq!(
+        diags,
+        vec![(
+            9008,
+            "Method must have an explicit return type annotation with --isolatedDeclarations."
+                .to_string()
+        )]
+    );
+}
+
+// A function returning a primitive literal has a syntactically-derivable type,
+// so no annotation is required (tsgo emits `declare function f(): number;` with
+// no diagnostic under --isolatedDeclarations).
+#[test]
+fn isolated_declarations_literal_return_is_ok() {
+    let diags = check_diagnostics_opts("export function f() { return 1; }", true);
+    assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+}
+
+// An explicit return annotation suppresses the diagnostic.
+#[test]
+fn isolated_declarations_annotated_void_is_ok() {
+    let diags = check_diagnostics_opts("export function f(): void {}", true);
+    assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+}
+
+// Without --isolatedDeclarations, a void function is fine (the type is inferred).
+#[test]
+fn void_function_without_isolated_declarations_reports_nothing() {
+    let diags = check_diagnostics_opts("export function noReturn() {}", false);
+    assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+}
+
+// The 9007 diagnostic carries a 9031 "add a return type" related suggestion.
+#[test]
+fn isolated_declarations_9007_has_related_suggestion() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+    let input = "export function noReturn() {}";
+    let (ec, source_file) = parse_shared(input);
+    let resolver = build_reference_resolver(input);
+    let compiler_options = CompilerOptions {
+        isolated_declarations: Tristate::True,
+        ..Default::default()
+    };
+    let opts = TransformOptions {
+        context: Some(Rc::clone(&ec)),
+        compiler_options,
+    };
+    let (mut tx, diags) = new_declarations_transformer_with_diagnostics(&opts, Some(resolver));
+    let _ = tx.transform_source_file(source_file);
+    let diags = diags.borrow();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, 9007);
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 9031);
+    assert_eq!(
+        diags[0].related_information[0].message,
+        "Add a return type to the function declaration."
     );
 }

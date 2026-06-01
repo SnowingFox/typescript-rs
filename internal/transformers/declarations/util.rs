@@ -15,8 +15,168 @@
 //! `can_produce_diagnostics`, ...) are deferred with the visibility/diagnostics
 //! work — see `transform.rs`'s module-level DEFER list.
 
+use crate::EmitReferenceResolver;
 use tsgo_ast::utilities::modifier_to_flag;
 use tsgo_ast::{Kind, ModifierFlags, ModifierList, NodeArena, NodeData, NodeId};
+
+/// Reports whether source file `node` is an *external module* — it carries a
+/// top-level `import`/`export` (the parser's external-module indicator) — as
+/// opposed to a global script (Go's `ast.IsExternalModule`). Declaration emit
+/// elides non-exported top-level declarations from a module but keeps them in a
+/// script (they are globals).
+///
+/// # Examples
+/// ```
+/// use tsgo_transformers::declarations::util::is_external_module;
+/// use tsgo_ast::NodeArena;
+/// let mut a = NodeArena::new();
+/// let id = a.new_identifier("x");
+/// // A non-source-file node is never an external module.
+/// assert!(!is_external_module(&a, id));
+/// ```
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsExternalModule
+pub fn is_external_module(arena: &NodeArena, node: NodeId) -> bool {
+    matches!(
+        arena.data(node),
+        NodeData::SourceFile(d) if d.external_module_indicator.is_some()
+    )
+}
+
+/// Reports whether `node` is any import or re-export statement (Go's
+/// `ast.IsAnyImportOrReExport`).
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsAnyImportOrReExport
+fn is_any_import_or_re_export(arena: &NodeArena, node: NodeId) -> bool {
+    matches!(
+        arena.kind(node),
+        Kind::ImportDeclaration | Kind::ImportEqualsDeclaration | Kind::ExportDeclaration
+    )
+}
+
+/// Reports whether `node` carries its own `export` modifier (Go's
+/// `HasSyntacticModifier(node, ModifierFlagsExport)`), read from the node's own
+/// modifier list (synthesized declaration-emit statements have no enclosing
+/// statement to fold flags from).
+///
+/// Side effects: none (pure).
+fn has_own_export_modifier(arena: &NodeArena, node: NodeId) -> bool {
+    own_modifier_flags(arena, node).contains(ModifierFlags::EXPORT)
+}
+
+/// Reports whether emitted statement `node` is an *external-module indicator*:
+/// an import / re-export, an export assignment, or an `export`-modified
+/// statement (Go's `ast.IsExternalModuleIndicator`). A module's `.d.ts` output
+/// needs at least one, else a synthesized `export {};` is appended.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsExternalModuleIndicator
+pub fn is_external_module_indicator(arena: &NodeArena, node: NodeId) -> bool {
+    is_any_import_or_re_export(arena, node)
+        || arena.kind(node) == Kind::ExportAssignment
+        || has_own_export_modifier(arena, node)
+}
+
+/// Reports whether emitted statement `node` needs a scope-fix marker to remain
+/// module-local — it is neither an import/re-export, an export assignment, nor
+/// `export`-modified (Go's `needsScopeMarker`). The ambient-module carve-out is
+/// deferred (no ambient modules in the reachable subset).
+///
+/// Side effects: none (pure).
+// Go: internal/transformers/declarations/util.go:needsScopeMarker
+pub fn needs_scope_marker(arena: &NodeArena, node: NodeId) -> bool {
+    !is_any_import_or_re_export(arena, node)
+        && arena.kind(node) != Kind::ExportAssignment
+        && !has_own_export_modifier(arena, node)
+}
+
+/// Reports whether emitted statement `node` is a scope marker — an export
+/// assignment or export declaration (Go's `isScopeMarker`).
+///
+/// Side effects: none (pure).
+// Go: internal/transformers/declarations/util.go:isScopeMarker
+pub fn is_scope_marker(arena: &NodeArena, node: NodeId) -> bool {
+    matches!(
+        arena.kind(node),
+        Kind::ExportAssignment | Kind::ExportDeclaration
+    )
+}
+
+/// Reports whether the binding `elem` (a variable declaration or binding
+/// element) introduces a name visible to declaration emit (Go's
+/// `getBindingNameVisible`): a binding pattern is visible iff any of its
+/// elements is, an omitted/nameless element is not, and a simple name defers to
+/// [`EmitReferenceResolver::is_declaration_visible`].
+///
+/// Side effects: none (pure read over the resolver's bound program).
+// Go: internal/transformers/declarations/util.go:getBindingNameVisible
+pub fn get_binding_name_visible(
+    arena: &NodeArena,
+    resolver: &EmitReferenceResolver,
+    elem: NodeId,
+) -> bool {
+    if arena.kind(elem) == Kind::OmittedExpression {
+        return false;
+    }
+    let Some(name) = binding_name(arena, elem) else {
+        return false;
+    };
+    match arena.data(name) {
+        NodeData::ArrayBindingPattern(d) | NodeData::ObjectBindingPattern(d) => d
+            .elements
+            .nodes
+            .iter()
+            .any(|&child| get_binding_name_visible(arena, resolver, child)),
+        _ => resolver.is_declaration_visible(elem),
+    }
+}
+
+/// Returns the binding name of a variable declaration or binding element, for
+/// the kinds [`get_binding_name_visible`] traverses (Go's `node.Name()`).
+///
+/// Side effects: none (pure).
+fn binding_name(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
+    match arena.data(node) {
+        NodeData::VariableDeclaration(d) => Some(d.name),
+        NodeData::BindingElement(d) => d.name,
+        _ => None,
+    }
+}
+
+/// Reports whether `node` is a declaration that exists but is *not visible* to
+/// declaration emit, so it must be elided (Go's `isDeclarationAndNotVisible`).
+///
+/// A function / module / interface / class / type-alias / enum declaration is
+/// elided when [`EmitReferenceResolver::is_declaration_visible`] is false; a
+/// variable declaration when no binding name is visible; a class static block
+/// always; imports/exports/`export =` never (they run their own checks). Other
+/// node kinds are not elided here.
+///
+/// Side effects: none (pure read over the resolver's bound program).
+// Go: internal/transformers/declarations/util.go:isDeclarationAndNotVisible
+pub fn is_declaration_and_not_visible(
+    arena: &NodeArena,
+    resolver: &EmitReferenceResolver,
+    node: NodeId,
+) -> bool {
+    match arena.kind(node) {
+        Kind::FunctionDeclaration
+        | Kind::ModuleDeclaration
+        | Kind::InterfaceDeclaration
+        | Kind::ClassDeclaration
+        | Kind::TypeAliasDeclaration
+        | Kind::EnumDeclaration => !resolver.is_declaration_visible(node),
+        Kind::VariableDeclaration => !get_binding_name_visible(arena, resolver, node),
+        Kind::ImportEqualsDeclaration
+        | Kind::ImportDeclaration
+        | Kind::ExportDeclaration
+        | Kind::ExportAssignment => false,
+        Kind::ClassStaticBlockDeclaration => true,
+        _ => false,
+    }
+}
 
 /// Reports whether `node` is a declaration that is *always* a type and so never
 /// needs a synthesized `declare` keyword in `.d.ts` output (only an
