@@ -205,6 +205,124 @@ fn emit_writes_through_host_fs_by_default() {
     assert_eq!(written.as_deref(), Some("const x = 1;\n"));
 }
 
+// Slice 2: `--sourceMap` writes `out.js` + `out.js.map` and appends a
+// `//# sourceMappingURL=out.js.map` comment to the JS.
+//
+// Go ground truth (`cmd/tsgo --sourceMap --module esnext`) for
+// `const x: number = 1;` emits a leading `"use strict";` (module pipeline) and
+// the map `;AAAA,MAAM,CAAC,GAAW,CAAC,CAAC`. The reachable Rust subset runs only
+// the type eraser (no module transform), so it omits `"use strict";` and the
+// mappings lose the leading `;` (the generated-line shift).
+// Go: internal/compiler/emitter.go:printSourceFile (SourceMap branch)
+#[test]
+fn emit_source_map_writes_map_file_and_url_comment() {
+    let options = CompilerOptions {
+        source_map: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[("/src/index.ts", "const x: number = 1;")],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    // The `.map` is written before the `.js` (Go EmittedFiles order).
+    assert_eq!(
+        result.emitted_files,
+        vec!["/src/index.js.map".to_string(), "/src/index.js".to_string()]
+    );
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[0].0, "/src/index.js.map");
+    assert_eq!(captured[1].0, "/src/index.js");
+
+    // JS gets the trailing URL comment (no trailing newline after it).
+    assert_eq!(
+        captured[1].1,
+        "const x = 1;\n//# sourceMappingURL=index.js.map"
+    );
+
+    // The `.map` JSON matches Go exactly (key order + relativized source), with
+    // the mappings string lacking the leading `;` (no `"use strict";`).
+    assert_eq!(
+        captured[0].1,
+        r#"{"version":3,"file":"index.js","sourceRoot":"","sources":["index.ts"],"names":[],"mappings":"AAAA,MAAM,CAAC,GAAW,CAAC,CAAC"}"#
+    );
+
+    // A source-map emit result is recorded with the raw (un-relativized) source.
+    assert_eq!(result.source_maps.len(), 1);
+    assert_eq!(result.source_maps[0].generated_file, "/src/index.js");
+    assert_eq!(
+        result.source_maps[0].input_source_file_names,
+        vec!["/src/index.ts".to_string()]
+    );
+}
+
+// Slice 3: `--inlineSourceMap` appends a `data:application/json;base64,<...>`
+// URL inline and writes no separate `.map` file. The base64 decodes to the
+// same JSON the file-mode map carries.
+// Go: internal/compiler/emitter.go:getSourceMappingURL (InlineSourceMap)
+#[test]
+fn emit_inline_source_map_appends_base64_data_url() {
+    let options = CompilerOptions {
+        inline_source_map: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[("/src/index.ts", "const x: number = 1;")],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    // Only the `.js` is written; no separate `.map`.
+    assert_eq!(result.emitted_files, vec!["/src/index.js".to_string()]);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].0, "/src/index.js");
+
+    // The data URL's base64 payload is the same JSON as file mode (verified
+    // against the base64 of the Go-derived JSON).
+    assert_eq!(
+        captured[0].1,
+        concat!(
+            "const x = 1;\n//# sourceMappingURL=data:application/json;base64,",
+            "eyJ2ZXJzaW9uIjozLCJmaWxlIjoiaW5kZXguanMiLCJzb3VyY2VSb290IjoiIiwi",
+            "c291cmNlcyI6WyJpbmRleC50cyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiQUFB",
+            "QSxNQUFNLENBQUMsR0FBVyxDQUFDLENBQUMifQ=="
+        )
+    );
+    // No separate source-map emit result file path beyond the inline payload,
+    // but the result still records the source map (Go appends it for inline).
+    assert_eq!(result.source_maps.len(), 1);
+    assert_eq!(result.source_maps[0].generated_file, "/src/index.js");
+}
+
+// Slice 5: without `--sourceMap`/`--inlineSourceMap` the output is byte-for-byte
+// the pre-P6-7 emit — no `//# sourceMappingURL=` comment, no `.map` file, and no
+// recorded source map (the plain path must be unchanged).
+// Go: internal/compiler/emitter.go:printSourceFile (sourceMapGenerator == nil)
+#[test]
+fn emit_without_source_map_has_no_url_or_map() {
+    let program = build_program(
+        &[("/src/index.ts", "const x: number = 1;")],
+        &["/src/index.ts"],
+        CompilerOptions::default(),
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert_eq!(result.emitted_files, vec!["/src/index.js".to_string()]);
+    assert!(result.source_maps.is_empty());
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].1, "const x = 1;\n");
+    assert!(!captured[0].1.contains("//# sourceMappingURL="));
+}
+
 // Go: internal/compiler/emitter.go:emitter.emitJSFile (PrinterOptions.NewLine)
 #[test]
 fn emit_honors_crlf_newline_option() {

@@ -6,6 +6,8 @@ use tsgo_ast::{NodeArena, NodeId};
 use tsgo_core::compileroptions::NewLineKind;
 use tsgo_core::get_script_kind_from_file_name;
 use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+use tsgo_sourcemap::Generator;
+use tsgo_tspath::ComparePathsOptions;
 
 /// Emits a synthetic (factory-built) source file, mirroring Go's
 /// `MarkSyntheticRecursive` + `CheckEmit(nil, file, ...)` flow. The arena's nodes
@@ -87,6 +89,55 @@ pub(crate) fn emit(input: &str, jsx: bool) -> String {
         &ec,
     );
     printer.emit_source_file(parse.source_file, input)
+}
+
+/// Parses `input` and drives a source-map [`Generator`] while emitting,
+/// returning the JS text and the populated generator (mirrors Go
+/// `printer.Write(node, sf, writer, sourceMapGenerator)`).
+///
+/// `generated_file` is recorded as the map's `file`; sources are relativized
+/// against `sources_dir` (so `file_name = "/main.ts"` with `sources_dir = "/"`
+/// yields `sources: ["main.ts"]`).
+pub(crate) fn emit_with_source_map(
+    input: &str,
+    file_name: &str,
+    generated_file: &str,
+    sources_dir: &str,
+    inline_sources: bool,
+) -> (String, Generator) {
+    let script_kind = get_script_kind_from_file_name(file_name);
+    let parse = parse_source_file(
+        SourceFileParseOptions {
+            file_name: file_name.to_string(),
+        },
+        input,
+        script_kind,
+    );
+    assert!(
+        parse.diagnostics.is_empty(),
+        "parse error for {input:?}: {:?}",
+        parse.diagnostics
+    );
+    let ec = EmitContext::with_arena(parse.arena);
+    let mut printer = Printer::new(
+        PrinterOptions {
+            new_line: NewLineKind::Lf,
+            inline_sources,
+            ..Default::default()
+        },
+        PrintHandlers::default(),
+        &ec,
+    );
+    let generator = Generator::new(
+        generated_file,
+        "",
+        sources_dir,
+        ComparePathsOptions {
+            use_case_sensitive_file_names: true,
+            current_directory: "/".to_string(),
+        },
+    );
+    printer.emit_source_file_with_source_map(parse.source_file, input, file_name, generator)
 }
 
 /// Asserts that emitting `input` yields `expected` (after trimming the trailing

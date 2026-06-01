@@ -21,9 +21,15 @@
 //!   not-yet-ported transformer factories.
 //! - Declaration (`.d.ts`) emit and `EmitHost`/emit-resolver wiring. DEFER
 //!   blocked-by: checker public API + the declarations transformer.
-//! - Source maps. DEFER blocked-by: `tsgo_printer::Printer` does not yet drive a
-//!   `sourcemap::Generator` (its `emit_source_file` takes no generator, unlike
-//!   Go's `printer.Write`).
+//!
+//! # Source maps (P6-7)
+//!
+//! `--sourceMap` / `--inlineSourceMap` are wired: when source maps are enabled
+//! [`emit_js_text_with_source_map`] drives a `tsgo_sourcemap::Generator` while
+//! printing, and [`crate::Program`] assembles the `.js.map` (file mode) or the
+//! inlined `data:` URL, plus the trailing `//# sourceMappingURL=` comment.
+//! `--mapRoot`/`--sourceRoot` beyond the reachable subset and token-level brace
+//! mappings are deferred (see `impl.md`).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -35,6 +41,7 @@ use tsgo_core::scriptkind::ScriptKind;
 use tsgo_parser::{parse_source_file, SourceFileParseOptions};
 use tsgo_printer::printer::{PrintHandlers, Printer, PrinterOptions};
 use tsgo_printer::EmitContext;
+use tsgo_sourcemap::Generator;
 use tsgo_transformers::tstransforms::typeeraser::new_type_eraser_transformer;
 use tsgo_transformers::{SharedEmitContext, TransformOptions};
 
@@ -64,13 +71,22 @@ pub enum EmitOnly {
 /// binder/checker state; once emit needs that state, share the file's arena
 /// instead of re-parsing.
 ///
-/// Side effects: allocates a parse arena and emit context.
-// Go: internal/compiler/emitter.go:emitter.emitJSFile (transform + print core)
-pub(crate) fn emit_js_text(
+/// When `generator` is `Some` this also drives source map generation (recording
+/// generated→source mappings as the file prints) and returns the populated
+/// generator alongside the JS text; with `None` it just returns the JS text.
+/// The generator must already be configured with the generated file name,
+/// source root, and sources directory (the caller, [`crate::Program`], does this
+/// from the compiler options and output paths, mirroring Go's `printSourceFile`
+/// which constructs the `sourcemap.Generator` before calling `printer.Write`).
+///
+/// Side effects: allocates a parse arena and emit context; mutates `generator`.
+// Go: internal/compiler/emitter.go:emitter.emitJSFile + printSourceFile
+pub(crate) fn emit_js_text_with_source_map(
     file_name: &str,
     source_text: &str,
     options: &CompilerOptions,
-) -> String {
+    generator: Option<Generator>,
+) -> (String, Option<Generator>) {
     let parse = parse_source_file(
         SourceFileParseOptions {
             file_name: file_name.to_string(),
@@ -86,12 +102,24 @@ pub(crate) fn emit_js_text(
         PrinterOptions {
             remove_comments: options.remove_comments.is_true(),
             new_line: options.new_line,
+            inline_sources: options.inline_sources.is_true(),
             ..Default::default()
         },
         PrintHandlers::default(),
         &ec_ref,
     );
-    printer.emit_source_file(source_file, source_text)
+    match generator {
+        Some(generator) => {
+            let (text, generator) = printer.emit_source_file_with_source_map(
+                source_file,
+                source_text,
+                file_name,
+                generator,
+            );
+            (text, Some(generator))
+        }
+        None => (printer.emit_source_file(source_file, source_text), None),
+    }
 }
 
 /// Runs the reachable script transformers over `source_file`, returning the

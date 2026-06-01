@@ -29,6 +29,8 @@ use tsgo_ast::precedence::{get_expression_precedence, OperatorPrecedence};
 use tsgo_ast::{Kind, NodeArena, NodeData, NodeFlags, NodeId, NodeList};
 use tsgo_core::compileroptions::NewLineKind;
 use tsgo_core::text::{TextPos, TextRange};
+use tsgo_core::{utf16_len, Utf16Offset};
+use tsgo_sourcemap::{Generator, SourceIndex};
 
 /// Options controlling emit (a subset of Go `PrinterOptions`; the rest are added
 /// as their emit paths land).
@@ -45,6 +47,8 @@ pub struct PrinterOptions {
     pub never_ascii_escape: bool,
     /// Preserve source newlines where possible.
     pub preserve_source_newlines: bool,
+    /// Inline each source's full text into the source map's `sourcesContent`.
+    pub inline_sources: bool,
 }
 
 /// A callback reporting whether `name` collides with a global outside the file.
@@ -129,6 +133,41 @@ pub struct Printer<'a> {
     next_list_element_pos: i32,
     /// Whether we are emitting the `extends` clause of a conditional/infer type.
     pub(crate) in_extends: bool,
+    //
+    // Source maps (driven only when `emit_source_file_with_source_map` runs;
+    // `emit_source_file` leaves `source_maps_disabled = true`, so all the
+    // source-map hooks below are no-ops on the plain path).
+    //
+    /// The source map being accumulated (moved in/out by the source-map entry).
+    source_map_generator: Option<Generator>,
+    /// Whether source-map recording is suppressed (true on the plain path and
+    /// while inside an `EFNoNestedSourceMaps` subtree).
+    source_maps_disabled: bool,
+    /// Whether a source has been registered for the file being emitted.
+    has_source_map_source: bool,
+    /// The current source's index in the generator's `sources`.
+    source_map_source_index: SourceIndex,
+    /// Whether the current source is a JSON file (no mappings emitted).
+    source_map_source_is_json: bool,
+    /// Stack of per-node source-map state, pushed in `enter_node` and popped in
+    /// `exit_node` (mirrors Go's `printerState.sourceMapState`).
+    source_map_state_stack: Vec<Option<SourceMapState>>,
+    /// Incremental line/character cache for source positions (mirrors Go's
+    /// `lineCharacterCache`, optimized for monotonically increasing positions).
+    sm_cached_line: i32,
+    sm_cached_pos: i32,
+    sm_cached_char: Utf16Offset,
+    sm_has_cached: bool,
+}
+
+/// Per-node source-map state captured at `enter_node` and consumed at
+/// `exit_node` (the reachable subset of Go's `sourceMapState`).
+///
+/// Side effects: none (plain data).
+// Go: internal/printer/printer.go:sourceMapState
+struct SourceMapState {
+    emit_flags: EmitFlags,
+    source_map_range: TextRange,
 }
 
 impl<'a> Printer<'a> {
@@ -156,6 +195,16 @@ impl<'a> Printer<'a> {
             comments_disabled,
             next_list_element_pos: 0,
             in_extends: false,
+            source_map_generator: None,
+            source_maps_disabled: true,
+            has_source_map_source: false,
+            source_map_source_index: SourceIndex(-1),
+            source_map_source_is_json: false,
+            source_map_state_stack: Vec::new(),
+            sm_cached_line: 0,
+            sm_cached_pos: 0,
+            sm_cached_char: Utf16Offset(0),
+            sm_has_cached: false,
         }
     }
 
@@ -182,6 +231,233 @@ impl<'a> Printer<'a> {
         self.writer.clear();
         self.emit_source_file_worker(source_file);
         self.writer.get_text().to_string()
+    }
+
+    /// Emits a whole source file while driving `generator`, returning the
+    /// produced JS text (with the trailing newline) and the populated generator.
+    ///
+    /// This is the additive source-map counterpart of [`Self::emit_source_file`]
+    /// and mirrors Go's `Printer.Write(node, sourceFile, writer,
+    /// sourceMapGenerator)`: it registers `source_file_name` (and, when
+    /// `inline_sources` is set, the source text) as a source, then records a
+    /// generated→source mapping at each node's leading/trailing position as the
+    /// tree is emitted.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_printer::emitcontext::EmitContext;
+    /// use tsgo_printer::printer::{Printer, PrinterOptions, PrintHandlers};
+    /// use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// use tsgo_core::scriptkind::ScriptKind;
+    /// use tsgo_sourcemap::Generator;
+    /// use tsgo_tspath::ComparePathsOptions;
+    /// let parse = parse_source_file(SourceFileParseOptions::default(), "0", ScriptKind::Ts);
+    /// let ec = EmitContext::with_arena(parse.arena);
+    /// let mut p = Printer::new(PrinterOptions::default(), PrintHandlers::default(), &ec);
+    /// let gen = Generator::new("main.js", "", "/", ComparePathsOptions::default());
+    /// let (text, mut gen) = p.emit_source_file_with_source_map(parse.source_file, "0", "/main.ts", gen);
+    /// assert_eq!(text, "0;\n");
+    /// // Matches Go `cmd/tsgo --sourceMap` (`;AAAA,CAAC,CAAA`) minus the leading
+    /// // `;` from the `"use strict";` prologue the reachable subset omits.
+    /// assert_eq!(gen.raw_source_map().mappings, "AAAA,CAAC,CAAA");
+    /// ```
+    ///
+    /// Side effects: resets and fills the internal writer; mutates `generator`.
+    // Go: internal/printer/printer.go:Write
+    pub fn emit_source_file_with_source_map(
+        &mut self,
+        source_file: NodeId,
+        text: &str,
+        source_file_name: &str,
+        generator: Generator,
+    ) -> (String, Generator) {
+        text.clone_into(&mut self.text);
+        self.line_starts = tsgo_core::compute_ecma_line_starts(text);
+        self.current_source_file = Some(source_file);
+
+        // Set up source-map state (Go's `Write` resets these before emit).
+        self.source_maps_disabled = false;
+        self.source_map_generator = Some(generator);
+        self.has_source_map_source = false;
+        self.source_map_source_index = SourceIndex(-1);
+        self.source_map_source_is_json = false;
+        self.sm_has_cached = false;
+        self.set_source_map_source(source_file_name, text);
+
+        self.writer.clear();
+        self.emit_source_file_worker(source_file);
+        let out = self.writer.get_text().to_string();
+
+        // Tear down source-map state and hand the generator back.
+        let generator = self.source_map_generator.take().expect("generator present");
+        self.source_maps_disabled = true;
+        self.has_source_map_source = false;
+        self.current_source_file = None;
+        (out, generator)
+    }
+
+    /// Registers `file_name` as the source for subsequent mappings, recording
+    /// its index and (when `inline_sources` is set) its full text.
+    ///
+    /// Side effects: appends to the generator's `sources`/`sourcesContent`.
+    // Go: internal/printer/printer.go:setSourceMapSource
+    fn set_source_map_source(&mut self, file_name: &str, text: &str) {
+        if self.source_maps_disabled {
+            return;
+        }
+        self.has_source_map_source = true;
+        self.sm_has_cached = false;
+        self.source_map_source_is_json =
+            tsgo_tspath::file_extension_is(file_name, tsgo_tspath::EXTENSION_JSON);
+        if self.source_map_source_is_json {
+            return;
+        }
+        let generator = self
+            .source_map_generator
+            .as_mut()
+            .expect("generator present");
+        let index = generator.add_source(file_name);
+        self.source_map_source_index = index;
+        if self.options.inline_sources {
+            generator
+                .set_source_content(index, text)
+                .expect("source index in range");
+        }
+    }
+
+    /// Records a generated→source mapping for byte position `pos` in the current
+    /// source file (a no-op when source maps are off, the source is JSON, or
+    /// `pos` is synthesized).
+    ///
+    /// Side effects: appends a mapping to the generator; advances the line/char
+    /// cache.
+    // Go: internal/printer/printer.go:emitPos
+    fn emit_pos(&mut self, pos: i32) {
+        if self.source_maps_disabled
+            || !self.has_source_map_source
+            || self.source_map_generator.is_none()
+            || self.source_map_source_is_json
+            || position_is_synthesized(pos)
+        {
+            return;
+        }
+        let (source_line, source_character) = self.source_line_and_character(pos);
+        let generated_line = self.writer.get_line();
+        let generated_character = self.writer.get_column();
+        let source_index = self.source_map_source_index;
+        self.source_map_generator
+            .as_mut()
+            .expect("generator present")
+            .add_source_mapping(
+                generated_line,
+                generated_character,
+                source_index,
+                source_line,
+                source_character,
+            )
+            .expect("valid source mapping");
+    }
+
+    /// Returns the 0-based line and UTF-16 character offset within that line for
+    /// byte position `pos`, using an incremental cache for monotonically
+    /// increasing positions.
+    ///
+    /// Side effects: updates the line/char cache.
+    // Go: internal/printer/utilities.go:lineCharacterCache.getLineAndCharacter
+    fn source_line_and_character(&mut self, pos: i32) -> (i32, Utf16Offset) {
+        let line = tsgo_scanner::compute_line_of_position(&self.line_starts, pos);
+        let character =
+            if self.sm_has_cached && line == self.sm_cached_line && pos >= self.sm_cached_pos {
+                Utf16Offset(
+                    self.sm_cached_char.0
+                        + utf16_len(&self.text[self.sm_cached_pos as usize..pos as usize]).0,
+                )
+            } else {
+                let line_start = self.line_starts[line as usize].0;
+                utf16_len(&self.text[line_start as usize..pos as usize])
+            };
+        self.sm_cached_line = line;
+        self.sm_cached_pos = pos;
+        self.sm_cached_char = character;
+        self.sm_has_cached = true;
+        (line, character)
+    }
+
+    /// Reports whether source maps should be emitted for `node` (the reachable
+    /// subset of Go's `shouldEmitSourceMaps`: single-file, uniform JSON-ness).
+    // Go: internal/printer/printer.go:shouldEmitSourceMaps
+    fn should_emit_source_maps(&self, node: NodeId) -> bool {
+        !self.source_maps_disabled
+            && self.has_source_map_source
+            && self.arena().kind(node) != Kind::SourceFile
+            && !self.source_map_source_is_json
+    }
+
+    /// Records the leading source-map position for `node` and returns the state
+    /// to consume in [`Self::emit_source_maps_after_node`].
+    ///
+    /// Side effects: may append a mapping; may suspend nested source maps.
+    // Go: internal/printer/printer.go:emitSourceMapsBeforeNode
+    fn emit_source_maps_before_node(&mut self, node: NodeId) -> Option<SourceMapState> {
+        if !self.should_emit_source_maps(node) {
+            return None;
+        }
+        let emit_flags = self.context.emit_flags(node);
+        let loc = self.source_map_range(node);
+
+        if self.arena().kind(node) != Kind::NotEmittedStatement
+            && !emit_flags.contains(EmitFlags::NO_LEADING_SOURCE_MAP)
+            && self.current_source_file.is_some()
+            && !position_is_synthesized(loc.pos())
+        {
+            let pos = tsgo_scanner::skip_trivia(&self.text, loc.pos());
+            self.emit_pos(pos);
+        }
+
+        if emit_flags.contains(EmitFlags::NO_NESTED_SOURCE_MAPS) {
+            self.source_maps_disabled = true;
+        }
+
+        Some(SourceMapState {
+            emit_flags,
+            source_map_range: loc,
+        })
+    }
+
+    /// Records the trailing source-map position for `node`, restoring any nested
+    /// source-map suspension.
+    ///
+    /// Side effects: may append a mapping; may resume nested source maps.
+    // Go: internal/printer/printer.go:emitSourceMapsAfterNode
+    fn emit_source_maps_after_node(
+        &mut self,
+        node: NodeId,
+        previous_state: Option<SourceMapState>,
+    ) {
+        let Some(state) = previous_state else {
+            return;
+        };
+        let emit_flags = state.emit_flags;
+        let loc = state.source_map_range;
+
+        if emit_flags.contains(EmitFlags::NO_NESTED_SOURCE_MAPS) {
+            self.source_maps_disabled = false;
+        }
+
+        if self.arena().kind(node) != Kind::NotEmittedStatement
+            && !emit_flags.contains(EmitFlags::NO_TRAILING_SOURCE_MAP)
+            && !position_is_synthesized(loc.end())
+        {
+            self.emit_pos(loc.end());
+        }
+    }
+
+    /// Returns the source-map range for `node` (the explicit range when one was
+    /// assigned, else the node's own location). For freshly-parsed trees this is
+    /// always the node's location.
+    // Go: internal/printer/emitcontext.go:EmitContext.SourceMapRange
+    fn source_map_range(&self, node: NodeId) -> TextRange {
+        self.arena().loc(node)
     }
 
     // Go: internal/printer/printer.go:emitSourceFile
@@ -355,10 +631,25 @@ impl<'a> Printer<'a> {
     //
 
     // Go: internal/printer/printer.go:enterNode
-    pub(crate) fn enter_node(&mut self, _node: NodeId) {}
+    pub(crate) fn enter_node(&mut self, node: NodeId) {
+        // Comment emit is still on the no-op path; only source maps are driven.
+        // The generator is present iff source maps are enabled for this run, so
+        // the plain `emit_source_file` path stays a true no-op.
+        if self.source_map_generator.is_none() {
+            return;
+        }
+        let state = self.emit_source_maps_before_node(node);
+        self.source_map_state_stack.push(state);
+    }
 
     // Go: internal/printer/printer.go:exitNode
-    pub(crate) fn exit_node(&mut self, _node: NodeId) {}
+    pub(crate) fn exit_node(&mut self, node: NodeId) {
+        if self.source_map_generator.is_none() {
+            return;
+        }
+        let state = self.source_map_state_stack.pop().flatten();
+        self.emit_source_maps_after_node(node, state);
+    }
 
     //
     // Emit-flag queries
@@ -1874,3 +2165,7 @@ fn get_closing_bracket(format: ListFormat) -> &'static str {
 #[cfg(test)]
 #[path = "printer_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sourcemap_test.rs"]
+mod sourcemap_tests;

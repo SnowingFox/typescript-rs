@@ -8,14 +8,18 @@
 
 use std::sync::Arc;
 
-use tsgo_core::compileroptions::CompilerOptions;
-use tsgo_outputpaths::{get_output_paths_for, OutputPathsHost};
+use tsgo_core::compileroptions::{CompilerOptions, NewLineKind};
+use tsgo_outputpaths::{get_output_paths_for, get_source_map_file_path, OutputPathsHost};
 use tsgo_parser::Diagnostic;
+use tsgo_sourcemap::Generator;
 use tsgo_tsoptions::ParsedCommandLine;
-use tsgo_tspath::{is_declaration_file_name, to_path, ComparePathsOptions, Path};
+use tsgo_tspath::{
+    get_base_file_name, get_directory_path, is_declaration_file_name, normalize_path,
+    normalize_slashes, to_path, ComparePathsOptions, Path,
+};
 
 use crate::checkerpool::CompilerCheckerPool;
-use crate::emitter::{emit_js_text, EmitOnly};
+use crate::emitter::{emit_js_text_with_source_map, EmitOnly};
 use crate::fileloader::{process_all_program_files, ProcessedFiles};
 use crate::host::{CompilerHost, ParsedFile};
 use crate::verify_options::{verify_compiler_options, OptionsDiagnostic};
@@ -409,10 +413,16 @@ impl Program {
         result
     }
 
-    /// Emits the JavaScript output for `file` to `js_file_path`, writing it
-    /// through `options.write_file` (or the host file system).
+    /// Emits the JavaScript output for `file` to `js_file_path` (with its source
+    /// map when enabled), writing through `options.write_file` (or the host file
+    /// system).
     ///
-    /// Side effects: writes the emitted `.js` file.
+    /// When `--sourceMap`/`--inlineSourceMap` is set this drives a
+    /// `sourcemap::Generator` while printing, appends the
+    /// `//# sourceMappingURL=` comment (a relative `.map` path or an inlined
+    /// `data:` URL), and writes the separate `.js.map` in file mode.
+    ///
+    /// Side effects: writes the emitted `.js` (and `.js.map`) file.
     // Go: internal/compiler/emitter.go:emitter.emitJSFile + printSourceFile
     fn emit_js_file(
         &self,
@@ -430,12 +440,81 @@ impl Program {
             result.emit_skipped = true;
             return;
         }
-        let mut text = emit_js_text(file.file_name(), file.text(), self.options());
+
+        let opts = self.options();
+        let emit_source_maps = should_emit_source_maps(opts, file);
+        let source_map_file_path = get_source_map_file_path(js_file_path, opts);
+
+        // Construct the generator with the generated file's base name, source
+        // root, and the directory sources are relativized against.
+        let generator = if emit_source_maps {
+            Some(Generator::new(
+                &get_base_file_name(&normalize_slashes(js_file_path)),
+                &get_source_root(opts),
+                &self.get_source_map_directory(opts, js_file_path),
+                ComparePathsOptions {
+                    use_case_sensitive_file_names: self
+                        .compare_paths_options
+                        .use_case_sensitive_file_names,
+                    current_directory: self.compare_paths_options.current_directory.clone(),
+                },
+            ))
+        } else {
+            None
+        };
+
+        let (mut text, generator) =
+            emit_js_text_with_source_map(file.file_name(), file.text(), opts, generator);
+
+        let mut source_map_url_pos = -1;
+        if let Some(mut generator) = generator {
+            // Record the source-map emit result (Go appends for source map /
+            // inline source map / declaration maps).
+            if opts.source_map.is_true() || opts.inline_source_map.is_true() {
+                result.source_maps.push(SourceMapEmitResult {
+                    input_source_file_names: generator.sources().to_vec(),
+                    generated_file: js_file_path.to_string(),
+                });
+            }
+
+            let source_mapping_url =
+                self.get_source_mapping_url(opts, &mut generator, &source_map_file_path);
+            if !source_mapping_url.is_empty() {
+                // Mirror Go's writer: only insert a newline when not already at
+                // the start of a line (the printer output ends with one).
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push_str(if opts.new_line == NewLineKind::Crlf {
+                        "\r\n"
+                    } else {
+                        "\n"
+                    });
+                }
+                source_map_url_pos = text.len() as i32;
+                text.push_str("//# sourceMappingURL=");
+                text.push_str(&source_mapping_url);
+            }
+
+            // Write the separate `.map` file (file mode only).
+            if !source_map_file_path.is_empty() {
+                let source_map = generator.to_string();
+                let map_data = WriteFileData {
+                    source_map_url_pos: -1,
+                    skipped_dts_write: false,
+                };
+                if self
+                    .write_text(&source_map_file_path, &source_map, &map_data, options)
+                    .is_ok()
+                {
+                    result.emitted_files.push(source_map_file_path);
+                }
+            }
+        }
+
         if self.options().emit_bom.is_true() {
             text = tsgo_stringutil::add_utf8_byte_order_mark(&text);
         }
         let data = WriteFileData {
-            source_map_url_pos: -1,
+            source_map_url_pos,
             skipped_dts_write: false,
         };
         if self.write_text(js_file_path, &text, &data, options).is_ok() {
@@ -443,6 +522,41 @@ impl Program {
         }
         // DEFER(P6): on write error, add a `Could_not_write_file` diagnostic
         // (needs the `ast.Diagnostic` compiler-diagnostic constructor surface).
+    }
+
+    /// Returns the directory that source-map `sources` are relativized against
+    /// (the reachable subset of Go's `getSourceMapDirectory`).
+    ///
+    /// `--sourceRoot`/`--mapRoot` (which re-root the map directory) are deferred;
+    /// without them the directory is that of the generated `.js`.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/compiler/emitter.go:emitter.getSourceMapDirectory
+    fn get_source_map_directory(&self, _options: &CompilerOptions, js_file_path: &str) -> String {
+        // DEFER(P6): `--sourceRoot` -> CommonSourceDirectory; `--mapRoot` ->
+        // re-rooted per-file directory. blocked-by: common-source-directory +
+        // mapRoot layout (reachable subset uses the `.js` directory).
+        get_directory_path(&normalize_path(js_file_path))
+    }
+
+    /// Computes the `//# sourceMappingURL=` value: an inlined base64 `data:` URL
+    /// for `--inlineSourceMap`, otherwise the URI-encoded base name of the
+    /// `.map` file.
+    ///
+    /// Side effects: flushes the generator's pending mapping (when inlining).
+    // Go: internal/compiler/emitter.go:emitter.getSourceMappingURL
+    fn get_source_mapping_url(
+        &self,
+        options: &CompilerOptions,
+        generator: &mut Generator,
+        source_map_file_path: &str,
+    ) -> String {
+        if options.inline_source_map.is_true() {
+            return generator.base64_data_url();
+        }
+        // DEFER(P6): `--mapRoot` re-rooting. blocked-by: common-source-directory.
+        let source_map_file = get_base_file_name(&normalize_slashes(source_map_file_path));
+        tsgo_stringutil::encode_uri(&source_map_file)
     }
 
     /// Writes emitted `text` for `file_name`, preferring `options.write_file`
@@ -484,6 +598,33 @@ impl Program {
             current_directory: self.compare_paths_options.current_directory.clone(),
             use_case_sensitive_file_names: self.compare_paths_options.use_case_sensitive_file_names,
         }
+    }
+}
+
+/// Reports whether source maps should be emitted for `file` (the reachable
+/// subset of Go's `shouldEmitSourceMaps`).
+///
+/// Source maps are produced when `--sourceMap` or `--inlineSourceMap` is set and
+/// the file is not JSON.
+///
+/// Side effects: none (pure).
+// Go: internal/compiler/emitter.go:shouldEmitSourceMaps
+fn should_emit_source_maps(options: &CompilerOptions, file: &ParsedFile) -> bool {
+    (options.source_map.is_true() || options.inline_source_map.is_true())
+        && !tsgo_tspath::file_extension_is(file.file_name(), tsgo_tspath::EXTENSION_JSON)
+}
+
+/// Returns the source-map `sourceRoot` value: the normalized `--sourceRoot`
+/// option with a trailing separator, or empty when unset.
+///
+/// Side effects: none (pure).
+// Go: internal/compiler/emitter.go:getSourceRoot
+fn get_source_root(options: &CompilerOptions) -> String {
+    let source_root = normalize_slashes(&options.source_root);
+    if source_root.is_empty() {
+        source_root
+    } else {
+        tsgo_tspath::ensure_trailing_directory_separator(&source_root)
     }
 }
 
@@ -546,8 +687,10 @@ pub struct EmitOptions {
 
 /// One emitted source map (shape parity with Go).
 ///
-/// The `source_map` payload itself is deferred (see [`Program::emit`]'s DEFER
-/// note), so the reachable emitter never produces one.
+/// Produced for each `.js` when `--sourceMap`/`--inlineSourceMap` is set (P6-7).
+/// The full `RawSourceMap` payload field is still omitted from this struct (the
+/// reachable subset records only the input source names + generated file);
+/// callers needing the serialized map read it from the emitted `.js.map`.
 ///
 /// Side effects: none (plain data).
 // Go: internal/compiler/program.go:SourceMapEmitResult
@@ -573,7 +716,7 @@ pub struct EmitResult {
     pub diagnostics: Vec<Diagnostic>,
     /// The files the emitter wrote, in input order.
     pub emitted_files: Vec<String>,
-    /// The emitted source maps (always empty in the reachable subset).
+    /// The emitted source maps (one per `.js` when source maps are enabled).
     pub source_maps: Vec<SourceMapEmitResult>,
 }
 

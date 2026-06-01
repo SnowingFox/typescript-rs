@@ -446,11 +446,24 @@
 - [ ] 每条带 `// Go:` 锚点（`<file>_test.go:<TestFunc>[/<case>]`）
 - [ ] 与 impl.md 双向对齐无遗漏
 
+## P6-7 已落地单测（source-map emission，+3 `#[test]` / +1 doctest）
+
+> printer 驱动 `tsgo_sourcemap::Generator`。测试位置：`sourcemap_test.rs`（挂在 `printer.rs`，`#[path]` mod `sourcemap_tests`）；helper `test_support::emit_with_source_map`。expected 取自 `cmd/tsgo --sourceMap --module esnext` 实测（Rust 子集无 `"use strict";`，mappings = Go 去前导 `;`）。
+
+| Rust 测试 | 验证内容 | input → expected | Go 对照 | 完成 |
+|---|---|---|---|---|
+| `source_map_records_first_mapping` | **tracer**：首段 gen(0,0)→src(0,0) + 全 VLQ 串 + JSON shape | `const x = 1;` → mappings `AAAA,MAAM,CAAC,GAAG,CAAC,CAAC`、`file=main.js`、`sources=["main.ts"]` | `printer.go:Write/emitPos`（`cmd/tsgo` `.map`） | ✓ |
+| `source_map_multi_statement_lines` | 多语句解码到正确 source 行（line0→src0、line1→src1） | `const x = 1;\nconst y = 2;` → `AAAA,MAAM,CAAC,GAAG,CAAC,CAAC;AACZ,MAAM,CAAC,GAAG,CAAC,CAAC` | `printer.go:Write`（`cmd/tsgo` `.map`） | ✓ |
+| `source_map_inline_sources_embeds_content` | `inline_sources` 嵌入原文到 `sourcesContent` | `const x = 1;` + inline → `sourcesContent==[Some(原文)]` | `printer.go:setSourceMapSource`（InlineSources） | ✓ |
+| doctest `emit_source_file_with_source_map` | 入口往返（text + mappings） | `0` → `0;\n` + mappings `AAAA,CAAC,CAAA` | `printer.go:Write` | ✓ |
+
 ## 推迟到后续 phase 的测试
 
 | 测试 / 行为 | 原因 | 目标 phase |
 |---|---|---|
 | 完整 emit conformance / fourslash baseline | 需 program + 全量 fixtures | P10 |
-| source map 字节级 emit 对拍（`--sourceMap`） | 需真实编译输出 | P10 |
+| source map 字节级 emit 对拍（`--sourceMap`，全 conformance） | 需真实编译输出 | P10 |
+| token-level source maps（brace 位置） | printer `emit_token` 未走 enter/exit token 路径（与注释发射同期 DEFER） | 注释/token round |
+| names-mapping（`AddNamedSourceMapping`） | Go 自身 `emitPosName` 已注释掉（TODO） | 跟随 Go |
 | `.d.ts` 声明 emit 集成 | 依赖 transformers/declarations + checker resolver | P5（transformers 包）/ P10 |
 | `ChangeTrackerWriter` 经 format/ls 的使用 | 上游在语言服务 | P7 |
