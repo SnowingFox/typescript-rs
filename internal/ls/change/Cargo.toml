@@ -5,3 +5,15 @@ edition = "2021"
 
 [lib]
 path = "lib.rs"
+
+[dependencies]
+indexmap = "2.12.0"
+tsgo_ast = { path = "../../ast" }
+tsgo_astnav = { path = "../../astnav" }
+tsgo_core = { path = "../../core" }
+tsgo_format = { path = "../../format" }
+tsgo_scanner = { path = "../../scanner" }
+tsgo_stringutil = { path = "../../stringutil" }
+
+[dev-dependencies]
+tsgo_parser = { path = "../../parser" }
