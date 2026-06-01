@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use tsgo_vfs::Fs;
 
@@ -63,6 +64,14 @@ pub trait System {
     /// Side effects: none (reads process/test environment state).
     // Go: internal/execute/tsc/compile.go:System.GetEnvironmentVariable
     fn get_environment_variable(&self, name: &str) -> String;
+
+    /// The current wall-clock time, used by the `--build` status reporter to
+    /// stamp its `HH:MM:SS PM - ...` verbose/dry lines (Go's `sys.Now()`).
+    ///
+    /// Side effects: reads the system clock (implementations may advance a
+    /// deterministic test clock instead).
+    // Go: internal/execute/tsc/compile.go:System.Now
+    fn now(&self) -> SystemTime;
 }
 
 /// A [`System`] backed by a shared [`Fs`] with an in-memory output buffer.
@@ -81,6 +90,10 @@ pub struct VfsSystem {
     output: RefCell<String>,
     env: HashMap<String, String>,
     write_output_is_tty: bool,
+    // A deterministic monotonic test clock (Go's `TestClock`): each `now()`
+    // call advances one second so successive `--build` status lines get
+    // distinct, reproducible timestamps in baselines.
+    clock: RefCell<SystemTime>,
 }
 
 impl VfsSystem {
@@ -115,6 +128,7 @@ impl VfsSystem {
             output: RefCell::new(String::new()),
             env: HashMap::new(),
             write_output_is_tty: false,
+            clock: RefCell::new(SystemTime::UNIX_EPOCH),
         }
     }
 
@@ -165,6 +179,13 @@ impl System for VfsSystem {
 
     fn get_environment_variable(&self, name: &str) -> String {
         self.env.get(name).cloned().unwrap_or_default()
+    }
+
+    fn now(&self) -> SystemTime {
+        // Mirror Go's `TestClock.Now`: advance one second, then return.
+        let mut clock = self.clock.borrow_mut();
+        *clock += Duration::from_secs(1);
+        *clock
     }
 }
 

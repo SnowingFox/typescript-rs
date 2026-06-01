@@ -30,12 +30,17 @@ use std::sync::Arc;
 
 use tsgo_compiler::{new_compiler_host, new_program, CompilerHost, ProgramOptions};
 use tsgo_locale::Locale;
-use tsgo_tsoptions::{parse_command_line, ParseConfigHost, ParsedCommandLine};
+use tsgo_tsoptions::{
+    parse_build_command_line, parse_command_line, ParseConfigHost, ParsedBuildCommandLine,
+    ParsedCommandLine,
+};
 use tsgo_vfs::Fs;
 
+pub mod build;
 pub mod sys;
 pub mod tsc;
 
+pub use build::perform_build;
 pub use sys::{System, VfsSystem};
 pub use tsc::{
     create_diagnostic_reporter, create_report_error_summary, emit_and_report_statistics,
@@ -71,11 +76,35 @@ pub use tsc::{
 /// diagnostics — all through `sys`.
 // Go: internal/execute/tsc.go:CommandLine
 pub fn execute(sys: &dyn System, args: &[String]) -> CommandLineResult {
-    // DEFER(P9): `-b`/`--build` and `--watch` routing. blocked-by: the build
-    // orchestrator (P6-9a) and the watch loop (p9-watcher). This entry runs the
-    // single-project compilation path.
+    // `-b`/`--build` routes to the project-reference build orchestrator; every
+    // other invocation flows to the single-project compilation path. The
+    // `--watch` routing is still DEFER (blocked-by: the p9-watcher chunk).
+    if let Some(first) = args.first() {
+        match first.to_lowercase().as_str() {
+            "-b" | "--b" | "-build" | "--build" => {
+                let build_command = parse_build_args(sys, args);
+                return perform_build(sys, build_command);
+            }
+            _ => {}
+        }
+    }
     let parsed = parse_args(sys, args);
     tsc_compilation(sys, parsed)
+}
+
+/// Parses a `tsc -b` command line through a [`SysParseConfigHost`] over `sys`.
+///
+/// The leading `-b`/`--build` flag is consumed by the build-options parser; the
+/// remaining positional arguments become the projects to build.
+///
+/// Side effects: reads response files through `sys`'s file system.
+// Go: internal/execute/tsc.go:CommandLine (tsoptions.ParseBuildCommandLine call)
+fn parse_build_args(sys: &dyn System, args: &[String]) -> ParsedBuildCommandLine {
+    let host = SysParseConfigHost {
+        fs: sys.fs(),
+        current_directory: sys.get_current_directory().to_string(),
+    };
+    parse_build_command_line(args, &host)
 }
 
 /// Runs the single-project compilation for an already-parsed command line:

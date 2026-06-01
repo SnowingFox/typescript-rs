@@ -361,6 +361,22 @@ pub struct ReportErrorSummary {
 }
 
 impl ReportErrorSummary {
+    /// A reporter that never writes anything, used per-project by the `--build`
+    /// orchestrator (which emits a single summary over all projects at the end).
+    ///
+    /// Side effects: none (construction); [`report`](Self::report) is a no-op.
+    // Go: internal/execute/tsc/diagnostics.go:QuietDiagnosticsReporter
+    pub fn quiet() -> ReportErrorSummary {
+        ReportErrorSummary {
+            pretty: false,
+            format_opts: FormattingOptions {
+                locale: Locale::default(),
+                compare_paths_options: ComparePathsOptions::default(),
+                new_line: "\n".to_string(),
+            },
+        }
+    }
+
     /// Writes the localized error summary (and, for multiple erroring files, the
     /// per-file table) in pretty mode; a no-op in plain mode.
     ///
