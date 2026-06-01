@@ -83,7 +83,32 @@ impl LanguageService {
 ///
 /// Side effects: resolves symbols through the checker (may cache).
 // Go: internal/ls/findallreferences.go:getReferencedSymbolsForNode (single-file body)
-fn reference_ranges(ctx: &mut FileCheckContext, position: i32) -> Vec<TextRange> {
+pub(crate) fn reference_ranges(ctx: &mut FileCheckContext, position: i32) -> Vec<TextRange> {
+    let nodes = same_symbol_reference_nodes(ctx, position);
+    let nav = NavSourceFile::from_borrowed_arena(ctx.view.arena(), ctx.root, ctx.text.clone());
+    nodes
+        .into_iter()
+        .map(|node| TextRange::new(get_start_of_node(&nav, node, false), nav.end(node)))
+        .collect()
+}
+
+/// Resolves the token at `position` (a byte offset) in `ctx` to the identifier
+/// *nodes* in the file that resolve to the same symbol, in source order, deduped
+/// by source range.
+///
+/// This is the shared symbol-walk that find-all-references, rename, and document
+/// highlights all build on: rename maps each node to a text edit and document
+/// highlights classifies each node's read/write access. Returns an empty vector
+/// when the token is not a resolvable identifier (a keyword / punctuation /
+/// the source file as a whole), mirroring Go's `getReferencedSymbolsForNode`
+/// returning no entries.
+///
+/// Side effects: resolves symbols through the checker (may cache).
+// Go: internal/ls/findallreferences.go:getReferencedSymbolsForNode (single-file body)
+pub(crate) fn same_symbol_reference_nodes(
+    ctx: &mut FileCheckContext,
+    position: i32,
+) -> Vec<NodeId> {
     let nav = NavSourceFile::from_borrowed_arena(ctx.view.arena(), ctx.root, ctx.text.clone());
     let node = nav.get_touching_property_name(position);
 
@@ -108,6 +133,7 @@ fn reference_ranges(ctx: &mut FileCheckContext, position: i32) -> Vec<TextRange>
     let mut candidates: Vec<NodeId> = Vec::new();
     collect_named_identifiers(nav.arena(), nav.root(), &name, &mut candidates);
 
+    let mut nodes: Vec<NodeId> = Vec::new();
     let mut ranges: Vec<TextRange> = Vec::new();
     for candidate in candidates {
         let resolved = get_symbol_at_location(
@@ -125,9 +151,10 @@ fn reference_ranges(ctx: &mut FileCheckContext, position: i32) -> Vec<TextRange>
         );
         if !ranges.contains(&range) {
             ranges.push(range);
+            nodes.push(candidate);
         }
     }
-    ranges
+    nodes
 }
 
 /// Appends every identifier / private-identifier node under `node` whose text

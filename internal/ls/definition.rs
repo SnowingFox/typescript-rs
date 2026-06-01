@@ -122,7 +122,7 @@ fn definition_ranges(ctx: &mut FileCheckContext, position: i32) -> Vec<TextRange
 ///
 /// Side effects: none (pure).
 // Go: internal/ast/utilities.go:GetNameOfDeclaration (reachable subset)
-fn name_of_declaration(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
+pub(crate) fn name_of_declaration(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
     match arena.data(node) {
         NodeData::VariableDeclaration(d) => Some(d.name),
         NodeData::ParameterDeclaration(d) => Some(d.name),
