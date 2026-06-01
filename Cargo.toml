@@ -48,6 +48,8 @@ members = [
     "internal/execute/incremental",
     "cmd/tsgo",
     "internal/testutil/baseline",
+    "internal/testutil/harnessutil",
+    "internal/testrunner",
     "internal/testutil/stringtestutil",
     "internal/testutil/race",
     "internal/testutil/parsetestutil",
