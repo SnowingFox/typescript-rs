@@ -849,12 +849,19 @@ fn get_declared_type_of_type_alias(
     t
 }
 
-// Builds a members-bearing object type for an enum from its `exports` table.
+// Builds the declared (type-position) type of an enum: the union of its member
+// literal types (`E.A | E.B`), tagged `ENUM_LITERAL` with the enum symbol so it
+// prints as `E`. Each member's literal type is computed from its constant value
+// (auto-increment / explicit / constant-foldable initializer) and cached as that
+// member's declared type. A single-member enum collapses to that member's
+// literal (Go's `getUnionTypeEx` returns the lone member), which prints as `E`
+// via the node-builder's `getDeclaredTypeOfSymbol(parent) == t` rule.
 //
-// DEFER(phase-4-checker-4g): Go's enum declared type is a union of the member
-// literal types, which needs constant-value evaluation. 4c models it as an
-// object type so `E.member` resolves to the member symbol.
-// blocked-by: enum-member constant evaluation (`evaluator`) wires in at 4g.
+// DEFER(phase-4-checker-C-D2): the fresh enum-literal pairing
+// (`getFreshTypeOfLiteralType`), the `UnionReductionLiteral`/alias attribution,
+// enum merging across declarations beyond a simple concat, and computed
+// (non-constant) members. blocked-by: fresh enum types + alias attribution +
+// computed-member evaluation.
 // Go: internal/checker/checker.go:Checker.getDeclaredTypeOfEnum
 fn get_declared_type_of_enum(
     checker: &mut Checker,
@@ -868,6 +875,155 @@ fn get_declared_type_of_enum(
     {
         return cached;
     }
+    let declarations = program.symbol(symbol).declarations.clone();
+    let mut member_type_list: Vec<TypeId> = Vec::new();
+    for declaration in declarations {
+        if program.arena().kind(declaration) != Kind::EnumDeclaration {
+            continue;
+        }
+        for (member_node, value) in compute_enum_member_values(program, declaration) {
+            // A member without a bound symbol has no bindable name (Go's
+            // `hasBindableName` guard); skip it.
+            let Some(member_symbol) = program.symbol_of_node(member_node) else {
+                continue;
+            };
+            let member_type = match value {
+                tsgo_evaluator::EvalValue::Num(n) => checker.new_enum_literal_type(
+                    TypeFlags::NUMBER_LITERAL | TypeFlags::ENUM_LITERAL,
+                    LiteralValue::Number(n),
+                    member_symbol,
+                ),
+                tsgo_evaluator::EvalValue::Str(s) => checker.new_enum_literal_type(
+                    TypeFlags::STRING_LITERAL | TypeFlags::ENUM_LITERAL,
+                    LiteralValue::String(s),
+                    member_symbol,
+                ),
+                // A non-constant member yields a computed enum type (DEFER).
+                _ => checker.new_computed_enum_type(member_symbol),
+            };
+            checker.declared_type_links.get(member_symbol).declared_type = Some(member_type);
+            member_type_list.push(member_type);
+        }
+    }
+    let enum_type = if member_type_list.is_empty() {
+        checker.new_computed_enum_type(symbol)
+    } else {
+        let union = checker.get_union_type(&member_type_list);
+        // A genuine (multi-member) union is tagged as the enum type so it prints
+        // as `E` and relates via `isEnumTypeRelatedTo`; a single member stays
+        // the lone literal (Go skips the tag for a non-union).
+        if checker.get_type(union).flags().contains(TypeFlags::UNION) {
+            checker.mark_enum_union(union, symbol);
+        }
+        union
+    };
+    checker.declared_type_links.get(symbol).declared_type = Some(enum_type);
+    enum_type
+}
+
+// Returns each enum member node paired with its evaluated constant value, in
+// declaration order, applying numeric auto-increment and constant-foldable
+// initializers (Go's `computeEnumMemberValues` / `computeEnumMemberValue`).
+//
+// Entity references in an initializer (`A | 1`, where `A` is an earlier member)
+// resolve against the enum's own already-computed members by name — the
+// reachable subset of Go's `evaluateEntity`/`evaluateEnumMember`. Cross-enum /
+// variable references and the per-member diagnostics (computed-name, numeric
+// name, "member must have initializer", const-enum/ambient/isolatedModules
+// errors) are DEFER.
+//
+// DEFER(phase-4-checker-C-D2): `evaluateEnumMember` use-before-assigned (2474),
+// the computed-member checks, and cross-file resolution.
+// blocked-by: full `resolveEntityName` + enum diagnostics.
+// Go: internal/checker/checker.go:Checker.computeEnumMemberValues
+fn compute_enum_member_values(
+    program: &dyn BoundProgram,
+    enum_declaration: NodeId,
+) -> Vec<(NodeId, tsgo_evaluator::EvalValue)> {
+    use tsgo_evaluator::{new_evaluator, new_result, EvalValue, OuterExpressionKinds};
+    let members = match program.arena().data(enum_declaration) {
+        NodeData::EnumDeclaration(d) => d.members.nodes.clone(),
+        _ => return Vec::new(),
+    };
+    let mut auto_value: Option<f64> = Some(0.0);
+    let mut by_name: FxHashMap<String, EvalValue> = FxHashMap::default();
+    let mut result: Vec<(NodeId, EvalValue)> = Vec::with_capacity(members.len());
+    for member in members {
+        let initializer = match program.arena().data(member) {
+            NodeData::EnumMember(d) => d.initializer,
+            _ => None,
+        };
+        let value = if let Some(init) = initializer {
+            // Evaluate the initializer, resolving identifier/property-access
+            // entity names against the enum's prior members by name.
+            let evaluator = new_evaluator(
+                |arena: &NodeArena, expr: NodeId, _loc: Option<NodeId>| {
+                    let name = match arena.data(expr) {
+                        NodeData::Identifier(_) => Some(arena.text(expr).to_string()),
+                        NodeData::PropertyAccessExpression(d) => {
+                            Some(arena.text(d.name).to_string())
+                        }
+                        _ => None,
+                    };
+                    match name.and_then(|n| by_name.get(&n)) {
+                        Some(v) => new_result(v.clone(), false, false, false),
+                        None => new_result(EvalValue::None, false, false, false),
+                    }
+                },
+                OuterExpressionKinds::NONE,
+            );
+            evaluator
+                .evaluate(program.arena(), init, Some(member))
+                .value
+        } else if let Some(v) = auto_value {
+            // No initializer: the auto-incremented numeric value.
+            EvalValue::Num(tsgo_jsnum::Number::from(v))
+        } else {
+            // A member following a non-numeric member with no initializer is an
+            // error in Go (1061); reachable tests do not hit this. Treat as
+            // non-foldable here (yields a computed enum type).
+            EvalValue::None
+        };
+        auto_value = match &value {
+            EvalValue::Num(n) => Some(f64::from(*n) + 1.0),
+            _ => None,
+        };
+        if let Some(name) = enum_member_name_text(program, member) {
+            by_name.insert(name, value.clone());
+        }
+        result.push((member, value));
+    }
+    result
+}
+
+// Returns the textual name of an enum member (its identifier/string-literal
+// name), used to key prior members for entity-reference resolution.
+fn enum_member_name_text(program: &dyn BoundProgram, member: NodeId) -> Option<String> {
+    let name = match program.arena().data(member) {
+        NodeData::EnumMember(d) => d.name,
+        _ => return None,
+    };
+    Some(program.arena().text(name).to_string())
+}
+
+// Builds (or returns the cached) value-position type of an enum: an anonymous
+// object whose members are the enum's exports, so `E.A` (a property access)
+// reads member `A`'s literal type (Go's `getTypeOfFuncClassEnumModule` for an
+// enum symbol). This is distinct from the declared (type-position) union built
+// by `get_declared_type_of_enum`.
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModule (enum)
+fn get_type_of_enum_object(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> TypeId {
+    if let Some(cached) = checker
+        .value_symbol_links
+        .try_get(&symbol)
+        .and_then(|l| l.resolved_type)
+    {
+        return cached;
+    }
     let members = program.symbol(symbol).exports.clone();
     let properties: Vec<SymbolId> = members.values().copied().collect();
     let object = ObjectType {
@@ -876,8 +1032,63 @@ fn get_declared_type_of_enum(
         ..Default::default()
     };
     let t = checker.new_object_type(ObjectFlags::ANONYMOUS, Some(symbol), object);
-    checker.declared_type_links.get(symbol).declared_type = Some(t);
+    checker.value_symbol_links.get(symbol).resolved_type = Some(t);
     t
+}
+
+// Returns the type of an enum member symbol (Go's `getTypeOfEnumMember` ->
+// `getDeclaredTypeOfEnumMember`): the member's literal type, resolved by
+// building the parent enum's declared type (which populates each member's
+// declared type) and reading it back.
+// Go: internal/checker/checker.go:Checker.getTypeOfEnumMember / getDeclaredTypeOfEnumMember
+fn get_type_of_enum_member(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> TypeId {
+    if let Some(cached) = checker
+        .value_symbol_links
+        .try_get(&symbol)
+        .and_then(|l| l.resolved_type)
+    {
+        return cached;
+    }
+    let t = get_declared_type_of_enum_member(checker, program, symbol);
+    checker.value_symbol_links.get(symbol).resolved_type = Some(t);
+    t
+}
+
+// Returns the declared type of an enum member: building the parent enum's
+// declared type populates each member's `declared_type` link with its literal
+// type; this reads it back (falling back to the enum type if unset).
+// Go: internal/checker/checker.go:Checker.getDeclaredTypeOfEnumMember
+fn get_declared_type_of_enum_member(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> TypeId {
+    if let Some(cached) = checker
+        .declared_type_links
+        .try_get(&symbol)
+        .and_then(|l| l.declared_type)
+    {
+        return cached;
+    }
+    let enum_type = match program.symbol(symbol).parent {
+        Some(parent) => get_declared_type_of_enum(checker, program, parent),
+        None => checker.error_type(),
+    };
+    match checker
+        .declared_type_links
+        .try_get(&symbol)
+        .and_then(|l| l.declared_type)
+    {
+        Some(t) => t,
+        None => {
+            checker.declared_type_links.get(symbol).declared_type = Some(enum_type);
+            enum_type
+        }
+    }
 }
 
 /// Returns the type of a value/property symbol, resolving its annotation.
@@ -917,7 +1128,15 @@ pub fn get_type_of_symbol(
     if flags.intersects(SymbolFlags::VARIABLE | SymbolFlags::PROPERTY) {
         return get_type_of_variable_or_property(checker, program, symbol, globals);
     }
-    if flags.intersects(SymbolFlags::CLASS | SymbolFlags::INTERFACE | SymbolFlags::ENUM) {
+    // An enum member's value type is its literal type (`E.A`); the enum object's
+    // value type is the members-bearing object that `E.A` reads from.
+    if flags.intersects(SymbolFlags::ENUM_MEMBER) {
+        return get_type_of_enum_member(checker, program, symbol);
+    }
+    if flags.intersects(SymbolFlags::ENUM) {
+        return get_type_of_enum_object(checker, program, symbol);
+    }
+    if flags.intersects(SymbolFlags::CLASS | SymbolFlags::INTERFACE) {
         return get_declared_type_of_symbol(checker, program, symbol, globals);
     }
     // A function or method symbol's type is an anonymous object type carrying
@@ -1129,6 +1348,22 @@ fn is_optional_parameter(program: &dyn BoundProgram, param: NodeId) -> bool {
     }
 }
 
+// Reports whether a variable-like declaration is optional for the `| undefined`
+// injection (Go's `isOptionalDeclaration`): a parameter with a `?` question
+// token, or a property signature/declaration whose postfix token is `?`. (A
+// parameter initializer/rest only affects arity, not the read optionality, so
+// unlike `is_optional_parameter` they do not count here.)
+// Go: internal/ast/utilities.go:isOptionalDeclaration
+fn is_optional_declaration(program: &dyn BoundProgram, declaration: NodeId) -> bool {
+    match program.arena().data(declaration) {
+        NodeData::ParameterDeclaration(d) => d.question_token.is_some(),
+        NodeData::PropertySignature(d) | NodeData::PropertyDeclaration(d) => d
+            .postfix_token
+            .is_some_and(|tok| program.arena().kind(tok) == Kind::QuestionToken),
+        _ => false,
+    }
+}
+
 // Resolves (and caches) the combined type of a synthesized union/intersection
 // property: the union (for a union containing type) or intersection (for an
 // intersection containing type) of the property's type across the constituents
@@ -1210,8 +1445,22 @@ fn get_type_of_variable_or_property(
         NodeData::ParameterDeclaration(d) => d.type_node,
         _ => None,
     });
+    // Optionality (`| undefined`) is injected for an optional property/parameter
+    // (`{ a?: number }`/`function f(x?: number)`) under strictNullChecks. Go's
+    // `getTypeForVariableLikeDeclaration` applies `addOptionalityEx(t, isProperty,
+    // includeOptionality && isOptionalDeclaration(decl))`; this worker is the
+    // `includeOptionality=true` path.
+    // Go: internal/checker/checker.go:Checker.getTypeForVariableLikeDeclaration
+    let is_property = declaration.is_some_and(|decl| {
+        matches!(
+            program.arena().kind(decl),
+            Kind::PropertySignature | Kind::PropertyDeclaration
+        )
+    });
+    let is_optional = declaration.is_some_and(|decl| is_optional_declaration(program, decl));
     let t = if let Some(node) = type_node {
-        get_type_from_type_node(checker, program, node, globals)
+        let declared = get_type_from_type_node(checker, program, node, globals);
+        checker.add_optionality_ex(declared, is_property, is_optional)
     } else if let Some(parameter) =
         declaration.filter(|&decl| program.arena().kind(decl) == Kind::Parameter)
     {
@@ -1789,6 +2038,19 @@ fn resolve_mapped_type_members_eager(
                 checker.instantiate_type(base, &template_mapper)
             }
             None => checker.error_type(),
+        };
+        // `-?` (ExcludeOptional) on a source optional property strips the
+        // `| undefined` that the optional source contributes to `T[K]` under
+        // strictNullChecks (Go's `CheckFlagsStripOptional` ->
+        // `getTypeWithFacts(propType, NEUndefined)` in `getTypeOfMappedSymbol`).
+        // Without this, `Required<{ a?: number }>` would read `a` as
+        // `number | undefined` (C-D1 now injects the optional `| undefined`).
+        // Go: internal/checker/checker.go:resolveMappedTypeMembers (stripOptional)
+        let strip_optional = checker.strict_null_checks() && !is_optional && prop_optional;
+        let prop_type = if strip_optional {
+            checker.get_type_with_facts(prop_type, super::type_facts::TypeFacts::NE_UNDEFINED)
+        } else {
+            prop_type
         };
         let mut flags = SymbolFlags::PROPERTY;
         if is_optional {

@@ -17,11 +17,11 @@
 //! adds fixed-arity tuple printing `[A, B]` / `readonly [A, B]` and the
 //! `readonly` adornment on a const object-literal property.)
 
-use tsgo_ast::SymbolId;
+use tsgo_ast::{SymbolFlags, SymbolId};
 
-use super::declared_types::get_type_of_symbol;
+use super::declared_types::{get_declared_type_of_symbol, get_type_of_symbol};
 use super::program::BoundProgram;
-use super::types::{ObjectFlags, TypeData, TypeId};
+use super::types::{ObjectFlags, TypeData, TypeFlags, TypeId};
 use super::Checker;
 
 /// Returns the printed name of `symbol` (Go's `symbolToString` for the simple
@@ -61,6 +61,37 @@ pub fn symbol_to_string(program: &dyn BoundProgram, symbol: SymbolId) -> String 
 /// Side effects: may resolve and cache member types.
 // Go: internal/checker/checker.go:Checker.typeToString
 pub fn type_to_string(checker: &mut Checker, program: &dyn BoundProgram, ty: TypeId) -> String {
+    // An enum-like type (enum union, computed enum, or an enum member literal)
+    // prints by its symbol, not its structure: an enum member literal prints
+    // `E.A` (parent enum `.` member), except when the enum's declared type *is*
+    // that member (a single-member enum), where it prints just `E`; the enum
+    // union / computed enum prints the enum name `E`. Checked before the union
+    // arm because the enum union also carries `TypeData::Union`.
+    // Go: internal/checker/nodebuilderimpl.go:typeToTypeNodeWorker (EnumLike arm)
+    if checker
+        .get_type(ty)
+        .flags()
+        .intersects(TypeFlags::ENUM_LIKE)
+    {
+        if let Some(symbol) = checker.get_type(ty).symbol {
+            if program
+                .symbol(symbol)
+                .flags
+                .intersects(SymbolFlags::ENUM_MEMBER)
+            {
+                if let Some(parent) = program.symbol(symbol).parent {
+                    let parent_name = symbol_to_string(program, parent);
+                    let globals = program.globals();
+                    if get_declared_type_of_symbol(checker, program, parent, globals) == ty {
+                        return parent_name;
+                    }
+                    let member_name = symbol_to_string(program, symbol);
+                    return format!("{parent_name}.{member_name}");
+                }
+            }
+            return symbol_to_string(program, symbol);
+        }
+    }
     // A union prints its constituents (each program-aware) joined by ` | `.
     if let TypeData::Union(u) = &checker.get_type(ty).data {
         let members = u.types.clone();

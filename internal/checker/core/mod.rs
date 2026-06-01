@@ -1544,6 +1544,77 @@ impl Checker {
         new_literal_type_in(&mut self.types, flags, value, regular_type)
     }
 
+    /// Allocates an enum-member literal type (Go's `getEnumLiteralType`): a
+    /// string/number literal carrying the `ENUM_LITERAL` flag, its value, and
+    /// the member's symbol (so it prints as `E.A`/`E` and the relation engine
+    /// can apply the enum-literal rules).
+    ///
+    /// `flags` is `STRING_LITERAL | ENUM_LITERAL` or `NUMBER_LITERAL |
+    /// ENUM_LITERAL`. The result is its own regular form (the port does not
+    /// model fresh enum literals — a reachable simplification, since enum
+    /// literal types do not widen in the reachable surface).
+    ///
+    /// Side effects: allocates a literal type.
+    // Go: internal/checker/checker.go:Checker.getEnumLiteralType
+    pub(crate) fn new_enum_literal_type(
+        &mut self,
+        flags: TypeFlags,
+        value: LiteralValue,
+        symbol: tsgo_ast::SymbolId,
+    ) -> TypeId {
+        let id = self.types.alloc(
+            flags,
+            ObjectFlags::empty(),
+            Some(symbol),
+            TypeData::Literal(LiteralType {
+                value,
+                fresh_type: None,
+                regular_type: None,
+            }),
+        );
+        if let TypeData::Literal(d) = &mut self.types.get_mut(id).data {
+            d.regular_type = Some(id);
+        }
+        id
+    }
+
+    /// Allocates a computed enum type (Go's `createComputedEnumType`): an
+    /// `ENUM`-flagged type carrying the enum/member symbol, used when a member's
+    /// value is not constant-foldable.
+    ///
+    /// DEFER(phase-4-checker-C-D2): computed (non-constant) enum members beyond
+    /// the evaluator's reach use this stand-in; the fresh/regular pairing is not
+    /// modeled. blocked-by: computed-member evaluation + fresh enum types.
+    ///
+    /// Side effects: allocates a type.
+    // Go: internal/checker/checker.go:Checker.createComputedEnumType
+    pub(crate) fn new_computed_enum_type(&mut self, symbol: tsgo_ast::SymbolId) -> TypeId {
+        self.types.alloc(
+            TypeFlags::ENUM,
+            ObjectFlags::empty(),
+            Some(symbol),
+            TypeData::Literal(LiteralType {
+                value: LiteralValue::Number(tsgo_jsnum::Number::from(0.0)),
+                fresh_type: None,
+                regular_type: None,
+            }),
+        )
+    }
+
+    /// Marks an interned union as an enum type (Go's `getDeclaredTypeOfEnum`:
+    /// `enumType.flags |= EnumLiteral; enumType.symbol = symbol` for the
+    /// multi-member union), so it prints as the enum name `E` and relates via
+    /// the enum rules. Safe to mutate the interned union: its member list (the
+    /// enum's literal members) is unique to this enum.
+    ///
+    /// Side effects: mutates the type's flags/symbol in place.
+    // Go: internal/checker/checker.go:Checker.getDeclaredTypeOfEnum (union marker)
+    pub(crate) fn mark_enum_union(&mut self, union: TypeId, symbol: tsgo_ast::SymbolId) {
+        let t = self.types.get_mut(union);
+        t.flags |= TypeFlags::ENUM_LITERAL;
+        t.symbol = Some(symbol);
+    }
+
     // Returns the interned string-literal type for `value`, allocating it once
     // and caching it by value so every `"a"` shares one `TypeId`. This is Go's
     // `getStringLiteralType`: a value-keyed cache giving equal literals id

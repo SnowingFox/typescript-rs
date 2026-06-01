@@ -504,7 +504,27 @@ impl Checker {
         if s.intersects(TypeFlags::STRING_LIKE) && t.intersects(TypeFlags::STRING) {
             return true;
         }
+        // A string enum-literal source is assignable to a non-enum string
+        // literal target with the same value (`E.A` (`"x"`) -> `"x"`).
+        // Go: internal/checker/relater.go:isSimpleTypeRelatedTo (string enum literal)
+        if s.contains(TypeFlags::STRING_LITERAL | TypeFlags::ENUM_LITERAL)
+            && t.contains(TypeFlags::STRING_LITERAL)
+            && !t.contains(TypeFlags::ENUM_LITERAL)
+            && self.literal_values_equal(source, target)
+        {
+            return true;
+        }
         if s.intersects(TypeFlags::NUMBER_LIKE) && t.intersects(TypeFlags::NUMBER) {
+            return true;
+        }
+        // A numeric enum-literal source is assignable to a non-enum number
+        // literal target with the same value (`E.B` (`2`) -> `2`).
+        // Go: internal/checker/relater.go:isSimpleTypeRelatedTo (number enum literal)
+        if s.contains(TypeFlags::NUMBER_LITERAL | TypeFlags::ENUM_LITERAL)
+            && t.contains(TypeFlags::NUMBER_LITERAL)
+            && !t.contains(TypeFlags::ENUM_LITERAL)
+            && self.literal_values_equal(source, target)
+        {
             return true;
         }
         if s.intersects(TypeFlags::BIG_INT_LIKE) && t.intersects(TypeFlags::BIG_INT) {
@@ -536,12 +556,45 @@ impl Checker {
         if s.intersects(TypeFlags::OBJECT) && t.intersects(TypeFlags::NON_PRIMITIVE) {
             return true;
         }
-        if (relation == RelationKind::Assignable || relation == RelationKind::Comparable)
-            && s.intersects(TypeFlags::ANY)
-        {
-            return true;
+        if relation == RelationKind::Assignable || relation == RelationKind::Comparable {
+            if s.intersects(TypeFlags::ANY) {
+                return true;
+            }
+            // `number` is assignable to any numeric enum type / numeric enum
+            // literal, and a non-enum numeric literal is assignable to a numeric
+            // enum literal with a matching value, so enums can be used as bit
+            // flags (`const c: E = 0;` is OK iff a member has value `0`).
+            // Go: internal/checker/relater.go:isSimpleTypeRelatedTo (number -> enum)
+            if s.intersects(TypeFlags::NUMBER)
+                && (t.intersects(TypeFlags::ENUM)
+                    || t.contains(TypeFlags::NUMBER_LITERAL | TypeFlags::ENUM_LITERAL))
+            {
+                return true;
+            }
+            if s.contains(TypeFlags::NUMBER_LITERAL)
+                && !s.contains(TypeFlags::ENUM_LITERAL)
+                && (t.intersects(TypeFlags::ENUM)
+                    || (t.contains(TypeFlags::NUMBER_LITERAL | TypeFlags::ENUM_LITERAL)
+                        && self.literal_values_equal(source, target)))
+            {
+                return true;
+            }
         }
         false
+    }
+
+    // Reports whether two literal types carry equal values (Go's
+    // `source.AsLiteralType().value == target.AsLiteralType().value`), used by
+    // the enum-literal relation rules.
+    // Go: internal/checker/relater.go:isSimpleTypeRelatedTo (value equality)
+    fn literal_values_equal(&self, source: TypeId, target: TypeId) -> bool {
+        match (
+            self.get_type(source).literal_value(),
+            self.get_type(target).literal_value(),
+        ) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
     }
 
     // The cached structural relation check (Go's checkTypeRelatedTo core).

@@ -68,6 +68,46 @@ fn type_facts_of_primitives_and_literals() {
     assert!(c.has_type_facts(n, TypeFacts::TRUTHY));
 }
 
+// C-D1 (TypeFacts completion): a `symbol` value is always truthy and (under
+// strictNullChecks) carries the not-`undefined`/not-`null` facts but is never
+// falsy and never *is* nullable (Go's `getTypeFactsWorker` `ESSymbolLike` arm ->
+// `SymbolStrictFacts`). Before this round `symbol` fell through to the
+// catch-all `UnknownFacts` (which is falsy + `EQ_*`).
+// Go: internal/checker/checker.go:Checker.getTypeFactsWorker (ESSymbolLike)
+#[test]
+fn type_facts_of_symbol_is_truthy_non_nullable() {
+    let c = Checker::new();
+    let facts = c.get_type_facts(c.es_symbol_type());
+    assert_eq!(
+        facts,
+        TypeFacts::NE_UNDEFINED
+            | TypeFacts::NE_NULL
+            | TypeFacts::NE_UNDEFINED_OR_NULL
+            | TypeFacts::TRUTHY
+    );
+    assert!(!facts
+        .intersects(TypeFacts::FALSY | TypeFacts::IS_UNDEFINED_OR_NULL | TypeFacts::EQ_UNDEFINED));
+}
+
+// C-D1 (TypeFacts completion): the non-primitive `object` type behaves like an
+// object value — truthy, strict non-nullable, never falsy (Go maps
+// `NonPrimitive` to `ObjectStrictFacts`). Before this round it fell through to
+// `UnknownFacts`.
+// Go: internal/checker/checker.go:Checker.getTypeFactsWorker (NonPrimitive)
+#[test]
+fn type_facts_of_non_primitive_object_is_truthy_non_nullable() {
+    let c = Checker::new();
+    let facts = c.get_type_facts(c.non_primitive_type());
+    assert_eq!(
+        facts,
+        TypeFacts::NE_UNDEFINED
+            | TypeFacts::NE_NULL
+            | TypeFacts::NE_UNDEFINED_OR_NULL
+            | TypeFacts::TRUTHY
+    );
+    assert!(!facts.intersects(TypeFacts::FALSY | TypeFacts::IS_UNDEFINED_OR_NULL));
+}
+
 // 4ay tracer (genuine RED): under `strictNullChecks`, `getNonNullableType`
 // removes the `undefined` constituent from a union, reducing `string | undefined`
 // to `string`. A default-options intrinsic checker has `strictNullChecks` in

@@ -5138,13 +5138,26 @@ fn assignability_flat_primitive_mismatch_has_no_chain() {
 
 // 4bn: the optional-source vs required-target property surfaces as `2327`
 // "Property 'a' is optional in type 'S' but required in type 'T'." under the
-// `2322` head (non-strict: the optional property type still matches).
+// `2322` head. This 2327 arm is only reached in NON-strict mode: under
+// strictNullChecks the optional source property `a?: string` reads as
+// `string | undefined` (C-D1 `addOptionalityEx`), so the property-type
+// comparison fails first and Go reports the "Types of property 'a' are
+// incompatible" chain instead (verified against `cmd/tsgo`: strict ->
+// property-incompatible chain; non-strict -> 2327). The test pins the 2327 arm,
+// so it runs non-strict.
 // Go: internal/checker/relater.go:Relater.propertyRelatedTo (2327 arm)
 #[test]
 fn assignability_chain_optional_source_required_target_reports_2327() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+    let options = CompilerOptions {
+        strict_null_checks: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
         "/a.ts",
         "interface S { a?: string }\ninterface T { a: string }\ndeclare const s: S;\nvar t: T = s;",
+        options,
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -7504,5 +7517,299 @@ fn mapped_as_identity_remap_e2e() {
     assert_eq!(
         diags[0].message,
         "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// ===========================================================================
+// C-D1: strictNullChecks completeness (optional property / parameter) + enums.
+// ===========================================================================
+
+// C-D1 slice 1 (optional property `| undefined`): reading an optional property
+// `{ a?: number }` yields `number | undefined` under strictNullChecks, so
+// `const n: number = o.a;` reports 2322.
+// Verified against `cmd/tsgo --noEmit --strict`: `(2,7): error TS2322: Type
+// 'number | undefined' is not assignable to type 'number'.`
+// Go: internal/checker/checker.go:Checker.getTypeForVariableLikeDeclaration (addOptionalityEx)
+#[test]
+fn optional_property_read_is_number_or_undefined_under_strict() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { a?: number } = {};\nconst n: number = o.a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    // The port sorts union constituents by type id, which allocates `undefined`
+    // before `number`, so it prints `undefined | number` where cmd/tsgo prints
+    // `number | undefined` (a pre-existing union member-ordering divergence; see
+    // 4ay/4az). The CODE (2322) and the assignability decision match Go.
+    assert_eq!(
+        diags[0].message,
+        "Type 'undefined | number' is not assignable to type 'number'."
+    );
+}
+
+// C-D1 slice 1 guard: assigning `{}` to `{ a?: number }` is fine (the optional
+// property need not be present). Verified against `cmd/tsgo --noEmit --strict`:
+// 0 diagnostics.
+// Go: internal/checker/relater.go (optional target property not required)
+#[test]
+fn assign_empty_object_to_optional_property_is_ok() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { a?: number } = {};\no.a;\nconst x = o;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 0, "expected no diagnostics, got {diags:?}");
+}
+
+// C-D1 slice 1 (non-strict): without strictNullChecks an optional property reads
+// as its bare type (`number`), so `const n: number = o.a;` is fine.
+// Verified against `cmd/tsgo --noEmit --strictNullChecks false`: 0 diagnostics.
+// Go: internal/checker/checker.go:Checker.addOptionalityEx (no-op when !strictNullChecks)
+#[test]
+fn optional_property_read_is_bare_type_without_strict_null_checks() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+    let options = CompilerOptions {
+        strict_null_checks: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "const o: { a?: number } = {};\nconst n: number = o.a;",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 0, "expected no diagnostics, got {diags:?}");
+}
+
+// C-D1 slice 2 (optional parameter `| undefined`): inside the body of
+// `function f(x?: number)`, `x` is `number | undefined`, so `const n: number =
+// x;` reports 2322.
+// Verified against `cmd/tsgo --noEmit --strict`: `(1,32): error TS2322: Type
+// 'number | undefined' is not assignable to type 'number'.`
+// Go: internal/checker/checker.go:Checker.getTypeForVariableLikeDeclaration (addOptionalityEx, parameter)
+#[test]
+fn optional_parameter_is_number_or_undefined_in_body() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(x?: number) { const n: number = x; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    // Port union ordering prints `undefined | number` (see slice 1 note).
+    assert_eq!(
+        diags[0].message,
+        "Type 'undefined | number' is not assignable to type 'number'."
+    );
+}
+
+// C-D1 slice 2 (non-strict): without strictNullChecks an optional parameter is
+// its bare type, so the body assignment is fine.
+// Verified against `cmd/tsgo --noEmit --strictNullChecks false`: 0 diagnostics.
+// Go: internal/checker/checker.go:Checker.addOptionalityEx (no-op when !strictNullChecks)
+#[test]
+fn optional_parameter_is_bare_type_without_strict_null_checks() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+    let options = CompilerOptions {
+        strict_null_checks: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "function f(x?: number) { const n: number = x; }",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 0, "expected no diagnostics, got {diags:?}");
+}
+
+// C-D1 slice 3 (numeric enum literal + union): `enum E { A, B }` gives `E.A`
+// (value 0) / `E.B` (value 1); the enum type `E` is `E.A | E.B`. `E.A` is
+// assignable to `E`, but a numeric literal `2` (matching no member) is not.
+// Verified against `cmd/tsgo --noEmit --strict`: only `const c: E = 2;` reports
+// `(3,7): error TS2322: Type '2' is not assignable to type 'E'.`
+// Go: internal/checker/checker.go:Checker.getDeclaredTypeOfEnum / isSimpleTypeRelatedTo
+#[test]
+fn numeric_enum_member_and_union_assignability() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A, B }\nconst a: E = E.A;\nconst c: E = 2;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(diags[0].message, "Type '2' is not assignable to type 'E'.");
+}
+
+// C-D1 slice 3 (matching numeric literal -> numeric enum is OK): a numeric
+// literal whose value matches a member is assignable to the enum (bit-flag
+// rule), so `const c0: E = 0;` and `const c1: E = 1;` are both fine.
+// Verified against `cmd/tsgo --noEmit --strict`: 0 diagnostics.
+// Go: internal/checker/relater.go:isSimpleTypeRelatedTo (numeric literal -> enum literal, matching value)
+#[test]
+fn matching_numeric_literal_is_assignable_to_enum() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A, B }\nconst c0: E = 0;\nconst c1: E = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 0, "expected no diagnostics, got {diags:?}");
+}
+
+// C-D1 slice 4 (enum auto-increment with explicit initializer): `enum E { A = 1,
+// B }` gives `E.B` value 2, so `const b1: 2 = E.B;` is OK but `const b2: 1 =
+// E.B;` reports 2322. The enum member literal prints `E.B` (multi-member enum).
+// Verified against `cmd/tsgo --noEmit --strict`: only `const b2: 1 = E.B;`
+// reports `(3,7): error TS2322: Type 'E.B' is not assignable to type '1'.`
+// Go: internal/checker/checker.go:Checker.computeEnumMemberValue (auto-increment)
+#[test]
+fn enum_auto_increment_after_explicit_initializer() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A = 1, B }\nconst b1: 2 = E.B;\nconst b2: 1 = E.B;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'E.B' is not assignable to type '1'."
+    );
+}
+
+// C-D1 slice 5 (auto-increment with multiple explicit initializers): `enum E { A
+// = 10, B, C = 20 }` gives `E.B` value 11, so `const b2: 12 = E.B;` reports
+// 2322 ("Type 'E.B' is not assignable to type '12'.") while `const b1: 11 = E.B;`
+// is OK.
+// Verified against `cmd/tsgo --noEmit --strict`: only `const b2: 12 = E.B;`.
+// Go: internal/checker/checker.go:Checker.computeEnumMemberValues (auto-increment continues)
+#[test]
+fn enum_auto_increment_between_explicit_initializers() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A = 10, B, C = 20 }\nconst b1: 11 = E.B;\nconst b2: 12 = E.B;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'E.B' is not assignable to type '12'."
+    );
+}
+
+// C-D1 slice 6 (string enum): `enum E { A = "x" }` member is a string enum
+// literal; `E.A` is assignable to `string`, but a string literal `"x"` is not
+// assignable to the enum `E` (single-member enums print as `E`).
+// Verified against `cmd/tsgo --noEmit --strict`: only `const e: E = "x";`
+// reports `(3,7): error TS2322: Type '"x"' is not assignable to type 'E'.`
+// Go: internal/checker/checker.go:Checker.getEnumLiteralType (string) / isSimpleTypeRelatedTo
+#[test]
+fn string_enum_member_and_assignability() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A = \"x\" }\nconst s: string = E.A;\nconst e: E = \"x\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '\"x\"' is not assignable to type 'E'."
+    );
+}
+
+// C-D1 slice 7 (enum member reference as a value): `E.A` reads as its enum
+// literal type; `E.A` is assignable to `number` and `E`, but not to a
+// non-matching numeric literal type `5`.
+// Verified against `cmd/tsgo --noEmit --strict`: only `const bad: 5 = E.A;`
+// reports `(4,7): error TS2322: Type 'E.A' is not assignable to type '5'.`
+// Go: internal/checker/checker.go:Checker.getTypeOfEnumMember
+#[test]
+fn enum_member_value_reference_assignability() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A, B }\nconst n: number = E.A;\nconst e: E = E.B;\nconst bad: 5 = E.A;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'E.A' is not assignable to type '5'."
+    );
+}
+
+// C-D1 slice 8 (const enum member typing): a `const enum` member is typed
+// identically to a regular enum member (the emit-inlining is a transformer
+// concern, DEFER). `const a: E = E.A;` is OK; `const bad: 5 = E.B;` reports
+// 2322.
+// Verified against `cmd/tsgo --noEmit --strict`: only `const bad: 5 = E.B;`
+// reports `(3,7): error TS2322: Type 'E.B' is not assignable to type '5'.`
+// Go: internal/checker/checker.go:Checker.getDeclaredTypeOfEnum (const enum)
+#[test]
+fn const_enum_member_typing() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const enum E { A, B }\nconst a: E = E.A;\nconst bad: 5 = E.B;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'E.B' is not assignable to type '5'."
+    );
+}
+
+// C-D1 slice 9 (constant-expression enum members via the evaluator): `enum E { A
+// = 1 << 1, B = A | 1 }` folds `A` to 2 and `B` to `2 | 1` = 3 (an entity
+// reference to a prior member resolved through the evaluator), so `const b1: 3 =
+// E.B;` is OK and `const b2: 4 = E.B;` reports 2322.
+// Verified against `cmd/tsgo --noEmit --strict`: only `const b2: 4 = E.B;`
+// reports `(3,7): error TS2322: Type 'E.B' is not assignable to type '4'.`
+// Go: internal/checker/checker.go:Checker.computeConstantEnumMemberValue (evaluate)
+#[test]
+fn enum_constant_expression_members_via_evaluator() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A = 1 << 1, B = A | 1 }\nconst b1: 3 = E.B;\nconst b2: 4 = E.B;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'E.B' is not assignable to type '4'."
     );
 }

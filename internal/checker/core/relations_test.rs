@@ -134,20 +134,34 @@ fn assignable_structural_subset() {
 }
 
 // Go: internal/checker/relater.go:Relater.propertyRelatedTo (skipOptional for comparable)
+//
+// Runs NON-strict: this test isolates `skipOptional` (the optional-vs-required
+// leniency). Under strictNullChecks the optional source property `a?: string`
+// would read as `string | undefined` (C-D1 `addOptionalityEx`), so the property
+// *type* comparison `string | undefined` vs `string` would fail regardless of
+// `skipOptional`. Non-strict keeps `a` as bare `string`, so the only S/T
+// difference is the optional flag — exactly what `skipOptional` governs.
 #[test]
 fn comparable_is_lenient_about_optional_vs_required() {
-    let p = StubProgram::parse_and_bind(
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+    let options = CompilerOptions {
+        strict_null_checks: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
         "/a.ts",
         "interface S { a?: string }\ninterface T { a: string }",
-    );
-    let mut c = Checker::new();
-    let s = get_declared_type_of_symbol(&mut c, &p, sym(&p, "S"), None);
-    let t = get_declared_type_of_symbol(&mut c, &p, sym(&p, "T"), None);
+        options,
+    ));
+    let mut c = Checker::new_checker(p.clone());
+    let s = get_declared_type_of_symbol(&mut c, &*p, sym(&p, "S"), None);
+    let t = get_declared_type_of_symbol(&mut c, &*p, sym(&p, "T"), None);
     // Assignability rejects an optional source against a required target.
-    assert!(!c.is_type_assignable_to(&p, s, t));
+    assert!(!c.is_type_assignable_to(&*p, s, t));
     // Comparability passes `skipOptional`, so the optional/required mismatch is
     // tolerated and `S` is comparable to `T`.
-    assert!(c.is_type_comparable_to(&p, s, t));
+    assert!(c.is_type_comparable_to(&*p, s, t));
 }
 
 // Go: internal/checker/relater.go:typeRelatedToEachType (target intersection)

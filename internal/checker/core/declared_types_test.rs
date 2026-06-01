@@ -12,6 +12,15 @@ fn local(p: &StubProgram, name: &str) -> SymbolId {
         .unwrap_or_else(|| panic!("missing local {name}"))
 }
 
+// Looks up an enum member symbol (`E.member`) via the enum symbol's exports.
+fn member_symbol(p: &StubProgram, enum_name: &str, member: &str) -> SymbolId {
+    let e = local(p, enum_name);
+    *p.symbol(e)
+        .exports
+        .get(member)
+        .unwrap_or_else(|| panic!("missing member {enum_name}.{member}"))
+}
+
 // Go: internal/checker/checker.go:Checker.getPropertiesOfType / getNamedMembers(21907)
 #[test]
 fn get_properties_of_type_excludes_reserved_index_member() {
@@ -215,16 +224,94 @@ fn declared_type_of_type_alias_resolves_rhs() {
     );
 }
 
-// Go: internal/checker/checker.go:Checker.getDeclaredTypeOfEnum (4c simplification)
+// C-D1: the VALUE-position type of an enum (`get_type_of_symbol`) is a
+// members-bearing object so `E.A` resolves the member; the DECLARED
+// (type-position) type (`get_declared_type_of_symbol`) is the union of member
+// literals, which for a single-member enum collapses to that member's
+// `ENUM_LITERAL` literal type (Go's `getTypeOfFuncClassEnumModule` vs
+// `getDeclaredTypeOfEnum`). (Was a 4c simplification that modeled the declared
+// type itself as the object; updated to the Go-faithful split.)
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModule / getDeclaredTypeOfEnum
 #[test]
 fn declared_type_of_enum_exposes_members() {
+    use crate::core::declared_types::get_type_of_symbol;
+    use crate::core::types::TypeFlags;
     let p = StubProgram::parse_and_bind("/a.ts", "enum E {\n  A,\n}");
     let mut c = Checker::new();
     let e = local(&p, "E");
-    let ty = get_declared_type_of_symbol(&mut c, &p, e, None);
-    assert!(c.get_type(ty).as_object().is_some());
-    let a = get_property_of_type(&c, ty, "A").expect("enum member A");
+    // Value side: the enum object exposes member `A`.
+    let value = get_type_of_symbol(&mut c, &p, e, None);
+    assert!(c.get_type(value).as_object().is_some());
+    let a = get_property_of_type(&c, value, "A").expect("enum member A");
     assert_eq!(p.symbol(a).name, "A");
+    // Declared (type) side: the member literal type (single member), tagged
+    // `ENUM_LITERAL` with value 0.
+    let declared = get_declared_type_of_symbol(&mut c, &p, e, None);
+    assert!(c
+        .get_type(declared)
+        .flags()
+        .contains(TypeFlags::ENUM_LITERAL));
+    assert_eq!(
+        c.get_type(declared).literal_value(),
+        Some(&crate::core::types::LiteralValue::Number(0.0.into()))
+    );
+}
+
+// C-D1: a multi-member numeric enum's declared type is a `ENUM_LITERAL`-tagged
+// union of its member literal types (values 0 and 1, auto-incremented), carrying
+// the enum symbol.
+// Go: internal/checker/checker.go:Checker.getDeclaredTypeOfEnum
+#[test]
+fn numeric_enum_declared_type_is_union_of_member_literals() {
+    use crate::core::types::{LiteralValue, TypeFlags};
+    let p = StubProgram::parse_and_bind("/a.ts", "enum E { A, B }");
+    let mut c = Checker::new();
+    let declared = get_declared_type_of_symbol(&mut c, &p, local(&p, "E"), None);
+    let t = c.get_type(declared);
+    assert!(t
+        .flags()
+        .contains(TypeFlags::UNION | TypeFlags::ENUM_LITERAL));
+    let members = t.union_types().expect("union").to_vec();
+    assert_eq!(members.len(), 2);
+    let mut values: Vec<f64> = members
+        .iter()
+        .map(|&m| match c.get_type(m).literal_value() {
+            Some(LiteralValue::Number(n)) => f64::from(*n),
+            other => panic!("expected number literal, got {other:?}"),
+        })
+        .collect();
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(values, vec![0.0, 1.0]);
+}
+
+// C-D1: enum member values via the value-side type — explicit initializer plus
+// auto-increment (`A = 1` -> `B = 2`) and a string member.
+// Go: internal/checker/checker.go:Checker.computeEnumMemberValue
+#[test]
+fn enum_member_value_computation() {
+    use crate::core::declared_types::get_type_of_symbol;
+    use crate::core::types::LiteralValue;
+    // Numeric: explicit `A = 1`, auto `B = 2`.
+    let p = StubProgram::parse_and_bind("/a.ts", "enum E { A = 1, B }");
+    let mut c = Checker::new();
+    let a = get_type_of_symbol(&mut c, &p, member_symbol(&p, "E", "A"), None);
+    let b = get_type_of_symbol(&mut c, &p, member_symbol(&p, "E", "B"), None);
+    assert_eq!(
+        c.get_type(a).literal_value(),
+        Some(&LiteralValue::Number(1.0.into()))
+    );
+    assert_eq!(
+        c.get_type(b).literal_value(),
+        Some(&LiteralValue::Number(2.0.into()))
+    );
+    // String member.
+    let p2 = StubProgram::parse_and_bind("/a.ts", "enum S { A = \"x\" }");
+    let mut c2 = Checker::new();
+    let sa = get_type_of_symbol(&mut c2, &p2, member_symbol(&p2, "S", "A"), None);
+    assert_eq!(
+        c2.get_type(sa).literal_value(),
+        Some(&LiteralValue::String("x".into()))
+    );
 }
 
 // Go: internal/checker/checker.go:Checker.getApparentType (4c identity)

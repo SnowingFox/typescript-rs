@@ -170,6 +170,17 @@ impl Checker {
             // reachable EQ/NE/Is/Truthy subset.
             return primitive_facts(strict, true, false);
         }
+        // A `symbol`/`unique symbol` value is always truthy and (strict)
+        // non-nullable (Go's `SymbolStrictFacts`/`SymbolFacts`). Same shape as
+        // an object: truthy, never falsy, no `Is*`.
+        if flags.intersects(TypeFlags::ES_SYMBOL_LIKE) {
+            return primitive_facts(strict, true, false);
+        }
+        // The non-primitive `object` type behaves like an object value (Go's
+        // object branch maps `NonPrimitive` to `ObjectStrictFacts`/`ObjectFacts`).
+        if flags.intersects(TypeFlags::NON_PRIMITIVE) {
+            return primitive_facts(strict, true, false);
+        }
         if flags.intersects(TypeFlags::VOID) {
             return VOID_FACTS;
         }
@@ -242,6 +253,60 @@ impl Checker {
     /// `NonNullable<T>` global alias). blocked-by: `unknownUnionType` + the `{}`
     /// empty-object / `NonNullable<T>` global alias (lib globals, P6).
     // Go: internal/checker/checker.go:Checker.GetNonNullableType / getAdjustedTypeWithFacts (NEUndefinedOrNull, reachable subset)
+    /// Adds `undefined` to `t` when `is_optional` and strictNullChecks is on
+    /// (Go's `addOptionalityEx`); otherwise returns `t` unchanged.
+    ///
+    /// This is what injects `| undefined` into the read type of an optional
+    /// property (`{ a?: number }` → `o.a` is `number | undefined`) and an
+    /// optional parameter (`function f(x?: number)` → `x` is `number |
+    /// undefined`). Outside strictNullChecks (or for a non-optional
+    /// declaration) it is the identity.
+    ///
+    /// Side effects: may allocate a union.
+    // Go: internal/checker/checker.go:Checker.addOptionalityEx
+    pub(crate) fn add_optionality_ex(
+        &mut self,
+        t: TypeId,
+        is_property: bool,
+        is_optional: bool,
+    ) -> TypeId {
+        if self.strict_null_checks() && is_optional {
+            return self.get_optional_type(t, is_property);
+        }
+        t
+    }
+
+    /// Returns `t | undefined`, the optional form of `t` (Go's `getOptionalType`).
+    ///
+    /// `is_property` selects `undefinedOrMissingType` vs `undefinedType`; with
+    /// `exactOptionalPropertyTypes` deferred, both are the plain `undefined`
+    /// type, so the result is `t | undefined` (already-optional `t` is returned
+    /// unchanged). Callers gate this on strictNullChecks via
+    /// [`add_optionality_ex`](Self::add_optionality_ex).
+    ///
+    /// Side effects: may allocate a union.
+    // Go: internal/checker/checker.go:Checker.getOptionalType
+    pub(crate) fn get_optional_type(&mut self, t: TypeId, _is_property: bool) -> TypeId {
+        // DEFER(phase-4-checker-C-D2): `exactOptionalPropertyTypes` makes the
+        // property form use `missingType` rather than `undefinedType`; the base
+        // behavior uses `undefinedType` for both. blocked-by: `missingType` +
+        // `exactOptionalPropertyTypes` option consumer.
+        let missing_or_undefined = self.undefined_type();
+        if t == missing_or_undefined {
+            return t;
+        }
+        // A union already led by `undefined`/missing is already optional.
+        if self
+            .get_type(t)
+            .union_types()
+            .and_then(|m| m.first().copied())
+            == Some(missing_or_undefined)
+        {
+            return t;
+        }
+        self.get_union_type(&[t, missing_or_undefined])
+    }
+
     pub(crate) fn get_non_null_type(&mut self, t: TypeId) -> TypeId {
         // Go: `GetNonNullableType` is the identity outside strictNullChecks (a
         // non-strict union never carries `null`/`undefined`).
