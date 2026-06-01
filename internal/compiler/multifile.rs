@@ -30,7 +30,8 @@
 //! blocked-by: the binder's cross-file `mergeSymbol`/`mergeSymbolTable` +
 //! triple-slash lib-reference resolution (P6-8).
 
-use std::rc::Rc;
+use std::cell::RefCell;
+use std::rc::{Rc, Weak};
 
 use rustc_hash::FxHashMap;
 use tsgo_ast::flow::{FlowList, FlowListId, FlowNode, FlowNodeId, FlowSwitchClauseData};
@@ -61,9 +62,27 @@ const FILE_INDEX_SHIFT: u32 = 24;
 ///
 /// Side effects: none (shares the program's arenas / symbols via `Rc`).
 // Go: internal/compiler/program.go:Program (per-file checking context)
+/// Cross-file resolution registry shared by every [`FileView`] of a program, so
+/// a per-file view (the context the checker pool actually drives) can still
+/// resolve a *sibling* file's view — needed when a declaration's nodes live in
+/// another file's arena (e.g. a lib type alias resolved lazily while checking a
+/// user file). The program holds the views as `Rc` (strong); the registry holds
+/// them as [`Weak`] so `FileView -> registry -> FileView` is not a reference
+/// cycle. Upgrades always succeed while the owning program is alive.
+struct ViewRegistry {
+    /// `[start, end)` merged-symbol-id range per file (parallel to `views`).
+    ranges: Vec<(u32, u32)>,
+    /// Back-pointers to each file's view, filled after all views are built.
+    views: RefCell<Vec<Weak<FileView>>>,
+}
+
 pub(crate) struct FileView {
     arena: Rc<NodeArena>,
     root: NodeId,
+    /// Shared cross-file resolution registry (see [`ViewRegistry`]); lets this
+    /// per-file view answer [`view_for_symbol`](BoundProgram::view_for_symbol) /
+    /// [`file_view`](BoundProgram::file_view) for sibling files.
+    registry: Rc<ViewRegistry>,
     /// The collision-free program file handle (see [`encode_file_handle`]); the
     /// diagnostics partition key, distinct from the raw arena `root`.
     handle: NodeId,
@@ -128,6 +147,30 @@ impl BoundProgram for FileView {
 
     fn compiler_options(&self) -> &CompilerOptions {
         &self.options
+    }
+
+    fn file_view(&self, file: NodeId) -> Option<Rc<dyn BoundProgram>> {
+        let index = (file.0 >> FILE_INDEX_SHIFT) as usize;
+        self.registry
+            .views
+            .borrow()
+            .get(index)?
+            .upgrade()
+            .map(|view| view as Rc<dyn BoundProgram>)
+    }
+
+    fn view_for_symbol(&self, symbol: SymbolId) -> Option<Rc<dyn BoundProgram>> {
+        let index = self
+            .registry
+            .ranges
+            .iter()
+            .position(|&(start, end)| symbol.0 >= start && symbol.0 < end)?;
+        self.registry
+            .views
+            .borrow()
+            .get(index)?
+            .upgrade()
+            .map(|view| view as Rc<dyn BoundProgram>)
     }
 }
 
@@ -229,12 +272,25 @@ impl MultiFileBoundProgram {
         }
         let merged_globals = Rc::new(merged_globals);
 
-        let mut views = Vec::with_capacity(bound.len());
+        // Per-file merged-symbol ranges (parallel to `views`), used to map a
+        // merged symbol back to its declaring file.
         let mut symbol_ranges = Vec::with_capacity(bound.len());
         for (i, file) in bound.iter().enumerate() {
             let off = offsets[i];
             let bind = file.bind_result().expect("bound");
             symbol_ranges.push((off, off + bind.symbols.len() as u32));
+        }
+        // The shared cross-file resolution registry: ranges are known now; the
+        // `views` weak back-pointers are filled after the views are built.
+        let registry = Rc::new(ViewRegistry {
+            ranges: symbol_ranges.clone(),
+            views: RefCell::new(Vec::with_capacity(bound.len())),
+        });
+
+        let mut views = Vec::with_capacity(bound.len());
+        for (i, file) in bound.iter().enumerate() {
+            let off = offsets[i];
+            let bind = file.bind_result().expect("bound");
             let root = file.node();
             let node_symbol: FxHashMap<NodeId, SymbolId> = bind
                 .node_symbol
@@ -249,6 +305,7 @@ impl MultiFileBoundProgram {
             views.push(Rc::new(FileView {
                 arena: file.arena_rc(),
                 root,
+                registry: Rc::clone(&registry),
                 handle: encode_file_handle(i, root),
                 symbols: Rc::clone(&merged_symbols),
                 globals: Rc::clone(&merged_globals),
@@ -261,6 +318,11 @@ impl MultiFileBoundProgram {
                 options: Rc::clone(&options),
             }));
         }
+
+        // Fill the registry's weak back-pointers now that every view exists, so
+        // a per-file view can resolve a sibling file's view (`view_for_symbol` /
+        // `file_view`). Weak avoids a `FileView -> registry -> FileView` cycle.
+        *registry.views.borrow_mut() = views.iter().map(Rc::downgrade).collect();
 
         MultiFileBoundProgram {
             views,

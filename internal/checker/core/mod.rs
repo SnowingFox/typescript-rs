@@ -32,7 +32,7 @@ use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tsgo_ast::{CheckFlags, NodeId};
+use tsgo_ast::{CheckFlags, NodeId, SymbolId};
 use tsgo_core::compileroptions::CompilerOptions;
 use tsgo_core::tristate::Tristate;
 
@@ -190,6 +190,13 @@ pub struct Checker {
     declared_type_links: SymbolLinks<DeclaredTypeLinks>,
     /// Lazily-built declared types for type-alias symbols.
     type_alias_links: SymbolLinks<TypeAliasLinks>,
+    /// Type-alias symbols whose declared type is currently being resolved, used
+    /// to break circular references (`type T = T[] | ...`): a re-entrant resolve
+    /// returns `errorType` instead of recursing forever. Mirrors Go's
+    /// `pushTypeResolution`/`popTypeResolution` circularity check for the
+    /// `DeclaredType` property.
+    // Go: internal/checker/checker.go:Checker.typeResolutions (DeclaredType)
+    type_aliases_resolving: rustc_hash::FxHashSet<SymbolId>,
     /// Lazily-computed types of value/property symbols.
     value_symbol_links: SymbolLinks<ValueSymbolLinks>,
     /// Checker-owned arena of synthesized (transient) symbols minted during
@@ -456,6 +463,7 @@ impl Checker {
             number_literal_types: FxHashMap::default(),
             declared_type_links: SymbolLinks::default(),
             type_alias_links: SymbolLinks::default(),
+            type_aliases_resolving: rustc_hash::FxHashSet::default(),
             value_symbol_links: SymbolLinks::default(),
             synthesized_symbols: RefCell::new(Vec::new()),
             synthesized_property_cache: RefCell::new(FxHashMap::default()),

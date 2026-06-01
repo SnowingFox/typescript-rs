@@ -61,6 +61,20 @@ pub fn get_declared_type_of_symbol(
     symbol: SymbolId,
     globals: Option<&SymbolTable>,
 ) -> TypeId {
+    // Resolve the declared type against the view of the file that DECLARES the
+    // symbol. A multi-file program may declare a type alias / enum / class /
+    // interface in a lib file whose declaration nodes are NOT in
+    // `program.arena()`; reading them through the current arena would index out
+    // of bounds. Mirrors `Checker::get_global_type`'s owning-view switch and is
+    // guarded by `file_handle()` so the switch happens at most once (the owning
+    // view returns itself for `symbol`, so no infinite recursion). For a
+    // single-file program `view_for_symbol` is `None` and this is a no-op.
+    if let Some(view) = program.view_for_symbol(symbol) {
+        if view.file_handle() != program.file_handle() {
+            let owner_globals = view.globals();
+            return get_declared_type_of_symbol(checker, view.as_ref(), symbol, owner_globals);
+        }
+    }
     let flags = program.symbol(symbol).flags;
     if flags.intersects(SymbolFlags::CLASS | SymbolFlags::INTERFACE) {
         return get_declared_type_of_class_or_interface(checker, program, symbol, globals);
@@ -128,16 +142,22 @@ pub fn get_constraint_of_type_parameter(
         .get_type(type_parameter)
         .as_type_parameter()
         .and_then(|d| d.symbol);
-    let constraint_node =
-        symbol.and_then(|sym| {
-            program.symbol(sym).declarations.iter().find_map(|&decl| {
-                match program.arena().data(decl) {
-                    NodeData::TypeParameterDeclaration(d) => d.constraint,
-                    _ => None,
-                }
+    // Read the type-parameter declaration (and resolve its constraint node)
+    // through the view of the file that DECLARES the symbol: the parameter may
+    // belong to a lib generic (e.g. `Array<T>`) whose nodes are not in the
+    // file-under-check's arena. For a single-file program this is `program`.
+    let owner = symbol.and_then(|sym| program.view_for_symbol(sym));
+    let prog: &dyn BoundProgram = owner.as_deref().unwrap_or(program);
+    let constraint_node = symbol.and_then(|sym| {
+        prog.symbol(sym)
+            .declarations
+            .iter()
+            .find_map(|&decl| match prog.arena().data(decl) {
+                NodeData::TypeParameterDeclaration(d) => d.constraint,
+                _ => None,
             })
-        });
-    let result = constraint_node.map(|node| get_type_from_type_node(checker, program, node, None));
+    });
+    let result = constraint_node.map(|node| get_type_from_type_node(checker, prog, node, None));
     checker
         .type_parameter_constraints
         .insert(type_parameter, result);
@@ -169,16 +189,19 @@ pub fn get_default_from_type_parameter(
         .get_type(type_parameter)
         .as_type_parameter()
         .and_then(|d| d.symbol);
-    let default_node =
-        symbol.and_then(|sym| {
-            program.symbol(sym).declarations.iter().find_map(|&decl| {
-                match program.arena().data(decl) {
-                    NodeData::TypeParameterDeclaration(d) => d.default_type,
-                    _ => None,
-                }
+    // Read through the declaring file's view (see `get_constraint_of_type_parameter`).
+    let owner = symbol.and_then(|sym| program.view_for_symbol(sym));
+    let prog: &dyn BoundProgram = owner.as_deref().unwrap_or(program);
+    let default_node = symbol.and_then(|sym| {
+        prog.symbol(sym)
+            .declarations
+            .iter()
+            .find_map(|&decl| match prog.arena().data(decl) {
+                NodeData::TypeParameterDeclaration(d) => d.default_type,
+                _ => None,
             })
-        });
-    let result = default_node.map(|node| get_type_from_type_node(checker, program, node, None));
+    });
+    let result = default_node.map(|node| get_type_from_type_node(checker, prog, node, None));
     checker
         .type_parameter_defaults
         .insert(type_parameter, result);
@@ -201,11 +224,13 @@ fn has_type_parameter_default(
     else {
         return false;
     };
-    program
-        .symbol(symbol)
+    // Read through the declaring file's view (see `get_constraint_of_type_parameter`).
+    let owner = program.view_for_symbol(symbol);
+    let prog: &dyn BoundProgram = owner.as_deref().unwrap_or(program);
+    prog.symbol(symbol)
         .declarations
         .iter()
-        .any(|&decl| match program.arena().data(decl) {
+        .any(|&decl| match prog.arena().data(decl) {
             NodeData::TypeParameterDeclaration(d) => d.default_type.is_some(),
             _ => false,
         })
@@ -826,6 +851,14 @@ fn get_declared_type_of_type_alias(
     {
         return cached;
     }
+    // Break circular references (`type T = T[] | ...`): if we are already
+    // resolving this alias's declared type, a re-entrant resolve returns
+    // `errorType` rather than recursing forever (Go's `pushTypeResolution`
+    // returning false for the `DeclaredType` property -> circularity ->
+    // `errorType`; the 2456 diagnostic itself is DEFER'd).
+    if !checker.type_aliases_resolving.insert(symbol) {
+        return checker.error_type();
+    }
     let type_node = program
         .symbol(symbol)
         .declarations
@@ -845,6 +878,7 @@ fn get_declared_type_of_type_alias(
         Some(node) => get_type_from_type_node(checker, program, node, globals),
         None => checker.error_type(),
     };
+    checker.type_aliases_resolving.remove(&symbol);
     checker.type_alias_links.get(symbol).declared_type = Some(t);
     t
 }
