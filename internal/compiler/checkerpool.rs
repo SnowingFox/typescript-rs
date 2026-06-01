@@ -224,6 +224,19 @@ impl CompilerCheckerPool {
     /// `Rc` program, so the per-file subsets are driven sequentially.
     // Go: internal/compiler/checkerpool.go:forEachCheckerGroupDo + program.go:getDiagnostics
     pub fn collect_diagnostics(&mut self) -> Vec<Diagnostic> {
+        self.collect_diagnostics_excluding(&[])
+    }
+
+    /// Like [`Self::collect_diagnostics`], but skips the bound files whose index
+    /// is `true` in `exclude` (parallel to [`BoundProgram::source_files`] order).
+    /// Used to omit the auto-included default-library files: `tsc` does not
+    /// report semantic diagnostics located in `lib.*.d.ts`, and the partial
+    /// checker would otherwise false-positive on their advanced constructs (and
+    /// such a lib-positioned diagnostic, rendered against a user file, panics the
+    /// diagnostic writer with an out-of-bounds slice). An empty `exclude`
+    /// (or shorter than the file list) excludes nothing.
+    // Go: internal/compiler/program.go:getDiagnostics (skips default-lib files)
+    pub fn collect_diagnostics_excluding(&mut self, exclude: &[bool]) -> Vec<Diagnostic> {
         // The K checkers share one `Rc<dyn BoundProgram>`; clone the handle so it
         // does not borrow `self` while a checker is driven with `&mut`.
         let Some(program) = self.program.clone() else {
@@ -232,6 +245,9 @@ impl CompilerCheckerPool {
         let mut diagnostics = Vec::new();
         // Iterate handles in input file order for a deterministic result.
         for (file_index, handle) in program.source_files().into_iter().enumerate() {
+            if exclude.get(file_index).copied().unwrap_or(false) {
+                continue;
+            }
             let checker_index = self.checker_index_for_file(file_index).unwrap_or(0);
             diagnostics.extend(
                 self.checkers[checker_index]

@@ -50,8 +50,14 @@ pub fn emit_files_and_report_errors(
         all_diagnostics.push(ReportedDiagnostic::from_options(options_diagnostic, locale));
     }
 
-    // Per-file syntactic diagnostics.
+    // Per-file syntactic diagnostics — but NOT for the auto-included
+    // default-library files: `tsc` does not report diagnostics located in
+    // `lib.*.d.ts`, and the partial parser would otherwise surface its own
+    // failures on advanced lib syntax as user-facing errors.
     for file in program.source_files() {
+        if program.is_default_library_file(file) {
+            continue;
+        }
         for diagnostic in file.diagnostics() {
             all_diagnostics.push(ReportedDiagnostic::from_parser(
                 diagnostic,

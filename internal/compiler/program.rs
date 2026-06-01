@@ -321,7 +321,58 @@ impl Program {
         // Bind every file and build the pool's checkers (idempotent), then drive
         // checking through the pool.
         self.create_checkers();
-        self.checker_pool.collect_diagnostics()
+        // Exclude the auto-included default-library files: `tsc` does not report
+        // semantic diagnostics located in `lib.*.d.ts`, and this partial checker
+        // would otherwise false-positive on their advanced constructs — a
+        // lib-positioned diagnostic rendered against a user file also panics the
+        // diagnostic writer (out-of-bounds slice). A bound file is a library file
+        // iff it lives under the default-library directory (the directory of the
+        // resolved default lib). Parallel to the bound-program's source-file order
+        // (`MultiFileBoundProgram::new` keeps the `processed.files()` order,
+        // filtered to bound files).
+        let lib_dir = self.default_library_directory();
+        let exclude: Vec<bool> = self
+            .processed
+            .files()
+            .iter()
+            .filter(|f| f.is_bound())
+            .map(|f| match &lib_dir {
+                Some(dir) if !dir.is_empty() => f.file_name().starts_with(dir.as_str()),
+                _ => false,
+            })
+            .collect();
+        self.checker_pool.collect_diagnostics_excluding(&exclude)
+    }
+
+    /// Reports whether `file` is one of the auto-included default-library files
+    /// (`lib.*.d.ts`) — i.e. it lives under the default-library directory (the
+    /// directory of the resolved default lib). `tsc` does not report syntactic or
+    /// semantic diagnostics located in default-library files; this is the reachable
+    /// proxy for Go's `Program.isSourceFileDefaultLibrary` (a per-file flag set at
+    /// load time, which this port does not yet thread through `ParsedFile`).
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/compiler/program.go:Program.isSourceFileDefaultLibrary
+    pub fn is_default_library_file(&self, file: &ParsedFile) -> bool {
+        let Some(lib_dir) = self.default_library_directory() else {
+            return false;
+        };
+        !lib_dir.is_empty() && file.file_name().starts_with(lib_dir.as_str())
+    }
+
+    /// The directory (with trailing `/`) that the default-library files live in,
+    /// derived from the resolved default lib's path, or `None` when no default lib
+    /// was loaded.
+    ///
+    /// Side effects: none (pure).
+    fn default_library_directory(&self) -> Option<String> {
+        self.processed.default_lib_file().map(|f| {
+            let name = f.file_name();
+            match name.rfind('/') {
+                Some(slash) => name[..=slash].to_string(),
+                None => String::new(),
+            }
+        })
     }
 
     /// The loaded default library file (the lib included automatically from the
