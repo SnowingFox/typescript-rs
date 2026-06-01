@@ -1,0 +1,60 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "26240a122edf",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-01T02:46:07.999629Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "internal/checker/core/check_test.rs",
+    "internal/checker/core/nodebuilder.rs",
+    "internal/checker/core/relations.rs",
+    "internal/checker/core/relations_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-opus-4-8-thinking-xhigh-fast",
+  "turn_id": "43a3cd1f66f6",
+  "checkpoint_transcript_start": 497,
+  "transcript_lines_at_start": 497,
+  "session_metrics": {
+    "turn_count": 100,
+    "context_tokens": 453664,
+    "context_window_size": 272000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-01T02:46:07.957715Z",
+    "agent_lines": 115,
+    "agent_removed": 1,
+    "human_added": 1098,
+    "human_modified": 33,
+    "human_removed": 0,
+    "total_committed": 1217,
+    "total_lines_changed": 1266,
+    "agent_percentage": 9.162717219589258,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 264,
+      "user_lines_removed": 3,
+      "agent_lines_added": 29,
+      "agent_lines_removed": 1,
+      "user_added_per_file": {
+        "internal/checker/core/check_test.rs": 46,
+        "internal/checker/core/relations.rs": 218
+      },
+      "user_removed_per_file": {
+        "internal/checker/core/relations.rs": 3
+      }
+    }
+  ]
+}
