@@ -420,3 +420,18 @@ fn could_contain_type_variables_classifies_types() {
     let array_of_num = c.create_type_reference(array_target, vec![num]);
     assert!(!c.could_contain_type_variables(array_of_num));
 }
+
+// Go: internal/checker/checker.go:Checker.couldContainTypeVariables (Instantiable)
+// A deferred `keyof T` and `T[K]` are instantiable, so both could contain type
+// variables (this is what lets a generic `: T[K]` return type be re-instantiated
+// after call inference).
+#[test]
+fn could_contain_type_variables_index_and_indexed_access() {
+    use crate::core::types::{AccessFlags, IndexFlags};
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let key = c.new_index_type(tp, IndexFlags::NONE); // keyof T
+    assert!(c.could_contain_type_variables(key));
+    let access = c.new_indexed_access_type(tp, key, AccessFlags::NONE); // T[keyof T]
+    assert!(c.could_contain_type_variables(access));
+}

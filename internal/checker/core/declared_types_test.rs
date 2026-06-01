@@ -742,6 +742,112 @@ fn method_member_call_signature_return_type() {
     assert_eq!(ret, c.string_type());
 }
 
+// Go: internal/checker/checker.go:Checker.getIndexType / getLiteralTypeFromProperties
+// `keyof` over a concrete object type is the union of its property-name string
+// literal types: `keyof { a; b }` == `"a" | "b"`.
+#[test]
+fn get_index_type_of_object_is_union_of_name_literals() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface I {\n  a: number;\n  b: string;\n}");
+    let mut c = Checker::new();
+    let i = get_declared_type_of_symbol(&mut c, &p, local(&p, "I"), None);
+    let key = get_index_type(&mut c, i);
+    let a = c.get_string_literal_type("a");
+    let b = c.get_string_literal_type("b");
+    let expected = c.get_union_type(&[a, b]);
+    assert_eq!(key, expected, "keyof {{ a; b }} should be \"a\" | \"b\"");
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromTypeOperatorNode (keyof arm)
+// A `keyof I` type-operator node resolves to the index type of `I`.
+#[test]
+fn keyof_type_operator_node_resolves_to_index_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I {\n  a: number;\n  b: string;\n}\ntype K = keyof I;",
+    );
+    let mut c = Checker::new();
+    let globals = p.locals(p.root());
+    let k = get_declared_type_of_symbol(&mut c, &p, local(&p, "K"), globals);
+    let a = c.get_string_literal_type("a");
+    let b = c.get_string_literal_type("b");
+    let expected = c.get_union_type(&[a, b]);
+    assert_eq!(k, expected, "type K = keyof I should be \"a\" | \"b\"");
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromIndexedAccessTypeNode
+// An `I["a"]` indexed-access type node resolves to the named property's type.
+#[test]
+fn indexed_access_type_node_resolves_property() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I {\n  a: number;\n}\ntype A = I[\"a\"];",
+    );
+    let mut c = Checker::new();
+    let globals = p.locals(p.root());
+    let a_alias = get_declared_type_of_symbol(&mut c, &p, local(&p, "A"), globals);
+    assert_eq!(
+        a_alias,
+        c.number_type(),
+        "type A = I[\"a\"] should be number"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getIndexType / getIndexTypeForGenericType
+// `keyof T` for a type parameter defers to an interned `Index` type whose
+// target is the type parameter; the same target re-uses the cached id.
+#[test]
+fn get_index_type_of_type_parameter_is_deferred_index() {
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let key = get_index_type(&mut c, tp);
+    assert!(c.get_type(key).flags().contains(TypeFlags::INDEX));
+    assert_eq!(c.get_type(key).as_index().expect("index").target, tp);
+    // Interned: a second `keyof T` over the same target is the same id.
+    assert_eq!(get_index_type(&mut c, tp), key);
+}
+
+// Go: internal/checker/checker.go:Checker.getIndexedAccessTypeOrUndefined (defer generic)
+// `T[K]` over generic operands defers to an interned `IndexedAccess` type whose
+// objectType/indexType are the operands; the same pair re-uses the cached id.
+#[test]
+fn get_indexed_access_type_generic_is_deferred() {
+    let p = StubProgram::parse_and_bind("/a.ts", "");
+    let mut c = Checker::new();
+    let t = c.new_type_parameter(None);
+    let k = c.new_type_parameter(None);
+    let access = get_indexed_access_type(&mut c, &p, t, k).expect("deferred T[K]");
+    assert!(c
+        .get_type(access)
+        .flags()
+        .contains(TypeFlags::INDEXED_ACCESS));
+    let d = c
+        .get_type(access)
+        .as_indexed_access()
+        .expect("indexed access");
+    assert_eq!(d.object_type, t);
+    assert_eq!(d.index_type, k);
+    // Interned: a second `T[K]` over the same operands is the same id.
+    assert_eq!(get_indexed_access_type(&mut c, &p, t, k).unwrap(), access);
+}
+
+// Go: internal/checker/checker.go:Checker.getIndexedAccessTypeOrUndefined (union index)
+// `T["a" | "b"]` distributes over the union index to `T["a"] | T["b"]`.
+#[test]
+fn get_indexed_access_type_distributes_union_index() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface I {\n  a: number;\n  b: string;\n}");
+    let mut c = Checker::new();
+    let i = get_declared_type_of_symbol(&mut c, &p, local(&p, "I"), None);
+    let a = c.get_string_literal_type("a");
+    let b = c.get_string_literal_type("b");
+    let union_index = c.get_union_type(&[a, b]);
+    let result = get_indexed_access_type(&mut c, &p, i, union_index).expect("I[\"a\" | \"b\"]");
+    let expected = c.get_union_type(&[c.number_type(), c.string_type()]);
+    assert_eq!(
+        result, expected,
+        "I[\"a\" | \"b\"] should be number | string"
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.getTypeFromTypeReference (type parameter in scope)
 // A bare `T` type reference inside a generic interface's member resolves to the
 // interface's type parameter, so a `value: T` member of `Iterator<T>` carries

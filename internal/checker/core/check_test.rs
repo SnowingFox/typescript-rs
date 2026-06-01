@@ -7071,3 +7071,96 @@ fn generic_call_contextual_return_inference() {
         "Type 'Array<number>' is not assignable to type 'Array<string>'."
     );
 }
+
+// C-C1 slice 1: `keyof` over a concrete object type is the union of its
+// property-name literals, so a value not among them reports 2322.
+// Verified against `cmd/tsgo --strict`: only line 3 (`const k2: K = "c"`) reports
+// `(3,7): error TS2322: Type '"c"' is not assignable to type '"a" | "b"'.`
+// (line 2 `const k: K = "a"` is accepted).
+// Go: internal/checker/checker.go:Checker.getIndexType / getLiteralTypeFromProperties
+#[test]
+fn keyof_concrete_object_union_of_name_literals_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type K = keyof { a: number; b: string };\nconst k: K = \"a\";\nconst k2: K = \"c\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '\"c\"' is not assignable to type '\"a\" | \"b\"'."
+    );
+}
+
+// C-C1 slice 2: a concrete indexed-access type node `T["a"]` resolves to the
+// named property's type (`number`), so a `string` initializer reports 2322.
+// Verified against `cmd/tsgo --strict`: only line 3 (`const y: T["a"] = "s"`)
+// reports `(3,7): error TS2322: Type 'string' is not assignable to type 'number'.`
+// Go: internal/checker/checker.go:Checker.getTypeFromIndexedAccessTypeNode
+#[test]
+fn concrete_indexed_access_type_node_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = { a: number };\nconst x: T[\"a\"] = 1;\nconst y: T[\"a\"] = \"s\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// C-C1 slice 3 (headline): `keyof` + indexed-access + generic inference. A call
+// `get({ a: 1, b: "x" }, "a")` infers `T = { a: number; b: string }`, `K = "a"`
+// (kept literal by the `keyof`-primitive constraint), so the return type `T[K]`
+// resolves to `number`; assigning that to `string` reports 2322.
+// Verified against `cmd/tsgo --strict`: only line 3 (`const s: string = r`)
+// reports `(3,7): error TS2322: Type 'number' is not assignable to type 'string'.`
+// Go: internal/checker/checker.go:Checker.getIndexedAccessType + inferTypeArguments
+#[test]
+fn generic_keyof_indexed_access_call_inference_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function get<T, K extends keyof T>(o: T, k: K): T[K] { return o[k]; }\nconst r = get({ a: 1, b: \"x\" }, \"a\");\nconst s: string = r;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-C1 slice 5: indexing a generic object with a non-key. `get({ a: 1 }, "b")`
+// infers `T = { a: number }`; the constraint `K extends keyof T` instantiates to
+// `keyof { a: number }` = `"a"`, so the inferred `K = "b"` is clamped to `"a"`
+// and the argument `"b"` is not assignable to the parameter `"a"` -> 2345.
+// Verified against `cmd/tsgo --strict`: line 2 reports `(2,25): error TS2345:
+// Argument of type '"b"' is not assignable to parameter of type '"a"'.`
+// Go: internal/checker/checker.go:Checker.getInferredType (constraint clamp) + isSignatureApplicable
+#[test]
+fn generic_keyof_index_with_non_key_reports_2345_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function get<T, K extends keyof T>(o: T, k: K): T[K] { return o[k]; }\nconst r = get({ a: 1 }, \"b\");",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+    assert_eq!(
+        diags[0].message,
+        "Argument of type '\"b\"' is not assignable to parameter of type '\"a\"'."
+    );
+}

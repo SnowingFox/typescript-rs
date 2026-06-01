@@ -431,7 +431,10 @@ impl Checker {
     // Go: internal/checker/checker.go:Checker.couldContainTypeVariables
     pub(crate) fn could_contain_type_variables(&self, t: TypeId) -> bool {
         let flags = self.get_type(t).flags();
-        if flags.contains(TypeFlags::TYPE_PARAMETER) {
+        // Any instantiable type (a type parameter, a `keyof T` index, a `T[K]`
+        // indexed access, and — once ported — conditionals/substitutions/
+        // template-literals/string-mappings) could contain type variables.
+        if flags.intersects(TypeFlags::INSTANTIABLE) {
             return true;
         }
         if flags.intersects(TypeFlags::UNION | TypeFlags::INTERSECTION) {
@@ -649,18 +652,44 @@ impl Checker {
                 .unwrap_or(self.unknown_type)
         };
         // Apply the constraint: a covariantly-inferred type that violates the
-        // constraint is replaced by the (instantiated) constraint type.
-        // DEFER(phase-4-checker-C-C): `getTypeWithThisArgument`, the
-        // return-type `filteredByConstraint` speculation, and the
-        // `nonFixingMapper` constraint instantiation. blocked-by: `this`-types +
-        // return-type inference + lazy inference mappers.
+        // (instantiated) constraint is replaced by the constraint type. The
+        // constraint is instantiated through the inferences made so far (Go's
+        // `nonFixingMapper`), so a constraint that references another type
+        // parameter resolves — e.g. `K extends keyof T` becomes `keyof
+        // <inferred T>` (a concrete key union), letting an inferred literal key
+        // be checked against it instead of against a deferred `keyof T`.
+        //
+        // DEFER(phase-4-checker-C-C2): `getTypeWithThisArgument` and the
+        // return-type `filteredByConstraint` speculation. blocked-by: `this`-
+        // types + return-type inference speculation.
         if let Some(constraint) = get_constraint_of_type_parameter(self, program, type_parameter) {
-            if !self.is_type_assignable_to(program, inferred, constraint) {
-                inferred = constraint;
+            let mapper = self.inference_context_mapper(context);
+            let instantiated_constraint = self.instantiate_type(constraint, &mapper);
+            if !self.is_type_assignable_to(program, inferred, instantiated_constraint) {
+                inferred = instantiated_constraint;
             }
         }
         context.inferences[index].inferred_type = Some(inferred);
         inferred
+    }
+
+    /// Builds the mapper from each type parameter of `context` to the type
+    /// inferred for it so far (or the type parameter itself when not yet
+    /// resolved), used to instantiate a type-parameter constraint during
+    /// inference (Go's `context.nonFixingMapper`, eager reachable form).
+    ///
+    /// Side effects: none (reads the context's current inferences).
+    // Go: internal/checker/inference.go:Checker.createInferenceContextWorker (nonFixingMapper)
+    fn inference_context_mapper(&self, context: &InferenceContext) -> TypeMapper {
+        let targets: Vec<TypeId> = context
+            .inferences
+            .iter()
+            .map(|inf| inf.inferred_type.unwrap_or(inf.type_parameter))
+            .collect();
+        TypeMapper::Array {
+            sources: context.type_parameters.clone(),
+            targets,
+        }
     }
 
     /// The covariant inference for a non-empty candidate set: the common

@@ -1,7 +1,21 @@
 use super::*;
+use crate::core::declared_types::{
+    get_declared_type_of_symbol, get_index_type, get_indexed_access_type,
+};
+use crate::core::program::BoundProgram;
 use crate::core::signatures::{Signature, SignatureFlags};
-use crate::core::types::ObjectFlags;
+use crate::core::test_support::StubProgram;
+use crate::core::types::{ObjectFlags, TypeFlags};
 use crate::core::Checker;
+use std::rc::Rc;
+use tsgo_ast::SymbolId;
+
+fn local(p: &StubProgram, name: &str) -> SymbolId {
+    *p.locals(p.root())
+        .expect("locals")
+        .get(name)
+        .unwrap_or_else(|| panic!("missing {name}"))
+}
 
 // Go: internal/checker/mapper.go:newTypeMapper
 #[test]
@@ -294,4 +308,57 @@ fn instantiate_signature_maps_return_type() {
         Some(c.number_type())
     );
     assert_eq!(c.signature(inst).target, Some(id));
+}
+
+// Go: internal/checker/checker.go:instantiateTypeWorker (TypeFlagsIndex arm)
+// Instantiating `keyof T` substitutes `T` then recomputes `keyof`, so with
+// `T -> { a; b }` it yields `"a" | "b"`.
+#[test]
+fn instantiate_type_index_recomputes_keyof() {
+    let p = Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I {\n  a: number;\n  b: string;\n}",
+    ));
+    let mut c = Checker::new_checker(p.clone());
+    let tp = c.new_type_parameter(None);
+    let key = get_index_type(&mut c, tp); // keyof T (deferred)
+    assert!(c.get_type(key).flags().contains(TypeFlags::INDEX));
+    let i = get_declared_type_of_symbol(&mut c, &*p, local(&p, "I"), None);
+    let mapper = TypeMapper::unary(tp, i);
+    let result = c.instantiate_type(key, &mapper);
+    let a = c.get_string_literal_type("a");
+    let b = c.get_string_literal_type("b");
+    let expected = c.get_union_type(&[a, b]);
+    assert_eq!(result, expected, "keyof T with T -> I is \"a\" | \"b\"");
+}
+
+// Go: internal/checker/checker.go:instantiateTypeWorker (TypeFlagsIndexedAccess arm)
+// Instantiating `T[K]` substitutes both operands then re-resolves the access, so
+// with `T -> { a: number }, K -> "a"` it yields `number`.
+#[test]
+fn instantiate_type_indexed_access_resolves_property() {
+    let p = Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I {\n  a: number;\n  b: string;\n}",
+    ));
+    let mut c = Checker::new_checker(p.clone());
+    let t = c.new_type_parameter(None);
+    let k = c.new_type_parameter(None);
+    let access = get_indexed_access_type(&mut c, &*p, t, k).expect("T[K] deferred");
+    assert!(c
+        .get_type(access)
+        .flags()
+        .contains(TypeFlags::INDEXED_ACCESS));
+    let i = get_declared_type_of_symbol(&mut c, &*p, local(&p, "I"), None);
+    let a = c.get_string_literal_type("a");
+    let mapper = TypeMapper::Array {
+        sources: vec![t, k],
+        targets: vec![i, a],
+    };
+    let result = c.instantiate_type(access, &mapper);
+    assert_eq!(
+        result,
+        c.number_type(),
+        "T[K] with T -> I, K -> \"a\" is number"
+    );
 }

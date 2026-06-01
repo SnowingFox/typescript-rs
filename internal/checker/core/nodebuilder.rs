@@ -91,6 +91,18 @@ pub fn type_to_string(checker: &mut Checker, program: &dyn BoundProgram, ty: Typ
     {
         return serialize_tuple(checker, program, ty);
     }
+    // A deferred `keyof X` index type prints `keyof <operand>`, naming the
+    // operand through the program-aware printer.
+    if let Some(d) = checker.get_type(ty).as_index().cloned() {
+        let target = type_to_string(checker, program, d.target);
+        return format!("keyof {target}");
+    }
+    // A deferred `X[Y]` indexed-access type prints `<object>[<index>]`.
+    if let Some(d) = checker.get_type(ty).as_indexed_access().cloned() {
+        let object = type_to_string(checker, program, d.object_type);
+        let index = type_to_string(checker, program, d.index_type);
+        return format!("{object}[{index}]");
+    }
     let symbol = checker.get_type(ty).symbol;
     let object_info = match &checker.get_type(ty).data {
         TypeData::Object(o) => Some((o.target, o.resolved_type_arguments.clone())),

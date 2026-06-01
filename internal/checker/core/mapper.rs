@@ -323,9 +323,46 @@ impl Checker {
             // needs instantiated symbol types (4e).
             return t;
         }
-        // DEFER(phase-4-checker-4e+): index/indexed-access/conditional/
-        // template-literal/substitution instantiation.
-        // blocked-by: those type constructors land across 4e+.
+        // `keyof X`: instantiate the target, then recompute `keyof` over it, so
+        // `keyof T` with `T -> { a }` becomes `"a"` (Go's index arm).
+        if flags.contains(TypeFlags::INDEX) {
+            let target = self.get_type(t).as_index().expect("index type").target;
+            let instantiated_target = self.instantiate_type(target, mapper);
+            return super::declared_types::get_index_type(self, instantiated_target);
+        }
+        // `X[Y]`: instantiate both operands, then re-resolve the indexed access,
+        // so `T[K]` with `T -> { a: number }, K -> "a"` becomes `number` (Go's
+        // indexed-access arm).
+        if flags.contains(TypeFlags::INDEXED_ACCESS) {
+            let d = self
+                .get_type(t)
+                .as_indexed_access()
+                .expect("indexed access type")
+                .clone();
+            let object_type = self.instantiate_type(d.object_type, mapper);
+            let index_type = self.instantiate_type(d.index_type, mapper);
+            // The property resolution path needs the bound program (to resolve
+            // member/symbol types); it is the retained program in real checking.
+            // A deferred re-form needs no program, so when the access stays
+            // generic the result is interned without one.
+            return match self.retained_program() {
+                Some(program) => super::declared_types::get_indexed_access_type(
+                    self,
+                    program.as_ref(),
+                    object_type,
+                    index_type,
+                )
+                // Go: `getIndexedAccessTypeEx` with no access node yields
+                // `unknownType` when nothing resolves.
+                .unwrap_or_else(|| self.unknown_type()),
+                // No retained program (intrinsic-only checker): only the
+                // deferred path is reachable, so re-form the indexed access.
+                None => self.new_indexed_access_type(object_type, index_type, d.access_flags),
+            };
+        }
+        // DEFER(phase-4-checker-C-C2+): conditional/template-literal/substitution
+        // and string-mapping instantiation.
+        // blocked-by: those type constructors land across C-C2/C-C3.
         t
     }
 

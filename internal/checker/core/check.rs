@@ -4785,17 +4785,36 @@ impl Checker {
     }
 
     // Reports whether `t` could contain top-level singleton (unit) types in a
-    // way meaningful to error reporting (Go's `typeCouldHaveTopLevelSingletonTypes`,
-    // 4m subset). `boolean` is excluded by design; unit/template-literal/
-    // string-mapping types qualify.
+    // way meaningful to error reporting (Go's `typeCouldHaveTopLevelSingletonTypes`).
+    // `boolean` (a `true | false` union) is excluded by design; a union /
+    // intersection qualifies when any constituent does, so a literal-union target
+    // (e.g. `"a" | "b"`, the result of `keyof`) keeps a non-member source literal
+    // un-generalized in the assignability error (`"c"`, not `string`).
     //
-    // DEFER(phase-4-checker-4m+): union/intersection members and instantiable
-    // constraints. blocked-by: constraint resolution + union iteration here.
+    // DEFER(phase-4-checker-C-C2): the instantiable-constraint arm
+    // (`getConstraintOfType`) and `isPatternLiteralType`. blocked-by: constraint
+    // resolution over instantiable types + pattern (template) literal types.
     // Go: internal/checker/relater.go:Checker.typeCouldHaveTopLevelSingletonTypes(1302)
     fn type_could_have_top_level_singleton_types(&self, t: TypeId) -> bool {
         let f = self.get_type(t).flags();
-        if f.intersects(TypeFlags::BOOLEAN) {
+        // `boolean` is `true | false` but is not a useful singleton for errors.
+        // (This port represents `boolean` as a plain union with no `BOOLEAN`
+        // flag bit, so compare against the interned boolean type directly.)
+        if f.intersects(TypeFlags::BOOLEAN) || t == self.boolean_type {
             return false;
+        }
+        if f.intersects(TypeFlags::UNION_OR_INTERSECTION) {
+            let members = if let Some(m) = self.get_type(t).union_types() {
+                m.to_vec()
+            } else {
+                self.get_type(t)
+                    .intersection_types()
+                    .unwrap_or(&[])
+                    .to_vec()
+            };
+            return members
+                .iter()
+                .any(|&m| self.type_could_have_top_level_singleton_types(m));
         }
         f.intersects(TypeFlags::UNIT | TypeFlags::TEMPLATE_LITERAL | TypeFlags::STRING_MAPPING)
     }

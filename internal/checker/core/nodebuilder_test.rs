@@ -31,6 +31,22 @@ fn type_to_string_named_interface() {
     assert_eq!(type_to_string(&mut c, &p, foo), "Foo");
 }
 
+// Go: internal/checker/checker.go:Checker.typeToString (Index / IndexedAccess)
+#[test]
+fn type_to_string_index_and_indexed_access() {
+    use crate::core::types::{AccessFlags, IndexFlags};
+    let p = StubProgram::parse_and_bind("/a.ts", "");
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    // `keyof T` prints with the `keyof` operator.
+    let key = c.new_index_type(tp, IndexFlags::NONE);
+    assert_eq!(type_to_string(&mut c, &p, key), "keyof T");
+    // `T["a"]` prints in bracket form with the quoted literal index.
+    let a = c.get_string_literal_type("a");
+    let access = c.new_indexed_access_type(tp, a, AccessFlags::NONE);
+    assert_eq!(type_to_string(&mut c, &p, access), "T[\"a\"]");
+}
+
 // Go: internal/checker/checker.go:Checker.typeToString (type reference)
 #[test]
 fn type_to_string_type_reference() {

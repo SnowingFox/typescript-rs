@@ -224,6 +224,15 @@ pub struct Checker {
     /// cached id rather than a fresh allocation each time. C-B3 adds this as the
     /// reachable form of Go's `(type, mapper)` instantiation cache.
     type_reference_cache: FxHashMap<(TypeId, Vec<TypeId>), TypeId>,
+    /// Interned deferred `keyof T` index types over a generic target, keyed by
+    /// the target type id (Go's `cachedTypes[CachedTypeKindIndexType]`). Gives
+    /// `keyof T` a stable id so it compares identically across resolutions.
+    index_types: FxHashMap<TypeId, TypeId>,
+    /// Interned deferred `T[K]` indexed-access types, keyed by `(object, index)`
+    /// (Go's `indexedAccessTypes` keyed by `getIndexedAccessKey`). The reachable
+    /// subset always has `AccessFlags::NONE`, so the flags are not part of the
+    /// key.
+    indexed_access_types: FxHashMap<(TypeId, TypeId), TypeId>,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -380,6 +389,8 @@ impl Checker {
             types,
             symbol_reference_links: SymbolLinks::default(),
             global_types: FxHashMap::default(),
+            index_types: FxHashMap::default(),
+            indexed_access_types: FxHashMap::default(),
             type_parameter_constraints: FxHashMap::default(),
             type_parameter_defaults: FxHashMap::default(),
             union_types,
@@ -772,6 +783,18 @@ impl Checker {
             // blocked-by: node builder (`nodebuilderimpl.go`) ships in 4j.
             TypeData::Object(_) => "{ ... }".to_string(),
             TypeData::TypeParameter(_) => "T".to_string(),
+            // A `keyof X` index type. The program-less printer cannot name a
+            // type parameter target faithfully, so it prints the operator with
+            // the recursive (placeholder) target name; the program-aware
+            // `nodebuilder::type_to_string` renders the proper `keyof T`.
+            TypeData::Index(d) => format!("keyof {}", self.type_to_string(d.target)),
+            // A `T[K]` indexed-access type, printed `object[index]` (the
+            // program-aware printer names the operands faithfully).
+            TypeData::IndexedAccess(d) => format!(
+                "{}[{}]",
+                self.type_to_string(d.object_type),
+                self.type_to_string(d.index_type)
+            ),
         }
     }
 
@@ -796,6 +819,64 @@ impl Checker {
                 symbol,
                 constraint: None,
                 is_this_type: false,
+            }),
+        )
+    }
+
+    /// Allocates a deferred `keyof target` index type with `index_flags`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{Checker, IndexFlags, TypeFlags};
+    /// let mut c = Checker::new();
+    /// let tp = c.new_type_parameter(None);
+    /// let k = c.new_index_type(tp, IndexFlags::NONE);
+    /// assert!(c.get_type(k).flags().contains(TypeFlags::INDEX));
+    /// assert_eq!(c.get_type(k).as_index().unwrap().target, tp);
+    /// ```
+    ///
+    /// Side effects: mutates the checker's type arena.
+    // Go: internal/checker/checker.go:Checker.newIndexType
+    pub fn new_index_type(&mut self, target: TypeId, index_flags: types::IndexFlags) -> TypeId {
+        self.types.alloc(
+            TypeFlags::INDEX,
+            ObjectFlags::empty(),
+            None,
+            TypeData::Index(types::IndexType {
+                target,
+                index_flags,
+            }),
+        )
+    }
+
+    /// Allocates a deferred `object_type[index_type]` indexed-access type.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{AccessFlags, Checker, TypeFlags};
+    /// let mut c = Checker::new();
+    /// let o = c.new_type_parameter(None);
+    /// let i = c.new_type_parameter(None);
+    /// let a = c.new_indexed_access_type(o, i, AccessFlags::NONE);
+    /// assert!(c.get_type(a).flags().contains(TypeFlags::INDEXED_ACCESS));
+    /// ```
+    ///
+    /// Side effects: mutates the checker's type arena.
+    // Go: internal/checker/checker.go:Checker.newIndexedAccessType
+    pub fn new_indexed_access_type(
+        &mut self,
+        object_type: TypeId,
+        index_type: TypeId,
+        access_flags: types::AccessFlags,
+    ) -> TypeId {
+        self.types.alloc(
+            TypeFlags::INDEXED_ACCESS,
+            ObjectFlags::empty(),
+            None,
+            TypeData::IndexedAccess(types::IndexedAccessType {
+                object_type,
+                index_type,
+                access_flags,
             }),
         )
     }

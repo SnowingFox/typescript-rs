@@ -262,6 +262,81 @@ bitflags::bitflags! {
     }
 }
 
+bitflags::bitflags! {
+    /// Modifiers on a `keyof` (index) type operation.
+    ///
+    /// Mirrors Go `IndexFlags` (a `uint32` bit set), passed through
+    /// `getIndexType`/`getIndexTypeForGenericType` to control which key kinds
+    /// are reported and whether string index signatures are elided. The
+    /// reachable subset only ever uses [`IndexFlags::NONE`]; the others are kept
+    /// for 1:1 fidelity with the Go signature.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::IndexFlags;
+    /// assert!(IndexFlags::NONE.is_empty());
+    /// assert_eq!(IndexFlags::STRINGS_ONLY.bits(), 1);
+    /// ```
+    ///
+    /// Side effects: none (pure value type).
+    // Go: internal/checker/types.go:IndexFlags
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+    pub struct IndexFlags: u32 {
+        /// No modifiers (the default `keyof T`).
+        const NONE = 0;
+        /// Report only string keys (`keyof` in a `for-in`/mapped-string context).
+        const STRINGS_ONLY = 1 << 0;
+        /// Elide string index signatures from the result.
+        const NO_INDEX_SIGNATURES = 1 << 1;
+        /// Skip the generic-reducible-union deferral check.
+        const NO_REDUCIBLE_CHECK = 1 << 2;
+    }
+}
+
+bitflags::bitflags! {
+    /// Modifiers on an indexed-access (`T[K]`) type operation.
+    ///
+    /// Mirrors Go `AccessFlags` (a `uint32` bit set), threaded through
+    /// `getIndexedAccessTypeOrUndefined`/`getPropertyTypeForIndexType`. Only the
+    /// `Persistent` subset is stored on a deferred [`IndexedAccessType`]; the
+    /// reachable subset uses [`AccessFlags::NONE`].
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::AccessFlags;
+    /// assert!(AccessFlags::NONE.is_empty());
+    /// assert_eq!(AccessFlags::WRITING.bits(), 1 << 2);
+    /// ```
+    ///
+    /// Side effects: none (pure value type).
+    // Go: internal/checker/types.go:AccessFlags
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+    pub struct AccessFlags: u32 {
+        /// No modifiers.
+        const NONE = 0;
+        /// Include `undefined` (`noUncheckedIndexedAccess`).
+        const INCLUDE_UNDEFINED = 1 << 0;
+        /// Elide index signatures.
+        const NO_INDEX_SIGNATURES = 1 << 1;
+        /// The access is in a writing (assignment-target) position.
+        const WRITING = 1 << 2;
+        /// Cache the resolved symbol on the access node.
+        const CACHE_SYMBOL = 1 << 3;
+        /// Allow a missing property without an error.
+        const ALLOW_MISSING = 1 << 4;
+        /// The access originates in an expression.
+        const EXPRESSION_POSITION = 1 << 5;
+        /// Report deprecated-symbol suggestions.
+        const REPORT_DEPRECATED = 1 << 6;
+        /// Suppress the `noImplicitAny` element-access error.
+        const SUPPRESS_NO_IMPLICIT_ANY_ERROR = 1 << 7;
+        /// The access is a contextual-type lookup.
+        const CONTEXTUAL = 1 << 8;
+        /// Flags persisted on a deferred indexed-access type.
+        const PERSISTENT = Self::INCLUDE_UNDEFINED.bits() | Self::NO_INDEX_SIGNATURES.bits();
+    }
+}
+
 /// One entry of the flag-name table used by [`format_type_flags`].
 struct TypeFlagName {
     flag: TypeFlags,
@@ -631,6 +706,64 @@ pub struct TypeParameter {
     pub is_this_type: bool,
 }
 
+/// The payload of a `keyof T` index type (`TypeFlags::INDEX`).
+///
+/// A deferred index over a generic/instantiable `target` (e.g. `keyof T` for a
+/// type parameter `T`): it is kept as an [`IndexType`] until `target` is
+/// instantiated, at which point `keyof` is recomputed over the substituted
+/// type (Go's `instantiateType` index arm). A `keyof` over a concrete object
+/// type is resolved eagerly to a union of property-name literals and never
+/// produces an `IndexType`.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{IndexFlags, IndexType, TypeId};
+/// let d = IndexType { target: TypeId(1), index_flags: IndexFlags::NONE };
+/// assert_eq!(d.target, TypeId(1));
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go:IndexType
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexType {
+    /// The type whose keys are taken (`T` in `keyof T`).
+    pub target: TypeId,
+    /// The `keyof` modifier flags.
+    pub index_flags: IndexFlags,
+}
+
+/// The payload of an indexed-access type `T[K]` (`TypeFlags::INDEXED_ACCESS`).
+///
+/// A deferred `T[K]` over a generic `object_type` and/or `index_type`: it is
+/// kept as an [`IndexedAccessType`] until both are instantiated, at which point
+/// it is re-resolved through `getIndexedAccessType` (Go's `instantiateType`
+/// indexed-access arm). A `T[K]` over concrete operands resolves eagerly to the
+/// selected property/element type and never produces an `IndexedAccessType`.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{AccessFlags, IndexedAccessType, TypeId};
+/// let d = IndexedAccessType {
+///     object_type: TypeId(1),
+///     index_type: TypeId(2),
+///     access_flags: AccessFlags::NONE,
+/// };
+/// assert_eq!(d.object_type, TypeId(1));
+/// assert_eq!(d.index_type, TypeId(2));
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go:IndexedAccessType
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexedAccessType {
+    /// The object type being indexed (`T` in `T[K]`).
+    pub object_type: TypeId,
+    /// The index type (`K` in `T[K]`).
+    pub index_type: TypeId,
+    /// The persisted access-flag subset.
+    pub access_flags: AccessFlags,
+}
+
 /// Type-specific data, the discriminated-union form of Go's `TypeData`
 /// interface (PORTING, section 3).
 ///
@@ -661,6 +794,10 @@ pub enum TypeData {
     Object(ObjectType),
     /// A type parameter (`T`), including the interface `this` type.
     TypeParameter(TypeParameter),
+    /// A deferred `keyof T` index type over a generic operand.
+    Index(IndexType),
+    /// A deferred `T[K]` indexed-access type over generic operands.
+    IndexedAccess(IndexedAccessType),
 }
 
 /// A checker type: the common header (Go's `Type` struct fields) plus its
@@ -813,6 +950,28 @@ impl Type {
     pub fn as_type_parameter(&self) -> Option<&TypeParameter> {
         match &self.data {
             TypeData::TypeParameter(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Returns the `keyof` index payload, if this is a deferred index type.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/types.go:Type.AsIndexType
+    pub fn as_index(&self) -> Option<&IndexType> {
+        match &self.data {
+            TypeData::Index(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Returns the indexed-access payload, if this is a deferred `T[K]` type.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/types.go:Type.AsIndexedAccessType
+    pub fn as_indexed_access(&self) -> Option<&IndexedAccessType> {
+        match &self.data {
+            TypeData::IndexedAccess(d) => Some(d),
             _ => None,
         }
     }

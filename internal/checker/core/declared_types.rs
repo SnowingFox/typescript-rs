@@ -23,7 +23,9 @@ use tsgo_ast::{
 use super::program::BoundProgram;
 use super::signatures::{IndexInfo, IndexInfoId, Signature, SignatureFlags, SignatureId};
 use super::symbols::resolve_name;
-use super::types::{LiteralValue, ObjectFlags, ObjectType, TypeData, TypeFlags, TypeId};
+use super::types::{
+    AccessFlags, IndexFlags, LiteralValue, ObjectFlags, ObjectType, TypeData, TypeFlags, TypeId,
+};
 use super::Checker;
 
 /// Builds (or returns the cached) declared type of a type-introducing symbol.
@@ -1354,6 +1356,9 @@ pub fn get_type_from_type_node(
             get_type_from_function_or_constructor_type_node(checker, program, node)
         }
         Kind::TypeOperator => get_type_from_type_operator_node(checker, program, node, globals),
+        Kind::IndexedAccessType => {
+            get_type_from_indexed_access_type_node(checker, program, node, globals)
+        }
         Kind::UnionType => get_type_from_union_type_node(checker, program, node, globals),
         Kind::IntersectionType => {
             get_type_from_intersection_type_node(checker, program, node, globals)
@@ -1509,6 +1514,34 @@ fn is_readonly_type_operator_parent(program: &dyn BoundProgram, node: tsgo_ast::
     )
 }
 
+// Resolves an `IndexedAccessType` node (`T[K]`) to the indexed-access type: each
+// operand node is resolved, then combined via `get_indexed_access_type`. A
+// generic operand yields a deferred indexed-access type; concrete operands
+// resolve to the selected property/element/index-signature value type. When
+// nothing resolves (a missing property on a concrete object), Go's
+// `getIndexedAccessTypeEx` with an access node yields the error type.
+//
+// DEFER(phase-4-checker-later): the `2536`/`2537` index diagnostics, the type
+// alias attribution (`getAliasForTypeNode`), and the `links.resolvedType`
+// memoization. blocked-by: the access-node error machinery + alias attribution +
+// type-node memoization.
+// Go: internal/checker/checker.go:Checker.getTypeFromIndexedAccessTypeNode
+fn get_type_from_indexed_access_type_node(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: tsgo_ast::NodeId,
+    globals: Option<&SymbolTable>,
+) -> TypeId {
+    let (object_node, index_node) = match program.arena().data(node) {
+        NodeData::IndexedAccessType(d) => (d.object_type, d.index_type),
+        _ => return checker.error_type(),
+    };
+    let object_type = get_type_from_type_node(checker, program, object_node, globals);
+    let index_type = get_type_from_type_node(checker, program, index_node, globals);
+    get_indexed_access_type(checker, program, object_type, index_type)
+        .unwrap_or(checker.error_type())
+}
+
 // Resolves a `TypeOperator` node (`keyof`/`unique`/`readonly T`). The `readonly`
 // operator over an array/tuple is transparent at the type level: Go returns the
 // operand's type (`getTypeFromTypeNode(argType)`) and the array node itself
@@ -1530,8 +1563,13 @@ fn get_type_from_type_operator_node(
     };
     match operator {
         Kind::ReadonlyKeyword => get_type_from_type_node(checker, program, operand, globals),
-        // DEFER(phase-4-checker-later): `keyof` / `unique symbol`.
-        // blocked-by: `getIndexType` + unique-ES-symbol typing.
+        // `keyof T` resolves to the index type of the operand.
+        Kind::KeyOfKeyword => {
+            let operand_type = get_type_from_type_node(checker, program, operand, globals);
+            get_index_type(checker, operand_type)
+        }
+        // DEFER(phase-4-checker-later): `unique symbol`
+        // (`getESSymbolLikeTypeForNode`). blocked-by: unique-ES-symbol typing.
         _ => checker.error_type(),
     }
 }
@@ -1938,6 +1976,172 @@ pub(crate) fn get_applicable_index_info_for_name(
     get_applicable_index_info(checker, program, t, key)
 }
 
+/// Returns the index type `keyof t` (Go's `getIndexType`).
+///
+/// For a concrete object type this is the union of its property-name literal
+/// types plus any string/number index-signature key types; for a generic /
+/// instantiable type (a type parameter, an indexed access, a conditional, ...)
+/// it is a deferred [`TypeData::Index`] type that recomputes `keyof` once the
+/// target is instantiated. A union distributes to an intersection of its
+/// constituents' index types; an intersection distributes to a union.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{get_index_type, Checker, TypeFlags};
+/// let mut c = Checker::new();
+/// // `keyof T` for a type parameter is a deferred index type.
+/// let tp = c.new_type_parameter(None);
+/// let k = get_index_type(&mut c, tp);
+/// assert!(c.get_type(k).flags().contains(TypeFlags::INDEX));
+/// ```
+///
+/// Side effects: may allocate a union/index type and populate the index cache.
+// Go: internal/checker/checker.go:Checker.getIndexType / getIndexTypeEx
+pub fn get_index_type(checker: &mut Checker, t: TypeId) -> TypeId {
+    get_index_type_ex(checker, t, IndexFlags::NONE)
+}
+
+// Go: internal/checker/checker.go:Checker.getIndexTypeEx
+fn get_index_type_ex(checker: &mut Checker, t: TypeId, index_flags: IndexFlags) -> TypeId {
+    // Go calls `getReducedType(t)` first; that is the identity for the reachable
+    // subset (no never-reducible intersections constructed here).
+    if should_defer_index_type(checker, t, index_flags) {
+        return get_index_type_for_generic_type(checker, t, index_flags);
+    }
+    let flags = checker.get_type(t).flags();
+    // `keyof (A | B)` == `keyof A & keyof B`.
+    if flags.contains(TypeFlags::UNION) {
+        let members = checker.get_type(t).union_types().unwrap_or(&[]).to_vec();
+        let mapped: Vec<TypeId> = members
+            .iter()
+            .map(|&m| get_index_type_ex(checker, m, index_flags))
+            .collect();
+        return checker.get_intersection_type(&mapped);
+    }
+    // `keyof (A & B)` == `keyof A | keyof B`.
+    if flags.contains(TypeFlags::INTERSECTION) {
+        let members = checker
+            .get_type(t)
+            .intersection_types()
+            .unwrap_or(&[])
+            .to_vec();
+        let mapped: Vec<TypeId> = members
+            .iter()
+            .map(|&m| get_index_type_ex(checker, m, index_flags))
+            .collect();
+        return checker.get_union_type(&mapped);
+    }
+    if flags.contains(TypeFlags::UNKNOWN) {
+        return checker.never_type();
+    }
+    // DEFER(phase-4-checker-C-C3): the `keyof any`/`keyof never` arm
+    // (`stringNumberSymbolType`), the wildcard arm, and the mapped-type arm
+    // (`getIndexTypeForMappedType`). blocked-by: the global `string | number |
+    // symbol` type, the wildcard type, and mapped types (C-C3).
+    let include = TypeFlags::STRING_LIKE | TypeFlags::NUMBER_LIKE | TypeFlags::ES_SYMBOL_LIKE;
+    get_literal_type_from_properties(checker, t, include)
+}
+
+// Reports whether `keyof t` should be deferred to a generic [`TypeData::Index`]
+// type rather than resolved to a union of keys.
+//
+// DEFER(phase-4-checker-C-C3): the generic-tuple, generic-mapped, reducible-
+// union, and instantiable-intersection arms. blocked-by: generic tuples,
+// mapped types (C-C3), and union/intersection reducibility machinery.
+// Go: internal/checker/checker.go:Checker.shouldDeferIndexType
+fn should_defer_index_type(checker: &Checker, t: TypeId, _index_flags: IndexFlags) -> bool {
+    checker
+        .get_type(t)
+        .flags()
+        .intersects(TypeFlags::INSTANTIABLE_NON_PRIMITIVE)
+}
+
+// Returns (and interns) the deferred `keyof t` index type for a generic target.
+// Go: internal/checker/checker.go:Checker.getIndexTypeForGenericType
+fn get_index_type_for_generic_type(
+    checker: &mut Checker,
+    t: TypeId,
+    index_flags: IndexFlags,
+) -> TypeId {
+    if let Some(&cached) = checker.index_types.get(&t) {
+        return cached;
+    }
+    let index = checker.new_index_type(t, index_flags & IndexFlags::STRINGS_ONLY);
+    checker.index_types.insert(t, index);
+    index
+}
+
+// Builds the union of a structured type's property-name literal types plus its
+// included index-signature key types (Go's `getLiteralTypeFromProperties`).
+//
+// DEFER(phase-4-checker-C-C3): the origin-index alias, the `includeOrigin`
+// caching key, and the enum-number index-info exclusion. blocked-by: index-type
+// origins + the properties-types cache + enum number indexing.
+// Go: internal/checker/checker.go:Checker.getLiteralTypeFromProperties
+fn get_literal_type_from_properties(
+    checker: &mut Checker,
+    t: TypeId,
+    include: TypeFlags,
+) -> TypeId {
+    let props = get_properties_of_type(checker, t);
+    let infos = get_index_infos_of_type(checker, t);
+    let mut types: Vec<TypeId> = Vec::with_capacity(props.len() + infos.len());
+    for (name, _prop) in props {
+        types.push(get_literal_type_from_property(checker, &name, include));
+    }
+    let string_type = checker.string_type();
+    for info in infos {
+        let key_type = checker.index_info(info).key_type;
+        if is_key_type_included(checker, key_type, include) {
+            if key_type == string_type && include.contains(TypeFlags::NUMBER) {
+                types.push(checker.string_or_number_type());
+            } else {
+                types.push(key_type);
+            }
+        }
+    }
+    checker.get_union_type(&types)
+}
+
+// Returns the property-name literal type for `name` when its kind is in
+// `include`, else `never` (Go's `getLiteralTypeFromProperty`).
+//
+// DEFER(phase-4-checker-C-C3): the `valueSymbolLinks.nameType` path (computed /
+// late-bound names), the numeric-literal property name (`{ 0: T }` -> `0`), the
+// `default` export name, and the non-public-accessibility filter. blocked-by:
+// computed/late-bound name types, numeric-literal property names, and
+// accessibility-modifier plumbing on synthesized members.
+// Go: internal/checker/checker.go:Checker.getLiteralTypeFromProperty
+fn get_literal_type_from_property(checker: &mut Checker, name: &str, include: TypeFlags) -> TypeId {
+    let t = checker.get_string_literal_type(name);
+    if checker.get_type(t).flags().intersects(include) {
+        t
+    } else {
+        checker.never_type()
+    }
+}
+
+// Reports whether an index-signature key type contributes to a `keyof` result
+// under `include` (Go's `isKeyTypeIncluded`).
+// Go: internal/checker/checker.go:Checker.isKeyTypeIncluded
+fn is_key_type_included(checker: &Checker, key_type: TypeId, include: TypeFlags) -> bool {
+    let flags = checker.get_type(key_type).flags();
+    if flags.intersects(include) {
+        return true;
+    }
+    if flags.contains(TypeFlags::INTERSECTION) {
+        let members = checker
+            .get_type(key_type)
+            .intersection_types()
+            .unwrap_or(&[])
+            .to_vec();
+        return members
+            .iter()
+            .any(|&m| is_key_type_included(checker, m, include));
+    }
+    false
+}
+
 /// Resolves `object_type[index_type]` to the element/indexed value type when an
 /// applicable index signature exists.
 ///
@@ -1958,6 +2162,67 @@ pub fn get_indexed_access_type(
     object_type: TypeId,
     index_type: TypeId,
 ) -> Option<TypeId> {
+    // A generic object and/or index defers to an interned `IndexedAccess` type
+    // (a higher-order access whose members cannot be resolved yet). An
+    // `any`/`unknown` object short-circuits to itself.
+    if should_defer_indexed_access_type(checker, object_type, index_type) {
+        if checker
+            .get_type(object_type)
+            .flags()
+            .intersects(TypeFlags::ANY | TypeFlags::UNKNOWN)
+        {
+            return Some(object_type);
+        }
+        return Some(get_or_create_indexed_access_type(
+            checker,
+            object_type,
+            index_type,
+        ));
+    }
+    // A (non-boolean) union index distributes: `T["a" | "b"]` == `T["a"] |
+    // T["b"]`. A missing constituent property aborts to `None` (Go's
+    // `accessNode == nil` early return).
+    if checker
+        .get_type(index_type)
+        .flags()
+        .contains(TypeFlags::UNION)
+        && index_type != checker.boolean_type()
+    {
+        let members = checker
+            .get_type(index_type)
+            .union_types()
+            .unwrap_or(&[])
+            .to_vec();
+        let mut prop_types: Vec<TypeId> = Vec::with_capacity(members.len());
+        for m in members {
+            match get_property_type_for_index_type(checker, program, object_type, m) {
+                Some(pt) => prop_types.push(pt),
+                None => return None,
+            }
+        }
+        return Some(checker.get_union_type(&prop_types));
+    }
+    get_property_type_for_index_type(checker, program, object_type, index_type)
+}
+
+// Resolves `objectType[indexType]` to the type of the property/element selected
+// by `indexType` on the (apparent) object type — a named property when the index
+// is a string/number literal, a tuple element by a literal/number index, or the
+// value type of an applicable index signature. Returns `None` when nothing
+// applies (the caller turns that into a diagnostic or the error type).
+//
+// DEFER(phase-4-checker-later): the `accessNode`-driven error reporting
+// (`2536`/`2538`/`7053`), the `Contextual`/`Writing`/`IncludeUndefined` access
+// flags, numeric-literal property names on a non-tuple object, and the
+// constraint-of-index-type fallback for a residual generic object. blocked-by:
+// the access-node error machinery + access flags + numeric property names.
+// Go: internal/checker/checker.go:Checker.getPropertyTypeForIndexType
+fn get_property_type_for_index_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    object_type: TypeId,
+    index_type: TypeId,
+) -> Option<TypeId> {
     ensure_primitive_apparent_wrapper(checker, object_type);
     let apparent = get_apparent_type(checker, object_type);
     let flags = checker.get_type(apparent).flags();
@@ -1970,6 +2235,15 @@ pub fn get_indexed_access_type(
     if let Some(union) = get_tuple_number_index_type(checker, apparent, index_type) {
         return Some(union);
     }
+    // A string/number-literal index names a property: select it by name (Go's
+    // `getPropertyTypeForIndexType` `hasPropName` branch). This is what resolves
+    // a type-node access `T["a"]` and each constituent of a distributed union
+    // index to the property type.
+    if let Some(name) = get_property_name_from_index(checker, index_type) {
+        if let Some(t) = get_type_of_property_of_type(checker, program, apparent, &name) {
+            return Some(t);
+        }
+    }
     if !checker
         .get_type(index_type)
         .flags()
@@ -1979,6 +2253,101 @@ pub fn get_indexed_access_type(
     }
     let info = get_applicable_index_info(checker, program, apparent, index_type)?;
     Some(checker.index_info(info).value_type)
+}
+
+// Reports whether `objectType[indexType]` should be deferred to an
+// `IndexedAccess` type (a higher-order access over generic operands).
+//
+// DEFER(phase-4-checker-later): the `accessNode`-kind distinction (an
+// element-access *expression* eagerly resolves a generic object indexed by a
+// non-generic key via its constraint, whereas a type node defers) and the
+// generic-tuple fixed-index eager resolution. The unified form here matches the
+// type-node path; the element-access cases reachable in the ported tests have
+// either concrete operands or a generic index, so both produce the Go result.
+// blocked-by: threading the access-node kind + generic tuples + constraint-based
+// eager resolution.
+// Go: internal/checker/checker.go:Checker.shouldDeferIndexedAccessType
+fn should_defer_indexed_access_type(
+    checker: &Checker,
+    object_type: TypeId,
+    index_type: TypeId,
+) -> bool {
+    is_generic_index_type(checker, index_type) || is_generic_object_type(checker, object_type)
+}
+
+// Reports whether `t` is a generic (instantiable) index type — i.e. usable as a
+// deferred `keyof`/index value (Go's `isGenericIndexType`, reachable subset).
+//
+// DEFER(phase-4-checker-C-C3): `isGenericStringLikeType` (template-literal /
+// string-mapping types) and the substitution-type arm. blocked-by: template
+// literal + string mapping + substitution types (C-C2/C-C3).
+// Go: internal/checker/checker.go:Checker.isGenericIndexType / getGenericObjectFlags
+fn is_generic_index_type(checker: &Checker, t: TypeId) -> bool {
+    let flags = checker.get_type(t).flags();
+    if flags.intersects(TypeFlags::UNION_OR_INTERSECTION) {
+        let members = union_or_intersection_members(checker, t);
+        return members.iter().any(|&m| is_generic_index_type(checker, m));
+    }
+    flags.intersects(TypeFlags::INSTANTIABLE_NON_PRIMITIVE | TypeFlags::INDEX)
+}
+
+// Reports whether `t` is a generic (instantiable) object type (Go's
+// `isGenericObjectType`, reachable subset).
+//
+// DEFER(phase-4-checker-C-C3): generic mapped and generic tuple types.
+// blocked-by: mapped types (C-C3) + generic tuples.
+// Go: internal/checker/checker.go:Checker.isGenericObjectType / getGenericObjectFlags
+fn is_generic_object_type(checker: &Checker, t: TypeId) -> bool {
+    let flags = checker.get_type(t).flags();
+    if flags.intersects(TypeFlags::UNION_OR_INTERSECTION) {
+        let members = union_or_intersection_members(checker, t);
+        return members.iter().any(|&m| is_generic_object_type(checker, m));
+    }
+    flags.intersects(TypeFlags::INSTANTIABLE_NON_PRIMITIVE)
+}
+
+// Returns a union's or intersection's constituent type ids.
+fn union_or_intersection_members(checker: &Checker, t: TypeId) -> Vec<TypeId> {
+    let ty = checker.get_type(t);
+    if let Some(members) = ty.union_types() {
+        members.to_vec()
+    } else if let Some(members) = ty.intersection_types() {
+        members.to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+// Returns (and interns) the deferred `objectType[indexType]` indexed-access type.
+// Go: internal/checker/checker.go:Checker.getIndexedAccessTypeOrUndefined (defer branch)
+fn get_or_create_indexed_access_type(
+    checker: &mut Checker,
+    object_type: TypeId,
+    index_type: TypeId,
+) -> TypeId {
+    let key = (object_type, index_type);
+    if let Some(&cached) = checker.indexed_access_types.get(&key) {
+        return cached;
+    }
+    // The reachable subset carries no persistent access flags.
+    let t = checker.new_indexed_access_type(object_type, index_type, AccessFlags::NONE);
+    checker.indexed_access_types.insert(key, t);
+    t
+}
+
+// Returns the property name a string/number-literal index selects (Go's
+// `getPropertyNameFromIndex` / `getPropertyNameFromType` for the literal cases).
+//
+// DEFER(phase-4-checker-later): numeric-literal property names on a non-tuple
+// object (`{ 0: T }[0]`), unique-symbol names, and the `accessNode`-driven
+// computed/private name cases. blocked-by: numeric property naming + ES symbol
+// names + access-node plumbing.
+// Go: internal/checker/checker.go:Checker.getPropertyNameFromIndex
+fn get_property_name_from_index(checker: &Checker, index_type: TypeId) -> Option<String> {
+    match checker.get_type(index_type).literal_value() {
+        Some(LiteralValue::String(s)) => Some(s.clone()),
+        _ => None,
+    }
 }
 
 // Resolves `tuple[index]` to the element type at a constant position when the
