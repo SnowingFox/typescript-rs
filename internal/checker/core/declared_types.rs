@@ -12,7 +12,9 @@
 
 use rustc_hash::FxHashMap;
 
-use tsgo_ast::symbol::{INTERNAL_SYMBOL_NAME_CALL, INTERNAL_SYMBOL_NAME_INDEX};
+use tsgo_ast::symbol::{
+    INTERNAL_SYMBOL_NAME_CALL, INTERNAL_SYMBOL_NAME_INDEX, INTERNAL_SYMBOL_NAME_NEW,
+};
 use tsgo_ast::{
     CheckFlags, Kind, ModifierFlags, NodeArena, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId,
     SymbolTable,
@@ -846,7 +848,19 @@ fn get_signature_from_declaration(
         Some(node) => get_type_from_type_node(checker, program, node, None),
         None => checker.any_type(),
     };
-    let mut signature = Signature::new(SignatureFlags::NONE);
+    // A constructor-type / construct-signature declaration produces a construct
+    // signature (Go's `getSignatureFromDeclaration` sets `SignatureFlagsConstruct`
+    // via `isConstructSignatureDeclaration`), which selects the construct-signature
+    // relation and the `new (...)` printed form.
+    let flags = if matches!(
+        program.arena().kind(declaration),
+        Kind::ConstructorType | Kind::ConstructSignature
+    ) {
+        SignatureFlags::CONSTRUCT
+    } else {
+        SignatureFlags::NONE
+    };
+    let mut signature = Signature::new(flags);
     signature.declaration = Some(declaration);
     signature.parameters = parameters;
     signature.min_argument_count = min_argument_count;
@@ -1357,10 +1371,10 @@ fn get_type_from_type_literal_node(
 // type yields a call signature whose parameter types contextually type an
 // assigned arrow/function expression's parameters (4bj).
 //
-// DEFER(phase-4-checker-4bk+): construct signatures (the `__new` member of a
-// `ConstructorType`), generic type parameters, the `this` parameter, and the
-// per-node `links.resolvedType` memoization Go keeps. blocked-by: construct
-// signatures + generic signatures + `this`-typing + type-node memoization.
+// DEFER(phase-4-checker-C-A+): generic type parameters, the `this` parameter,
+// and the per-node `links.resolvedType` memoization Go keeps. blocked-by:
+// generic signatures + `this`-typing + type-node memoization. (Construct
+// signatures — the `__new` member of a `ConstructorType` — land in C-A.)
 // Go: internal/checker/checker.go:Checker.getTypeFromTypeLiteralOrFunctionOrConstructorTypeNode
 fn get_type_from_function_or_constructor_type_node(
     checker: &mut Checker,
@@ -1370,24 +1384,35 @@ fn get_type_from_function_or_constructor_type_node(
     let Some(symbol) = program.symbol_of_node(node) else {
         return checker.error_type();
     };
-    // The `__type` symbol's `__call` member declares the call signature; its
-    // declarations are the function-type node itself.
-    let call_signatures = match program
-        .symbol(symbol)
-        .members
-        .get(INTERNAL_SYMBOL_NAME_CALL)
-    {
-        Some(&call_symbol) => {
-            let declarations = program.symbol(call_symbol).declarations.clone();
-            get_signatures_of_symbol(checker, program, &declarations)
-        }
-        None => Vec::new(),
-    };
+    // The `__type` symbol's `__call`/`__new` members declare the call/construct
+    // signatures; their declarations are the function/constructor-type node.
+    let call_signatures = signatures_of_member(checker, program, symbol, INTERNAL_SYMBOL_NAME_CALL);
+    let construct_signatures =
+        signatures_of_member(checker, program, symbol, INTERNAL_SYMBOL_NAME_NEW);
     let object = ObjectType {
         call_signatures,
+        construct_signatures,
         ..Default::default()
     };
     checker.new_object_type(ObjectFlags::ANONYMOUS, Some(symbol), object)
+}
+
+// Resolves the signatures declared by a synthetic signature member (`__call` /
+// `__new`) of an anonymous type-node symbol, or an empty list when absent.
+// Go: internal/checker/checker.go:Checker.getSignaturesOfSymbol (member subset)
+fn signatures_of_member(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+    member_name: &str,
+) -> Vec<SignatureId> {
+    match program.symbol(symbol).members.get(member_name) {
+        Some(&member) => {
+            let declarations = program.symbol(member).declarations.clone();
+            get_signatures_of_symbol(checker, program, &declarations)
+        }
+        None => Vec::new(),
+    }
 }
 
 // Go: internal/checker/checker.go:Checker.getTypeFromTypeReference

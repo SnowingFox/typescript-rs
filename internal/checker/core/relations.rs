@@ -10,16 +10,17 @@
 //! error reporting, and the `Ternary` recursion machinery) is deferred.
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tsgo_ast::{SymbolFlags, SymbolId};
+use tsgo_ast::{Kind, SymbolFlags, SymbolId};
 use tsgo_diagnostics::{Category, Message};
 
 use super::check::DiagnosticMessageChain;
 use super::declared_types::{
-    get_applicable_index_info_for_name, get_properties_of_type, get_property_of_type,
-    get_type_of_symbol,
+    get_apparent_type, get_applicable_index_info_for_name, get_properties_of_type,
+    get_property_of_type, get_type_of_symbol,
 };
 use super::nodebuilder::{symbol_to_string, type_to_string};
 use super::program::BoundProgram;
+use super::signatures::{SignatureFlags, SignatureId};
 use super::types::{ObjectFlags, TypeData, TypeFlags, TypeId};
 use super::Checker;
 
@@ -45,6 +46,17 @@ pub enum RelationKind {
     Assignable,
     /// Comparability (used by `===`/`switch`).
     Comparable,
+}
+
+// Which kind of signature list to compare (Go's `SignatureKind`), selecting
+// `call_signatures` vs `construct_signatures` on an object type.
+// Go: internal/checker/types.go:SignatureKind
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SignatureKind {
+    // Call signatures (`(x): T`).
+    Call,
+    // Construct signatures (`new (x): T`).
+    Construct,
 }
 
 /// A per-relation cache of comparison results, keyed by `(kind, source, target)`.
@@ -277,31 +289,49 @@ fn add_to_dotted_name(head: &str, tail: &str) -> String {
 // builds nested `*Diagnostic`s under the head).
 // Go: internal/checker/relater.go:createDiagnosticChainFromErrorChain
 fn error_chain_to_report(chain: ErrorChain) -> RelationErrorReport {
+    // Skip leading `elidedInCompatibilityPyramid` markers (the signature
+    // return-type messages 2202..=2205), mirroring Go's
+    // `createDiagnosticChainFromErrorChain`. The head is never a marker in
+    // practice; the loop is defensive.
+    let mut head = chain;
+    while head.message.elided_in_compatibility_pyramid() {
+        match head.next {
+            Some(next) => head = *next,
+            None => break,
+        }
+    }
     RelationErrorReport {
-        code: chain.message.code(),
-        category: chain.message.category(),
-        message: localize_chain_entry(chain.message, &chain.args),
-        message_chain: chain
-            .next
-            .map(|n| error_chain_node_to_message_chain(*n))
+        code: head.message.code(),
+        category: head.message.category(),
+        message: localize_chain_entry(head.message, &head.args),
+        message_chain: error_chain_node_to_message_chain(head.next)
             .into_iter()
             .collect(),
     }
 }
 
-// Materializes a non-head [`ErrorChain`] entry (and its descendants) into a
-// [`DiagnosticMessageChain`].
-fn error_chain_node_to_message_chain(chain: ErrorChain) -> DiagnosticMessageChain {
-    DiagnosticMessageChain {
-        code: chain.message.code(),
-        category: chain.message.category(),
-        message: localize_chain_entry(chain.message, &chain.args),
-        next: chain
-            .next
-            .map(|n| error_chain_node_to_message_chain(*n))
-            .into_iter()
-            .collect(),
+// Materializes the remaining [`ErrorChain`] (head-first) into a
+// [`DiagnosticMessageChain`], skipping `elidedInCompatibilityPyramid` marker
+// entries anywhere in the list (Go's `createDiagnosticChainFromErrorChain`
+// elides them and recurses on `next`).
+fn error_chain_node_to_message_chain(
+    mut chain: Option<Box<ErrorChain>>,
+) -> Option<DiagnosticMessageChain> {
+    while let Some(node) = chain {
+        if node.message.elided_in_compatibility_pyramid() {
+            chain = node.next;
+            continue;
+        }
+        return Some(DiagnosticMessageChain {
+            code: node.message.code(),
+            category: node.message.category(),
+            message: localize_chain_entry(node.message, &node.args),
+            next: error_chain_node_to_message_chain(node.next)
+                .into_iter()
+                .collect(),
+        });
     }
+    None
 }
 
 // Substitutes `args` into `message`'s template text (Go's
@@ -616,7 +646,36 @@ impl Checker {
             {
                 return result;
             }
-            return self.properties_related_to(program, source, target, relation);
+            // An object type relates structurally on BOTH its properties and its
+            // call/construct signatures (Go relates properties, then call sigs,
+            // then construct sigs — all must hold). A bare function type has no
+            // properties, so the signature comparison is what makes two function
+            // types relate (or not).
+            // Go: internal/checker/relater.go:structuredTypeRelatedToWorker (object arm)
+            if !self.properties_related_to(program, source, target, relation) {
+                return false;
+            }
+            if !self.signatures_related_to(
+                program,
+                source,
+                target,
+                SignatureKind::Call,
+                relation,
+                None,
+            ) {
+                return false;
+            }
+            if !self.signatures_related_to(
+                program,
+                source,
+                target,
+                SignatureKind::Construct,
+                relation,
+                None,
+            ) {
+                return false;
+            }
+            return true;
         }
         false
     }
@@ -701,6 +760,308 @@ impl Checker {
             if !self.is_type_related_to(program, sources[i], targets[i], relation) {
                 return false;
             }
+        }
+        true
+    }
+
+    // Returns the call or construct signatures of `t` (Go's
+    // `getSignaturesOfType(t, kind)`), resolving through a type reference's
+    // generic target. Mirrors the public call-only [`get_signatures_of_type`]
+    // but is kind-aware for the relation engine.
+    // Go: internal/checker/checker.go:Checker.getSignaturesOfType
+    fn signatures_of_type(&self, t: TypeId, kind: SignatureKind) -> Vec<SignatureId> {
+        let apparent = get_apparent_type(self, t);
+        let Some(obj) = self.get_type(apparent).as_object() else {
+            return Vec::new();
+        };
+        let resolved = match obj.target {
+            Some(target) => self.get_type(target).as_object(),
+            None => Some(obj),
+        };
+        let Some(obj) = resolved else {
+            return Vec::new();
+        };
+        match kind {
+            SignatureKind::Call => obj.call_signatures.clone(),
+            SignatureKind::Construct => obj.construct_signatures.clone(),
+        }
+    }
+
+    // The number of declared parameters of a signature (Go's
+    // `getParameterCount`, reachable subset without rest-tuple expansion).
+    // Go: internal/checker/relater.go:Checker.getParameterCount
+    fn signature_parameter_count(&self, sig: SignatureId) -> usize {
+        self.signature(sig).parameters.len()
+    }
+
+    // The minimum number of arguments a signature requires (Go's
+    // `getMinArgumentCount`, the stored required-parameter count for the
+    // reachable subset without rest-tuple expansion).
+    // Go: internal/checker/relater.go:Checker.getMinArgumentCount
+    fn signature_min_argument_count(&self, sig: SignatureId) -> i32 {
+        self.signature(sig).min_argument_count
+    }
+
+    // The resolved return type of a signature, or `any` when unresolved (Go's
+    // `getReturnTypeOfSignature` for an already-resolved non-generic signature).
+    // Go: internal/checker/checker.go:Checker.getReturnTypeOfSignature
+    fn signature_return_type(&self, sig: SignatureId) -> TypeId {
+        self.signature(sig)
+            .resolved_return_type
+            .unwrap_or(self.any_type)
+    }
+
+    // Selects the return-type incompatibility marker message (Go's
+    // `compareSignaturesRelated` return-type block). All four are
+    // `elidedInCompatibilityPyramid`: they are elided from the materialized
+    // diagnostic chain and only trigger the `x()`/`x(...)` collapse when nested
+    // under a property message.
+    // Go: internal/checker/relater.go:Checker.compareSignaturesRelated (return marker)
+    fn return_type_marker_message(
+        &self,
+        source: SignatureId,
+        target: SignatureId,
+    ) -> &'static Message {
+        let no_args = self.signature(source).parameters.is_empty()
+            && self.signature(target).parameters.is_empty();
+        let is_construct = self
+            .signature(source)
+            .flags
+            .contains(SignatureFlags::CONSTRUCT);
+        match (no_args, is_construct) {
+            (true, false) => {
+                &tsgo_diagnostics::CALL_SIGNATURES_WITH_NO_ARGUMENTS_HAVE_INCOMPATIBLE_RETURN_TYPES_0_AND_1
+            }
+            (true, true) => {
+                &tsgo_diagnostics::CONSTRUCT_SIGNATURES_WITH_NO_ARGUMENTS_HAVE_INCOMPATIBLE_RETURN_TYPES_0_AND_1
+            }
+            (false, false) => {
+                &tsgo_diagnostics::CALL_SIGNATURE_RETURN_TYPES_0_AND_1_ARE_INCOMPATIBLE
+            }
+            (false, true) => {
+                &tsgo_diagnostics::CONSTRUCT_SIGNATURE_RETURN_TYPES_0_AND_1_ARE_INCOMPATIBLE
+            }
+        }
+    }
+
+    // The parameter type at position `pos`, or `None` when out of range (Go's
+    // `tryGetTypeAtPosition`, reachable subset: no rest parameter, so an
+    // out-of-range position yields `None` rather than an indexed rest element).
+    // Go: internal/checker/relater.go:Checker.tryGetTypeAtPosition
+    fn try_signature_type_at_position(
+        &mut self,
+        program: &dyn BoundProgram,
+        sig: SignatureId,
+        pos: usize,
+    ) -> Option<TypeId> {
+        let param = self.signature(sig).parameters.get(pos).copied()?;
+        Some(get_type_of_symbol(self, program, param, None))
+    }
+
+    // The parameter name at position `pos` (Go's `getParameterNameAtPosition`,
+    // reachable subset: the parameter symbol's name).
+    // Go: internal/checker/relater.go:Checker.getParameterNameAtPosition
+    fn signature_parameter_name(
+        &self,
+        program: &dyn BoundProgram,
+        sig: SignatureId,
+        pos: usize,
+    ) -> String {
+        match self.signature(sig).parameters.get(pos).copied() {
+            Some(param) => program.symbol(param).name.clone(),
+            None => String::new(),
+        }
+    }
+
+    // Reports whether a signature is a method/constructor declaration (Go's
+    // `kind == KindMethodDeclaration | KindMethodSignature | KindConstructor`
+    // test in `compareSignaturesRelated`). Such parameters are ALWAYS bivariant
+    // regardless of `strictFunctionTypes`.
+    // Go: internal/checker/relater.go:Checker.compareSignaturesRelated (strictVariance)
+    fn signature_is_method(&self, program: &dyn BoundProgram, sig: SignatureId) -> bool {
+        match self.signature(sig).declaration {
+            Some(decl) => matches!(
+                program.arena().kind(decl),
+                Kind::MethodDeclaration | Kind::MethodSignature | Kind::Constructor
+            ),
+            None => false,
+        }
+    }
+
+    // Relates the call/construct signatures of `source` to those of `target`
+    // (Go's `signaturesRelatedTo` for a non-identity relation). Each target
+    // signature must be matched by SOME source signature; the common
+    // single-signature case is a direct pairwise comparison. A `reporter`
+    // threads the reporting twin so a failure in the single-signature case hangs
+    // its elaboration chain.
+    //
+    // DEFER(phase-4-checker-C-A+): the identity relation (`signaturesIdenticalTo`),
+    // the `anyFunctionType` wildcard, the same-symbol/same-target pairwise
+    // optimization, generic type-parameter erasure/instantiation, and the
+    // multi-overload `Type_0_provides_no_match_for_the_signature_1` elaboration.
+    // blocked-by: identity signature compare + `anyFunctionType` + generic
+    // signatures + overload reporting.
+    // Go: internal/checker/relater.go:Relater.signaturesRelatedTo
+    fn signatures_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        kind: SignatureKind,
+        relation: RelationKind,
+        reporter: Option<&mut ChainReporter>,
+    ) -> bool {
+        let source_sigs = self.signatures_of_type(source, kind);
+        let target_sigs = self.signatures_of_type(target, kind);
+        if target_sigs.is_empty() {
+            return true;
+        }
+        if source_sigs.is_empty() {
+            return false;
+        }
+        if source_sigs.len() == 1 && target_sigs.len() == 1 {
+            return self.compare_signatures_related(
+                program,
+                source_sigs[0],
+                target_sigs[0],
+                relation,
+                reporter,
+            );
+        }
+        // Each target signature must be matched by some source signature (Go's
+        // N*M matrix). Reporting for this multi-overload case is deferred.
+        for &t in &target_sigs {
+            let mut matched = false;
+            for &s in &source_sigs {
+                if self.compare_signatures_related(program, s, t, relation, None) {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return false;
+            }
+        }
+        true
+    }
+
+    // Compares two signatures for a relation (Go's `compareSignaturesRelated`,
+    // reachable subset). Parameters relate CONTRAVARIANTLY (`target` param ->
+    // `source` param). A `reporter` (the reporting twin) hangs the `2328`
+    // parameter-incompatibility message over the contravariant leaf on failure.
+    //
+    // This single function serves both the bool fast path (`reporter == None`,
+    // no allocation/reporting) and the reporting twin (`reporter == Some`),
+    // mirroring Go's one `compareSignaturesRelated(reportErrors, errorReporter,
+    // compareTypes)` parameterized by reporting.
+    //
+    // DEFER(phase-4-checker-C-A+): the top-signature `(...args: any[]) => any`
+    // short-circuit, generic instantiation/erasure, rest parameters, the `this`
+    // parameter (its symbol is not yet collected), the callback-covariance
+    // optimization (`getSingleCallSignature` on a parameter), type predicates,
+    // and strict-arity subtype tightening. blocked-by: top signatures + generic
+    // signatures + rest/`this` parameters + type predicates + callback variance.
+    // Go: internal/checker/relater.go:Checker.compareSignaturesRelated
+    fn compare_signatures_related(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: SignatureId,
+        target: SignatureId,
+        relation: RelationKind,
+        mut reporter: Option<&mut ChainReporter>,
+    ) -> bool {
+        if source == target {
+            return true;
+        }
+        let target_count = self.signature_parameter_count(target);
+        // Arity: a source requiring MORE arguments than the target accepts is
+        // not assignable. A callback may ignore trailing arguments, so a source
+        // with FEWER required parameters is fine (Go's `sourceHasMoreParameters`,
+        // reachable subset: no rest parameter, so `getMinArgumentCount(source) >
+        // targetCount`).
+        if self.signature_min_argument_count(source) > target_count as i32 {
+            if let Some(r) = &mut reporter {
+                r.report(
+                    &tsgo_diagnostics::TARGET_SIGNATURE_PROVIDES_TOO_FEW_ARGUMENTS_EXPECTED_0_OR_MORE_BUT_GOT_1,
+                    vec![
+                        self.signature_min_argument_count(source).to_string(),
+                        target_count.to_string(),
+                    ],
+                );
+            }
+            return false;
+        }
+        let source_count = self.signature_parameter_count(source);
+        let param_count = source_count.max(target_count);
+        // Under `strictFunctionTypes`, parameters relate strictly contravariantly;
+        // otherwise (flag off OR a method/constructor target) they relate
+        // bivariantly. Methods are always bivariant regardless of the flag (Go's
+        // `SignatureFlagsIsMethod` / `KindMethod*` check).
+        let strict_variance =
+            self.strict_function_types() && !self.signature_is_method(program, target);
+        for i in 0..param_count {
+            let (Some(source_type), Some(target_type)) = (
+                self.try_signature_type_at_position(program, source, i),
+                self.try_signature_type_at_position(program, target, i),
+            ) else {
+                continue;
+            };
+            if source_type == target_type {
+                continue;
+            }
+            // Parameters relate contravariantly: the target parameter type must
+            // be assignable to the source parameter type. Under bivariance (flag
+            // off or a method target) also accept the forward `source -> target`
+            // direction (Go tries it first, without reporting).
+            let related = if !strict_variance
+                && self.is_type_related_to(program, source_type, target_type, relation)
+            {
+                true
+            } else {
+                match &mut reporter {
+                    Some(r) => {
+                        self.report_is_related_to(program, target_type, source_type, relation, r)
+                    }
+                    None => self.is_type_related_to(program, target_type, source_type, relation),
+                }
+            };
+            if !related {
+                if let Some(r) = &mut reporter {
+                    let source_name = self.signature_parameter_name(program, source, i);
+                    let target_name = self.signature_parameter_name(program, target, i);
+                    r.report(
+                        &tsgo_diagnostics::TYPES_OF_PARAMETERS_0_AND_1_ARE_INCOMPATIBLE,
+                        vec![source_name, target_name],
+                    );
+                }
+                return false;
+            }
+        }
+        // Return types relate covariantly; a `void`/`any` target return accepts
+        // any source return (Go's void-return special case).
+        let target_return = self.signature_return_type(target);
+        if target_return == self.void_type() || target_return == self.any_type {
+            return true;
+        }
+        let source_return = self.signature_return_type(source);
+        let related = match &mut reporter {
+            Some(r) => {
+                self.report_is_related_to(program, source_return, target_return, relation, r)
+            }
+            None => self.is_type_related_to(program, source_return, target_return, relation),
+        };
+        if !related {
+            if let Some(r) = &mut reporter {
+                // The return-type marker is elided from the materialized chain;
+                // it triggers the `x()`/`x(...)` collapse when nested under a
+                // property and is otherwise dropped, leaving the inner return
+                // relation's own message as the child.
+                let message = self.return_type_marker_message(source, target);
+                let source_str = type_to_string(self, program, source_return);
+                let target_str = type_to_string(self, program, target_return);
+                r.report(message, vec![source_str, target_str]);
+            }
+            return false;
         }
         true
     }
@@ -1028,7 +1389,26 @@ impl Checker {
             ) {
                 Some(result) => result,
                 None => {
+                    // Elaborate properties, then call/construct signatures (the
+                    // reporting twin of the bool object arm), so a function-type
+                    // mismatch hangs its `2328`/return-type chain under the head.
                     self.report_properties_related_to(program, source, target, relation, reporter)
+                        && self.signatures_related_to(
+                            program,
+                            source,
+                            target,
+                            SignatureKind::Call,
+                            relation,
+                            Some(&mut *reporter),
+                        )
+                        && self.signatures_related_to(
+                            program,
+                            source,
+                            target,
+                            SignatureKind::Construct,
+                            relation,
+                            Some(&mut *reporter),
+                        )
                 }
             }
         } else {

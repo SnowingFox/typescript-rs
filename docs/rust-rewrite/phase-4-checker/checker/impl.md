@@ -3307,6 +3307,87 @@ impl EmitResolver {
 
 **推荐下一轮（4bq）**：(a) **`getVariances` marker-probe 变型**（解锁 contravariant/invariant/bivariant + 函数参数位 + variance 注解）；(b) **signature/parameter 阐释 `2328` + 返回类型折叠**（`signaturesRelatedTo` reporting + `reportError` 的 `x()`/`x(...)` 臂）；(c) **tuple 逐元素变型 + `[]` shorthand 打印**（解锁 tuple 关系 + cov_bad 头消息对齐 Go）。
 
+## C-A 落地记录（worklog 摘要）—— 函数类型 **signature 关系**（`signaturesRelatedTo`/`compareSignaturesRelated`：参数 contravariant + arity + 返回 covariant/void + 方法 bivariance + construct 签名）+ 函数类型打印 `(x: T) => R`
+
+**目标**：4bp 前 port 的 bool 关系把两个**函数类型**（`(x:number)=>void` vs `(x:string)=>void`）仅按**属性**比较（裸函数类型无属性 ⇒ 结构上恒"相等" ⇒ 误判可赋值）——**没有 call/construct SIGNATURE 比较**。本轮接入 Go `relater.go` 的 signature 关系：`structuredTypeRelatedToWorker` 的 OBJECT↔OBJECT 臂在 `propertiesRelatedTo` 之后追加 `signaturesRelatedTo(Call)` + `signaturesRelatedTo(Construct)`（三者皆须成立）；`signaturesRelatedTo` → `signatureRelatedTo` → `compareSignaturesRelated`（**参数 contravariant**、**arity 容忍**、**返回 covariant + void 特例**、**`strictFunctionTypes` 门控 + 方法 bivariance**）。配套：(b) construct 签名 population（`ConstructorType` 节点的 `__new` 成员 → `construct_signatures` + `SignatureFlags::CONSTRUCT`）；(c) nodebuilder 函数/构造类型 **arrow shorthand 打印** `(x: T) => R` / `new () => R`（此前印 `{}`）；(d) 关系错误链 materialize 时**剔除 `elidedInCompatibilityPyramid` marker**（返回类型 marker 2202..=2205）。bool 快路径与 4bn/4bo/4bp 报告链对其余形态**不动**（signature 关系是 4bn 报告孪生的纯增量；同 target 引用变型臂在 signature 前短路，与 4bp 不交互）。逐行为红→绿。单 lane。cargo 仅 `-p tsgo_checker`（+ `cargo build -p tsgo_compiler` 验 additive）。未 `git commit`。
+
+**Go 真值（ground truth，用 `go build ./cmd/tsgo` 实跑快照逐一核对，非凭空推断）**：
+- 参数错（`declare let a:(x:string)=>void; let b:(x:number)=>void=a`）：`v_param.ts(2,5)` `2322`「Type '(x: string) => void' is not assignable to type '(x: number) => void'.」→ `2328`「Types of parameters 'x' and 'x' are incompatible.」→ `2322`「Type 'number' is not assignable to type 'string'.」（**contravariant**：target `number` → source `string`）。
+- 返回错（`declare let a:()=>string; let b:()=>number=a`）：`v_return.ts(2,5)` `2322`「Type '() => string' is not assignable to type '() => number'.」→ `2322`「Type 'string' is not assignable to type 'number'.」（中间 2204 marker **elided**，链深 2）。
+- 返回 void（`declare let a:()=>number; let b:()=>void=a`）：**0** 诊断。
+- arity 太少（`declare let a:(x:number,y:number)=>void; let b:(x:number)=>void=a`）：`v_arity_bad.ts(2,5)` `2322` → `2849`「Target signature provides too few arguments. Expected 2 or more, but got 1.」（2849 **非** elided，显示）。
+- arity 容忍（`declare let a:(a:number)=>void; let b:(a:number,b:number)=>void=a`）：**0** 诊断。
+- 方法 bivariant（`interface A{f(x:number):void} interface B{f(x:number|string):void} declare let a:A; let b:B=a`）：**0** 诊断（方法参数恒 bivariant）。
+- 箭头属性 strict contravariant（同形但 `f:(x:number)=>void` 属性）：`m_prop.ts(4,5)` `2322`「Type 'A2' is not assignable to type 'B2'.」→ `2326`「Types of property 'f'...」→ `2322`「Type '(x: number) => void'...(x: string | number)...」→ `2328`「Types of parameters 'x' and 'x'...」→ `2322`「Type 'string | number' is not assignable to type 'number'.」（再 → `Type 'string'...` 是 4bo/4bp DEFER 的 union 阐释，port 少一层）。
+- 方法/属性区分关 `strictFunctionTypes`：`--strict --strictFunctionTypes false` 下 m_prop **0** 诊断（箭头属性也 bivariant）。
+- construct 对（`class Base{} declare let c:new()=>Base; let d:new()=>Base=c`）：**0** 诊断。
+- construct 错（`class Base{x:number=1} class Other{} declare let c:new()=>Other; let d:new()=>Base=c`）：`ctor_bad.ts(4,5)` `2322`「Type 'new () => Other' is not assignable to type 'new () => Base'.」→ `2741`「Property 'x' is missing in type 'Other' but required in type 'Base'.」（2205 construct-return marker **elided**）。
+- 变型 + signature 复合（`declare let a:Array<(x:number)=>void>; let b:Array<(x:string)=>void>=a`）：`combo.ts(2,5)` `2322`（头印 `((x: number) => void)[]`）→ `2322` 元素函数类型 → `2328` → `2322`「Type 'string' is not assignable to type 'number'.」。复合正控（元素 `(x:number|string)=>void` → `(x:number)=>void`）：**0** 诊断。
+
+**Go 函数镜像（`// Go:` 锚）**：`structuredTypeRelatedToWorker`（object 臂 `propertiesRelatedTo`+`signaturesRelatedTo(Call)`+`signaturesRelatedTo(Construct)`）、`signaturesRelatedTo`（single/默认 N*M「each target matched by some source」）、`signatureRelatedTo`、`compareSignaturesRelated`（arity `sourceHasMoreParameters`/参数 contravariant + `strictVariance`/返回 covariant + void 特例 + return marker）、`getParameterCount`/`getMinArgumentCount`/`tryGetTypeAtPosition`/`getParameterNameAtPosition`/`getReturnTypeOfSignature`、`getSignaturesOfType(kind)`、`getSignatureFromDeclaration`（construct flag）、`getTypeFromTypeLiteralOrFunctionOrConstructorTypeNode`（`__new`）、`createDiagnosticChainFromErrorChain`（`ElidedInCompatibilityPyramid` 剔除）、`signatureToString`/function-type node（nodebuilder arrow shorthand）。
+
+**严格 TDD（逐行为 red→green，先 probe 实测红再产最终测试）**：
+
+| # | 切片 | 最小 input → observable（实测红/绿）| 实现触点 |
+|---|---|---|---|
+| 1 tracer（genuine RED）| `function_parameters_relate_contravariantly` | `(x:number\|string)=>void` 赋 `(x:number)=>void` true / 反向 false（红：实测反向 **true**，函数类型仅按属性比较误判）| `signatures_related_to`+`compare_signatures_related`（参数 contravariant）+ bool 臂接线 |
+| 1 端到端 | `function_parameter_mismatch_reports_2328_chain` | `(x:string)=>void` 赋 `(x:number)=>void` → `2322`+`2328`+leaf（红：头印 `{}`、无链）| 报告孪生接线（`report_structured_type_related_to` 追加 signature）+ nodebuilder arrow 打印 |
+| 2（genuine RED）| `function_return_types_relate_covariantly` | `()=>string`✗`()=>number`、`()=>number`✓`()=>void`（红：实测 `s✗n` **true**，无返回比较）| `compare_signatures_related` 返回 covariant + void/any 短路 |
+| 2 端到端 | `function_return_mismatch_reports_collapsed_chain` / `function_void_return_accepts_any_source_return` | `()=>string` 赋 `()=>number` → `2322`+leaf（2204 marker elided）；void → 0 | return marker `return_type_marker_message` + `error_chain_*` elision |
+| 3（genuine RED）| `function_arity_tolerance` | few✓many / many✗few（红：实测 `many✗few` **true**，无 arity 守卫）| `compare_signatures_related` arity 守卫（`min_argument_count`）|
+| 3 端到端 | `function_arity_too_few_target_args_reports_2849` / `function_fewer_source_params_is_assignable` | many 赋 few → `2322`+`2849`；few 赋 many → 0 | 2849 marker（非 elided）|
+| 4（genuine RED）| `method_parameters_are_bivariant` | 方法形 A 赋 B → 0（红：临时强制 `strict_variance=true` → 实测 **1×2322**）| `strict_variance` + 方法 `signature_is_method` + bivariant 回退 |
+| 4 | `arrow_property_parameters_are_contravariant` / `arrow_property_parameters_are_bivariant_without_strict_function_types` | 箭头属性 strict → `2326`链；`--strictFunctionTypes false` → 0 | `strict_function_types()` 门控 |
+| 5（genuine RED）| `construct_signatures_relate_by_return_type` | `new()=>Other`✗`new()=>Base`（红：实测 **true**，construct 签名未 populate）| `__new` population + `SignatureFlags::CONSTRUCT` + Construct 臂接线 |
+| 5 端到端 | `construct_signature_matching_return_reports_nothing` / `construct_signature_incompatible_return_reports_2322` | 对→0；错→`2322`+`2741`（2205 elided）| 同上 + nodebuilder `new () => R` 打印 |
+| 6 | `array_of_function_types_relates_by_element_signature` / `..._contravariant_element_is_assignable` | `Array<(x:number)=>void>`✗`Array<(x:string)=>void>` → `2322`+元素链；逆元素 covariant → 0 | 4bp 变型臂 feed signature 关系（非回归）|
+| 单测 | `signatures_of_type_is_kind_aware` | call/construct 各取对应表；非对象→空 | `signatures_of_type` |
+| 单测 | `signatures_related_to_matches_some_source_signature` | target `()=>number` 被源 `[()=>string,()=>number]` 匹配；`()=>boolean` 无匹配；空 target→true | `signatures_related_to` N*M 臂 |
+| 单测 | `compare_signatures_related_return_covariance_and_void` | `()=>string`✗`()=>number`、`()=>number`✓`()=>void`、同→true | `compare_signatures_related`（返回/void）|
+| 单测 | `compare_signatures_related_arity_guard` | more✗fewer / fewer✓more（real `x:number` 填充参数）| `compare_signatures_related`（arity）|
+
+> 红→绿证据：slice 1/2/3/5 均 **genuine RED**（实测函数类型/构造类型误判可赋值，因无 signature 比较）；slice 4 用临时 `let strict_variance = true || (...)` 实测方法测试 **1×2322** 红后恢复复绿。端到端链测试在报告孪生接线前实测**头印 `{}`、无 signature 链**。单测为 green-on-arrival（关系机器一体）——**如实记录非伪造红**（同 4bc–4bp 口径）。
+
+**可达裁剪（faithful-but-reachable）**：
+- **dual-mode `compare_signatures_related`**：单函数带 `reporter: Option<&mut ChainReporter>`——`None` = bool 快路径（无分配/报告），`Some` = 报告孪生（挂 `2328`/返回 marker 链）。镜像 Go 单 `compareSignaturesRelated(reportErrors, errorReporter, compareTypes)` 由报告参数化（比拆两份 twin **更**贴 Go）。
+- **参数 contravariant + strict/bivariant**：`strict_variance = strictFunctionTypes && !signature_is_method(target)`。strict → 仅 `relate(target,source)`；bivariant → 先 `relate(source,target)`（不报告）失败再 `relate(target,source)`（报告）。方法/构造声明（`MethodDeclaration|MethodSignature|Constructor`）恒 bivariant。callback-covariance 优化（参数自身是单 call 签名时换向递归）DEFER。
+- **arity**：无 rest 子集 ⇒ `sourceHasMoreParameters = getMinArgumentCount(source) > getParameterCount(target)`。`tryGetTypeAtPosition` 越界返 `None`（无 rest 索引），`param_count = max(sourceCount, targetCount)`，单侧 `None` 跳过。
+- **返回 covariant + void/any 特例**：`target return == void || any` ⇒ 直 true；否则 `relate(sourceReturn, targetReturn)`。失败时报 `return_type_marker_message`（2202/2203/2204/2205 四选一，按 no-args × construct）——该 marker `elidedInCompatibilityPyramid`，materialize 时剔除（留下内层返回关系自身的叶诊断），故 `()=>string`↔`()=>number` 链深 2。`x()`/`x(...)` 属性折叠（marker 在属性消息下触发 `The_types_returned_by` 重写）DEFER。
+- **`signaturesRelatedTo` 匹配**：单签名各一 → 直接 `compareSignaturesRelated`；否则 N*M「每个 target 签名被某 source 签名匹配」（多 overload 报告 DEFER）。identity（`signaturesIdenticalTo`）/`anyFunctionType` wildcard / same-symbol·same-target pairwise 优化 / 泛型 erase·instantiate / abstract·visibility 检查 DEFER。
+- **construct population**：`ConstructorType` 节点经 `__new` 成员收签名（`get_signature_from_declaration` 置 `CONSTRUCT`）。interface `{ new(): T }`（`ConstructSignature`）/ `{ (x): T }`（`CallSignature`）成员的签名收集仍 DEFER（`get_signatures_of_symbol` 未含这两 kind；interface 级 call/construct 签名表未 populate）。
+- **arrow 打印**：anonymous object 恰 1 call（且无 construct/属性/index）⇒ `(p: T) => R`；恰 1 construct ⇒ `new (p: T) => R`；否则回退 `{ ... }` 成员字面量。混合形（签名 + 属性）/ overload / 泛型 / optional·rest·this 参数打印 DEFER。
+
+**本轮交付**：
+- `core/relations.rs`：新私有 `SignatureKind` 枚举；`structured_type_related_to` OBJECT↔OBJECT 臂在 `properties_related_to` 后追加 `signatures_related_to(Call/Construct, None)`；`report_structured_type_related_to` 同臂追加 `signatures_related_to(..., Some(reporter))`；新私有 `signatures_of_type`/`signature_parameter_count`/`signature_min_argument_count`/`signature_return_type`/`return_type_marker_message`/`try_signature_type_at_position`/`signature_parameter_name`/`signature_is_method`/`signatures_related_to`（dual-mode）/`compare_signatures_related`（dual-mode）；`error_chain_to_report`/`error_chain_node_to_message_chain` 改为剔除 `elidedInCompatibilityPyramid` marker（后者签名改取 `Option<Box<ErrorChain>>`）。
+- `core/mod.rs`：新 `pub fn strict_function_types`（镜像 `strict_null_checks`）。
+- `core/declared_types.rs`：`get_type_from_function_or_constructor_type_node` 读 `__new` → `construct_signatures`（新私有 `signatures_of_member`）；`get_signature_from_declaration` 对 `ConstructorType|ConstructSignature` 置 `SignatureFlags::CONSTRUCT`；import `INTERNAL_SYMBOL_NAME_NEW`。
+- `core/nodebuilder.rs`：anonymous object 臂在成员字面量前插 `serialize_signature_shorthand`（+ `serialize_signature`）打印 `(x: T) => R` / `new () => R`。
+- 测试：`relations_test.rs`（+8）、`check_test.rs`（+12）。
+
+**新公开 API 形状（additive-only 确认）**：唯一新 `pub` 面是 `Checker::strict_function_types`（additive 新 `pub fn`，镜像既有 `strict_null_checks`）。其余全私有：`SignatureKind` 私有枚举、所有新 `Checker` 方法私有 `fn`、`signatures_of_member`/`serialize_signature*` 私有自由 fn。**无既有 `pub fn` 签名变更**（`get_type_from_function_or_constructor_type_node`/`get_signature_from_declaration` 私有 fn；`structured_type_related_to`/`report_structured_type_related_to` 私有 fn 加调用；`error_chain_node_to_message_chain` 私有 fn 改签名）、无 `.go` 改动、无 `internal/ast` 改动、无新依赖、无 `lib.rs` 改动。复用 4bn `ChainReporter`/`DiagnosticMessageChain`/`build_relation_error_chain`、4bp 变型臂、4al `compiler_options()`/strict getter。`cargo build -p tsgo_compiler` 绿。
+
+**测试增量**：**569 单测**（+20，相对 4bp 基线 549：`relations_test`+8、`check_test`+12）+ **136 doctest**（+1：`strict_function_types`）。**无既有测试弱化/删除**（无既有断言改动；新增打印路径未触动任何现有 nodebuilder 测试——549→569 全绿）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker --lib`（569 绿）+ `--doc`（136 绿）；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。未触 `internal/ast`，故未跑 `--workspace`。未 `git commit`。
+
+**与 Go 的已知偏离（本轮，记录在案）**：
+- **m_prop / combo 链最内层少一层**：箭头属性参数失败的叶 = `Type 'string | number' is not assignable to type 'number'.`，Go 再下一层 `Type 'string' is not assignable to type 'number'.`（union per-constituent 阐释，4bo/4bp DEFER）。CODE/结构/contravariant 方向均对齐。
+- **combo 头数组打印 `Array<...>` vs Go `(...)[]`**：4bp 已记录的 array-shorthand 打印偏离（`type_to_string` array 臂未 port），非本轮引入。
+
+**本轮 DEFER（带 blocked-by）**：
+- **完整 `getVariances` marker-probe 变型**：本轮**未**实现（保留 4bp 全 covariant 默认，未回归）。contravariant/invariant/bivariant/independent 类型参数（含函数参数位 ⇒ contravariant）、`in`/`out` 注解、marker（`markerSuperType`/`markerSubType`/`markerOtherType`）探测、`relateVariances` 结构兜底。blocked-by: 泛型实例化基石（C-B）——marker-probe 需用 marker 类型实例化泛型 target 再探关系。
+- **callback-covariance 优化**：参数自身为单 call 签名时换向递归 `compareSignaturesRelated`（`Promise<T>` 协变）。blocked-by: `getSingleCallSignature` + checkMode callback 位。
+- **`this` 参数 / rest 参数 / 泛型签名**：`compareSignaturesRelated` 的 this（contravariant）、rest（`getRestOrAnyTypeAtPosition`）、`getErasedSignature`/`instantiateSignatureInContextOf`。blocked-by: `this_parameter` 收集（`getSignatureFromDeclaration` 未收 `this:` 伪参数）+ tuple/rest 类型 + 泛型签名实例化。
+- **top-signature 短路**：`(...args:any[])=>any` 子类型。blocked-by: rest 参数 + `isTopSignature`。
+- **identity / overload / abstract·visibility**：`signaturesIdenticalTo`、N*M `Type_0_provides_no_match_for_the_signature_1` 报告、construct abstract（2517）/ visibility（2674）检查、`anyFunctionType`。blocked-by: identity 签名比较 + overload 报告 + abstract/access 修饰符 + `anyFunctionType` 内建。
+- **interface 级 call/construct 签名 + type-literal 签名**：`{ (x):T; name:string }`（属性 + 签名）的签名收集 + 混合打印。blocked-by: `getSignaturesOfSymbol` 含 `CallSignature`/`ConstructSignature` kind + interface 成员签名表 population。
+- **`x()`/`x(...)` 返回类型属性折叠**：marker 在属性消息下触发 `The_types_returned_by_0_are_incompatible`。blocked-by: 嵌套属性-函数-返回链（需属性下 signature 阐释）。
+- **type predicates / index-signature 关系**：`compareTypePredicateRelatedTo`、`indexSignaturesRelatedTo`。blocked-by: 类型谓词 + index 签名关系。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/types/typeRelationships/typeAndMemberIdentity/` + `assignmentCompatibility/`（函数类型参数 contravariant / 返回 covariant / arity / 方法 bivariance / construct 签名）最基础子集——无泛型变型、无 callback-covariance、无 this/rest/overload、无 type predicate。
+
+**推荐下一轮（C-B 或 C-A 续）**：(a) **泛型实例化基石**（解锁 `getVariances` marker-probe ⇒ contravariant/invariant 类型参数位 + 泛型签名 erase/instantiate）；(b) **`this`/rest 参数 + top-signature**（`getSignatureFromDeclaration` 收 `this:` + rest tuple）；(c) **interface/type-literal 级 call/construct 签名收集 + 混合打印**（`{ (x):T; a:U }` 关系与打印）。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

@@ -124,12 +124,83 @@ pub fn type_to_string(checker: &mut Checker, program: &dyn BoundProgram, ty: Typ
                 return name;
             }
         }
+        // A bare function/constructor type (a single call or construct
+        // signature, no properties/index/other signatures) prints in arrow
+        // shorthand: `(x: T) => R` / `new (x: T) => R`.
+        if let Some(shorthand) = serialize_signature_shorthand(checker, program, ty) {
+            return shorthand;
+        }
         // An anonymous object type prints its member literal.
         return serialize_members(checker, program, ty);
     }
     // Intrinsics/literals/unions (and not-yet-handled kinds) use the
     // program-less printer.
     checker.type_to_string(ty)
+}
+
+// Prints a bare function/constructor type in arrow shorthand (Go's
+// `typeToString` of an object type with exactly one call (or one construct)
+// signature and no properties, index signatures, or other-kind signatures):
+// `(x: T) => R` for a call signature, `new (x: T) => R` for a construct
+// signature. Returns `None` when the type is not a bare function/constructor
+// type, so the caller falls back to the `{ ... }` member literal.
+//
+// DEFER(phase-4-checker-C-A+): the `{ (x): R; new (): S; a: T; }` mixed form
+// (an object carrying signatures alongside properties/index infos), overloaded
+// signatures (multiple call/construct signatures), generic type parameters
+// (`<T>(x: T) => T`), optional (`x?: T`) and rest (`...args: T[]`) parameters,
+// and the `this` parameter. blocked-by: full signature-node serialization.
+// Go: internal/checker/nodebuilderimpl.go (signatureToString / function type node)
+fn serialize_signature_shorthand(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    ty: TypeId,
+) -> Option<String> {
+    let (properties, calls, constructs, index_infos) = match &checker.get_type(ty).data {
+        TypeData::Object(o) => (
+            o.properties.clone(),
+            o.call_signatures.clone(),
+            o.construct_signatures.clone(),
+            o.index_infos.clone(),
+        ),
+        _ => return None,
+    };
+    if !properties.is_empty() || !index_infos.is_empty() {
+        return None;
+    }
+    if calls.len() == 1 && constructs.is_empty() {
+        return Some(serialize_signature(checker, program, calls[0], false));
+    }
+    if constructs.len() == 1 && calls.is_empty() {
+        return Some(serialize_signature(checker, program, constructs[0], true));
+    }
+    None
+}
+
+// Prints one signature in arrow shorthand: `(p0: T0, p1: T1) => R`, prefixed
+// with `new ` for a construct signature.
+// Go: internal/checker/nodebuilderimpl.go (signatureToString)
+fn serialize_signature(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    sig: super::signatures::SignatureId,
+    is_construct: bool,
+) -> String {
+    let parameters = checker.signature(sig).parameters.clone();
+    let return_type = checker
+        .signature(sig)
+        .resolved_return_type
+        .unwrap_or_else(|| checker.any_type());
+    let mut parts = Vec::with_capacity(parameters.len());
+    for param in parameters {
+        let name = program.symbol(param).name.clone();
+        let param_type = get_type_of_symbol(checker, program, param, None);
+        let printed = type_to_string(checker, program, param_type);
+        parts.push(format!("{name}: {printed}"));
+    }
+    let return_str = type_to_string(checker, program, return_type);
+    let prefix = if is_construct { "new " } else { "" };
+    format!("{prefix}({}) => {return_str}", parts.join(", "))
 }
 
 // Prints an anonymous object type's members as `{ a: A; b: B; }` (or `{}`).

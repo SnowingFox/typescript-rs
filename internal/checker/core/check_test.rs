@@ -5784,3 +5784,362 @@ fn parenthesized_expression_takes_inner_type() {
         "Type 'number' is not assignable to type 'string'."
     );
 }
+
+// ---- C-A: function-type signature relations + variance (end-to-end) ----
+
+// C-A slice 1 (param mismatch, contravariant): assigning a `(x: string) => void`
+// to a `(x: number) => void` fails because parameters relate contravariantly.
+// The head `2322` carries a `2328` "Types of parameters 'x' and 'x' are
+// incompatible." over the contravariant leaf `2322` "Type 'number' is not
+// assignable to type 'string'." (target param `number` -> source param `string`).
+// Verified against `cmd/tsgo`:
+//   v_param.ts(2,5): error TS2322: Type '(x: string) => void' is not assignable
+//   to type '(x: number) => void'.
+//     Types of parameters 'x' and 'x' are incompatible.
+//       Type 'number' is not assignable to type 'string'.
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (parameters)
+#[test]
+fn function_parameter_mismatch_reports_2328_chain() {
+    let src = "declare let a: (x: string) => void;\nlet b: (x: number) => void = a;";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type '(x: string) => void' is not assignable to type '(x: number) => void'."
+    );
+    // 2328 parameter incompatibility over the contravariant leaf.
+    assert_eq!(d.message_chain.len(), 1);
+    let params = &d.message_chain[0];
+    assert_eq!(params.code, 2328);
+    assert_eq!(
+        params.message,
+        "Types of parameters 'x' and 'x' are incompatible."
+    );
+    assert_eq!(params.next.len(), 1);
+    assert_eq!(params.next[0].code, 2322);
+    assert_eq!(
+        params.next[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+    // Anchored at the `b` declaration name.
+    let span = &src[d.start as usize..(d.start + d.length) as usize];
+    assert!(span.trim_start().starts_with('b'), "span = {span:?}");
+}
+
+// C-A slice 2 (return mismatch, covariant + marker elision): assigning a
+// `() => string` to a `() => number` fails on the covariant return type. The
+// "Call signatures with no arguments have incompatible return types ..." marker
+// (2204) is `elidedInCompatibilityPyramid`, so the materialized chain collapses
+// to the head `2322` over the inner return relation's own `2322` leaf.
+// Verified against `cmd/tsgo`:
+//   v_return.ts(2,5): error TS2322: Type '() => string' is not assignable to
+//   type '() => number'.
+//     Type 'string' is not assignable to type 'number'.
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (return marker)
+//     + createDiagnosticChainFromErrorChain (elision)
+#[test]
+fn function_return_mismatch_reports_collapsed_chain() {
+    let src = "declare let a: () => string;\nlet b: () => number = a;";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type '() => string' is not assignable to type '() => number'."
+    );
+    // The 2204 return-type marker is elided; the child is the return leaf.
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2322);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+    assert!(d.message_chain[0].next.is_empty());
+}
+
+// C-A slice 2 (void return accepts any): a `() => number` is assignable to a
+// `() => void` because a `void` target return accepts any source return.
+// Verified against `cmd/tsgo`: no diagnostics.
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (void return)
+#[test]
+fn function_void_return_accepts_any_source_return() {
+    let src = "declare let a: () => number;\nlet b: () => void = a;";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "() => number is assignable to () => void"
+    );
+}
+
+// C-A slice 3 (arity, too few target arguments): assigning a
+// `(x: number, y: number) => void` to a `(x: number) => void` fails because the
+// source requires more arguments than the target supplies. The head `2322`
+// carries a `2849` "Target signature provides too few arguments. Expected 2 or
+// more, but got 1." (not `elidedInCompatibilityPyramid`, so it is shown).
+// Verified against `cmd/tsgo`:
+//   v_arity_bad.ts(2,5): error TS2322: Type '(x: number, y: number) => void' is
+//   not assignable to type '(x: number) => void'.
+//     Target signature provides too few arguments. Expected 2 or more, but got 1.
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (arity)
+#[test]
+fn function_arity_too_few_target_args_reports_2849() {
+    let src = "declare let a: (x: number, y: number) => void;\nlet b: (x: number) => void = a;";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type '(x: number, y: number) => void' is not assignable to type '(x: number) => void'."
+    );
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2849);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Target signature provides too few arguments. Expected 2 or more, but got 1."
+    );
+}
+
+// C-A slice 3 (arity, fewer source params is fine): a `(a: number) => void` is
+// assignable to a `(a: number, b: number) => void` (callbacks may ignore
+// trailing arguments). Verified against `cmd/tsgo`: no diagnostics.
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (arity)
+#[test]
+fn function_fewer_source_params_is_assignable() {
+    let src = "declare let a: (a: number) => void;\nlet b: (a: number, b: number) => void = a;";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "fewer-param source is assignable"
+    );
+}
+
+// C-A slice 4 (method parameters are bivariant): under the default options
+// (strict on), a method-declared parameter relates BIVARIANTLY, so assigning
+// `A { f(x: number): void }` to `B { f(x: number | string): void }` is allowed
+// (the forward `number -> number | string` direction holds).
+// Verified against `cmd/tsgo`: no diagnostics.
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (method bivariance)
+#[test]
+fn method_parameters_are_bivariant() {
+    let src = "interface A { f(x: number): void }\ninterface B { f(x: number | string): void }\ndeclare let a: A;\nlet b: B = a;";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "method params are bivariant, so A is assignable to B"
+    );
+}
+
+// C-A slice 4 (arrow-property parameters are strictly contravariant): the same
+// shapes as `method_parameters_are_bivariant`, but with the member declared as
+// an arrow-typed PROPERTY, relate strictly contravariantly under
+// `strictFunctionTypes`, so the assignment fails.
+// Verified against `cmd/tsgo`:
+//   m_prop.ts(4,5): error TS2322: Type 'A2' is not assignable to type 'B2'.
+//     Types of property 'f' are incompatible.
+//       Type '(x: number) => void' is not assignable to type '(x: string | number) => void'.
+//         Types of parameters 'x' and 'x' are incompatible.
+//           Type 'string | number' is not assignable to type 'number'.
+//             Type 'string' is not assignable to type 'number'.   (union elaboration DEFER)
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (strict contravariance)
+#[test]
+fn arrow_property_parameters_are_contravariant() {
+    let src = "interface A2 { f: (x: number) => void }\ninterface B2 { f: (x: number | string) => void }\ndeclare let a: A2;\nlet b: B2 = a;";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message, "Type 'A2' is not assignable to type 'B2'.");
+    // 2326 (property 'f') -> 2322 (function type) -> 2328 (parameters) -> leaf.
+    assert_eq!(d.message_chain.len(), 1);
+    let prop = &d.message_chain[0];
+    assert_eq!(prop.code, 2326);
+    assert_eq!(prop.message, "Types of property 'f' are incompatible.");
+    assert_eq!(prop.next.len(), 1);
+    let func = &prop.next[0];
+    assert_eq!(func.code, 2322);
+    assert_eq!(
+        func.message,
+        "Type '(x: number) => void' is not assignable to type '(x: string | number) => void'."
+    );
+    assert_eq!(func.next.len(), 1);
+    let params = &func.next[0];
+    assert_eq!(params.code, 2328);
+    assert_eq!(
+        params.message,
+        "Types of parameters 'x' and 'x' are incompatible."
+    );
+    // The leaf is the contravariant `target(string | number) -> source(number)`
+    // relation. The deeper per-constituent union leaf is the 4bo/4bp union
+    // elaboration DEFER, so the port stops one level shy of Go here.
+    assert_eq!(params.next.len(), 1);
+    assert_eq!(params.next[0].code, 2322);
+    assert_eq!(
+        params.next[0].message,
+        "Type 'string | number' is not assignable to type 'number'."
+    );
+}
+
+// C-A slice 4 (strictFunctionTypes off -> bivariant property params): with
+// `--strictFunctionTypes false`, even an arrow-typed PROPERTY relates its
+// parameters bivariantly, so the `arrow_property_parameters_are_contravariant`
+// shapes become assignable.
+// Verified against `cmd/tsgo --strict --strictFunctionTypes false`: no diagnostics.
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (strictVariance off)
+#[test]
+fn arrow_property_parameters_are_bivariant_without_strict_function_types() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+    let src = "interface A2 { f: (x: number) => void }\ninterface B2 { f: (x: number | string) => void }\ndeclare let a: A2;\nlet b: B2 = a;";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        src,
+        CompilerOptions {
+            strict: Tristate::True,
+            strict_function_types: Tristate::False,
+            ..CompilerOptions::default()
+        },
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "without strictFunctionTypes, arrow-property params are bivariant"
+    );
+}
+
+// C-A slice 5 (construct signature, matching return): a `new () => Base` is
+// assignable to a `new () => Base`. Verified against `cmd/tsgo`: no diagnostics.
+// Go: internal/checker/relater.go:Relater.signaturesRelatedTo (SignatureKindConstruct)
+#[test]
+fn construct_signature_matching_return_reports_nothing() {
+    let src = "class Base {}\ndeclare let c: new () => Base;\nlet d: new () => Base = c;";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "new () => Base is assignable to new () => Base"
+    );
+}
+
+// C-A slice 5 (construct signature, incompatible return): a `new () => Other` is
+// not assignable to a `new () => Base` because the constructed `Other` lacks the
+// required `x` of `Base`. The construct-signature return-type marker (2205) is
+// elided, so the head `2322` carries the inner missing-property `2741`.
+// Verified against `cmd/tsgo`:
+//   ctor_bad.ts(4,5): error TS2322: Type 'new () => Other' is not assignable to
+//   type 'new () => Base'.
+//     Property 'x' is missing in type 'Other' but required in type 'Base'.
+// Go: internal/checker/relater.go:Relater.signaturesRelatedTo (SignatureKindConstruct)
+#[test]
+fn construct_signature_incompatible_return_reports_2322() {
+    let src = "class Base { x: number = 1; }\nclass Other {}\ndeclare let c: new () => Other;\nlet d: new () => Base = c;";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type 'new () => Other' is not assignable to type 'new () => Base'."
+    );
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2741);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Property 'x' is missing in type 'Other' but required in type 'Base'."
+    );
+}
+
+// C-A slice 6 (variance + signatures compose, non-regression): an
+// `Array<(x: number) => void>` is NOT assignable to an
+// `Array<(x: string) => void>` because the (covariant) element relation relates
+// the element function types, whose parameters are contravariant
+// (`target(string)` -> `source(number)` fails). This exercises 4bp's covariant
+// type-argument variance feeding into the new signature relation.
+// Verified against `cmd/tsgo`:
+//   combo.ts(2,5): error TS2322: Type '((x: number) => void)[]' is not
+//   assignable to type '((x: string) => void)[]'.
+//     Type '(x: number) => void' is not assignable to type '(x: string) => void'.
+//       Types of parameters 'x' and 'x' are incompatible.
+//         Type 'string' is not assignable to type 'number'.
+// (The head prints the element array as `Array<...>` rather than `(...)[]` — the
+// 4bp-documented array-shorthand printing divergence; CODE/structure/leaf match.)
+// Go: internal/checker/relater.go:typeArgumentsRelatedTo + compareSignaturesRelated
+#[test]
+fn array_of_function_types_relates_by_element_signature() {
+    let src =
+        format!("{ARRAY_LIB}declare let a: Array<(x: number) => void>;\nlet b: Array<(x: string) => void> = a;");
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", &src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    // Element function-type mismatch nested under the array head.
+    assert_eq!(d.message_chain.len(), 1);
+    let elem = &d.message_chain[0];
+    assert_eq!(elem.code, 2322);
+    assert_eq!(
+        elem.message,
+        "Type '(x: number) => void' is not assignable to type '(x: string) => void'."
+    );
+    assert_eq!(elem.next.len(), 1);
+    let params = &elem.next[0];
+    assert_eq!(params.code, 2328);
+    assert_eq!(
+        params.message,
+        "Types of parameters 'x' and 'x' are incompatible."
+    );
+    assert_eq!(params.next.len(), 1);
+    assert_eq!(params.next[0].code, 2322);
+    assert_eq!(
+        params.next[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// C-A slice 6 (variance + signatures compose, positive): an
+// `Array<(x: number | string) => void>` IS assignable to an
+// `Array<(x: number) => void>` because the element function types' parameters
+// relate contravariantly (`target(number)` -> `source(number | string)` holds).
+// Verified against `cmd/tsgo`: no diagnostics.
+// Go: internal/checker/relater.go:typeArgumentsRelatedTo + compareSignaturesRelated
+#[test]
+fn array_of_function_types_contravariant_element_is_assignable() {
+    let src = format!(
+        "{ARRAY_LIB}declare let a: Array<(x: number | string) => void>;\nlet b: Array<(x: number) => void> = a;"
+    );
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", &src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "contravariant element params make the array assignable"
+    );
+}

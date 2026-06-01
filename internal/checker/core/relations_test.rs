@@ -1,8 +1,9 @@
 use super::*;
-use crate::core::declared_types::get_declared_type_of_symbol;
+use crate::core::declared_types::{get_declared_type_of_symbol, get_type_of_symbol};
 use crate::core::program::BoundProgram;
+use crate::core::signatures::Signature;
 use crate::core::test_support::StubProgram;
-use crate::core::types::LiteralValue;
+use crate::core::types::{LiteralValue, ObjectType};
 use crate::core::Checker;
 use tsgo_ast::SymbolId;
 
@@ -17,6 +18,11 @@ fn sym(p: &StubProgram, name: &str) -> SymbolId {
         .expect("locals")
         .get(name)
         .unwrap_or_else(|| panic!("missing {name}"))
+}
+
+// Resolves the (function/value) type of a top-level `declare let <name>: T`.
+fn type_of_var(c: &mut Checker, p: &StubProgram, name: &str) -> TypeId {
+    get_type_of_symbol(c, p, sym(p, name), p.globals())
 }
 
 // Go: internal/checker/relater.go:isSimpleTypeRelatedTo (any/unknown/never)
@@ -709,6 +715,231 @@ fn array_references_relate_by_element_covariance() {
     assert!(!c.is_type_assignable_to(&p, array_num_or_str, array_num));
     // Identical references relate.
     assert!(c.is_type_assignable_to(&p, array_num, array_num));
+}
+
+// ---- C-A: function-type signature relations + variance ----
+
+// Builds a nullary signature returning `ret` (a `new` signature when
+// `construct`), for the direct signature-relation unit tests.
+fn nullary_sig(c: &mut Checker, ret: TypeId, construct: bool) -> SignatureId {
+    let mut s = Signature::new(if construct {
+        SignatureFlags::CONSTRUCT
+    } else {
+        SignatureFlags::NONE
+    });
+    s.resolved_return_type = Some(ret);
+    s.min_argument_count = 0;
+    c.new_signature(s)
+}
+
+// Builds an anonymous object type carrying the given call/construct signatures.
+fn signature_obj(c: &mut Checker, calls: Vec<SignatureId>, constructs: Vec<SignatureId>) -> TypeId {
+    let obj = ObjectType {
+        call_signatures: calls,
+        construct_signatures: constructs,
+        ..Default::default()
+    };
+    c.new_object_type(ObjectFlags::ANONYMOUS, None, obj)
+}
+
+// C-A unit: `signatures_of_type` is kind-aware — it returns `call_signatures`
+// for `Call` and `construct_signatures` for `Construct`.
+// Go: internal/checker/checker.go:Checker.getSignaturesOfType
+#[test]
+fn signatures_of_type_is_kind_aware() {
+    let mut c = Checker::new();
+    let n = c.number_type();
+    let call = nullary_sig(&mut c, n, false);
+    let ctor = nullary_sig(&mut c, n, true);
+    let obj = signature_obj(&mut c, vec![call], vec![ctor]);
+    assert_eq!(c.signatures_of_type(obj, SignatureKind::Call), vec![call]);
+    assert_eq!(
+        c.signatures_of_type(obj, SignatureKind::Construct),
+        vec![ctor]
+    );
+    // A type with no object data has neither kind.
+    let s = c.string_type();
+    assert!(c.signatures_of_type(s, SignatureKind::Call).is_empty());
+    assert!(c.signatures_of_type(s, SignatureKind::Construct).is_empty());
+}
+
+// C-A unit: `signatures_related_to` requires EACH target signature to be matched
+// by SOME source signature (Go's N*M matrix). A target `() => number` is matched
+// by a source list `[() => string, () => number]`; a target `() => boolean` is
+// matched by neither.
+// Go: internal/checker/relater.go:Relater.signaturesRelatedTo (default arm)
+#[test]
+fn signatures_related_to_matches_some_source_signature() {
+    let mut c = Checker::new();
+    let p = empty_program();
+    let n = c.number_type();
+    let s = c.string_type();
+    let b = c.boolean_type();
+    let src_str = nullary_sig(&mut c, s, false);
+    let src_num = nullary_sig(&mut c, n, false);
+    let source = signature_obj(&mut c, vec![src_str, src_num], Vec::new());
+    // Target `() => number` matched by the source's `() => number`.
+    let tgt_num = nullary_sig(&mut c, n, false);
+    let target_num = signature_obj(&mut c, vec![tgt_num], Vec::new());
+    assert!(c.signatures_related_to(
+        &p,
+        source,
+        target_num,
+        SignatureKind::Call,
+        RelationKind::Assignable,
+        None
+    ));
+    // Target `() => boolean` matched by NEITHER source signature.
+    let tgt_bool = nullary_sig(&mut c, b, false);
+    let target_bool = signature_obj(&mut c, vec![tgt_bool], Vec::new());
+    assert!(!c.signatures_related_to(
+        &p,
+        source,
+        target_bool,
+        SignatureKind::Call,
+        RelationKind::Assignable,
+        None
+    ));
+    // An empty target signature list is trivially satisfied.
+    let empty = signature_obj(&mut c, Vec::new(), Vec::new());
+    assert!(c.signatures_related_to(
+        &p,
+        source,
+        empty,
+        SignatureKind::Call,
+        RelationKind::Assignable,
+        None
+    ));
+}
+
+// C-A unit: `compare_signatures_related` relates return types covariantly, with a
+// `void`/`any` target return accepting any source return (no parameters needed).
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (return type)
+#[test]
+fn compare_signatures_related_return_covariance_and_void() {
+    let mut c = Checker::new();
+    let p = empty_program();
+    let n = c.number_type();
+    let s = c.string_type();
+    let v = c.void_type();
+    let ret_str = nullary_sig(&mut c, s, false);
+    let ret_num = nullary_sig(&mut c, n, false);
+    let ret_void = nullary_sig(&mut c, v, false);
+    // `() => string` vs `() => number`: covariant return fails.
+    assert!(!c.compare_signatures_related(&p, ret_str, ret_num, RelationKind::Assignable, None));
+    // `() => number` vs `() => void`: void target accepts any source return.
+    assert!(c.compare_signatures_related(&p, ret_num, ret_void, RelationKind::Assignable, None));
+    // Identical return relates.
+    assert!(c.compare_signatures_related(&p, ret_str, ret_str, RelationKind::Assignable, None));
+}
+
+// C-A unit: `compare_signatures_related` rejects a source requiring more
+// arguments than the target accepts (the arity guard, before the parameter
+// loop), using a real `number` parameter symbol as filler.
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (arity)
+#[test]
+fn compare_signatures_related_arity_guard() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare let x: number;");
+    let mut c = Checker::new();
+    let v = c.void_type();
+    let x = sym(&p, "x");
+    // Source requires 2 args; target accepts 1.
+    let mut more = Signature::new(SignatureFlags::NONE);
+    more.parameters = vec![x, x];
+    more.min_argument_count = 2;
+    more.resolved_return_type = Some(v);
+    let more = c.new_signature(more);
+    let mut fewer = Signature::new(SignatureFlags::NONE);
+    fewer.parameters = vec![x];
+    fewer.min_argument_count = 1;
+    fewer.resolved_return_type = Some(v);
+    let fewer = c.new_signature(fewer);
+    // A source requiring MORE args is not assignable to a target accepting fewer.
+    assert!(!c.compare_signatures_related(&p, more, fewer, RelationKind::Assignable, None));
+    // The reverse (fewer required params) is assignable.
+    assert!(c.compare_signatures_related(&p, fewer, more, RelationKind::Assignable, None));
+}
+
+// C-A slice 1: call-signature parameters relate CONTRAVARIANTLY (Go's
+// `compareSignaturesRelated` parameter loop relates `target` param -> `source`
+// param). A function accepting a WIDER parameter is assignable where a
+// function accepting a NARROWER parameter is expected, not the reverse.
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (parameters)
+#[test]
+fn function_parameters_relate_contravariantly() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let wide: (x: number | string) => void;\ndeclare let narrow: (x: number) => void;",
+    );
+    let mut c = Checker::new();
+    let wide = type_of_var(&mut c, &p, "wide");
+    let narrow = type_of_var(&mut c, &p, "narrow");
+    // `(x: number | string) => void` IS assignable to `(x: number) => void`:
+    // contravariant `target(number)` -> `source(number | string)` holds.
+    assert!(c.is_type_assignable_to(&p, wide, narrow));
+    // The reverse fails: `target(number | string)` -> `source(number)` fails.
+    assert!(!c.is_type_assignable_to(&p, narrow, wide));
+}
+
+// C-A slice 2: call-signature return types relate COVARIANTLY (`source` return
+// -> `target` return), with a `void`/`any` target return accepting any source
+// return (Go's void-return special case).
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (return type)
+#[test]
+fn function_return_types_relate_covariantly() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let s: () => string;\ndeclare let n: () => number;\ndeclare let v: () => void;",
+    );
+    let mut c = Checker::new();
+    let s = type_of_var(&mut c, &p, "s");
+    let n = type_of_var(&mut c, &p, "n");
+    let v = type_of_var(&mut c, &p, "v");
+    // `() => string` is NOT assignable to `() => number` (covariant return).
+    assert!(!c.is_type_assignable_to(&p, s, n));
+    // `() => number` IS assignable to `() => void` (void target accepts any).
+    assert!(c.is_type_assignable_to(&p, n, v));
+    // A matching return relates.
+    assert!(c.is_type_assignable_to(&p, s, s));
+}
+
+// C-A slice 3: arity tolerance. A signature requiring FEWER arguments is
+// assignable where MORE parameters are expected (a callback may ignore trailing
+// arguments); a signature requiring MORE arguments is NOT assignable to one
+// accepting fewer (Go's `sourceHasMoreParameters` -> `getMinArgumentCount`).
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (arity)
+#[test]
+fn function_arity_tolerance() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let few: (a: number) => void;\ndeclare let many: (a: number, b: number) => void;",
+    );
+    let mut c = Checker::new();
+    let few = type_of_var(&mut c, &p, "few");
+    let many = type_of_var(&mut c, &p, "many");
+    // Fewer required params -> assignable where more are expected.
+    assert!(c.is_type_assignable_to(&p, few, many));
+    // More required params -> NOT assignable to a target accepting fewer.
+    assert!(!c.is_type_assignable_to(&p, many, few));
+}
+
+// C-A slice 5: construct signatures (`new () => T`) relate by their return type
+// (covariantly), like call signatures. A bare construct type carries a
+// construct signature (the `__new` member), not a call signature.
+// Go: internal/checker/relater.go:Relater.signaturesRelatedTo (SignatureKindConstruct)
+#[test]
+fn construct_signatures_relate_by_return_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "class Base { x: number = 1; }\nclass Other {}\ndeclare let cb: new () => Base;\ndeclare let cc: new () => Other;",
+    );
+    let mut c = Checker::new();
+    let cb = type_of_var(&mut c, &p, "cb");
+    let cc = type_of_var(&mut c, &p, "cc");
+    // Identity: `new () => Base` is assignable to itself.
+    assert!(c.is_type_assignable_to(&p, cb, cb));
+    // `new () => Other` is NOT assignable to `new () => Base` (Other lacks `x`).
+    assert!(!c.is_type_assignable_to(&p, cc, cb));
 }
 
 // 4bp: a generic reference's member types are instantiated through its

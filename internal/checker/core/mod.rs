@@ -516,6 +516,27 @@ impl Checker {
         self.get_strict_option_value(self.compiler_options().strict_null_checks)
     }
 
+    /// Reports whether `strictFunctionTypes` is in effect (Go's
+    /// `c.strictFunctionTypes`, `= compilerOptions.GetStrictOptionValue(
+    /// compilerOptions.StrictFunctionTypes)`).
+    ///
+    /// When on, function/property call-signature parameters relate strictly
+    /// contravariantly; when off they relate bivariantly. Method-declared
+    /// parameters are always bivariant regardless of this flag.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// // With all-defaults options, the `strict != false` rule enables it.
+    /// assert!(Checker::new().strict_function_types());
+    /// ```
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/checker.go:NewChecker (c.strictFunctionTypes)
+    pub fn strict_function_types(&self) -> bool {
+        self.get_strict_option_value(self.compiler_options().strict_function_types)
+    }
+
     /// Clones the shared handle to the retained program, if any.
     ///
     /// Returning an owned `Rc` lets a `&mut self` driver (e.g.
