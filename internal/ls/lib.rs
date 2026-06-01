@@ -23,6 +23,7 @@ pub mod folding;
 pub mod hover;
 pub mod references;
 pub mod rename;
+pub mod signaturehelp;
 pub mod symbols;
 
 pub use completions::CompletionList;
@@ -31,6 +32,7 @@ pub use host::LanguageServiceHost;
 pub use hover::QuickInfo;
 pub use languageservice::LanguageService;
 pub use rename::RenameInfo;
+pub use signaturehelp::{ParameterInformation, SignatureHelp, SignatureInformation};
 pub use symbols::DocumentSymbol;
 
 #[cfg(test)]
