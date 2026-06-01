@@ -480,6 +480,20 @@ fn compute_line_of_position_binary() {
     assert_eq!(compute_line_of_position(&line_starts, 100), 2);
 }
 
+// Go: internal/scanner/scanner.go:GetECMALineOfPosition
+#[test]
+fn ecma_line_of_position_from_text() {
+    // "ab\ncde\nf": line starts at bytes 0, 3, 7.
+    let text = "ab\ncde\nf";
+    assert_eq!(get_ecma_line_of_position(text, 0), 0);
+    assert_eq!(get_ecma_line_of_position(text, 2), 0);
+    assert_eq!(get_ecma_line_of_position(text, 3), 1);
+    assert_eq!(get_ecma_line_of_position(text, 6), 1);
+    assert_eq!(get_ecma_line_of_position(text, 7), 2);
+    // CRLF is one terminator: "a\r\nb" has line 1 starting after `\r\n`.
+    assert_eq!(get_ecma_line_of_position("a\r\nb", 3), 1);
+}
+
 // Go: internal/scanner/scanner.go:GetECMALineAndUTF16CharacterOfPosition
 #[test]
 fn line_and_utf16_char_with_astral() {

@@ -19,6 +19,25 @@
 
 自检：`cargo test -p tsgo_astnav`（32 lib + 17 doctest）全绿；`cargo clippy -p tsgo_astnav --all-targets -- -D warnings` clean；astnav 自身满足 gate-code C1–C8（仓库级 gate 因并行的 binder/module crate 缺模块文件而红，与 astnav 无关）。
 
+## 实施状态（P7 enablement round）：**SHARED-BORROW 导航面已落地（additive）**
+
+> 这是解锁整条 P7 语言服务河流的基石轮。LS 持有 program 的节点为**共享** `&NodeArena` / `Rc<NodeArena>`（与 checker 共享同一 arena），无法交出独占 `&mut`，而旧 `astnav::SourceFile` 既**按值持有 arena**、又因 `get_or_create_token` 把按需合成的 token 写进那块 arena 而要求 `&mut`，故 LS 用不了。本轮在**完全 additive**前提下加了 `&self` 的共享借用面，并据此重启了 `lsutil` 被阻塞的 helper。
+
+**设计（如何调和「合成 token」与「共享借用」）：**
+
+- **泛型导航引擎 `NavEngine<A: Borrow<NodeArena>>`**：整套算法挪进一个按「如何借 arena」泛型化的上下文。`pub type SourceFile = NavEngine<NodeArena>`（原 owned API，别名，签名不变）、`pub type NavSourceFile<'a> = NavEngine<&'a NodeArena>`（借用）、`pub type RcSourceFile = NavEngine<Rc<NodeArena>>`（共享）。构造器：`SourceFile::new`（原）、`NavSourceFile::from_borrowed_arena`、`RcSourceFile::from_rc_arena`。
+- **合成 token 侧存储（内部可变）**：按需合成的 token 不再写进被借用的 arena，而是落入上下文自带的 `RefCell<SynthesizedTokenStore>`，故所有公开查询取 `&self`（共享），缓存在内部变更。`get_or_create_token(&self, ...)` 走 `borrow_mut`。
+- **合成 id 高位打标（防碰撞）**：合成 token 的 `NodeId` 打上高位 `SYNTHESIZED_NODE_TAG = 1<<31`（真实 id 是 `nodes.len() as u32`，永不触及 2^31），与真实 arena id 形成不相交 id 空间（镜像 checker 给瞬态符号高位打标的 4x 做法）。`kind`/`pos`/`end`/`flags`/`node_is_missing`/`is_whitespace_only_jsx_text` 透明分发到「真实 arena」或「侧存储」。`for_each_child` 只在真实节点上调用（合成 token 永远是叶子）。
+- **owned 与 shared 共享同一代码路径**：连原 owned `&mut` API 内部也只需 `&self`（`&mut` 仅为源码兼容保留）；所有核心算法函数（`token_at_position_core`/`fpt_ex`/`frvt_find`/`fnt_find`/`find_child_of_kind_core` 等）泛型化为 `fn ...<A: Borrow<NodeArena>>(file: &NavEngine<A>, ...)`，由 owned 自由函数（`&mut SourceFile`，签名原样保留）与 shared 方法（`&self`）共同委托。
+
+**新增公开面（additive only）：** 类型别名 `NavSourceFile<'a>` / `RcSourceFile` + 构造器；`NavEngine<A>` 上的 `&self` 方法 `get_token_at_position`/`get_touching_token`/`get_touching_property_name`/`find_preceding_token(_ex)`/`find_next_token`/`find_child_of_kind` 与访问器 `kind`/`pos`/`end`/`root`/`text`/`arena`；自由函数 `get_start_of_node`/`visit_each_child_and_jsdoc` 放宽为泛型 `&NavEngine<A>`（原 `&SourceFile` 调用点不变）。**原 `&mut SourceFile` 自由函数签名与 `SourceFile`/`SourceFile::new` 一字未改**（checker/transformers/compiler 透传依赖不受影响——`cargo build --workspace --all-targets` 绿）。
+
+**TDD 切片（红→绿）：**
+1. `RcSourceFile::from_rc_arena(...).get_token_at_position` 与 owned `&mut` API 同输入返回同 token（parity）。RED：`RcSourceFile`/`NavSourceFile` 未声明（`E0433`）→ GREEN。
+2. 合成 id 非碰撞 guard：合成 `;` 的查询不破坏真实节点查询；合成 id 带 tag 位、真实 id 无；剥掉 tag 位得到的真实 id 解析到不同节点。GREEN（设计即满足该不变量）。
+
+自检（本轮）：`cargo test -p tsgo_astnav` → **35 lib + 26 doctest 全绿**（既有 `&mut` API 测试一条未改、全绿）；`cargo clippy -p tsgo_astnav --all-targets -- -D warnings` clean；`cargo fmt -p tsgo_astnav -- --check` clean。**解锁 P7：** `tsgo_ls_lsutil` 已据此重启 `IsCompletedNode`/`hasChildOfKind`/`PositionBelongsToNode` 与 `NodeIsASICandidate`/`PositionIsASICandidate`；`format` 的 `FormatDocument`/SmartIndenter（轮 2）与 `ls` 根仍 DEFER（后续轮次）。新增 scanner additive 助手 `get_ecma_line_of_position(text,pos)`。
+
 ## 这个包是什么（业务说明）
 
 parser 产出的 AST **只含语法节点**：标点/关键字等"平凡 token"通常不作为独立节点存在（它们隐含在父节点的 `[pos,end)` 区间里）。但语言服务经常需要"光标在第 N 个字节处，那是哪个 token？"——可能落在某个真实 AST 节点上，也可能落在两个节点之间的标点/空白/注释里。astnav 就是把"位置 → token/节点"这件事做对：

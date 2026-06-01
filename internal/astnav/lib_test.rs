@@ -400,6 +400,109 @@ fn find_rightmost_node_descends_to_rightmost_leaf() {
     assert_eq!(file.pos(rightmost), 2);
 }
 
+// ---- Shared-borrow navigation surface (the LS keystone) ----
+
+// Slice 1: a navigation handle built from a shared `Rc<NodeArena>` (as the
+// program hands it to the language service) must answer `get_token_at_position`
+// identically to the existing owned `&mut SourceFile` API — using only `&self`
+// (shared) access, with synthesized tokens living behind interior mutability.
+#[test]
+fn shared_rc_get_token_at_position_matches_mut_api() {
+    use std::rc::Rc;
+    let text = "const x = 1;";
+    // The owned, `&mut`-based reference result.
+    let mut owned = parse_ts(text);
+    let expected_kind = file_kind_at(&mut owned, 6);
+
+    // Re-parse into a fresh arena, share it as the program would, and run the
+    // query over the shared borrow with only `&self`.
+    let r = parse_source_file(
+        SourceFileParseOptions {
+            file_name: "/file.ts".to_string(),
+        },
+        text,
+        ScriptKind::Ts,
+    );
+    let arena = Rc::new(r.arena);
+    let nav = RcSourceFile::from_rc_arena(Rc::clone(&arena), r.source_file, text.to_string());
+    let token = nav.get_token_at_position(6);
+    assert_eq!(nav.kind(token), Kind::Identifier);
+    assert_eq!(nav.kind(token), expected_kind);
+    // The shared arena is still shared (the handle did not consume it).
+    assert_eq!(Rc::strong_count(&arena), 2);
+}
+
+// Slice 1: a borrowed-arena handle (`&NodeArena`) answers a punctuation query
+// (which forces scanner synthesis) the same as the owned `&mut` API.
+#[test]
+fn shared_borrow_get_token_at_position_synthesizes_punctuation() {
+    let mut owned = parse_ts("a + b;");
+    let owned_kind = file_kind_at(&mut owned, 5);
+
+    let r = parse_source_file(
+        SourceFileParseOptions {
+            file_name: "/file.ts".to_string(),
+        },
+        "a + b;",
+        ScriptKind::Ts,
+    );
+    let nav = NavSourceFile::from_borrowed_arena(&r.arena, r.source_file, "a + b;".to_string());
+    let token = nav.get_token_at_position(5);
+    assert_eq!(nav.kind(token), Kind::SemicolonToken);
+    assert_eq!(nav.kind(token), owned_kind);
+    assert_eq!(nav.pos(token), 5);
+    assert_eq!(nav.end(token), 6);
+    // Repeated shared queries return the same memoized synthesized id.
+    assert_eq!(nav.get_token_at_position(5), token);
+}
+
+// Slice 4: a query that synthesizes a token must not corrupt real-node lookups.
+// Synthesized ids carry the high tag bit and resolve out of the side store, so
+// they never alias a real arena id that shares their low bits.
+#[test]
+fn synthesized_token_id_does_not_collide_with_real_nodes() {
+    // The `;` at position 5 is not a standalone parsed node, so querying it
+    // forces scanner synthesis.
+    let mut file = parse_ts("a + b;");
+    let root = file.root();
+    let root_kind_before = file.kind(root);
+    // The first real arena node (untagged id 0).
+    let real0 = NodeId(0);
+    let real0_kind_before = file.kind(real0);
+
+    let semi = get_token_at_position(&mut file, 5);
+    assert_eq!(file.kind(semi), Kind::SemicolonToken);
+
+    // The synthesized id is tagged; real ids never are.
+    assert_ne!(
+        semi.0 & SYNTHESIZED_NODE_TAG,
+        0,
+        "synthesized id must be tagged"
+    );
+    assert_eq!(
+        real0.0 & SYNTHESIZED_NODE_TAG,
+        0,
+        "real id must be untagged"
+    );
+    assert_ne!(semi, real0);
+
+    // Real-node lookups are unchanged after synthesis (no corruption).
+    assert_eq!(file.kind(root), root_kind_before);
+    assert_eq!(file.kind(real0), real0_kind_before);
+
+    // Stripping the tag bit yields a *real* id that resolves to a different node
+    // than the synthesized token (the source has no real `;` node).
+    let aliased_real = NodeId(semi.0 & !SYNTHESIZED_NODE_TAG);
+    assert_eq!(aliased_real.0 & SYNTHESIZED_NODE_TAG, 0);
+    assert_ne!(file.kind(aliased_real), Kind::SemicolonToken);
+}
+
+/// Returns the kind of the token at `pos` via the owned `&mut` API.
+fn file_kind_at(file: &mut SourceFile, pos: i32) -> Kind {
+    let t = get_token_at_position(file, pos);
+    file.kind(t)
+}
+
 /// Returns the first identifier node by walking into the first statement.
 fn get_first_identifier(file: &SourceFile) -> NodeId {
     let stmt = first_statement(file);

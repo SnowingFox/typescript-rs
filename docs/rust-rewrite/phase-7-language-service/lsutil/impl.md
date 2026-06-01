@@ -41,13 +41,31 @@ and the token cache (`SourceFile::get_or_create_token`) are replicated locally
 over the owned arena. Behavior is identical to Go's
 `scanner.GetScannerForSourceFile` + `sourceFile.GetOrCreateToken`.
 
-> Why not reuse `tsgo_astnav::SourceFile`? It owns its own arena and exposes
-> neither a mutable arena nor `get_or_create_token`, so token synthesis cannot
-> go through it. Conversely, `astnav.FindChildOfKind`/`FindNextToken` require
-> `tsgo_astnav::SourceFile`, so the lsutil functions that need *both* token
-> synthesis and `astnav` navigation over the *same* arena are deferred (see
-> DEFER list) — bridging them needs an `astnav` API change, which is out of this
-> lane's edit scope.
+## Enablement round (P7 keystone): `astnav` shared-borrow surface lands
+
+`tsgo_astnav` now exposes a **shared-borrow** navigation surface
+(`NavSourceFile<'a> = NavEngine<&NodeArena>` and `RcSourceFile`), whose queries
+take `&self` and synthesize on-demand tokens into a side store behind a
+`RefCell` (interior mutability), with tagged ids so they never collide with real
+arena ids. That unblocks the lsutil helpers that need *both* a navigation over
+*this crate's* arena and token synthesis:
+
+- `completednode.rs` (`IsCompletedNode`/`nodeEndsWith`/`hasChildOfKind`/
+  `PositionBelongsToNode`) — fully `&self`. `hasChildOfKind` builds a
+  `tsgo_astnav::NavSourceFile` that **borrows** this crate's arena and calls
+  `find_child_of_kind` (shared access, no arena mutation). `nodeEndsWith` only
+  needs token *kinds*, so it tracks them with a scanner directly instead of
+  synthesizing nodes (a documented, behavior-identical divergence from Go's
+  `GetOrCreateToken`).
+- `asi.rs` node-level (`NodeIsASICandidate`/`PositionIsASICandidate`) — uses the
+  existing `&mut` `GetLastToken`/`GetLastChild` for the trailing-token checks,
+  then a borrowed `NavSourceFile` for `FindNextToken`/`GetStartOfNode`, plus the
+  additive `scanner::get_ecma_line_of_position(text, pos)` and local
+  `FindAncestor`/`FindAncestorOrQuit`/`IsFunctionBlock`/`IsModuleBlock`/
+  `IsFunctionLikeKind` ports (kept local to avoid touching `tsgo_ast`).
+
+`tsgo_astnav` was added to `[dependencies]`; `SourceFile::scanner_at` was made
+`pub(crate)` so `completednode.rs` can scan. Both are additive.
 
 ## Type mapping (this package)
 
@@ -69,12 +87,12 @@ over the owned arena. Behavior is identical to Go's
 
 | Go file | Rust file | Status |
 |---|---|---|
-| `asi.go` | `asi.rs` | kind predicates ported; node-level entry points DEFER |
+| `asi.go` | `asi.rs` | kind predicates + node-level entry points ported |
 | `children.go` | `children.rs` | fully ported (+ `SourceFile` context) |
 | `utilities.go` | `utilities.rs` | identifier/keyword/quote helpers ported; rest DEFER |
 | `userpreferences.go` | `userpreferences.rs` | only `QuotePreference` enum ported; rest DEFER |
 | `symbol_display.go` | `symbol_display.rs` | enums + `strings()` + `FILE_EXTENSION_KIND_MODIFIERS` ported; symbol functions DEFER |
-| `completednode.go` | — | DEFER (needs `astnav.FindChildOfKind` over a shared arena) |
+| `completednode.go` | `completednode.rs` | fully ported (uses `astnav` shared-borrow surface) |
 | `organizeimports.go` | — | DEFER (UserPreferences + ICU collation + modulespecifiers) |
 | `formatcodeoptions.go` | — | DEFER (lsproto + printer) |
 | — (crate root) | `lib.rs` | `mod` declarations + re-exports |
@@ -87,6 +105,16 @@ over the owned arena. Behavior is identical to Go's
 - [x] `syntax_requires_trailing_module_block_or_semicolon_or_asi` — `:SyntaxRequiresTrailingModuleBlockOrSemicolonOrASI`
 - [x] `syntax_requires_trailing_semicolon_or_asi` — `:SyntaxRequiresTrailingSemicolonOrASI`
 - [x] `syntax_may_be_asi_candidate` — `:SyntaxMayBeASICandidate`
+- [x] `node_is_asi_candidate` — `:NodeIsASICandidate` (via `astnav.FindNextToken`/`GetStartOfNode` + `scanner::get_ecma_line_of_position`)
+- [x] `position_is_asi_candidate` — `:PositionIsASICandidate`
+- [x] local `find_ancestor`/`find_ancestor_or_quit`/`is_function_block`/`is_module_block`/`is_function_like_kind` (ported here to avoid touching `tsgo_ast`)
+
+### `completednode.rs` (is-completed / position-belongs)
+- [x] `is_completed_node` — `completednode.go:IsCompletedNode` (full kind switch)
+- [x] `position_belongs_to_node` — `completednode.go:PositionBelongsToNode`
+- [x] `node_ends_with` — `completednode.go:nodeEndsWith` (tracks token kinds, no node synthesis)
+- [x] `has_child_of_kind` — `completednode.go:hasChildOfKind` (borrowed `astnav.FindChildOfKind`)
+- [x] local node accessors `node_body`/`node_type`/`node_expression`/`node_statement`/`node_module_specifier` + single-kind field reads (mirror Go `Node.Body()`/`Type()`/`Expression()`/`Statement()`/`ModuleSpecifier()`)
 
 ### `children.rs` (token/child navigation)
 - [x] `SourceFile` (context) + `new`/`root`/`text`/`arena` + private `get_or_create_token`/`scanner_at`
@@ -114,9 +142,9 @@ over the owned arena. Behavior is identical to Go's
 
 | Go function(s) | blocked-by | target |
 |---|---|---|
-| `completednode.go`: `IsCompletedNode`, `nodeEndsWith`, `hasChildOfKind`, `PositionBelongsToNode` | `hasChildOfKind` needs `astnav.FindChildOfKind`, which requires `tsgo_astnav::SourceFile` (an arena-owning context) and cannot share this crate's owned arena without an `astnav` API change (out of lane scope). `nodeEndsWith` *is* implementable here, but it is private and only used by `IsCompletedNode`, so it is deferred with it. | `ls` root / future astnav-shared-arena API |
-| `asi.go`: `NodeIsASICandidate`, `PositionIsASICandidate` | need `astnav.FindNextToken` (same shared-arena issue) and `scanner::GetECMALineOfPosition` (deferred in `tsgo_scanner`). | same |
-| `utilities.go`: `ProbablyUsesSemicolons` | `scanner::GetECMALineOfPosition` deferred in `tsgo_scanner` (`GetLastToken` itself is available). | scanner GetECMALine* port |
+| ~~`completednode.go`: `IsCompletedNode`, `nodeEndsWith`, `hasChildOfKind`, `PositionBelongsToNode`~~ | **DONE** — re-enabled via `astnav`'s shared-borrow surface (`NavSourceFile` borrows this crate's arena; `&self` queries). | — |
+| ~~`asi.go`: `NodeIsASICandidate`, `PositionIsASICandidate`~~ | **DONE** — `astnav.FindNextToken`/`GetStartOfNode` over a borrowed arena + additive `scanner::get_ecma_line_of_position`. | — |
+| `utilities.go`: `ProbablyUsesSemicolons` | needs `astnav.FindPrecedingToken` (now available via shared surface) wired against the LS program; left for the dedicated utilities/`ls` round. `scanner::get_ecma_line_of_position` is now available. | `ls` root |
 | `utilities.go`: `ShouldUseUriStyleNodeCoreModules` | `*compiler.Program` (`UsesUriStyleNodeCoreModules`, `Imports()`), `core.NodeCoreModules`. | `ls` root (P6/P7) |
 | `utilities.go`: `GetQuotePreference` | `UserPreferences` (full port). | with userpreferences.go |
 | `symbol_display.go`: `GetSymbolKind`, `GetSymbolModifiers` + helpers | `*checker.Checker` (`GetRootSymbols`, `GetTypeOfSymbolAtLocation`, `GetCallSignatures`, `GetAliasedSymbol`, `IsDeprecatedDeclaration`, ...). | `ls` root |
@@ -136,13 +164,19 @@ it fail (missing fn / `todo!()` panic) → minimal implementation → green.
    (token synthesis driven by `tsgo_scanner` + local token cache).
 5. `symbol_display.rs` — data defs land first; `strings()` is the tracer
    (RED on 4 tests) → GREEN.
+6. (enablement round) `completednode.rs` — RED: 10 tests panic on `todo!()` →
+   GREEN. Then `asi.rs` node-level — RED: 6 tests panic on `todo!()` → GREEN.
 
 ## Gates (crate-scoped)
 
-- `cargo test -p tsgo_ls_lsutil` — **40 unit + 25 doctests, all green**.
+- `cargo test -p tsgo_ls_lsutil` — **56 unit + 29 doctests, all green** (was
+  40 + 25; the enablement round added 10 completednode + 6 asi unit tests and
+  4 doctests).
 - `cargo clippy -p tsgo_ls_lsutil --all-targets -- -D warnings` — **clean**.
 - `cargo fmt -p tsgo_ls_lsutil -- --check` — **clean**.
-- `cargo build -p tsgo_ls_lsutil` — **ok**.
+- `cargo build --workspace --all-targets` — **ok** (astnav's shared surface
+  introduces no downstream break in checker/transformers/compiler/execute).
 
-Public API is additive within the crate; no other crate's source or the root
-`Cargo.toml` was touched.
+Public API is additive. This round added `tsgo_astnav` to `[dependencies]` and
+made `SourceFile::scanner_at` `pub(crate)` (both additive); the additive
+`scanner::get_ecma_line_of_position` helper was added to `tsgo_scanner`.

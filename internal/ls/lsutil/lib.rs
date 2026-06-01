@@ -23,11 +23,12 @@
 //!   `modulespecifiers`, `vfsmatch`, `lsproto`, and `printer`.
 //! - **Token-cache navigation that needs `astnav`** (`IsCompletedNode`,
 //!   `hasChildOfKind`, `PositionBelongsToNode`, `NodeIsASICandidate`,
-//!   `PositionIsASICandidate`, `ProbablyUsesSemicolons`): need
-//!   `astnav.FindChildOfKind`/`FindNextToken` (which require
-//!   `tsgo_astnav::SourceFile`, an arena-owning context incompatible with this
-//!   crate's own arena-owning [`SourceFile`]) and/or the deferred
-//!   `scanner::GetECMALineOfPosition`.
+//!   `PositionIsASICandidate`): now **re-enabled** — `tsgo_astnav` exposes a
+//!   shared-borrow surface (`NavSourceFile` borrows a `&NodeArena` and answers
+//!   `&self` queries, synthesizing tokens into an interior-mutability side
+//!   store). These helpers build such a view over this crate's arena, so they
+//!   navigate with shared access. `ProbablyUsesSemicolons` remains deferred
+//!   (it needs the LS program wiring for `FindPrecedingToken`).
 //!
 //! # Navigation context
 //!
@@ -40,12 +41,14 @@
 
 mod asi;
 mod children;
+mod completednode;
 mod symbol_display;
 mod userpreferences;
 mod utilities;
 
 pub use asi::{
-    syntax_may_be_asi_candidate, syntax_requires_trailing_comma_or_semicolon_or_asi,
+    node_is_asi_candidate, position_is_asi_candidate, syntax_may_be_asi_candidate,
+    syntax_requires_trailing_comma_or_semicolon_or_asi,
     syntax_requires_trailing_function_block_or_semicolon_or_asi,
     syntax_requires_trailing_module_block_or_semicolon_or_asi,
     syntax_requires_trailing_semicolon_or_asi,
@@ -54,6 +57,7 @@ pub use children::{
     assert_has_real_position, get_first_token, get_last_child, get_last_token,
     get_last_visited_child, SourceFile,
 };
+pub use completednode::{is_completed_node, position_belongs_to_node};
 pub use symbol_display::{
     ScriptElementKind, ScriptElementKindModifier, FILE_EXTENSION_KIND_MODIFIERS,
 };

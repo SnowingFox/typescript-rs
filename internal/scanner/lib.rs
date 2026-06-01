@@ -202,6 +202,30 @@ pub fn compute_line_of_position(line_starts: &[TextPos], pos: i32) -> i32 {
     low - 1
 }
 
+/// Returns the 0-based line index containing byte position `pos` in `text`,
+/// using the ECMAScript line-terminator rules (`\r`, `\n`, `\r\n`, U+2028,
+/// U+2029).
+///
+/// Go threads a `SourceFileLike` whose `ECMALineMap()` is cached on the file;
+/// the navigation contexts in `tsgo_astnav` / `tsgo_ls_lsutil` carry no cached
+/// line map, so this `&str`-based form recomputes the line starts on each call.
+///
+/// # Examples
+/// ```
+/// use tsgo_scanner::get_ecma_line_of_position;
+/// assert_eq!(get_ecma_line_of_position("a\nb\nc", 0), 0);
+/// assert_eq!(get_ecma_line_of_position("a\nb\nc", 2), 1);
+/// assert_eq!(get_ecma_line_of_position("a\nb\nc", 4), 2);
+/// ```
+///
+/// Side effects: none (pure).
+// PERF(port): Go caches the line map on the source file; this recomputes it.
+// Go: internal/scanner/scanner.go:GetECMALineOfPosition
+pub fn get_ecma_line_of_position(text: &str, pos: i32) -> i32 {
+    let line_starts = tsgo_core::compute_ecma_line_starts(text);
+    compute_line_of_position(&line_starts, pos)
+}
+
 /// Converts a 0-based `line` and raw byte offset within that line to an absolute
 /// byte position.
 ///

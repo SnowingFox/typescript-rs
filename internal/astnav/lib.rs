@@ -8,26 +8,36 @@
 //! and [`find_child_of_kind`]. It walks the AST top-down and, when the position
 //! falls on punctuation/trivia that the parser does not keep as a standalone
 //! node, re-scans from a known boundary to synthesize the token and caches it on
-//! the [`SourceFile`] (so repeated queries return the same node id).
+//! the navigation context (so repeated queries return the same node id).
 //!
-//! # Resolving the prior `BLOCKED` state without editing scanner/ast
+//! # Two navigation surfaces over one algorithm
 //!
-//! A previous wave reported this crate `BLOCKED` because `tsgo_scanner`
-//! explicitly defers `GetScannerForSourceFile`/`GetTokenPosOfNode` and the
-//! `tsgo_ast` `SourceFile` runtime has no token cache. Both are resolved here
-//! *locally*:
+//! The whole algorithm lives in [`NavEngine`], a generic context parameterized
+//! by *how it borrows the parsed `NodeArena`* (`A: Borrow<NodeArena>`):
 //!
-//! - [`SourceFile`] is this crate's navigation context: it owns the parsed
-//!   [`NodeArena`], the root id, the source text, and the synthesized-token
-//!   cache that backs the pointer-equality guarantee. It replaces Go's
-//!   `*ast.SourceFile` (which carried both the text and the cache).
-//! - A scanner is instantiated and driven over the source text directly (see
-//!   `get_scanner_for_source_file`), exactly as Go's `getTokenPosOfNode` drives
-//!   one internally, instead of depending on a scanner helper.
-//! - Child/JSDoc walks use `tsgo_ast`'s `NodeArena::for_each_child`; the Go
-//!   `VisitEachChild` hook split between single nodes and node lists is
-//!   flattened into a single ordered child stream (see the divergence notes on
-//!   [`visit_each_child_and_jsdoc`]).
+//! - [`SourceFile`] (`NavEngine<NodeArena>`) — the original **owned-arena**
+//!   context. The public free functions ([`get_token_at_position`], ...) take it
+//!   by `&mut` and are unchanged; the checker / other consumers keep using them.
+//! - [`NavSourceFile`] (`NavEngine<&NodeArena>`) and [`RcSourceFile`]
+//!   (`NavEngine<Rc<NodeArena>>`) — the **shared-borrow** contexts the language
+//!   service needs. The program holds its nodes as a shared `&NodeArena` /
+//!   `Rc<NodeArena>` (the same arena the checker reads) and cannot hand out an
+//!   exclusive `&mut`. These contexts expose the *same* navigation as `&self`
+//!   methods (e.g. [`NavEngine::get_token_at_position`]).
+//!
+//! # How synthesized tokens are reconciled with a shared borrow
+//!
+//! Go's scanner synthesizes on-demand token nodes into the source file's own
+//! node factory. The Rust split (arena vs. navigation context) means a shared
+//! `&NodeArena` cannot be mutated to append those tokens. So synthesized tokens
+//! live in a **side store** behind a [`RefCell`] (interior mutability): the
+//! public queries take `&self` (shared) and the cache mutates internally. Their
+//! ids are tagged with the high bit ([`SYNTHESIZED_NODE_TAG`]) so they never
+//! collide with real arena ids (mirroring how the checker high-bit-tags
+//! transient symbols); [`NavEngine::kind`]/[`pos`](NavEngine::pos)/[`end`](NavEngine::end)
+//! transparently resolve either space. This makes the owned and shared contexts
+//! share one code path: even the owned `&mut` API only needs `&self` internally
+//! (the `&mut` is kept for source compatibility).
 //!
 //! # JSDoc
 //!
@@ -36,18 +46,30 @@
 //! are ported structurally (so the shape matches Go) but are inert in practice;
 //! they are flagged with `// DEFER(phase-3)` / `// blocked-by: JSDoc reparser`.
 
-use tsgo_ast::utilities::{is_keyword_kind, is_token_kind, node_is_missing};
+use tsgo_ast::utilities::{is_keyword_kind, is_token_kind};
 use tsgo_ast::{Kind, NodeArena, NodeData, NodeFlags, NodeId};
 use tsgo_core::languagevariant::LanguageVariant;
 use tsgo_core::text::TextRange;
 use tsgo_scanner::{skip_trivia_ex, Scanner, SkipTriviaOptions};
 
+use std::borrow::Borrow;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 // Note: Go's `comparisonLessThan`/`EqualTo`/`GreaterThan` constants drove the
 // per-node-list binary searches. This port flattens lists into a single ordered
 // child stream and scans them linearly (see `visit_each_child_and_jsdoc`), so the
 // three-way comparator constants are not needed.
+
+/// High bit set on a synthesized-token [`NodeId`] so it never collides with a
+/// real arena id.
+///
+/// Real ids are `nodes.len() as u32` and never approach `2^31`; tagging the high
+/// bit gives synthesized tokens a disjoint id space the navigation context
+/// resolves out of its side store (mirroring the checker's high-bit-tagged
+/// transient symbols).
+const SYNTHESIZED_NODE_TAG: u32 = 1 << 31;
 
 /// Cache key for synthesized tokens, mirroring Go's `TokenCacheKey{parent, loc}`.
 ///
@@ -60,14 +82,71 @@ struct TokenCacheKey {
     end: i32,
 }
 
-/// A navigation context over a parsed source file.
+/// A token synthesized by the scanner and kept in the side store.
 ///
-/// Bundles the owning [`NodeArena`], the root `SourceFile` node id, the source
-/// text, and the synthesized-token cache. This stands in for Go's
-/// `*ast.SourceFile`: the Rust `tsgo_ast` `SourceFile` node stores neither the
-/// text nor a token cache, so this crate supplies both. Holding it by `&mut`
-/// lets the navigation functions synthesize and memoize tokens, which is what
-/// makes repeated queries at the same position return the same node id.
+/// Only `kind`/`loc` are needed to resolve later queries; the parent is part of
+/// the cache key, not read back, so it is not stored.
+///
+/// Side effects: none (pure value type).
+#[derive(Clone, Copy)]
+struct SynthesizedToken {
+    kind: Kind,
+    loc: TextRange,
+}
+
+/// The synthesized-token side store: tokens plus the `(parent, pos, end)` cache
+/// that backs pointer-equality.
+///
+/// Side effects: none on its own; `get_or_create` mutates via `&mut self`.
+#[derive(Default)]
+struct SynthesizedTokenStore {
+    tokens: Vec<SynthesizedToken>,
+    cache: HashMap<TokenCacheKey, NodeId>,
+}
+
+impl SynthesizedTokenStore {
+    /// Reports whether `id` refers to a synthesized token (high bit set).
+    fn is_synthesized(id: NodeId) -> bool {
+        id.0 & SYNTHESIZED_NODE_TAG != 0
+    }
+
+    /// Returns the previously synthesized token for `(kind, pos, end, parent)`,
+    /// or creates, caches, and returns a fresh tagged id.
+    // Go: internal/ast/ast.go:SourceFile.GetOrCreateToken
+    fn get_or_create(&mut self, kind: Kind, pos: i32, end: i32, parent: NodeId) -> NodeId {
+        let key = TokenCacheKey { parent, pos, end };
+        if let Some(&id) = self.cache.get(&key) {
+            return id;
+        }
+        let id = NodeId(SYNTHESIZED_NODE_TAG | self.tokens.len() as u32);
+        self.tokens.push(SynthesizedToken {
+            kind,
+            loc: TextRange::new(pos, end),
+        });
+        self.cache.insert(key, id);
+        id
+    }
+
+    /// Returns the synthesized token for a tagged `id`.
+    fn token(&self, id: NodeId) -> SynthesizedToken {
+        self.tokens[(id.0 & !SYNTHESIZED_NODE_TAG) as usize]
+    }
+}
+
+/// A navigation context over a parsed source file, generic over how it borrows
+/// the parsed [`NodeArena`].
+///
+/// Bundles the arena (owned, borrowed, or `Rc`-shared), the root `SourceFile`
+/// node id, the source text, the language variant, the end-of-file token id,
+/// and the synthesized-token side store (behind a [`RefCell`] so queries are
+/// `&self`). This stands in for Go's `*ast.SourceFile`: the Rust `tsgo_ast`
+/// `SourceFile` node stores neither the text nor a token cache, so this context
+/// supplies both.
+///
+/// Use the aliases rather than naming the generic directly:
+/// - [`SourceFile`] — owns the arena (the existing `&mut`-based API).
+/// - [`NavSourceFile`] — borrows a `&NodeArena`.
+/// - [`RcSourceFile`] — shares an `Rc<NodeArena>`.
 ///
 /// # Examples
 /// ```
@@ -80,20 +159,30 @@ struct TokenCacheKey {
 /// assert_eq!(sf.kind(sf.root()), tsgo_ast::Kind::SourceFile);
 /// ```
 ///
-/// Side effects: methods taking `&mut self` may push synthesized token nodes and
-/// populate the token cache.
-pub struct SourceFile {
-    arena: NodeArena,
+/// Side effects: query methods may push synthesized token nodes into the side
+/// store (via interior mutability) and populate the token cache; the parsed
+/// arena is never mutated.
+pub struct NavEngine<A: Borrow<NodeArena>> {
+    arena: A,
     root: NodeId,
     text: String,
     language_variant: LanguageVariant,
     eof_token: NodeId,
-    token_cache: HashMap<TokenCacheKey, NodeId>,
+    synth: RefCell<SynthesizedTokenStore>,
 }
 
+/// The owned-arena navigation context (the original, `&mut`-driven API).
+pub type SourceFile = NavEngine<NodeArena>;
+
+/// A navigation context borrowing the program's `&NodeArena` (shared access).
+pub type NavSourceFile<'a> = NavEngine<&'a NodeArena>;
+
+/// A navigation context sharing the program's `Rc<NodeArena>` (shared access).
+pub type RcSourceFile = NavEngine<Rc<NodeArena>>;
+
 impl SourceFile {
-    /// Builds a navigation context from a parse result's `arena`, `root` source
-    /// file id, and the original source `text`.
+    /// Builds an owned-arena navigation context from a parse result's `arena`,
+    /// `root` source file id, and the original source `text`.
     ///
     /// # Examples
     /// ```
@@ -108,17 +197,79 @@ impl SourceFile {
     ///
     /// Side effects: none (takes ownership of the arena and text).
     pub fn new(arena: NodeArena, root: NodeId, text: String) -> SourceFile {
-        let (language_variant, eof_token) = match arena.data(root) {
+        NavEngine::build(arena, root, text)
+    }
+}
+
+impl<'a> NavSourceFile<'a> {
+    /// Builds a shared navigation context that **borrows** the program's
+    /// `&NodeArena`. Position queries run with only shared access; synthesized
+    /// tokens go into this context's own side store, never into the borrowed
+    /// arena.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_astnav::NavSourceFile;
+    /// use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// use tsgo_core::scriptkind::ScriptKind;
+    /// let text = "const x = 1;";
+    /// let r = parse_source_file(SourceFileParseOptions::default(), text, ScriptKind::Ts);
+    /// let nav = NavSourceFile::from_borrowed_arena(&r.arena, r.source_file, text.to_string());
+    /// let t = nav.get_token_at_position(6);
+    /// assert_eq!(nav.kind(t), tsgo_ast::Kind::Identifier);
+    /// ```
+    ///
+    /// Side effects: none on construction; queries mutate the side store only.
+    pub fn from_borrowed_arena(
+        arena: &'a NodeArena,
+        root: NodeId,
+        text: String,
+    ) -> NavSourceFile<'a> {
+        NavEngine::build(arena, root, text)
+    }
+}
+
+impl RcSourceFile {
+    /// Builds a shared navigation context that holds an `Rc<NodeArena>` (the
+    /// program's shared arena). Queries run with only shared access.
+    ///
+    /// # Examples
+    /// ```
+    /// use std::rc::Rc;
+    /// use tsgo_astnav::RcSourceFile;
+    /// use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// use tsgo_core::scriptkind::ScriptKind;
+    /// let text = "const x = 1;";
+    /// let r = parse_source_file(SourceFileParseOptions::default(), text, ScriptKind::Ts);
+    /// let nav = RcSourceFile::from_rc_arena(Rc::new(r.arena), r.source_file, text.to_string());
+    /// let t = nav.get_token_at_position(6);
+    /// assert_eq!(nav.kind(t), tsgo_ast::Kind::Identifier);
+    /// ```
+    ///
+    /// Side effects: none on construction; queries mutate the side store only.
+    pub fn from_rc_arena(arena: Rc<NodeArena>, root: NodeId, text: String) -> RcSourceFile {
+        NavEngine::build(arena, root, text)
+    }
+}
+
+impl<A: Borrow<NodeArena>> NavEngine<A> {
+    /// Shared constructor: reads `language_variant`/`eof_token` off the root and
+    /// initializes an empty synthesized-token store.
+    ///
+    /// # Panics
+    /// Panics if `root` is not a `SourceFile` node.
+    fn build(arena: A, root: NodeId, text: String) -> NavEngine<A> {
+        let (language_variant, eof_token) = match arena.borrow().data(root) {
             NodeData::SourceFile(d) => (d.language_variant, d.end_of_file_token),
-            _ => panic!("SourceFile::new expects a SourceFile node as root"),
+            _ => panic!("NavEngine expects a SourceFile node as root"),
         };
-        SourceFile {
+        NavEngine {
             arena,
             root,
             text,
             language_variant,
             eof_token,
-            token_cache: HashMap::new(),
+            synth: RefCell::new(SynthesizedTokenStore::default()),
         }
     }
 
@@ -156,7 +307,9 @@ impl SourceFile {
         &self.text
     }
 
-    /// Returns the owning arena (for callers that need to inspect node payloads).
+    /// Returns the parsed arena (for callers that need to inspect *real* node
+    /// payloads). Synthesized tokens are not in here; use [`kind`](Self::kind)/
+    /// [`pos`](Self::pos)/[`end`](Self::end) to resolve any returned id.
     ///
     /// # Examples
     /// ```
@@ -170,10 +323,10 @@ impl SourceFile {
     ///
     /// Side effects: none (pure).
     pub fn arena(&self) -> &NodeArena {
-        &self.arena
+        self.arena.borrow()
     }
 
-    /// Returns the syntax kind of node `id`.
+    /// Returns the syntax kind of node `id`, resolving real and synthesized ids.
     ///
     /// # Examples
     /// ```
@@ -187,10 +340,15 @@ impl SourceFile {
     ///
     /// Side effects: none (pure).
     pub fn kind(&self, id: NodeId) -> Kind {
-        self.arena.kind(id)
+        if SynthesizedTokenStore::is_synthesized(id) {
+            self.synth.borrow().token(id).kind
+        } else {
+            self.arena().kind(id)
+        }
     }
 
-    /// Returns the start offset (full start, including leading trivia) of `id`.
+    /// Returns the start offset (full start, including leading trivia) of `id`,
+    /// resolving real and synthesized ids.
     ///
     /// # Examples
     /// ```
@@ -204,10 +362,15 @@ impl SourceFile {
     ///
     /// Side effects: none (pure).
     pub fn pos(&self, id: NodeId) -> i32 {
-        self.arena.loc(id).pos()
+        if SynthesizedTokenStore::is_synthesized(id) {
+            self.synth.borrow().token(id).loc.pos()
+        } else {
+            self.arena().loc(id).pos()
+        }
     }
 
-    /// Returns the end offset (exclusive) of node `id`.
+    /// Returns the end offset (exclusive) of node `id`, resolving real and
+    /// synthesized ids.
     ///
     /// # Examples
     /// ```
@@ -221,14 +384,33 @@ impl SourceFile {
     ///
     /// Side effects: none (pure).
     pub fn end(&self, id: NodeId) -> i32 {
-        self.arena.loc(id).end()
+        if SynthesizedTokenStore::is_synthesized(id) {
+            self.synth.borrow().token(id).loc.end()
+        } else {
+            self.arena().loc(id).end()
+        }
     }
 
-    /// Returns the per-node flags of `id`.
+    /// Returns the per-node flags of `id` (synthesized tokens carry no flags).
     ///
     /// Side effects: none (pure).
     fn flags(&self, id: NodeId) -> NodeFlags {
-        self.arena.flags(id)
+        if SynthesizedTokenStore::is_synthesized(id) {
+            NodeFlags::NONE
+        } else {
+            self.arena().flags(id)
+        }
+    }
+
+    /// Reports whether node `id` is "missing" (synthesized tokens never are).
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/ast/utilities.go:NodeIsMissing
+    fn node_is_missing(&self, id: NodeId) -> bool {
+        if SynthesizedTokenStore::is_synthesized(id) {
+            return false;
+        }
+        tsgo_ast::utilities::node_is_missing(self.arena(), id)
     }
 
     /// Returns the cached JSDoc nodes of `id`.
@@ -244,25 +426,176 @@ impl SourceFile {
     }
 
     /// Returns a previously synthesized token for `(kind, pos, end, parent)`, or
-    /// creates, caches, and returns a fresh one.
+    /// creates, caches, and returns a fresh one (with a tagged id).
     ///
     /// The cache key is `(parent, pos, end)` (matching Go's `TokenCacheKey`), so
     /// two queries that synthesize the same token return the same node id. This
     /// is the pointer-equality guarantee that Go gets from the source file's
     /// token cache.
     ///
-    /// Side effects: on a miss, pushes a new token node and records it.
+    /// Side effects: on a miss, records a new synthesized token (via interior
+    /// mutability); never touches the parsed arena.
     // Go: internal/ast/ast.go:SourceFile.GetOrCreateToken
-    fn get_or_create_token(&mut self, kind: Kind, pos: i32, end: i32, parent: NodeId) -> NodeId {
-        let key = TokenCacheKey { parent, pos, end };
-        if let Some(&id) = self.token_cache.get(&key) {
-            return id;
-        }
-        let id = self.arena.new_token(kind);
-        self.arena.set_loc(id, TextRange::new(pos, end));
-        self.arena.set_parent(id, Some(parent));
-        self.token_cache.insert(key, id);
-        id
+    fn get_or_create_token(&self, kind: Kind, pos: i32, end: i32, parent: NodeId) -> NodeId {
+        self.synth
+            .borrow_mut()
+            .get_or_create(kind, pos, end, parent)
+    }
+
+    /// Returns the token at `position`, counting positions in leading trivia
+    /// (the `&self` shared-surface twin of [`get_token_at_position`]).
+    ///
+    /// # Examples
+    /// ```
+    /// # use tsgo_astnav::NavSourceFile;
+    /// # use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// # use tsgo_core::scriptkind::ScriptKind;
+    /// let r = parse_source_file(SourceFileParseOptions::default(), "const x = 1;", ScriptKind::Ts);
+    /// let nav = NavSourceFile::from_borrowed_arena(&r.arena, r.source_file, "const x = 1;".to_string());
+    /// assert_eq!(nav.kind(nav.get_token_at_position(6)), tsgo_ast::Kind::Identifier);
+    /// ```
+    ///
+    /// Side effects: may synthesize and cache a token (interior mutability).
+    // Go: internal/astnav/tokens.go:GetTokenAtPosition
+    pub fn get_token_at_position(&self, position: i32) -> NodeId {
+        token_at_position_core(self, position, true, PrecedingTokenFilter::None)
+    }
+
+    /// Returns the token "touching" `position` (leading trivia rejected), the
+    /// `&self` twin of [`get_touching_token`].
+    ///
+    /// # Examples
+    /// ```
+    /// # use tsgo_astnav::NavSourceFile;
+    /// # use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// # use tsgo_core::scriptkind::ScriptKind;
+    /// let r = parse_source_file(SourceFileParseOptions::default(), "const x = 1;", ScriptKind::Ts);
+    /// let nav = NavSourceFile::from_borrowed_arena(&r.arena, r.source_file, "const x = 1;".to_string());
+    /// assert_eq!(nav.kind(nav.get_touching_token(6)), tsgo_ast::Kind::Identifier);
+    /// ```
+    ///
+    /// Side effects: may synthesize and cache a token (interior mutability).
+    // Go: internal/astnav/tokens.go:GetTouchingToken
+    pub fn get_touching_token(&self, position: i32) -> NodeId {
+        token_at_position_core(self, position, false, PrecedingTokenFilter::None)
+    }
+
+    /// Returns the token touching `position`, preferring a preceding
+    /// property-name/keyword/private-identifier at a node end. `&self` twin of
+    /// [`get_touching_property_name`].
+    ///
+    /// # Examples
+    /// ```
+    /// # use tsgo_astnav::NavSourceFile;
+    /// # use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// # use tsgo_core::scriptkind::ScriptKind;
+    /// let r = parse_source_file(SourceFileParseOptions::default(), "const x = 1;", ScriptKind::Ts);
+    /// let nav = NavSourceFile::from_borrowed_arena(&r.arena, r.source_file, "const x = 1;".to_string());
+    /// assert_eq!(nav.kind(nav.get_touching_property_name(6)), tsgo_ast::Kind::Identifier);
+    /// ```
+    ///
+    /// Side effects: may synthesize and cache a token (interior mutability).
+    // Go: internal/astnav/tokens.go:GetTouchingPropertyName
+    pub fn get_touching_property_name(&self, position: i32) -> NodeId {
+        token_at_position_core(self, position, false, PrecedingTokenFilter::PropertyName)
+    }
+
+    /// Finds the preceding token at `position`. `&self` twin of
+    /// [`find_preceding_token`].
+    ///
+    /// # Examples
+    /// ```
+    /// # use tsgo_astnav::NavSourceFile;
+    /// # use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// # use tsgo_core::scriptkind::ScriptKind;
+    /// let r = parse_source_file(SourceFileParseOptions::default(), "a.b", ScriptKind::Ts);
+    /// let nav = NavSourceFile::from_borrowed_arena(&r.arena, r.source_file, "a.b".to_string());
+    /// let t = nav.find_preceding_token(2).unwrap();
+    /// assert_eq!(nav.kind(t), tsgo_ast::Kind::DotToken);
+    /// ```
+    ///
+    /// Side effects: may synthesize and cache tokens (interior mutability).
+    // Go: internal/astnav/tokens.go:FindPrecedingToken
+    pub fn find_preceding_token(&self, position: i32) -> Option<NodeId> {
+        fpt_ex(self, position, None, false)
+    }
+
+    /// Finds the preceding token starting from `start_node` (or the root),
+    /// optionally excluding JSDoc. `&self` twin of [`find_preceding_token_ex`].
+    ///
+    /// # Examples
+    /// ```
+    /// # use tsgo_astnav::NavSourceFile;
+    /// # use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// # use tsgo_core::scriptkind::ScriptKind;
+    /// let r = parse_source_file(SourceFileParseOptions::default(), "a.b", ScriptKind::Ts);
+    /// let nav = NavSourceFile::from_borrowed_arena(&r.arena, r.source_file, "a.b".to_string());
+    /// let t = nav.find_preceding_token_ex(2, None, false).unwrap();
+    /// assert_eq!(nav.kind(t), tsgo_ast::Kind::DotToken);
+    /// ```
+    ///
+    /// # Panics
+    /// Panics if the result is whitespace-only JSX text (mirrors Go's assertion).
+    ///
+    /// Side effects: may synthesize and cache tokens (interior mutability).
+    // Go: internal/astnav/tokens.go:FindPrecedingTokenEx
+    pub fn find_preceding_token_ex(
+        &self,
+        position: i32,
+        start_node: Option<NodeId>,
+        exclude_jsdoc: bool,
+    ) -> Option<NodeId> {
+        fpt_ex(self, position, start_node, exclude_jsdoc)
+    }
+
+    /// Finds the token immediately following `previous_token` within `parent`.
+    /// `&self` twin of [`find_next_token`].
+    ///
+    /// # Examples
+    /// ```
+    /// # use tsgo_astnav::NavSourceFile;
+    /// # use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// # use tsgo_core::scriptkind::ScriptKind;
+    /// let r = parse_source_file(SourceFileParseOptions::default(), "a.b", ScriptKind::Ts);
+    /// let nav = NavSourceFile::from_borrowed_arena(&r.arena, r.source_file, "a.b".to_string());
+    /// let a = nav.get_token_at_position(0);
+    /// let root = nav.root();
+    /// assert_eq!(nav.kind(nav.find_next_token(a, root).unwrap()), tsgo_ast::Kind::DotToken);
+    /// ```
+    ///
+    /// # Panics
+    /// Panics when the scanner finds trivia (rather than a token) immediately
+    /// after `previous_token` (mirrors Go's assertion).
+    ///
+    /// Side effects: may synthesize and cache a token (interior mutability).
+    // Go: internal/astnav/tokens.go:FindNextToken
+    pub fn find_next_token(&self, previous_token: NodeId, parent: NodeId) -> Option<NodeId> {
+        fnt_find(self, parent, previous_token)
+    }
+
+    /// Searches `containing_node` for the first child node or token of `kind`.
+    /// `&self` twin of [`find_child_of_kind`].
+    ///
+    /// # Examples
+    /// ```
+    /// # use tsgo_astnav::NavSourceFile;
+    /// # use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// # use tsgo_core::scriptkind::ScriptKind;
+    /// let text = "function f(){}";
+    /// let r = parse_source_file(SourceFileParseOptions::default(), text, ScriptKind::Ts);
+    /// let func = match r.arena.data(r.source_file) {
+    ///     tsgo_ast::NodeData::SourceFile(d) => d.statements.nodes[0],
+    ///     _ => unreachable!(),
+    /// };
+    /// let nav = NavSourceFile::from_borrowed_arena(&r.arena, r.source_file, text.to_string());
+    /// let kw = nav.find_child_of_kind(func, tsgo_ast::Kind::FunctionKeyword).unwrap();
+    /// assert_eq!(nav.kind(kw), tsgo_ast::Kind::FunctionKeyword);
+    /// ```
+    ///
+    /// Side effects: may synthesize and cache tokens (interior mutability).
+    // Go: internal/astnav/tokens.go:FindChildOfKind
+    pub fn find_child_of_kind(&self, containing_node: NodeId, kind: Kind) -> Option<NodeId> {
+        find_child_of_kind_core(self, containing_node, kind)
     }
 }
 
@@ -270,7 +603,7 @@ impl SourceFile {
 ///
 /// Go passes a `func(*ast.Node) bool` callback to `getTokenAtPosition`; only
 /// `GetTouchingPropertyName` supplies a non-nil one. Modeled as a small enum to
-/// avoid a closure borrowing the `SourceFile` that is otherwise held by `&mut`.
+/// avoid a closure borrowing the navigation context.
 #[derive(Clone, Copy)]
 enum PrecedingTokenFilter {
     /// No filter (Go `nil`): used by `GetTokenAtPosition`/`GetTouchingToken`.
@@ -287,7 +620,7 @@ impl PrecedingTokenFilter {
 
     /// Applies the filter to node `id` (only meaningful for `PropertyName`).
     // Go: internal/astnav/tokens.go:GetTouchingPropertyName (inline callback)
-    fn applies(self, file: &SourceFile, id: NodeId) -> bool {
+    fn applies<A: Borrow<NodeArena>>(self, file: &NavEngine<A>, id: NodeId) -> bool {
         match self {
             PrecedingTokenFilter::None => false,
             PrecedingTokenFilter::PropertyName => {
@@ -311,17 +644,23 @@ fn is_jsdoc_kind(kind: Kind) -> bool {
 ///
 /// Side effects: none (pure).
 // Go: internal/ast/utilities.go:IsJSDocNode
-fn is_jsdoc_node(file: &SourceFile, id: NodeId) -> bool {
+fn is_jsdoc_node<A: Borrow<NodeArena>>(file: &NavEngine<A>, id: NodeId) -> bool {
     is_jsdoc_kind(file.kind(id))
 }
 
 /// Reports whether node `id` is a `JsxText` consisting only of whitespace.
 ///
+/// Synthesized tokens are never `JsxText` (the scanner factory creates bare
+/// token nodes), so a synthesized id is never whitespace-only JSX text.
+///
 /// Side effects: none (pure).
 // Go: internal/ast/utilities.go:IsWhitespaceOnlyJsxText
-fn is_whitespace_only_jsx_text(file: &SourceFile, id: NodeId) -> bool {
+fn is_whitespace_only_jsx_text<A: Borrow<NodeArena>>(file: &NavEngine<A>, id: NodeId) -> bool {
+    if SynthesizedTokenStore::is_synthesized(id) {
+        return false;
+    }
     matches!(
-        file.arena.data(id),
+        file.arena().data(id),
         NodeData::JsxText(d) if d.contains_only_trivia_white_spaces
     )
 }
@@ -330,7 +669,7 @@ fn is_whitespace_only_jsx_text(file: &SourceFile, id: NodeId) -> bool {
 ///
 /// Side effects: none (pure).
 // Go: internal/ast/utilities.go:IsNonWhitespaceToken
-fn is_non_whitespace_token(file: &SourceFile, id: NodeId) -> bool {
+fn is_non_whitespace_token<A: Borrow<NodeArena>>(file: &NavEngine<A>, id: NodeId) -> bool {
     is_token_kind(file.kind(id)) && !is_whitespace_only_jsx_text(file, id)
 }
 
@@ -338,7 +677,7 @@ fn is_non_whitespace_token(file: &SourceFile, id: NodeId) -> bool {
 ///
 /// Side effects: none (pure).
 // Go: internal/ast/utilities.go:IsJsxChild
-fn is_jsx_child(file: &SourceFile, id: NodeId) -> bool {
+fn is_jsx_child<A: Borrow<NodeArena>>(file: &NavEngine<A>, id: NodeId) -> bool {
     matches!(
         file.kind(id),
         Kind::JsxElement
@@ -354,7 +693,7 @@ fn is_jsx_child(file: &SourceFile, id: NodeId) -> bool {
 ///
 /// Side effects: none (pure).
 // Go: internal/ast/utilities.go:IsPropertyNameLiteral
-fn is_property_name_literal(file: &SourceFile, id: NodeId) -> bool {
+fn is_property_name_literal<A: Borrow<NodeArena>>(file: &NavEngine<A>, id: NodeId) -> bool {
     matches!(
         file.kind(id),
         Kind::Identifier
@@ -368,7 +707,7 @@ fn is_property_name_literal(file: &SourceFile, id: NodeId) -> bool {
 ///
 /// Side effects: none (pure).
 // Go: internal/ast/ast_generated.go:IsPrivateIdentifier
-fn is_private_identifier(file: &SourceFile, id: NodeId) -> bool {
+fn is_private_identifier<A: Borrow<NodeArena>>(file: &NavEngine<A>, id: NodeId) -> bool {
     file.kind(id) == Kind::PrivateIdentifier
 }
 
@@ -380,7 +719,10 @@ fn is_private_identifier(file: &SourceFile, id: NodeId) -> bool {
 /// Side effects: none (pure).
 // Go: internal/ast/utilities.go:FindLastVisibleNode
 #[allow(dead_code)]
-fn find_last_visible_node(file: &SourceFile, nodes: &[NodeId]) -> Option<NodeId> {
+fn find_last_visible_node<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
+    nodes: &[NodeId],
+) -> Option<NodeId> {
     let mut from_end = 1usize;
     while from_end <= nodes.len()
         && file
@@ -401,7 +743,7 @@ fn find_last_visible_node(file: &SourceFile, nodes: &[NodeId]) -> Option<NodeId>
 ///
 /// Side effects: none (pure).
 // Go: internal/astnav/tokens.go:shouldSkipChild
-fn should_skip_child(file: &SourceFile, id: NodeId) -> bool {
+fn should_skip_child<A: Borrow<NodeArena>>(file: &NavEngine<A>, id: NodeId) -> bool {
     let kind = file.kind(id);
     kind == Kind::JSDoc
         || kind == Kind::JSDocText
@@ -435,8 +777,8 @@ fn get_scanner_for_source_file(text: &str, language_variant: LanguageVariant, po
 ///
 /// Side effects: none (pure).
 // Go: internal/astnav/tokens.go:shouldRescanLessThanLessThanToken
-fn should_rescan_less_than_less_than_token(
-    file: &SourceFile,
+fn should_rescan_less_than_less_than_token<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
     containing_node: NodeId,
     token: Kind,
 ) -> bool {
@@ -448,9 +790,9 @@ fn should_rescan_less_than_less_than_token(
 ///
 /// Side effects: may advance the scanner via a JSX rescan.
 // Go: internal/astnav/tokens.go:scanNavigationToken
-fn scan_navigation_token(
+fn scan_navigation_token<A: Borrow<NodeArena>>(
     scanner: &mut Scanner,
-    file: &SourceFile,
+    file: &NavEngine<A>,
     containing_node: NodeId,
 ) -> Kind {
     let token = scanner.token();
@@ -465,10 +807,14 @@ fn scan_navigation_token(
 ///
 /// Side effects: none (pure).
 // Go: internal/scanner/scanner.go:GetTokenPosOfNode
-fn get_token_pos_of_node(file: &SourceFile, id: NodeId, include_jsdoc: bool) -> i32 {
+fn get_token_pos_of_node<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
+    id: NodeId,
+    include_jsdoc: bool,
+) -> i32 {
     // Missing (zero-width) nodes keep their position: skipping trivia would jump
     // forward to the next token.
-    if node_is_missing(&file.arena, id) {
+    if file.node_is_missing(id) {
         return file.pos(id);
     }
     if is_jsdoc_node(file, id) || file.kind(id) == Kind::JsxText {
@@ -504,7 +850,11 @@ fn get_token_pos_of_node(file: &SourceFile, id: NodeId, include_jsdoc: bool) -> 
 ///
 /// Side effects: none (pure).
 // Go: internal/astnav/tokens.go:getPosition
-fn get_position(file: &SourceFile, id: NodeId, allow_in_leading_trivia: bool) -> i32 {
+fn get_position<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
+    id: NodeId,
+    allow_in_leading_trivia: bool,
+) -> i32 {
     if allow_in_leading_trivia {
         file.pos(id)
     } else {
@@ -529,7 +879,11 @@ fn get_position(file: &SourceFile, id: NodeId, allow_in_leading_trivia: bool) ->
 ///
 /// Side effects: none (pure).
 // Go: internal/astnav/tokens.go:GetStartOfNode
-pub fn get_start_of_node(file: &SourceFile, node: NodeId, include_jsdoc: bool) -> i32 {
+pub fn get_start_of_node<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
+    node: NodeId,
+    include_jsdoc: bool,
+) -> i32 {
     get_token_pos_of_node(file, node, include_jsdoc)
 }
 
@@ -538,7 +892,7 @@ pub fn get_start_of_node(file: &SourceFile, node: NodeId, include_jsdoc: bool) -
 ///
 /// Side effects: none (pure).
 // Go: internal/astnav/tokens.go:isValidPrecedingNode
-fn is_valid_preceding_node(file: &SourceFile, id: NodeId) -> bool {
+fn is_valid_preceding_node<A: Borrow<NodeArena>>(file: &NavEngine<A>, id: NodeId) -> bool {
     if file.kind(id) == Kind::EndOfFile {
         return !file.node_jsdoc(id).is_empty();
     }
@@ -574,11 +928,15 @@ fn is_valid_preceding_node(file: &SourceFile, id: NodeId) -> bool {
 ///
 /// Side effects: invokes `visit` for each child; no mutation.
 // Go: internal/astnav/tokens.go:VisitEachChildAndJSDoc
-pub fn visit_each_child_and_jsdoc(file: &SourceFile, node: NodeId, visit: &mut dyn FnMut(NodeId)) {
+pub fn visit_each_child_and_jsdoc<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
+    node: NodeId,
+    visit: &mut dyn FnMut(NodeId),
+) {
     for &jsdoc in file.node_jsdoc(node) {
         visit(jsdoc);
     }
-    file.arena.for_each_child(node, &mut |c| {
+    file.arena().for_each_child(node, &mut |c| {
         visit(c);
         false
     });
@@ -587,7 +945,7 @@ pub fn visit_each_child_and_jsdoc(file: &SourceFile, node: NodeId, visit: &mut d
 /// Collects the children of `node` (JSDoc first) into a vector.
 ///
 /// Side effects: none beyond allocating the result.
-fn collect_children(file: &SourceFile, node: NodeId) -> Vec<NodeId> {
+fn collect_children<A: Borrow<NodeArena>>(file: &NavEngine<A>, node: NodeId) -> Vec<NodeId> {
     let mut out = Vec::new();
     visit_each_child_and_jsdoc(file, node, &mut |c| out.push(c));
     out
@@ -601,7 +959,7 @@ fn collect_children(file: &SourceFile, node: NodeId) -> Vec<NodeId> {
 /// Side effects: none (pure).
 // Go: internal/astnav/tokens.go:findRightmostNode
 #[allow(dead_code)]
-fn find_rightmost_node(file: &SourceFile, node: NodeId) -> NodeId {
+fn find_rightmost_node<A: Borrow<NodeArena>>(file: &NavEngine<A>, node: NodeId) -> NodeId {
     let mut current = node;
     loop {
         let children = collect_children(file, current);
@@ -619,8 +977,8 @@ fn find_rightmost_node(file: &SourceFile, node: NodeId) -> NodeId {
 ///
 /// Side effects: may set `*prev_subtree`.
 // Go: internal/astnav/tokens.go:getTokenAtPosition (testNode closure)
-fn test_node(
-    file: &SourceFile,
+fn test_node<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
     node: NodeId,
     position: i32,
     allow_in_leading_trivia: bool,
@@ -654,12 +1012,13 @@ fn test_node(
     0
 }
 
-/// Core of the three public position-to-token entry points.
+/// Core of the three position-to-token entry points (shared by the owned `&mut`
+/// free functions and the shared-borrow methods).
 ///
 /// Side effects: may synthesize and cache tokens.
 // Go: internal/astnav/tokens.go:getTokenAtPosition
-fn get_token_at_position_core(
-    file: &mut SourceFile,
+fn token_at_position_core<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
     position: i32,
     allow_in_leading_trivia: bool,
     include_preceding: PrecedingTokenFilter,
@@ -709,7 +1068,7 @@ fn get_token_at_position_core(
         // If `prev_subtree` was set, it ends exactly at the target position. Check
         // whether its rightmost token should be returned per the filter.
         if let Some(ps) = prev_subtree {
-            let child = find_preceding_token_ex(file, position, Some(ps), false);
+            let child = fpt_ex(file, position, Some(ps), false);
             if let Some(child) = child {
                 if file.end(child) == position && include_preceding.applies(file, child) {
                     // Optimization: the filter only ever accepts real AST nodes, so
@@ -782,7 +1141,9 @@ fn get_token_at_position_core(
 /// Returns the token at `position`, counting positions in leading trivia.
 ///
 /// Mirrors TS `getTokenAtPosition`: the result may be a real AST node or a token
-/// synthesized from the scanner (and memoized for pointer equality).
+/// synthesized from the scanner (and memoized for pointer equality). Takes
+/// `&mut SourceFile` for source compatibility; internally only shared access is
+/// needed (see [`NavEngine::get_token_at_position`] for the `&self` form).
 ///
 /// # Examples
 /// ```
@@ -799,7 +1160,7 @@ fn get_token_at_position_core(
 /// Side effects: may synthesize and cache a token.
 // Go: internal/astnav/tokens.go:GetTokenAtPosition
 pub fn get_token_at_position(file: &mut SourceFile, position: i32) -> NodeId {
-    get_token_at_position_core(file, position, true, PrecedingTokenFilter::None)
+    token_at_position_core(file, position, true, PrecedingTokenFilter::None)
 }
 
 /// Returns the token "touching" `position` (positions in leading trivia are not
@@ -820,7 +1181,7 @@ pub fn get_token_at_position(file: &mut SourceFile, position: i32) -> NodeId {
 /// Side effects: may synthesize and cache a token.
 // Go: internal/astnav/tokens.go:GetTouchingToken
 pub fn get_touching_token(file: &mut SourceFile, position: i32) -> NodeId {
-    get_token_at_position_core(file, position, false, PrecedingTokenFilter::None)
+    token_at_position_core(file, position, false, PrecedingTokenFilter::None)
 }
 
 /// Returns the token touching `position`, preferring a preceding
@@ -842,7 +1203,7 @@ pub fn get_touching_token(file: &mut SourceFile, position: i32) -> NodeId {
 /// Side effects: may synthesize and cache a token.
 // Go: internal/astnav/tokens.go:GetTouchingPropertyName
 pub fn get_touching_property_name(file: &mut SourceFile, position: i32) -> NodeId {
-    get_token_at_position_core(file, position, false, PrecedingTokenFilter::PropertyName)
+    token_at_position_core(file, position, false, PrecedingTokenFilter::PropertyName)
 }
 
 /// Finds the leftmost token satisfying `position < token.end()`; if that token
@@ -865,7 +1226,7 @@ pub fn get_touching_property_name(file: &mut SourceFile, position: i32) -> NodeI
 /// Side effects: may synthesize and cache tokens.
 // Go: internal/astnav/tokens.go:FindPrecedingToken
 pub fn find_preceding_token(file: &mut SourceFile, position: i32) -> Option<NodeId> {
-    find_preceding_token_ex(file, position, None, false)
+    fpt_ex(file, position, None, false)
 }
 
 /// Like [`find_preceding_token`] but starting from `start_node` (defaulting to
@@ -894,6 +1255,20 @@ pub fn find_preceding_token_ex(
     start_node: Option<NodeId>,
     exclude_jsdoc: bool,
 ) -> Option<NodeId> {
+    fpt_ex(file, position, start_node, exclude_jsdoc)
+}
+
+/// Shared core of [`find_preceding_token_ex`] (owned `&mut`) and
+/// [`NavEngine::find_preceding_token_ex`] (`&self`).
+///
+/// Side effects: may synthesize and cache tokens.
+// Go: internal/astnav/tokens.go:FindPrecedingTokenEx
+fn fpt_ex<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
+    position: i32,
+    start_node: Option<NodeId>,
+    exclude_jsdoc: bool,
+) -> Option<NodeId> {
     let node = start_node.unwrap_or(file.root);
     let result = fpt_find(file, node, position, exclude_jsdoc);
     if let Some(r) = result {
@@ -904,12 +1279,12 @@ pub fn find_preceding_token_ex(
     result
 }
 
-/// Recursive worker of [`find_preceding_token_ex`].
+/// Recursive worker of [`fpt_ex`].
 ///
 /// Side effects: may synthesize and cache tokens.
 // Go: internal/astnav/tokens.go:FindPrecedingTokenEx (find closure)
-fn fpt_find(
-    file: &mut SourceFile,
+fn fpt_find<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
     n: NodeId,
     position: i32,
     exclude_jsdoc: bool,
@@ -1005,8 +1380,8 @@ fn fpt_find(
 ///
 /// Side effects: none (pure).
 // Go: internal/astnav/tokens.go:findRightmostValidToken (shouldVisitNode closure)
-fn should_visit_node(
-    file: &SourceFile,
+fn should_visit_node<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
     node: NodeId,
     end_pos: i32,
     position: i32,
@@ -1022,8 +1397,8 @@ fn should_visit_node(
 ///
 /// Side effects: may synthesize and cache tokens.
 // Go: internal/astnav/tokens.go:findRightmostValidToken
-fn find_rightmost_valid_token(
-    file: &mut SourceFile,
+fn find_rightmost_valid_token<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
     end_pos: i32,
     containing_node: NodeId,
     position: i32,
@@ -1048,8 +1423,8 @@ fn find_rightmost_valid_token(
 ///
 /// Side effects: may synthesize and cache tokens.
 // Go: internal/astnav/tokens.go:findRightmostValidToken (find closure)
-fn frvt_find(
-    file: &mut SourceFile,
+fn frvt_find<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
     n: Option<NodeId>,
     end_pos: i32,
     containing_node: NodeId,
@@ -1184,7 +1559,11 @@ pub fn find_next_token(
 ///
 /// Side effects: may synthesize and cache a token.
 // Go: internal/astnav/tokens.go:FindNextToken (find closure)
-fn fnt_find(file: &mut SourceFile, n: NodeId, previous_token: NodeId) -> Option<NodeId> {
+fn fnt_find<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
+    n: NodeId,
+    previous_token: NodeId,
+) -> Option<NodeId> {
     let prev_end = file.end(previous_token);
     if is_token_kind(file.kind(n)) && file.pos(n) == prev_end {
         // A token starting at the end of the previous token: return it.
@@ -1253,6 +1632,19 @@ fn fnt_find(file: &mut SourceFile, n: NodeId, previous_token: NodeId) -> Option<
 // Go: internal/astnav/tokens.go:FindChildOfKind
 pub fn find_child_of_kind(
     file: &mut SourceFile,
+    containing_node: NodeId,
+    kind: Kind,
+) -> Option<NodeId> {
+    find_child_of_kind_core(file, containing_node, kind)
+}
+
+/// Shared core of [`find_child_of_kind`] (owned `&mut`) and
+/// [`NavEngine::find_child_of_kind`] (`&self`).
+///
+/// Side effects: may synthesize and cache tokens.
+// Go: internal/astnav/tokens.go:FindChildOfKind
+fn find_child_of_kind_core<A: Borrow<NodeArena>>(
+    file: &NavEngine<A>,
     containing_node: NodeId,
     kind: Kind,
 ) -> Option<NodeId> {

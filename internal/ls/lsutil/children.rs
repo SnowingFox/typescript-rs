@@ -174,7 +174,7 @@ impl SourceFile {
     ///
     /// Side effects: allocates a scanner that owns a copy of the text.
     // Go: internal/scanner/scanner.go:GetScannerForSourceFile
-    fn scanner_at(&self, pos: i32) -> Scanner {
+    pub(crate) fn scanner_at(&self, pos: i32) -> Scanner {
         let mut s = Scanner::new();
         // PERF(port): Go shares `sourceFile.Text()` by reference; the scanner
         // here owns its text, so each query clones the source.

@@ -9,6 +9,7 @@ path = "lib.rs"
 [dependencies]
 bitflags = "2.11.1"
 tsgo_ast = { path = "../../ast" }
+tsgo_astnav = { path = "../../astnav" }
 tsgo_core = { path = "../../core" }
 tsgo_scanner = { path = "../../scanner" }
 tsgo_stringutil = { path = "../../stringutil" }
