@@ -273,3 +273,72 @@ fn arena_conditional_type_accessor() {
     // A non-conditional type returns `None` from the accessor.
     assert_eq!(arena.get(check).as_conditional(), None);
 }
+
+// Go: internal/checker/types.go:Type.AsTemplateLiteralType / AsStringMappingType
+#[test]
+fn template_literal_and_string_mapping_accessors() {
+    let mut arena = TypeArena::new();
+    let ph = arena.alloc(
+        TypeFlags::TYPE_PARAMETER,
+        ObjectFlags::empty(),
+        None,
+        TypeData::TypeParameter(TypeParameter::default()),
+    );
+    let tmpl = arena.alloc(
+        TypeFlags::TEMPLATE_LITERAL,
+        ObjectFlags::empty(),
+        None,
+        TypeData::TemplateLiteral(TemplateLiteralType {
+            texts: vec!["a".to_string(), "b".to_string()],
+            types: vec![ph],
+        }),
+    );
+    let d = arena
+        .get(tmpl)
+        .as_template_literal()
+        .expect("template literal");
+    assert_eq!(d.texts.len(), d.types.len() + 1);
+    assert_eq!(d.types, vec![ph]);
+    assert_eq!(arena.get(ph).as_template_literal(), None);
+
+    let sm = arena.alloc(
+        TypeFlags::STRING_MAPPING,
+        ObjectFlags::empty(),
+        None,
+        TypeData::StringMapping(StringMappingType {
+            kind: StringMappingKind::Uppercase,
+            target: ph,
+        }),
+    );
+    let m = arena.get(sm).as_string_mapping().expect("string mapping");
+    assert_eq!(m.kind, StringMappingKind::Uppercase);
+    assert_eq!(m.target, ph);
+    assert_eq!(arena.get(ph).as_string_mapping(), None);
+}
+
+// Go: internal/checker/checker.go:intrinsicTypeKinds / MappedTypeModifiers
+#[test]
+fn string_mapping_kind_and_mapped_type_modifiers() {
+    assert_eq!(
+        StringMappingKind::from_name("Uppercase"),
+        Some(StringMappingKind::Uppercase)
+    );
+    assert_eq!(
+        StringMappingKind::from_name("Lowercase"),
+        Some(StringMappingKind::Lowercase)
+    );
+    assert_eq!(
+        StringMappingKind::from_name("Capitalize"),
+        Some(StringMappingKind::Capitalize)
+    );
+    assert_eq!(
+        StringMappingKind::from_name("Uncapitalize"),
+        Some(StringMappingKind::Uncapitalize)
+    );
+    assert_eq!(StringMappingKind::from_name("Nope"), None);
+    assert_eq!(StringMappingKind::Capitalize.intrinsic_name(), "Capitalize");
+    assert_eq!(MappedTypeModifiers::INCLUDE_READONLY.bits(), 1 << 0);
+    assert_eq!(MappedTypeModifiers::EXCLUDE_READONLY.bits(), 1 << 1);
+    assert_eq!(MappedTypeModifiers::INCLUDE_OPTIONAL.bits(), 1 << 2);
+    assert_eq!(MappedTypeModifiers::EXCLUDE_OPTIONAL.bits(), 1 << 3);
+}

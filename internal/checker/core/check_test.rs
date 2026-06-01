@@ -7332,3 +7332,177 @@ fn conditional_deferred_through_generic_function_e2e() {
     assert_eq!(diags[0].code, 2322);
     assert_eq!(diags[0].message, "Type '1' is not assignable to type '2'.");
 }
+
+// C-C3 slice 4: a template literal type with a concrete string-literal
+// placeholder resolves to a string literal. `` `a${"x"}b` `` is `"axb"`, so
+// assigning `"nope"` to it reports 2322 while `"axb"` is accepted.
+// Verified against `cmd/tsgo --noEmit --strict`: only line 3 (`const u: T =
+// "nope"`) reports `(3,7): error TS2322: Type '"nope"' is not assignable to
+// type '"axb"'.` (line 2 `const t: T = "axb"` is accepted).
+// Go: internal/checker/checker.go:Checker.getTemplateLiteralType (all-literal -> string literal)
+#[test]
+fn template_literal_concrete_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = `a${\"x\"}b`;\nconst t: T = \"axb\";\nconst u: T = \"nope\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '\"nope\"' is not assignable to type '\"axb\"'."
+    );
+}
+
+// C-C3 slice 5: a template literal type with a union placeholder distributes
+// over the union. `` `x${"a" | "b"}` `` is `"xa" | "xb"`, so assigning `"xc"`
+// reports 2322 while `"xa"` is accepted.
+// Verified against `cmd/tsgo --noEmit --strict`: only line 3 (`const u: T =
+// "xc"`) reports `(3,7): error TS2322: Type '"xc"' is not assignable to type
+// '"xa" | "xb"'.` (line 2 `const t: T = "xa"` is accepted).
+// Go: internal/checker/checker.go:Checker.getTemplateLiteralType (union distribution)
+#[test]
+fn template_literal_union_distribution_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = `x${\"a\" | \"b\"}`;\nconst t: T = \"xa\";\nconst u: T = \"xc\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '\"xc\"' is not assignable to type '\"xa\" | \"xb\"'."
+    );
+}
+
+// C-C3 slice 6: the intrinsic string-mapping type `Uppercase<S>`. Applied to a
+// concrete string literal `"abc"`, it resolves to `"ABC"`, so assigning `"abc"`
+// reports 2322 while `"ABC"` is accepted.
+//
+// Verified against `cmd/tsgo --noEmit --strict` (real lib `Uppercase`): only the
+// `const v: U = "abc"` line reports `error TS2322: Type '"abc"' is not assignable
+// to type '"ABC"'.` (the `const u: U = "ABC"` line is accepted).
+//
+// DIVERGENCE(port): Go declares `type Uppercase<S extends string> = intrinsic`
+// in lib.es5.d.ts and dispatches in `getTypeAliasInstantiation` when the
+// declared type is the intrinsic marker. The port's parser has no `intrinsic`
+// keyword (it is `internal/parser`, out of scope), so the stand-in alias body is
+// `= string` and the checker dispatches by the alias *name*. blocked-by: parser
+// `intrinsic` keyword support.
+// Go: internal/checker/checker.go:Checker.getStringMappingType / applyStringMapping
+#[test]
+fn intrinsic_uppercase_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Uppercase<S extends string> = string;\n\
+         type U = Uppercase<\"abc\">;\n\
+         const u: U = \"ABC\";\n\
+         const v: U = \"abc\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '\"abc\"' is not assignable to type '\"ABC\"'."
+    );
+}
+
+// C-C3 slice 1: a `Partial`-shaped homomorphic mapped type
+// `{ [K in keyof T]?: T[K] }` over a concrete object makes every property
+// optional. `Partial2<{ a: number }>` is `{ a?: number }`, so `{}` is assignable
+// (a is optional) but `{ a: "x" }` reports 2322 (a is `number`).
+// Verified against `cmd/tsgo --noEmit --strict`: only `const q: P = { a: "x" }`
+// reports `(4,16): error TS2322: Type 'string' is not assignable to type
+// 'number'.` (the `const p: P = {}` line is accepted).
+// Go: internal/checker/checker.go:Checker.instantiateMappedType / resolveMappedTypeMembers
+#[test]
+fn mapped_partial_optional_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Partial2<T> = { [K in keyof T]?: T[K] };\n\
+         type P = Partial2<{ a: number }>;\n\
+         const p: P = {};\n\
+         const q: P = { a: \"x\" };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// C-C3 slice 3: a `Required`-shaped mapped type `{ [K in keyof T]-?: T[K] }`
+// strips optionality. `Required2<{ a?: number }>` is `{ a: number }`
+// (required), so `const r: R = {}` reports a missing-property error.
+//
+// Verified against `cmd/tsgo --noEmit --strict`: `const r: R = {}` reports
+// `(3,7): error TS2741: Property 'a' is missing in type '{}' but required in
+// type 'Required2<{ a?: number | undefined; }>'.`
+//
+// DIVERGENCE(port): the target type prints as the resolved anonymous object
+// `{ a: number; }` rather than Go's alias form `Required2<{ a?: number |
+// undefined; }>` — the port does not do type-alias attribution on an
+// instantiated type, and (strictNullChecks off in the stub) does not widen the
+// source `a?` to `number | undefined`. The behavior (2741 for the now-required
+// `a`) matches Go. blocked-by: alias attribution on instantiated types.
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (-? strips optional)
+#[test]
+fn mapped_required_strips_optional_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Required2<T> = { [K in keyof T]-?: T[K] };\n\
+         type R = Required2<{ a?: number }>;\n\
+         const r: R = {};",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2741, got {diags:?}");
+    assert_eq!(diags[0].code, 2741);
+    assert_eq!(
+        diags[0].message,
+        "Property 'a' is missing in type '{}' but required in type '{ a: number; }'."
+    );
+}
+
+// C-C3 slice 7: key remapping via `as`. An identity remap `{ [K in keyof T as
+// K]: T[K] }` exercises the `as` name-type path while keeping the keys, so
+// `Id<{ a: number }>` is `{ a: number }` and `const bad: R = { a: "x" }`
+// reports 2322. (A non-identity template-literal `as` remap is covered by the
+// direct test `instantiate_mapped_type_as_remaps_keys`; the full template-`as`
+// over `string & K` is DEFER — see that test.)
+// Verified against `cmd/tsgo --noEmit --strict`: only `const bad: R = { a: "x" }`
+// reports `(3,18): error TS2322: Type 'string' is not assignable to type
+// 'number'.`
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (nameType remap)
+#[test]
+fn mapped_as_identity_remap_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Id<T> = { [K in keyof T as K]: T[K] };\n\
+         type R = Id<{ a: number }>;\n\
+         const bad: R = { a: \"x\" };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}

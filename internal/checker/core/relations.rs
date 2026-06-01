@@ -18,7 +18,7 @@ use super::declared_types::{
     get_apparent_type, get_applicable_index_info_for_name, get_properties_of_type,
     get_property_of_type, get_type_of_symbol,
 };
-use super::nodebuilder::{symbol_to_string, type_to_string};
+use super::nodebuilder::type_to_string;
 use super::program::BoundProgram;
 use super::signatures::{SignatureFlags, SignatureId};
 use super::types::{ObjectFlags, TypeData, TypeFlags, TypeId};
@@ -1539,9 +1539,10 @@ impl Checker {
         let related =
             self.report_is_related_to(program, source_type, target_type, relation, reporter);
         if !related {
+            let target_name = self.resolved_symbol_name(program, target_prop);
             reporter.report(
                 &tsgo_diagnostics::TYPES_OF_PROPERTY_0_ARE_INCOMPATIBLE,
-                vec![symbol_to_string(program, target_prop)],
+                vec![target_name],
             );
             return false;
         }
@@ -1552,7 +1553,7 @@ impl Checker {
             && self.symbol_is_class_member(program, target_prop)
             && !self.symbol_is_optional(program, target_prop)
         {
-            let target_name = symbol_to_string(program, target_prop);
+            let target_name = self.resolved_symbol_name(program, target_prop);
             let source_str = type_to_string(self, program, source);
             let target_str = type_to_string(self, program, target);
             reporter.report(
@@ -1710,7 +1711,7 @@ impl Checker {
         if props.len() == 1 {
             let source_type = type_to_string(self, program, source);
             let target_type = type_to_string(self, program, target);
-            let prop_name = symbol_to_string(program, unmatched);
+            let prop_name = self.resolved_symbol_name(program, unmatched);
             reporter.report(
                 &tsgo_diagnostics::PROPERTY_0_IS_MISSING_IN_TYPE_1_BUT_REQUIRED_IN_TYPE_2,
                 vec![prop_name, source_type, target_type],
@@ -1721,7 +1722,7 @@ impl Checker {
             if props.len() > 5 {
                 let names = props[..4]
                     .iter()
-                    .map(|&p| symbol_to_string(program, p))
+                    .map(|&p| self.resolved_symbol_name(program, p))
                     .collect::<Vec<_>>()
                     .join(", ");
                 reporter.report(
@@ -1731,7 +1732,7 @@ impl Checker {
             } else {
                 let names = props
                     .iter()
-                    .map(|&p| symbol_to_string(program, p))
+                    .map(|&p| self.resolved_symbol_name(program, p))
                     .collect::<Vec<_>>()
                     .join(", ");
                 reporter.report(

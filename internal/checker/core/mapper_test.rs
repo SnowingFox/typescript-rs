@@ -387,3 +387,32 @@ fn instantiate_type_conditional_without_program_is_deferred() {
     // No retained program: stays the same deferred conditional id.
     assert_eq!(c.instantiate_type(cond, &mapper), cond);
 }
+
+// C-C3: instantiating a deferred template literal folds it into a string
+// literal once its placeholder becomes a concrete string literal.
+// Go: internal/checker/checker.go:Checker.instantiateType (template-literal arm)
+#[test]
+fn instantiate_template_literal_folds_when_placeholder_resolved() {
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let tmpl = c.new_template_literal_type(vec!["p_".into(), "".into()], vec![tp]);
+    let x = c.get_string_literal_type("x");
+    let mapper = TypeMapper::unary(tp, x);
+    let resolved = c.instantiate_type(tmpl, &mapper);
+    assert_eq!(c.type_to_string(resolved), "\"p_x\"");
+}
+
+// C-C3: instantiating a deferred string mapping folds it once its target
+// becomes a concrete string literal.
+// Go: internal/checker/checker.go:Checker.instantiateType (string-mapping arm)
+#[test]
+fn instantiate_string_mapping_folds_when_target_resolved() {
+    use crate::core::types::StringMappingKind;
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let sm = c.new_string_mapping_type(StringMappingKind::Uppercase, tp);
+    let abc = c.get_string_literal_type("abc");
+    let mapper = TypeMapper::unary(tp, abc);
+    let resolved = c.instantiate_type(sm, &mapper);
+    assert_eq!(c.type_to_string(resolved), "\"ABC\"");
+}

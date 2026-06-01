@@ -337,6 +337,92 @@ bitflags::bitflags! {
     }
 }
 
+bitflags::bitflags! {
+    /// The `+`/`-` `readonly`/`?` modifiers on a mapped type's properties.
+    ///
+    /// Mirrors Go `MappedTypeModifiers`. `{ readonly [K in T]: V }` adds
+    /// readonly (`IncludeReadonly`); `{ -readonly [K in T]: V }` strips it
+    /// (`ExcludeReadonly`); `{ [K in T]?: V }` adds optional
+    /// (`IncludeOptional`); `{ [K in T]-?: V }` strips it (`ExcludeOptional`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::MappedTypeModifiers;
+    /// assert!(MappedTypeModifiers::NONE.is_empty());
+    /// assert_eq!(MappedTypeModifiers::INCLUDE_OPTIONAL.bits(), 1 << 2);
+    /// ```
+    ///
+    /// Side effects: none (pure value type).
+    // Go: internal/checker/checker.go:MappedTypeModifiers
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+    pub struct MappedTypeModifiers: u32 {
+        /// No `+`/`-` modifiers.
+        const NONE = 0;
+        /// `readonly` added (`{ readonly [K in T]: V }`).
+        const INCLUDE_READONLY = 1 << 0;
+        /// `readonly` stripped (`{ -readonly [K in T]: V }`).
+        const EXCLUDE_READONLY = 1 << 1;
+        /// `?` optionality added (`{ [K in T]?: V }`).
+        const INCLUDE_OPTIONAL = 1 << 2;
+        /// `?` optionality stripped (`{ [K in T]-?: V }`).
+        const EXCLUDE_OPTIONAL = 1 << 3;
+    }
+}
+
+/// The intrinsic string-mapping kind backing a `StringMapping` type.
+///
+/// Mirrors the `Uppercase`/`Lowercase`/`Capitalize`/`Uncapitalize` entries of
+/// Go's `intrinsicTypeKinds`. (Go keys a string mapping on the declaring
+/// symbol; the port stores the resolved intrinsic kind directly because the
+/// intrinsic aliases are not declared in a parsed lib here.)
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::StringMappingKind;
+/// assert_eq!(StringMappingKind::Uppercase.intrinsic_name(), "Uppercase");
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/checker.go:IntrinsicTypeKind (Uppercase/Lowercase/Capitalize/Uncapitalize)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StringMappingKind {
+    /// `Uppercase<S>`.
+    Uppercase,
+    /// `Lowercase<S>`.
+    Lowercase,
+    /// `Capitalize<S>`.
+    Capitalize,
+    /// `Uncapitalize<S>`.
+    Uncapitalize,
+}
+
+impl StringMappingKind {
+    /// Returns the intrinsic alias name (e.g. `"Uppercase"`).
+    ///
+    /// Side effects: none (pure).
+    pub fn intrinsic_name(self) -> &'static str {
+        match self {
+            StringMappingKind::Uppercase => "Uppercase",
+            StringMappingKind::Lowercase => "Lowercase",
+            StringMappingKind::Capitalize => "Capitalize",
+            StringMappingKind::Uncapitalize => "Uncapitalize",
+        }
+    }
+
+    /// Maps an intrinsic alias name to its kind, if it names a string mapping.
+    ///
+    /// Side effects: none (pure).
+    pub fn from_name(name: &str) -> Option<StringMappingKind> {
+        match name {
+            "Uppercase" => Some(StringMappingKind::Uppercase),
+            "Lowercase" => Some(StringMappingKind::Lowercase),
+            "Capitalize" => Some(StringMappingKind::Capitalize),
+            "Uncapitalize" => Some(StringMappingKind::Uncapitalize),
+            _ => None,
+        }
+    }
+}
+
 /// One entry of the flag-name table used by [`format_type_flags`].
 struct TypeFlagName {
     flag: TypeFlags,
@@ -847,6 +933,59 @@ pub struct ConditionalType {
     pub extends_type: TypeId,
 }
 
+/// The payload of a template literal type `` `a${T}b` `` (`TypeFlags::TEMPLATE_LITERAL`).
+///
+/// A deferred template literal over generic placeholders: it interleaves
+/// `texts` (the literal chunks, `texts.len() == types.len() + 1`) with `types`
+/// (the placeholder types). A template literal whose placeholders are all
+/// concrete resolves eagerly to a string literal (or distributes a union) and
+/// never produces a `TemplateLiteralType`.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{TemplateLiteralType, TypeId};
+/// let d = TemplateLiteralType {
+///     texts: vec!["a".to_string(), "b".to_string()],
+///     types: vec![TypeId(1)],
+/// };
+/// assert_eq!(d.texts.len(), d.types.len() + 1);
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go:TemplateLiteralType
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateLiteralType {
+    /// The literal text chunks (one more than `types`).
+    pub texts: Vec<String>,
+    /// The interleaved placeholder types.
+    pub types: Vec<TypeId>,
+}
+
+/// The payload of an intrinsic string-mapping type `Uppercase<S>` and friends
+/// (`TypeFlags::STRING_MAPPING`).
+///
+/// A deferred string mapping over a generic `target`: it is kept until `target`
+/// is concrete enough to apply the mapping. A mapping over a string literal
+/// resolves eagerly to the transformed literal and never produces a
+/// `StringMappingType`.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{StringMappingKind, StringMappingType, TypeId};
+/// let d = StringMappingType { kind: StringMappingKind::Uppercase, target: TypeId(1) };
+/// assert_eq!(d.kind, StringMappingKind::Uppercase);
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go:StringMappingType
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StringMappingType {
+    /// The intrinsic mapping applied (`Uppercase`/`Lowercase`/...).
+    pub kind: StringMappingKind,
+    /// The (generic) string-like type being mapped.
+    pub target: TypeId,
+}
+
 /// Type-specific data, the discriminated-union form of Go's `TypeData`
 /// interface (PORTING, section 3).
 ///
@@ -883,6 +1022,10 @@ pub enum TypeData {
     IndexedAccess(IndexedAccessType),
     /// A deferred conditional type `T extends U ? X : Y`.
     Conditional(ConditionalType),
+    /// A deferred template literal type `` `a${T}b` ``.
+    TemplateLiteral(TemplateLiteralType),
+    /// A deferred intrinsic string-mapping type (`Uppercase<S>`).
+    StringMapping(StringMappingType),
 }
 
 /// A checker type: the common header (Go's `Type` struct fields) plus its
@@ -1068,6 +1211,30 @@ impl Type {
     pub fn as_conditional(&self) -> Option<&ConditionalType> {
         match &self.data {
             TypeData::Conditional(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Returns the template-literal payload, if this is a deferred template
+    /// literal type.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/types.go:Type.AsTemplateLiteralType
+    pub fn as_template_literal(&self) -> Option<&TemplateLiteralType> {
+        match &self.data {
+            TypeData::TemplateLiteral(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Returns the string-mapping payload, if this is a deferred string-mapping
+    /// type.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/types.go:Type.AsStringMappingType
+    pub fn as_string_mapping(&self) -> Option<&StringMappingType> {
+        match &self.data {
+            TypeData::StringMapping(d) => Some(d),
             _ => None,
         }
     }

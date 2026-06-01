@@ -562,3 +562,33 @@ fn new_conditional_type_and_program_less_printing() {
     assert_eq!(d.extends_type, c.string_type());
     assert_eq!(c.type_to_string(cond), "T extends string ? ... : ...");
 }
+
+// Go: internal/checker/checker.go:Checker.newTemplateLiteralType + printer.go:typeToString
+// `new_template_literal_type` allocates a `TEMPLATE_LITERAL`-flagged (interned)
+// type, and the program-less printer renders it `` `a${T}b` ``.
+#[test]
+fn new_template_literal_type_and_program_less_printing() {
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let t = c.new_template_literal_type(vec!["a".into(), "b".into()], vec![tp]);
+    assert!(c.get_type(t).flags().contains(TypeFlags::TEMPLATE_LITERAL));
+    // Interned: a second identical request yields the same id.
+    let t2 = c.new_template_literal_type(vec!["a".into(), "b".into()], vec![tp]);
+    assert_eq!(t, t2);
+    assert_eq!(c.type_to_string(t), "`a${T}b`");
+}
+
+// Go: internal/checker/checker.go:Checker.newStringMappingType + printer.go:typeToString
+// `new_string_mapping_type` allocates a `STRING_MAPPING`-flagged (interned)
+// type, and the program-less printer renders it `Uppercase<T>`.
+#[test]
+fn new_string_mapping_type_and_program_less_printing() {
+    use crate::core::types::StringMappingKind;
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let t = c.new_string_mapping_type(StringMappingKind::Uppercase, tp);
+    assert!(c.get_type(t).flags().contains(TypeFlags::STRING_MAPPING));
+    let t2 = c.new_string_mapping_type(StringMappingKind::Uppercase, tp);
+    assert_eq!(t, t2);
+    assert_eq!(c.type_to_string(t), "Uppercase<T>");
+}

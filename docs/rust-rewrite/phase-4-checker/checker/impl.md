@@ -3737,6 +3737,82 @@ impl EmitResolver {
 
 **C-C2 状态**：**可达子集完成**。条件类型（具体求值真/假支 + 泛型延迟 + 随 alias/函数实例化再解析 + distributive over union + `infer` 元素/返回）落地；剩余高级类型（mapped/template C-C3）+ 条件化简/关系/tail-recursion 按 DEFER 推进。
 
+## C-C3 落地记录（worklog 摘要）—— mapped types `{[K in keyof T]: V}` + template literal types + intrinsic string mapping（高级类型 part 3，**收口 C-C**）
+
+> 在 C-C1（keyof/indexed-access + 延迟类型 + interning 模式）与 C-C2（条件类型延迟变体 + `instantiate_type_worker` 臂 + 程序感知 `instantiate_param_type`）之上，落地**映射类型 + 模板字面量类型 + 内置字符串映射类型**。每个行为一条 `/tdd` 红→绿垂直切片。先建类型基建（`MappedTypeModifiers`/`TemplateLiteralType`/`StringMappingType`/`StringMappingKind` + 两个 `TypeData` 变体 + mapped 用 `Object`+`ObjectFlags::MAPPED`+侧表）→ 模板字面量（concrete/union/generic）→ 内置字符串映射（Uppercase 等）→ 映射类型（Partial/Readonly/Required + `as` remap）→ 实例化臂 + 节点接线 → 端到端。
+
+**Go 真值（`/tmp/tsgo`（`go build -o /tmp/tsgo ./cmd/tsgo`）实跑 `--noEmit --strict` 逐一快照，断言前捕获，与任务书设想不符处一律以 cmd/tsgo 为准）**：
+- s1 Partial `type Partial2<T> = { [K in keyof T]?: T[K] }; type P = Partial2<{ a: number }>; const p: P = {}; const q: P = { a: "x" };` → 仅 `s1_partial.ts(4,16): TS2322: Type 'string' is not assignable to type 'number'.`（`p={}` 接受；证 `P`=`{ a?: number }`）。
+- s2 Readonly `type Readonly2<T> = { readonly [K in keyof T]: T[K] }; type R = Readonly2<{ a: number }>; const r: R = { a: 1 }; r.a = 2;` → 仅 `s2_readonly.ts(4,3): TS2540: Cannot assign to 'a' because it is a read-only property.`（证只读修饰应用）。
+- s3 Required `type Required2<T> = { [K in keyof T]-?: T[K] }; type R = Required2<{ a?: number }>; const r: R = {};` → 仅 `s3_required.ts(3,7): TS2741: Property 'a' is missing in type '{}' but required in type 'Required2<{ a?: number | undefined; }>'.`（证 `-?` 去可选 ⇒ `a` 必选）。
+- s4 模板字面量具体 `type T = \`a${"x"}b\`; const t: T = "axb"; const u: T = "nope";` → 仅 `s4_tmpl.ts(3,7): TS2322: Type '"nope"' is not assignable to type '"axb"'.`（证 `T`=`"axb"`）。
+- s5 模板字面量 union 分配 `type T = \`x${"a" | "b"}\`; const t: T = "xa"; const u: T = "xc";` → 仅 `s5_tmpl_union.ts(3,7): TS2322: Type '"xc"' is not assignable to type '"xa" | "xb"'.`（证分配为 `"xa" | "xb"`）。
+- s6 内置 `type U = Uppercase<"abc">; const u: U = "ABC"; const v: U = "abc";` → 仅 `s6_upper.ts(3,7): TS2322: Type '"abc"' is not assignable to type '"ABC"'.`（证 `Uppercase<"abc">`=`"ABC"`）。
+- s7 `as` 探查：`as \`p_${K & string}\`` → key remap 为 `p_a`（`const bad: R = { p_a: "x" }` → `TS2322 string/number`）；`as \`p_${string & K}\`` → 旧键 `a` 不存在（`TS2353`）；`as K`（identity）→ `Id<{a:number}>`=`{a:number}`（`const bad: R = { a: "x" }` → `TS2322 string/number`）；`as \`p_${K}\``（无 `& string`）→ **两条**诊断（额外 `TS2322: Type 'K' is not assignable to ... template placeholder`，因 `keyof T` 含 `symbol`）。
+
+**RED→GREEN 证据（每切片实测）**：
+- s4 模板具体：`TemplateLiteralType` 节点臂缺失 ⇒ 解成 `error_type` ⇒ 赋 error 无诊断 ⇒ **genuine RED**「expected one 2322, got []」；加 `get_type_from_template_type_node` + `get_template_literal_type`（all-literal → `getStringLiteralType`）后绿。
+- s5 模板 union：union 分配路径首次被触发（s4 同机器的不同臂），green-on-arrival（如实记录，非伪造红——分配代码路径首次执行）。
+- s6 内置：`Uppercase<"abc">` 解成桩 body `string` ⇒ 赋 "abc" 无诊断 ⇒ **genuine RED**；加 `get_type_from_type_reference` 的 intrinsic-name 派发（`StringMappingKind::from_name` + `get_string_mapping_type`）后绿。
+- s1 Partial：`Partial2<{a:number}>` 解成空 mapped 对象（无属性）⇒ `{a:"x"}` 无诊断 ⇒ **genuine RED**；加 `instantiate_mapped_type`（worker MAPPED 臂 + 急切成员解析）后绿。
+- s3 Required：首跑 **panic**「index out of bounds: len 9 index 2147483648」——`report_unmatched_property` 经 `symbol_to_string(program, unmatched)` 把**合成属性** id（高位 tag）喂进 `program.symbol()`；加 `Checker::resolved_symbol_name`（synthesized-aware）后绿。
+- s2 Readonly：2540 readonly-write **未接线**（既有），故按任务书改断言**类型/修饰符**——直测 `Readonly2<{a:number}>` 印 `{ readonly a: number; }` + 合成属性带 `CheckFlags::READONLY`，绿。
+- s7 `as`：identity `as K` 端到端绿（单 2322 对齐 cmd/tsgo）；非 identity 模板 `as \`p_${K}\`` 直测 remap 为 `{ p_a: number; }`（port 不查模板占位符约束 ⇒ 无 cmd/tsgo 的额外 symbol 诊断；`string & K` 化简 DEFER）。
+
+**类型基建（`core/types.rs`+`core/mod.rs`）**：
+- 新 `MappedTypeModifiers` bitflags（1:1 Go：`INCLUDE_/EXCLUDE_` × `READONLY/OPTIONAL`）、`StringMappingKind` 枚举（`Uppercase/Lowercase/Capitalize/Uncapitalize` + `intrinsic_name`/`from_name`）。
+- 新 `TypeData::TemplateLiteral(TemplateLiteralType{texts,types})`（`TypeFlags::TEMPLATE_LITERAL`）+ `TypeData::StringMapping(StringMappingType{kind,target})`（`TypeFlags::STRING_MAPPING`，4a 位表已有）；访问器 `Type::as_template_literal`/`as_string_mapping`。
+- **映射类型 = `Object`+`ObjectFlags::MAPPED`**（贴 Go「mapped type 即 object type」），declaration 节点存侧表 `mapped_type_declarations`、实例化 mapper 存侧表 `mapped_type_mappers`（`TypeMapper` 非 `PartialEq`，同 conditional 侧表手法）。interning：`template_literal_types`（按 `(texts,types)`）/`string_mapping_types`（按 `(kind,target)`）。
+- 构造器 `new_template_literal_type`/`new_string_mapping_type`（interned）/`new_mapped_type(declaration, mapper)`；accessor `mapped_type_declaration`/`mapped_type_mapper`/`resolved_symbol_name`（synthesized-aware）。程序无关 `type_to_string` 加 TemplateLiteral（`` `t0${T0}t1` ``）/StringMapping（`Uppercase<target>`）臂。
+
+**可达裁剪（faithful-but-reachable）**：
+- **`get_template_literal_type`**（无 program 参数——Go 该函数本就不用 program）：union/`never` 占位符分配（`mapType` 等价）→ `add_template_spans`（literal/nullable 折入文本、嵌套模板拼接、generic 占位符（`is_generic_index_type`/`is_pattern_literal_placeholder_type`）保留）→ all-literal ⇒ `getStringLiteralType`、all-empty+all-string ⇒ `string`、否则 interned deferred。`checkCrossProductUnion` 守卫、wildcard、`${Mapping}` 单 pattern 归一 DEFER。
+- **`get_string_mapping_type`**（无 program）：union/`never` 分配 → string-literal 急切（`apply_string_mapping`：Uppercase/Lowercase 全串、Capitalize/Uncapitalize 首字符）→ 同 kind 幂等折叠 → generic/string 保留为 interned deferred。模板字面量 target 臂（`applyTemplateStringMapping`）+ pattern-literal 归一 DEFER。
+- **内置识别按 alias 名**（非 `intrinsic` marker）：Go 声明 `type Uppercase<S> = intrinsic` 并在 `getTypeAliasInstantiation` 检 `t == intrinsicMarkerType`；**port 的 parser 无 `intrinsic` 关键字（`internal/parser` 越界）**，故 `get_type_from_type_reference` 的 TYPE_ALIAS 臂按名（+ 1 个类型实参）派发——同名 user alias 也被拦截（记录偏离，blocked-by parser `intrinsic`）。
+- **`instantiate_mapped_type` 急切解析**：仅同态 keyof 形（`is_mapped_type_with_keyof_constraint`）。`get_modifiers_type_from_mapped_type`（keyof 臂）= `instantiate(getTypeFromTypeNode(constraintDecl.Type()=keyof 操作数 T), combined)`；具体对象 ⇒ `resolve_mapped_type_members_eager`（逐 key 合成属性，模板 `V` 经 `append_mapping(combined, K, keyType)` 实例化、`as` nameType 经同 mapper remap key 名、`+/-` `readonly`/`?` 修饰），生成**具体 anonymous object**；generic modifiers ⇒ 保留 deferred mapped。这把 Go 的 lazy `resolveMappedTypeMembers`/`getTypeOfMappedSymbol` 融为实例化期急切解析——可达具体对象子集**可观察等价**（记录偏离）。
+- **修饰符**：`getMappedTypeModifiers`（`-` token ⇒ Exclude，`readonly`/`?`/`+` ⇒ Include）；`isOptional = IncludeOptional || (!ExcludeOptional && srcOptional)`、`isReadonly = IncludeReadonly || (!ExcludeReadonly && srcReadonly)`。`srcReadonly` 仅识别合成属性的 `CheckFlags::READONLY`（program 成员 readonly 修饰 DEFER）。strictNullChecks 下 `getOptionalType`/`addOptionality` 注 `undefined`：stub 默认 strict-null off ⇒ 与 Go 一致地不注（DEFER strict 路径）。
+- **worker 臂**：`instantiate_type_worker` 加 OBJECT-MAPPED 臂（经 `retained_program` → `instantiate_mapped_type`）、TEMPLATE_LITERAL 臂（实例化占位符 + `get_template_literal_type`，无需 program）、STRING_MAPPING 臂（实例化 target + `get_string_mapping_type`）。
+
+**本轮交付**：
+- `core/types.rs`：`MappedTypeModifiers`/`StringMappingKind` + `TemplateLiteralType`/`StringMappingType` struct + `TypeData::TemplateLiteral`/`StringMapping` + `as_template_literal`/`as_string_mapping`。
+- `core/mod.rs`：4 侧表字段 + init；`new_template_literal_type`/`new_string_mapping_type`/`new_mapped_type`/`mapped_type_declaration`/`mapped_type_mapper`/`resolved_symbol_name`；程序无关 `type_to_string` 加两臂。
+- `core/declared_types.rs`：`get_type_from_type_node` 加 `TemplateLiteralType`/`MappedType` 臂；`get_type_from_template_type_node`/`get_template_literal_type`(`pub`)/`add_template_spans`/`get_template_string_for_type`/`is_pattern_literal_placeholder_type`；`get_string_mapping_type`(`pub`)/`apply_string_mapping`/`map_first_char`；`get_type_from_mapped_type_node`/`instantiate_mapped_type`(`pub`)/`resolve_mapped_type_members_eager`/`property_name_from_remapped_type`/`is_readonly_source_symbol`/`get_type_parameter_from_mapped_type`/`get_mapped_type_modifiers`/`is_mapped_type_with_keyof_constraint`/`constraint_declaration_for_mapped_type`/`get_modifiers_type_from_mapped_type`；`get_type_from_type_reference` TYPE_ALIAS 臂加 intrinsic 名派发。
+- `core/mapper.rs`：`instantiate_type_worker` 加 MAPPED/TEMPLATE_LITERAL/STRING_MAPPING 臂（import `ObjectFlags`）。
+- `core/relations.rs`：`report_unmatched_property` 等 4 处属性名读取改 synthesized-aware `resolved_symbol_name`（去掉 `symbol_to_string` import）。
+- `core/nodebuilder.rs`：程序感知 `type_to_string` 加 TemplateLiteral/StringMapping 臂。
+- `lib.rs`：re-export `get_string_mapping_type`/`get_template_literal_type`/`instantiate_mapped_type` + `MappedTypeModifiers`/`StringMappingKind`/`StringMappingType`/`TemplateLiteralType`（additive）。
+- 测试：`check_test.rs`（+6 端到端）、`declared_types_test.rs`（+9）、`mapper_test.rs`（+2）、`mod_test.rs`（+2）、`types_test.rs`（+2）。
+
+**新公开 API 形状（additive-only 确认）**：无既有 `pub fn` 签名变更、无 `lib.rs` 既有项移除、无依赖/`.go`/`internal/ast` 改动。新增 additive：`TypeData::TemplateLiteral`/`StringMapping`（枚举变体）、`MappedTypeModifiers`/`StringMappingKind`/`StringMappingType`/`TemplateLiteralType`（新 `pub` + lib.rs re-export）、`Type::as_template_literal`/`as_string_mapping`、`Checker::new_template_literal_type`/`new_string_mapping_type`/`new_mapped_type`、`get_template_literal_type`/`get_string_mapping_type`/`instantiate_mapped_type`（新 `pub` + re-export）。其余新增 `fn` 私有；新字段/accessor 私有/`pub(crate)`。`get_type_from_type_node`/`get_type_from_type_reference`/`instantiate_type` 公开签名不变（行为增量）。`cargo build -p tsgo_compiler` 绿。
+
+**测试增量**：**679 单测**（+21，相对 C-C2 基线 658：`check_test`+6【s4 模板具体/s5 union/s6 内置/s1 Partial/s3 Required/s7 as-identity】、`declared_types_test`+9【instantiate_mapped_type partial/readonly/required + as-remap、get_template_literal_type concrete/union/generic、get_string_mapping_type concrete/distribute+defer】、`mapper_test`+2【模板/字符串映射实例化折叠】、`mod_test`+2【new_template_literal/new_string_mapping 构造+程序无关印名】、`types_test`+2【访问器、kind/modifiers 位】）+ **165 doctest**（+10：`MappedTypeModifiers`/`StringMappingKind`/`TemplateLiteralType`/`StringMappingType` 各 1 + `new_template_literal_type`/`new_string_mapping_type`/`new_mapped_type` 各 1 + `get_template_literal_type`/`get_string_mapping_type`/`instantiate_mapped_type` 各 1）。
+
+**既有测试更新（Go-verified justification）**：**无既有测试弱化/删除**（C-C2 的 658 单测全绿不变）。`report_unmatched_property` 等改用 `resolved_symbol_name` 是 synthesized-aware **bug 修复**（无既有测试断言其旧—会 panic 的—行为，因合成属性名此前从未走该报告路径）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker --lib`（679 绿）+ `--doc`（165 绿）；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。未触 `internal/ast`/`.go`/依赖。未 `git commit`。
+
+**与 Go 的已知偏离（本轮，记录在案）**：
+- **内置按名派发**：Go 按 `intrinsicMarkerType`（`= intrinsic`），port 按 alias 名（parser 无 `intrinsic`）。blocked-by: parser `intrinsic` 关键字。
+- **映射结果印名无 alias 归属**：Go 印 `Required2<{ a?: number | undefined; }>`，port 印解析后的 anonymous object `{ a: number; }`（无 alias attribution + strict-null off 不加宽 `number|undefined`）。行为（2741）一致。blocked-by: 实例化类型的 alias attribution。
+- **2540 readonly-write 未接线**：Readonly2 改断言只读修饰符/印名（`{ readonly a: number; }` + `CheckFlags::READONLY`），非 2540 写诊断。blocked-by: 赋值目标只读检查。
+- **模板占位符约束未检查**：`as \`p_${K}\``（`K` 可为 `symbol`）port 不报 Go 的额外 `TS2322 placeholder` 诊断；`as \`p_${string & K}\`` 的 `string & "a"` 不被 port 化简为 `"a"`（intersection subtype 化简 DEFER），故模板-`as` 端到端用 identity `as K`（cmd/tsgo 对齐）+ 直测 `as \`p_${K}\``（证 remap，记录占位符约束/化简 DEFER）。
+- **anonymous-object/急切成员解析**：port 在实例化期急切解析 mapped 成员为具体对象（Go lazy `resolveMappedTypeMembers`），可达具体对象子集等价。
+
+**本轮 DEFER（带 blocked-by）**：
+- **reverse-mapped 推断**（`inferTypeForHomomorphicMappedType`/`inferToMappedType`）：blocked-by 推断侧 mapped 臂 + reverse-mapped 类型。
+- **非同态（`Record<K,V>` 风格）mapped + mapped over union/array/tuple 同态分配（`instantiateMappedArrayType`/`instantiateMappedTupleType`/`getHomomorphicTypeVariable` 分配）**：blocked-by 泛型 tuple/array 同态 + `getLowerBoundOfKeyType` 非 keyof 路径。
+- **`as` 条件过滤（`[K in keyof T as T[K] extends F ? K : never]`）+ distributive `as never` 去键 + `string & K` 化简**：blocked-by conditional-as + intersection subtype 化简。
+- **keyof over mapped（`getIndexTypeForMappedType`）+ generic mapped 的关系/化简/`substituteIndexedMappedType`**：blocked-by mapped 关系引擎。
+- **strictNullChecks 下 `?` 注 `undefined`（`getOptionalType`/`addOptionalityEx`）+ `removeMissingOrUndefinedType`**：blocked-by strict-null 接线 + `missingType`。
+- **模板字面量关系/推断（`isTypeMatchedByTemplateLiteralType`/`inferTypesFromTemplateLiteralType`）+ `getStringMappingType` 的模板 target 臂（`applyTemplateStringMapping`）+ pattern-literal 归一 + wildcard/cross-product 守卫**：blocked-by 模板关系引擎 + wildcard 类型。
+- **program 成员 readonly 源识别 + computed/late-bound/numeric nameType + 循环约束诊断**：blocked-by 声明修饰符读取 + computed-name 类型 + 循环检测。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/types/mapped/*`（Partial/Readonly/Required 同态 + `as` remap）、`types/templateLiteral/*`（具体折叠 + union 分配）、`types/stringMapping/*`（`Uppercase`/`Lowercase`/`Capitalize`/`Uncapitalize`）最小子集——无 reverse-mapped、无非同态/数组同态、无条件-`as`、无 strict-null `?`-undefined、无模板关系/推断。
+
+**C-C3 状态**：**可达子集完成**。mapped types（同态 `{[K in keyof T]: V}` + `+/-` `readonly`/`?` + `as` remap）+ template literal types（具体折叠 + union 分配 + generic 延迟）+ intrinsic string mapping（`Uppercase`/`Lowercase`/`Capitalize`/`Uncapitalize`）落地。
+
+**C-C（高级类型）状态**：**可达子集完成**。C-C1（keyof + indexed-access `T[K]`）+ C-C2（conditional `T extends U ? X : Y` + `infer` + distributive）+ C-C3（mapped + template-literal + string-mapping）三轮收口高级类型的可达路径；剩余（reverse-mapped 推断、generic mapped 关系/化简、条件 tail-recursion/化简/关系、模板关系/推断、wildcard、strict-null `?`-undefined、变型 marker-probe）归 later。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

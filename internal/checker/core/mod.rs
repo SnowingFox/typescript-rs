@@ -46,8 +46,8 @@ use symbols::{
 };
 use types::{
     ConditionalRoot, ConditionalType, IntersectionType, IntrinsicType, LiteralType, LiteralValue,
-    ObjectFlags, ObjectType, Type, TypeArena, TypeData, TypeFlags, TypeId, TypeParameter,
-    UnionType,
+    ObjectFlags, ObjectType, StringMappingKind, StringMappingType, TemplateLiteralType, Type,
+    TypeArena, TypeData, TypeFlags, TypeId, TypeParameter, UnionType,
 };
 
 /// The bound program a checker retains (Go's `c.program` pointer field).
@@ -269,6 +269,20 @@ pub struct Checker {
     /// `getConditionalTypeKey`). The reachable subset keys on `forConstraint =
     /// false` only.
     conditional_instantiations: FxHashMap<(NodeId, Vec<TypeId>), TypeId>,
+    /// Interned deferred template literal types, keyed by `(texts, types)` (Go's
+    /// `templateLiteralTypes` keyed by `getTemplateTypeKey`).
+    template_literal_types: FxHashMap<(Vec<String>, Vec<TypeId>), TypeId>,
+    /// Interned deferred string-mapping types, keyed by `(kind, target)` (Go's
+    /// `stringMappingTypes` keyed by `StringMappingKey{symbol, type}`).
+    string_mapping_types: FxHashMap<(StringMappingKind, TypeId), TypeId>,
+    /// The `MappedTypeNode` declaration of each mapped-type object (Go stores
+    /// this on the `MappedType` payload; the port keeps it in a side table so
+    /// the mapped type reuses the value-comparable [`ObjectType`] payload).
+    mapped_type_declarations: FxHashMap<TypeId, NodeId>,
+    /// The substitution mapper of each instantiated mapped type, kept out of the
+    /// value-comparable payload because [`TypeMapper`] is not comparable (Go
+    /// stores `mapper` on the `MappedType`).
+    mapped_type_mappers: FxHashMap<TypeId, TypeMapper>,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -430,6 +444,10 @@ impl Checker {
             conditional_node_types: FxHashMap::default(),
             conditional_mappers: FxHashMap::default(),
             conditional_instantiations: FxHashMap::default(),
+            template_literal_types: FxHashMap::default(),
+            string_mapping_types: FxHashMap::default(),
+            mapped_type_declarations: FxHashMap::default(),
+            mapped_type_mappers: FxHashMap::default(),
             type_parameter_constraints: FxHashMap::default(),
             type_parameter_defaults: FxHashMap::default(),
             union_types,
@@ -843,6 +861,27 @@ impl Checker {
                 self.type_to_string(d.check_type),
                 self.type_to_string(d.extends_type)
             ),
+            // A deferred template literal type, printed `` `t0${T0}t1...` ``.
+            TypeData::TemplateLiteral(d) => {
+                let mut out = String::from("`");
+                out.push_str(&d.texts[0]);
+                for (i, &ty) in d.types.iter().enumerate() {
+                    out.push_str("${");
+                    out.push_str(&self.type_to_string(ty));
+                    out.push('}');
+                    out.push_str(&d.texts[i + 1]);
+                }
+                out.push('`');
+                out
+            }
+            // A deferred string-mapping type, printed `Uppercase<target>`.
+            TypeData::StringMapping(d) => {
+                format!(
+                    "{}<{}>",
+                    d.kind.intrinsic_name(),
+                    self.type_to_string(d.target)
+                )
+            }
         }
     }
 
@@ -1035,6 +1074,115 @@ impl Checker {
         self.conditional_instantiations.insert((node, type_args), t);
     }
 
+    /// Returns the interned deferred template literal type for `(texts, types)`,
+    /// allocating it once (Go's `getTemplateLiteralType` interning via
+    /// `newTemplateLiteralType`). `texts.len()` must be `types.len() + 1`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{Checker, TypeFlags};
+    /// let mut c = Checker::new();
+    /// let tp = c.new_type_parameter(None);
+    /// let t = c.new_template_literal_type(vec!["a".into(), "b".into()], vec![tp]);
+    /// assert!(c.get_type(t).flags().contains(TypeFlags::TEMPLATE_LITERAL));
+    /// // Interned: the same `(texts, types)` yields one id.
+    /// let t2 = c.new_template_literal_type(vec!["a".into(), "b".into()], vec![tp]);
+    /// assert_eq!(t, t2);
+    /// ```
+    ///
+    /// Side effects: mutates the type arena and template-literal intern cache.
+    // Go: internal/checker/checker.go:Checker.newTemplateLiteralType
+    pub fn new_template_literal_type(&mut self, texts: Vec<String>, types: Vec<TypeId>) -> TypeId {
+        let key = (texts.clone(), types.clone());
+        if let Some(&cached) = self.template_literal_types.get(&key) {
+            return cached;
+        }
+        let id = self.types.alloc(
+            TypeFlags::TEMPLATE_LITERAL,
+            ObjectFlags::empty(),
+            None,
+            TypeData::TemplateLiteral(TemplateLiteralType { texts, types }),
+        );
+        self.template_literal_types.insert(key, id);
+        id
+    }
+
+    /// Returns the interned deferred string-mapping type for `(kind, target)`,
+    /// allocating it once (Go's `getStringMappingTypeForGenericType` interning
+    /// via `newStringMappingType`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{Checker, StringMappingKind, TypeFlags};
+    /// let mut c = Checker::new();
+    /// let tp = c.new_type_parameter(None);
+    /// let t = c.new_string_mapping_type(StringMappingKind::Uppercase, tp);
+    /// assert!(c.get_type(t).flags().contains(TypeFlags::STRING_MAPPING));
+    /// ```
+    ///
+    /// Side effects: mutates the type arena and string-mapping intern cache.
+    // Go: internal/checker/checker.go:Checker.newStringMappingType
+    pub fn new_string_mapping_type(&mut self, kind: StringMappingKind, target: TypeId) -> TypeId {
+        let key = (kind, target);
+        if let Some(&cached) = self.string_mapping_types.get(&key) {
+            return cached;
+        }
+        let id = self.types.alloc(
+            TypeFlags::STRING_MAPPING,
+            ObjectFlags::empty(),
+            None,
+            TypeData::StringMapping(StringMappingType { kind, target }),
+        );
+        self.string_mapping_types.insert(key, id);
+        id
+    }
+
+    /// Allocates a mapped-type object for `declaration` (an object type carrying
+    /// [`ObjectFlags::MAPPED`]), optionally recording the `mapper` of an
+    /// instantiated mapped type (Go's `newObjectType(ObjectFlagsMapped)` /
+    /// `instantiateAnonymousType`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{Checker, ObjectFlags};
+    /// use tsgo_ast::NodeId;
+    /// let mut c = Checker::new();
+    /// let t = c.new_mapped_type(NodeId(1), None);
+    /// assert!(c.get_type(t).object_flags().contains(ObjectFlags::MAPPED));
+    /// ```
+    ///
+    /// Side effects: mutates the type arena and mapped-type side tables.
+    // Go: internal/checker/checker.go:Checker.getTypeFromMappedTypeNode / instantiateAnonymousType
+    pub fn new_mapped_type(&mut self, declaration: NodeId, mapper: Option<TypeMapper>) -> TypeId {
+        let object_flags = if mapper.is_some() {
+            ObjectFlags::INSTANTIATED_MAPPED
+        } else {
+            ObjectFlags::MAPPED
+        };
+        let id = self.new_object_type(object_flags, None, ObjectType::default());
+        self.mapped_type_declarations.insert(id, declaration);
+        if let Some(m) = mapper {
+            self.mapped_type_mappers.insert(id, m);
+        }
+        id
+    }
+
+    /// Returns the `MappedTypeNode` declaration of mapped-type object `t`, if it
+    /// is a mapped type.
+    ///
+    /// Side effects: none (pure).
+    pub(crate) fn mapped_type_declaration(&self, t: TypeId) -> Option<NodeId> {
+        self.mapped_type_declarations.get(&t).copied()
+    }
+
+    /// Returns the substitution mapper of an instantiated mapped type `t`, if
+    /// any (Go's `MappedType.mapper`).
+    ///
+    /// Side effects: none (pure).
+    pub(crate) fn mapped_type_mapper(&self, t: TypeId) -> Option<TypeMapper> {
+        self.mapped_type_mappers.get(&t).cloned()
+    }
+
     /// Mints a synthesized (transient) property symbol carrying `name`,
     /// `flags`, and `check_flags`, recording the union/intersection
     /// `containing_type` it was synthesized from, and returns its tagged
@@ -1185,6 +1333,24 @@ impl Checker {
             self.synthesized_symbol_flags(id)
         } else {
             program.symbol(id).flags
+        }
+    }
+
+    /// Returns the name of `id`, routing synthesized ids to the checker's
+    /// transient arena and program ids to the bound program. This is the
+    /// synthesized-aware analog of `program.symbol(id).name` (Go transient
+    /// symbols live on the checker, so a synthesized property — e.g. a mapped or
+    /// union/intersection property — has no entry in the program symbol vector).
+    // Go: internal/ast/symbol.go:Symbol.Name (transient symbols live on the checker)
+    pub(crate) fn resolved_symbol_name(
+        &self,
+        program: &dyn BoundProgram,
+        id: symbols::SymbolId,
+    ) -> String {
+        if is_synthesized_symbol(id) {
+            self.synthesized_symbol_name(id)
+        } else {
+            program.symbol(id).name.clone()
         }
     }
 

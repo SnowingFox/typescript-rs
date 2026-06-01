@@ -121,6 +121,26 @@ pub fn type_to_string(checker: &mut Checker, program: &dyn BoundProgram, ty: Typ
         let false_str = type_to_string(checker, program, false_ty);
         return format!("{check} extends {extends} ? {true_str} : {false_str}");
     }
+    // A deferred template literal type prints `` `t0${T0}t1...` ``, naming the
+    // placeholder operands program-aware.
+    if let Some(d) = checker.get_type(ty).as_template_literal().cloned() {
+        let mut out = String::from("`");
+        out.push_str(&d.texts[0]);
+        for (i, &t) in d.types.iter().enumerate() {
+            out.push_str("${");
+            let s = type_to_string(checker, program, t);
+            out.push_str(&s);
+            out.push('}');
+            out.push_str(&d.texts[i + 1]);
+        }
+        out.push('`');
+        return out;
+    }
+    // A deferred string-mapping type prints `Uppercase<target>`.
+    if let Some(d) = checker.get_type(ty).as_string_mapping().cloned() {
+        let target = type_to_string(checker, program, d.target);
+        return format!("{}<{}>", d.kind.intrinsic_name(), target);
+    }
     let symbol = checker.get_type(ty).symbol;
     let object_info = match &checker.get_type(ty).data {
         TypeData::Object(o) => Some((o.target, o.resolved_type_arguments.clone())),

@@ -10,7 +10,7 @@
 //! deferred to later sub-phases.
 
 use super::signatures::SignatureId;
-use super::types::{TypeFlags, TypeId};
+use super::types::{ObjectFlags, TypeFlags, TypeId};
 use super::Checker;
 
 /// Go reaches the error type after 100 nested instantiations.
@@ -304,6 +304,25 @@ impl Checker {
             return self.get_intersection_type(&instantiated);
         }
         if flags.contains(TypeFlags::OBJECT) {
+            // A mapped type `{ [K in C]: V }` re-resolves under the combined
+            // mapper, eagerly producing a concrete anonymous object when its
+            // modifiers type becomes concrete (Go's `instantiateMappedType`).
+            if self
+                .get_type(t)
+                .object_flags()
+                .contains(ObjectFlags::MAPPED)
+            {
+                return match self.retained_program() {
+                    Some(program) => super::declared_types::instantiate_mapped_type(
+                        self,
+                        program.as_ref(),
+                        t,
+                        mapper,
+                    ),
+                    // No retained program: leave the mapped type deferred.
+                    None => t,
+                };
+            }
             if let Some(obj) = self.get_type(t).as_object() {
                 if let Some(target) = obj.target {
                     let args = obj.resolved_type_arguments.clone();
@@ -379,9 +398,43 @@ impl Checker {
                 None => t,
             };
         }
-        // DEFER(phase-4-checker-C-C3): template-literal/substitution and
-        // string-mapping instantiation.
-        // blocked-by: those type constructors land in C-C3.
+        // A template literal type `` `a${T}b` ``: instantiate each placeholder,
+        // then rebuild via `getTemplateLiteralType` so concrete placeholders fold
+        // into a string literal (Go's `instantiateType` template-literal arm).
+        if flags.contains(TypeFlags::TEMPLATE_LITERAL) {
+            let (texts, types) = {
+                let d = self
+                    .get_type(t)
+                    .as_template_literal()
+                    .expect("template literal type");
+                (d.texts.clone(), d.types.clone())
+            };
+            let new_types: Vec<TypeId> = types
+                .iter()
+                .map(|&ty| self.instantiate_type(ty, mapper))
+                .collect();
+            if new_types == types {
+                return t;
+            }
+            return super::declared_types::get_template_literal_type(self, &texts, &new_types);
+        }
+        // A string-mapping type `Uppercase<S>`: instantiate the target, then
+        // re-apply the mapping so a concrete string literal folds to its mapped
+        // literal (Go's `instantiateType` string-mapping arm).
+        if flags.contains(TypeFlags::STRING_MAPPING) {
+            let d = self
+                .get_type(t)
+                .as_string_mapping()
+                .expect("string mapping type")
+                .clone();
+            let new_target = self.instantiate_type(d.target, mapper);
+            if new_target == d.target {
+                return t;
+            }
+            return super::declared_types::get_string_mapping_type(self, d.kind, new_target);
+        }
+        // DEFER(phase-4-checker-C-C3): substitution-type instantiation.
+        // blocked-by: substitution types land later.
         t
     }
 

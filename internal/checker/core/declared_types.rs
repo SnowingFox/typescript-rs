@@ -26,8 +26,8 @@ use super::program::BoundProgram;
 use super::signatures::{IndexInfo, IndexInfoId, Signature, SignatureFlags, SignatureId};
 use super::symbols::resolve_name;
 use super::types::{
-    AccessFlags, ConditionalRoot, IndexFlags, LiteralValue, ObjectFlags, ObjectType, TypeData,
-    TypeFlags, TypeId,
+    AccessFlags, ConditionalRoot, IndexFlags, LiteralValue, MappedTypeModifiers, ObjectFlags,
+    ObjectType, StringMappingKind, TypeData, TypeFlags, TypeId,
 };
 use super::Checker;
 
@@ -1365,6 +1365,10 @@ pub fn get_type_from_type_node(
         Kind::ConditionalType => {
             get_type_from_conditional_type_node(checker, program, node, globals)
         }
+        Kind::TemplateLiteralType => {
+            get_type_from_template_type_node(checker, program, node, globals)
+        }
+        Kind::MappedType => get_type_from_mapped_type_node(checker, program, node),
         Kind::InferType => get_type_from_infer_type_node(checker, program, node),
         Kind::UnionType => get_type_from_union_type_node(checker, program, node, globals),
         Kind::IntersectionType => {
@@ -1610,6 +1614,595 @@ fn get_type_from_infer_type_node(
     match program.symbol_of_node(tp_decl) {
         Some(sym) => get_declared_type_of_type_parameter(checker, sym),
         None => checker.error_type(),
+    }
+}
+
+// Resolves a `TemplateLiteralType` node (`` `a${T}b` ``) to its template literal
+// type: read the head + each span's placeholder type and trailing literal text,
+// then combine via [`get_template_literal_type`]. Concrete placeholders fold
+// into a string literal; a union placeholder distributes; a generic placeholder
+// yields a deferred template literal type (Go's `getTypeFromTemplateTypeNode`).
+// Go: internal/checker/checker.go:Checker.getTypeFromTemplateTypeNode
+fn get_type_from_template_type_node(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+    globals: Option<&SymbolTable>,
+) -> TypeId {
+    let (head, spans) = match program.arena().data(node) {
+        NodeData::TemplateLiteralType(d) => (d.head, d.template_spans.nodes.clone()),
+        _ => return checker.error_type(),
+    };
+    let mut texts: Vec<String> = Vec::with_capacity(spans.len() + 1);
+    texts.push(program.arena().text(head).to_string());
+    let mut types: Vec<TypeId> = Vec::with_capacity(spans.len());
+    for span in spans {
+        let (type_node, literal) = match program.arena().data(span) {
+            NodeData::TemplateLiteralTypeSpan(d) => (d.expression, d.literal),
+            _ => return checker.error_type(),
+        };
+        let span_type = get_type_from_type_node(checker, program, type_node, globals);
+        types.push(span_type);
+        texts.push(program.arena().text(literal).to_string());
+    }
+    get_template_literal_type(checker, &texts, &types)
+}
+
+// Resolves a `MappedType` node (`{ [K in C]: V }`) to a mapped-type object
+// (Go's `getTypeFromMappedTypeNode`). An un-instantiated mapped type carries
+// only the declaration node (no mapper); its members are produced when the type
+// is instantiated over a concrete modifiers type (see [`instantiate_mapped_type`]).
+//
+// DEFER(phase-4-checker-C-C3): the eager constraint-type resolution Go performs
+// here to surface a self-referential-constraint error. blocked-by: the
+// circular-constraint diagnostic path.
+// Go: internal/checker/checker.go:Checker.getTypeFromMappedTypeNode
+fn get_type_from_mapped_type_node(
+    checker: &mut Checker,
+    _program: &dyn BoundProgram,
+    node: NodeId,
+) -> TypeId {
+    checker.new_mapped_type(node, None)
+}
+
+/// Instantiates a mapped-type object `t` (`{ [K in C]: V }`) under `mapper`.
+///
+/// For a homomorphic mapped type (constraint `keyof T`) instantiated over a
+/// concrete object, eagerly resolves to an anonymous object carrying one
+/// property per key of the (instantiated) modifiers type — each with the
+/// template type `V` (with `K` bound to that key) and the `+`/`-` `readonly`/`?`
+/// modifiers applied. A mapped type whose modifiers type is still generic is
+/// kept as a deferred instantiated mapped type.
+///
+/// DEFER(phase-4-checker-later): the non-keyof (`Record`-style) constraint, the
+/// homomorphic distribution over a union/array/tuple modifiers type, the `as`
+/// name-type filtering (`as never` key removal), the reverse-mapped inference,
+/// and the lazy member resolution Go keeps (`resolveMappedTypeMembers`). The
+/// port resolves members eagerly at instantiation, which is observably
+/// equivalent for the reachable concrete-object subset. blocked-by: those
+/// machinery pieces + generic-mapped relation/inference.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{instantiate_mapped_type, BoundProgram, Checker, TypeId, TypeMapper};
+/// fn demo<P: BoundProgram>(c: &mut Checker, p: &P, mapped: TypeId, m: &TypeMapper) {
+///     let _ = instantiate_mapped_type(c, p, mapped, m);
+/// }
+/// ```
+///
+/// Side effects: may allocate property symbols and an anonymous object type.
+// Go: internal/checker/checker.go:Checker.instantiateMappedType / resolveMappedTypeMembers
+pub fn instantiate_mapped_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    t: TypeId,
+    mapper: &TypeMapper,
+) -> TypeId {
+    let Some(declaration) = checker.mapped_type_declaration(t) else {
+        return t;
+    };
+    let combined = match checker.mapped_type_mapper(t) {
+        Some(own) => TypeMapper::merge(own, mapper.clone()),
+        None => mapper.clone(),
+    };
+    // The reachable subset only resolves homomorphic `{ [K in keyof T]: V }`
+    // mapped types; a non-keyof (`Record`-style) constraint stays deferred.
+    if !is_mapped_type_with_keyof_constraint(program, declaration) {
+        return checker.new_mapped_type(declaration, Some(combined));
+    }
+    let modifiers_type =
+        get_modifiers_type_from_mapped_type(checker, program, declaration, &combined);
+    // A still-generic modifiers type keeps the mapped type deferred (Go's
+    // `instantiateMappedType` returns the instantiated mapped type when the
+    // homomorphic type variable is unchanged).
+    let modifiers_flags = checker.get_type(modifiers_type).flags();
+    if modifiers_flags.intersects(TypeFlags::INSTANTIABLE)
+        || is_generic_object_type(checker, modifiers_type)
+    {
+        return checker.new_mapped_type(declaration, Some(combined));
+    }
+    resolve_mapped_type_members_eager(checker, program, declaration, modifiers_type, &combined)
+}
+
+// Eagerly resolves a homomorphic mapped type's members over a concrete
+// `modifiers_type`, producing an anonymous object type. Mirrors the keyof
+// branch of Go's `resolveMappedTypeMembers` (with `getTypeOfMappedSymbol`
+// resolution inlined): one property per modifiers-type key, typed by the
+// template `V` with `K -> key`, carrying the `+`/`-` `readonly`/`?` modifiers.
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers / getTypeOfMappedSymbol
+fn resolve_mapped_type_members_eager(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    declaration: NodeId,
+    modifiers_type: TypeId,
+    combined: &TypeMapper,
+) -> TypeId {
+    let template_modifiers = get_mapped_type_modifiers(program, declaration);
+    let type_parameter = get_type_parameter_from_mapped_type(checker, program, declaration);
+    let template_node = match program.arena().data(declaration) {
+        NodeData::MappedType(d) => d.type_node,
+        _ => None,
+    };
+    let name_type_node = match program.arena().data(declaration) {
+        NodeData::MappedType(d) => d.name_type,
+        _ => None,
+    };
+    let globals = program.globals().cloned();
+    let props = get_properties_of_type(checker, modifiers_type);
+    let mut members = SymbolTable::default();
+    let mut properties: Vec<SymbolId> = Vec::with_capacity(props.len());
+    for (name, modifiers_prop) in props {
+        let key_type = checker.get_string_literal_type(&name);
+        // The property name: `as N` remaps the key through the name type
+        // (`K -> key`), then prints it as the new property name; without `as`
+        // the key itself is the name.
+        let prop_name = match name_type_node {
+            Some(nt) => {
+                let name_mapper =
+                    TypeMapper::append_mapping(Some(combined.clone()), type_parameter, key_type);
+                let base = get_type_from_type_node(checker, program, nt, globals.as_ref());
+                let remapped = checker.instantiate_type(base, &name_mapper);
+                match property_name_from_remapped_type(checker, remapped) {
+                    Some(n) => n,
+                    // A non-string-literal remapped key (e.g. `as never`) drops
+                    // the property. DEFER: full `as` filtering.
+                    None => continue,
+                }
+            }
+            None => name.clone(),
+        };
+        let prop_optional = checker
+            .resolved_symbol_flags(program, modifiers_prop)
+            .contains(SymbolFlags::OPTIONAL);
+        let prop_readonly = is_readonly_source_symbol(checker, modifiers_prop);
+        let is_optional = template_modifiers.contains(MappedTypeModifiers::INCLUDE_OPTIONAL)
+            || (!template_modifiers.contains(MappedTypeModifiers::EXCLUDE_OPTIONAL)
+                && prop_optional);
+        let is_readonly = template_modifiers.contains(MappedTypeModifiers::INCLUDE_READONLY)
+            || (!template_modifiers.contains(MappedTypeModifiers::EXCLUDE_READONLY)
+                && prop_readonly);
+        let prop_type = match template_node {
+            Some(tn) => {
+                let template_mapper =
+                    TypeMapper::append_mapping(Some(combined.clone()), type_parameter, key_type);
+                let base = get_type_from_type_node(checker, program, tn, globals.as_ref());
+                checker.instantiate_type(base, &template_mapper)
+            }
+            None => checker.error_type(),
+        };
+        let mut flags = SymbolFlags::PROPERTY;
+        if is_optional {
+            flags |= SymbolFlags::OPTIONAL;
+        }
+        let check_flags = if is_readonly {
+            CheckFlags::READONLY
+        } else {
+            CheckFlags::empty()
+        };
+        let prop = checker.new_object_literal_property(&prop_name, flags, check_flags, prop_type);
+        members.insert(prop_name.clone(), prop);
+        properties.push(prop);
+    }
+    let object = ObjectType {
+        members,
+        properties,
+        ..Default::default()
+    };
+    checker.new_object_type(ObjectFlags::ANONYMOUS, None, object)
+}
+
+// Returns the property name a remapped `as` key type denotes, for the reachable
+// subset (a string literal). A non-string-literal (e.g. `never`) yields `None`,
+// which drops the property.
+fn property_name_from_remapped_type(checker: &Checker, t: TypeId) -> Option<String> {
+    match checker.get_type(t).literal_value() {
+        Some(LiteralValue::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+// Reports whether a source (modifiers-type) property is `readonly`, for the
+// reachable subset (a synthesized property carrying the `Readonly` check flag).
+//
+// DEFER(phase-4-checker-later): a program (interface/type-literal) member's
+// `readonly` modifier. blocked-by: declaration-modifier `readonly` reading on
+// bound property symbols. The reachable mapped-type slices have no readonly
+// source properties, so this only affects `{ readonly a }` *sources*, not the
+// mapped type's own `readonly` modifier (which is handled separately).
+// Go: internal/checker/checker.go:Checker.isReadonlySymbol
+fn is_readonly_source_symbol(checker: &Checker, symbol: SymbolId) -> bool {
+    if super::is_synthesized_symbol(symbol) {
+        return checker
+            .synthesized_symbol_check_flags(symbol)
+            .contains(CheckFlags::READONLY);
+    }
+    false
+}
+
+// Returns the mapped type's declared type parameter `K` (Go's
+// `getTypeParameterFromMappedType`).
+// Go: internal/checker/checker.go:Checker.getTypeParameterFromMappedType
+fn get_type_parameter_from_mapped_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    declaration: NodeId,
+) -> TypeId {
+    let tp_decl = match program.arena().data(declaration) {
+        NodeData::MappedType(d) => d.type_parameter,
+        _ => return checker.error_type(),
+    };
+    match program.symbol_of_node(tp_decl) {
+        Some(sym) => get_declared_type_of_type_parameter(checker, sym),
+        None => checker.error_type(),
+    }
+}
+
+// Returns the `+`/`-` `readonly`/`?` modifiers declared on a mapped type (Go's
+// `getMappedTypeModifiers`): a `-` token strips, a `readonly`/`?`/`+` token adds.
+// Go: internal/checker/checker.go:getMappedTypeModifiers
+fn get_mapped_type_modifiers(
+    program: &dyn BoundProgram,
+    declaration: NodeId,
+) -> MappedTypeModifiers {
+    let (readonly_token, question_token) = match program.arena().data(declaration) {
+        NodeData::MappedType(d) => (d.readonly_token, d.question_token),
+        _ => return MappedTypeModifiers::NONE,
+    };
+    let mut modifiers = MappedTypeModifiers::NONE;
+    if let Some(rt) = readonly_token {
+        modifiers |= if program.arena().kind(rt) == Kind::MinusToken {
+            MappedTypeModifiers::EXCLUDE_READONLY
+        } else {
+            MappedTypeModifiers::INCLUDE_READONLY
+        };
+    }
+    if let Some(qt) = question_token {
+        modifiers |= if program.arena().kind(qt) == Kind::MinusToken {
+            MappedTypeModifiers::EXCLUDE_OPTIONAL
+        } else {
+            MappedTypeModifiers::INCLUDE_OPTIONAL
+        };
+    }
+    modifiers
+}
+
+// Reports whether a mapped type's constraint declaration is a `keyof T` node
+// (Go's `isMappedTypeWithKeyofConstraintDeclaration`), i.e. the mapped type is
+// homomorphic.
+// Go: internal/checker/checker.go:Checker.isMappedTypeWithKeyofConstraintDeclaration
+fn is_mapped_type_with_keyof_constraint(program: &dyn BoundProgram, declaration: NodeId) -> bool {
+    match constraint_declaration_for_mapped_type(program, declaration) {
+        Some(constraint) => matches!(
+            program.arena().data(constraint),
+            NodeData::TypeOperator(d) if d.operator == Kind::KeyOfKeyword
+        ),
+        None => false,
+    }
+}
+
+// Returns the `in C` constraint node of a mapped type's type parameter (Go's
+// `getConstraintDeclarationForMappedType`).
+// Go: internal/checker/checker.go:Checker.getConstraintDeclarationForMappedType
+fn constraint_declaration_for_mapped_type(
+    program: &dyn BoundProgram,
+    declaration: NodeId,
+) -> Option<NodeId> {
+    let tp_decl = match program.arena().data(declaration) {
+        NodeData::MappedType(d) => d.type_parameter,
+        _ => return None,
+    };
+    match program.arena().data(tp_decl) {
+        NodeData::TypeParameterDeclaration(d) => d.constraint,
+        _ => None,
+    }
+}
+
+// Returns the modifiers type `T` of a homomorphic mapped type (`{ [K in keyof
+// T]: V }`), instantiated through `mapper` (Go's `getModifiersTypeFromMappedType`
+// keyof branch: the modifiers type is the operand of the `keyof` constraint).
+// Go: internal/checker/checker.go:Checker.getModifiersTypeFromMappedType
+fn get_modifiers_type_from_mapped_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    declaration: NodeId,
+    mapper: &TypeMapper,
+) -> TypeId {
+    let Some(constraint) = constraint_declaration_for_mapped_type(program, declaration) else {
+        return checker.unknown_type();
+    };
+    // `getConstraintDeclarationForMappedType(t).Type()`: the operand of `keyof`.
+    let operand = match program.arena().data(constraint) {
+        NodeData::TypeOperator(d) => d.type_node,
+        _ => return checker.unknown_type(),
+    };
+    let globals = program.globals().cloned();
+    let base = get_type_from_type_node(checker, program, operand, globals.as_ref());
+    checker.instantiate_type(base, mapper)
+}
+
+/// Builds a template literal type from interleaved `texts` and placeholder
+/// `types` (`texts.len() == types.len() + 1`).
+///
+/// Mirrors Go's `getTemplateLiteralType`: concrete (literal) placeholders fold
+/// into the surrounding text (yielding a single string literal type); a
+/// union/`never` placeholder distributes the template over its members; a
+/// generic placeholder (a type variable / `keyof T` / string-mapping) is kept,
+/// producing an interned deferred template literal type.
+///
+/// DEFER(phase-4-checker-later): the cross-product-union size guard
+/// (`checkCrossProductUnion`), the wildcard arm, and the `${Mapping<xxx>}`
+/// single-pattern normalization. blocked-by: the wildcard type + the
+/// cross-product limiter.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{get_template_literal_type, Checker, TypeId};
+/// fn demo(c: &mut Checker, ph: TypeId) {
+///     let _ = get_template_literal_type(c, &["a".into(), "b".into()], &[ph]);
+/// }
+/// ```
+///
+/// Side effects: may allocate string-literal/union/template-literal types.
+// Go: internal/checker/checker.go:Checker.getTemplateLiteralType
+pub fn get_template_literal_type(
+    checker: &mut Checker,
+    texts: &[String],
+    types: &[TypeId],
+) -> TypeId {
+    // Distribute over the first union/`never` placeholder.
+    let union_index = types.iter().position(|&t| {
+        checker
+            .get_type(t)
+            .flags()
+            .intersects(TypeFlags::NEVER | TypeFlags::UNION)
+    });
+    if let Some(idx) = union_index {
+        // DEFER(phase-4-checker-later): `checkCrossProductUnion` size guard.
+        // blocked-by: the cross-product union limiter. Always permitted here.
+        let member_type = types[idx];
+        let members = checker
+            .get_type(member_type)
+            .union_types()
+            .map(|m| m.to_vec())
+            .unwrap_or_default();
+        let mut results: Vec<TypeId> = Vec::with_capacity(members.len());
+        for m in members {
+            let mut new_types = types.to_vec();
+            new_types[idx] = m;
+            results.push(get_template_literal_type(checker, texts, &new_types));
+        }
+        return checker.get_union_type(&results);
+    }
+    let mut sb = String::new();
+    sb.push_str(&texts[0]);
+    let mut new_texts: Vec<String> = Vec::new();
+    let mut new_types: Vec<TypeId> = Vec::new();
+    if !add_template_spans(
+        checker,
+        &mut sb,
+        &mut new_texts,
+        &mut new_types,
+        texts,
+        types,
+    ) {
+        return checker.string_type();
+    }
+    if new_types.is_empty() {
+        return checker.get_string_literal_type(&sb);
+    }
+    new_texts.push(sb);
+    // `${T}` with all-empty surrounding text where every placeholder is the
+    // `string` primitive collapses to `string` (Go's all-empty/all-string arm).
+    if new_texts.iter().all(|t| t.is_empty())
+        && new_types
+            .iter()
+            .all(|&t| checker.get_type(t).flags().contains(TypeFlags::STRING))
+    {
+        return checker.string_type();
+    }
+    checker.new_template_literal_type(new_texts, new_types)
+}
+
+// Appends the spans of a template literal into `sb`/`new_texts`/`new_types`,
+// returning `false` when a placeholder is not a valid template part (Go's inner
+// `addSpans`). A literal/nullable placeholder folds its printed value into the
+// running text; a nested template literal is spliced in; a generic placeholder
+// closes the current text run and is kept as a deferred span.
+// Go: internal/checker/checker.go:Checker.getTemplateLiteralType (addSpans)
+fn add_template_spans(
+    checker: &mut Checker,
+    sb: &mut String,
+    new_texts: &mut Vec<String>,
+    new_types: &mut Vec<TypeId>,
+    texts: &[String],
+    types: &[TypeId],
+) -> bool {
+    for (i, &t) in types.iter().enumerate() {
+        let flags = checker.get_type(t).flags();
+        if flags.intersects(TypeFlags::LITERAL | TypeFlags::NULL | TypeFlags::UNDEFINED) {
+            sb.push_str(&get_template_string_for_type(checker, t));
+            sb.push_str(&texts[i + 1]);
+        } else if flags.contains(TypeFlags::TEMPLATE_LITERAL) {
+            let (inner_texts, inner_types) = {
+                let d = checker
+                    .get_type(t)
+                    .as_template_literal()
+                    .expect("template literal");
+                (d.texts.clone(), d.types.clone())
+            };
+            sb.push_str(&inner_texts[0]);
+            if !add_template_spans(
+                checker,
+                sb,
+                new_texts,
+                new_types,
+                &inner_texts,
+                &inner_types,
+            ) {
+                return false;
+            }
+            sb.push_str(&texts[i + 1]);
+        } else if is_generic_index_type(checker, t)
+            || is_pattern_literal_placeholder_type(checker, t)
+        {
+            new_types.push(t);
+            new_texts.push(std::mem::take(sb));
+            sb.push_str(&texts[i + 1]);
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+// Returns the string a literal/nullable type contributes to a template literal
+// (Go's `getTemplateStringForType`): a literal's printed value, or a nullable
+// type's intrinsic name (`"null"`/`"undefined"`).
+// Go: internal/checker/checker.go:Checker.getTemplateStringForType
+fn get_template_string_for_type(checker: &Checker, t: TypeId) -> String {
+    let ty = checker.get_type(t);
+    match ty.literal_value() {
+        Some(LiteralValue::String(s)) => s.clone(),
+        Some(LiteralValue::Number(n)) => n.to_string(),
+        Some(LiteralValue::Boolean(b)) => {
+            if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        None if ty.flags().intersects(TypeFlags::NULLABLE) => {
+            ty.intrinsic_name().unwrap_or_default().to_string()
+        }
+        None => String::new(),
+    }
+}
+
+// Reports whether `t` is a pattern-literal placeholder — a type usable as a
+// template literal placeholder that keeps the template deferred (Go's
+// `isPatternLiteralPlaceholderType`, reachable subset: the primitive
+// `any`/`string`/`number`/`bigint` placeholders).
+//
+// DEFER(phase-4-checker-later): the nested-pattern-template and string-mapping
+// pattern arms. blocked-by: full pattern-literal classification.
+// Go: internal/checker/checker.go:Checker.isPatternLiteralPlaceholderType
+fn is_pattern_literal_placeholder_type(checker: &Checker, t: TypeId) -> bool {
+    checker
+        .get_type(t)
+        .flags()
+        .intersects(TypeFlags::ANY | TypeFlags::STRING | TypeFlags::NUMBER | TypeFlags::BIG_INT)
+}
+
+/// Applies an intrinsic string-mapping type `kind<t>` (`Uppercase<S>` etc.).
+///
+/// Mirrors Go's `getStringMappingType`: distributes over a union/`never`,
+/// transforms a concrete string literal eagerly, and keeps a generic/string
+/// target deferred as an interned [`crate::StringMappingType`].
+///
+/// DEFER(phase-4-checker-later): the template-literal target arm
+/// (`applyTemplateStringMapping`) and the pattern-literal-placeholder
+/// normalization. blocked-by: template-literal string mapping + pattern-literal
+/// classification.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{get_string_mapping_type, Checker, LiteralValue, StringMappingKind, TypeFlags};
+/// let mut c = Checker::new();
+/// let lit = c.new_literal_type(TypeFlags::STRING_LITERAL, LiteralValue::String("abc".into()), None);
+/// let up = get_string_mapping_type(&mut c, StringMappingKind::Uppercase, lit);
+/// assert_eq!(c.type_to_string(up), "\"ABC\"");
+/// ```
+///
+/// Side effects: may allocate string-literal/union/string-mapping types.
+// Go: internal/checker/checker.go:Checker.getStringMappingType
+pub fn get_string_mapping_type(
+    checker: &mut Checker,
+    kind: StringMappingKind,
+    t: TypeId,
+) -> TypeId {
+    let flags = checker.get_type(t).flags();
+    // Distribute over a union / `never`.
+    if flags.intersects(TypeFlags::UNION | TypeFlags::NEVER) {
+        let members = checker
+            .get_type(t)
+            .union_types()
+            .map(|m| m.to_vec())
+            .unwrap_or_default();
+        let mapped: Vec<TypeId> = members
+            .iter()
+            .map(|&m| get_string_mapping_type(checker, kind, m))
+            .collect();
+        return checker.get_union_type(&mapped);
+    }
+    // A concrete string literal folds to its transformed literal.
+    if flags.contains(TypeFlags::STRING_LITERAL) {
+        if let Some(LiteralValue::String(s)) = checker.get_type(t).literal_value().cloned() {
+            return checker.get_string_literal_type(&apply_string_mapping(kind, &s));
+        }
+    }
+    // `Uppercase<Uppercase<S>>` collapses (idempotent same-kind mapping).
+    if flags.contains(TypeFlags::STRING_MAPPING)
+        && checker.get_type(t).as_string_mapping().map(|m| m.kind) == Some(kind)
+    {
+        return t;
+    }
+    // A generic/string target is kept as a deferred, interned string mapping.
+    // DEFER(phase-4-checker-later): the template-literal target arm.
+    if flags.intersects(TypeFlags::ANY | TypeFlags::STRING | TypeFlags::STRING_MAPPING)
+        || is_generic_index_type(checker, t)
+    {
+        return checker.new_string_mapping_type(kind, t);
+    }
+    t
+}
+
+// Applies the intrinsic string transform to a literal value (Go's
+// `applyStringMapping`). `Uppercase`/`Lowercase` transform the whole string;
+// `Capitalize`/`Uncapitalize` transform only the first character.
+// Go: internal/checker/checker.go:applyStringMapping
+fn apply_string_mapping(kind: StringMappingKind, s: &str) -> String {
+    match kind {
+        StringMappingKind::Uppercase => s.to_uppercase(),
+        StringMappingKind::Lowercase => s.to_lowercase(),
+        StringMappingKind::Capitalize => map_first_char(s, true),
+        StringMappingKind::Uncapitalize => map_first_char(s, false),
+    }
+}
+
+// Transforms the first character of `s` to upper- (or lower-) case, leaving the
+// rest unchanged.
+fn map_first_char(s: &str, upper: bool) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => {
+            let head: String = if upper {
+                first.to_uppercase().collect()
+            } else {
+                first.to_lowercase().collect()
+            };
+            head + chars.as_str()
+        }
+        None => String::new(),
     }
 }
 
@@ -2172,6 +2765,18 @@ fn get_type_from_type_reference(
     // -> `getTypeAliasInstantiation`). The arity/2315 diagnostic is emitted
     // separately by `check_type_reference_node`.
     if symbol_flags.contains(SymbolFlags::TYPE_ALIAS) {
+        // Intrinsic string-mapping aliases (`Uppercase`/`Lowercase`/`Capitalize`/
+        // `Uncapitalize`): Go declares these as `type Uppercase<S> = intrinsic`
+        // and dispatches in `getTypeAliasInstantiation` when the alias's declared
+        // type is the intrinsic marker and it has one type argument. The port has
+        // no `intrinsic` keyword (parser is out of scope), so it keys on the
+        // alias *name* (a same-named user alias is also intercepted; documented
+        // divergence).
+        if provided_args.len() == 1 {
+            if let Some(kind) = StringMappingKind::from_name(&name) {
+                return get_string_mapping_type(checker, kind, provided_args[0]);
+            }
+        }
         let type_parameters = checker
             .type_alias_links
             .try_get(&symbol)

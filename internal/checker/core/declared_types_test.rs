@@ -988,3 +988,214 @@ fn get_conditional_type_infers_element_type() {
     let resolved = c.instantiate_type(element, &mapper);
     assert_eq!(resolved, n, "ElementType<number[]> should be number");
 }
+
+// Resolves the declared type of a single top-level type alias over a retained
+// program (so mapped-type instantiation reaches the retained program).
+fn resolve_alias_type(p: &std::rc::Rc<StubProgram>, c: &mut Checker, name: &str) -> TypeId {
+    let sym = local(p, name);
+    let globals = p.globals().cloned();
+    get_declared_type_of_symbol(c, p.as_ref(), sym, globals.as_ref())
+}
+
+// C-C3: `instantiateMappedType` over a concrete object — a `Partial`-shaped
+// mapped type makes every property optional and keeps its value type.
+// Go: internal/checker/checker.go:Checker.instantiateMappedType / resolveMappedTypeMembers
+#[test]
+fn instantiate_mapped_type_partial_makes_optional() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Partial2<T> = { [K in keyof T]?: T[K] };\n\
+         type P = Partial2<{ a: number; b: string }>;",
+    ));
+    let mut c = Checker::new_checker(p.clone());
+    let r = resolve_alias_type(&p, &mut c, "P");
+    let props = get_properties_of_type(&c, r);
+    assert_eq!(props.len(), 2);
+    for (name, sym) in props {
+        assert!(
+            c.synthesized_symbol_flags(sym)
+                .contains(SymbolFlags::OPTIONAL),
+            "property {name} should be optional"
+        );
+        let ty = get_type_of_symbol(&mut c, p.as_ref(), sym, None);
+        let expected = if name == "a" {
+            c.number_type()
+        } else {
+            c.string_type()
+        };
+        assert_eq!(ty, expected, "property {name} keeps its value type");
+    }
+}
+
+// C-C3: `instantiateMappedType` with the `readonly` (`+readonly`) modifier marks
+// each property readonly (asserted via the printed `readonly` adornment, since
+// the 2540 readonly-write check is not yet wired).
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (IncludeReadonly)
+#[test]
+fn instantiate_mapped_type_readonly_adds_modifier() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Readonly2<T> = { readonly [K in keyof T]: T[K] };\n\
+         type R = Readonly2<{ a: number }>;",
+    ));
+    let mut c = Checker::new_checker(p.clone());
+    let r = resolve_alias_type(&p, &mut c, "R");
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, p.as_ref(), r),
+        "{ readonly a: number; }"
+    );
+    let props = get_properties_of_type(&c, r);
+    let a = props[0].1;
+    assert!(
+        c.synthesized_symbol_check_flags(a)
+            .contains(tsgo_ast::CheckFlags::READONLY),
+        "readonly mapped property carries the Readonly check flag"
+    );
+    assert!(
+        !c.synthesized_symbol_flags(a)
+            .contains(SymbolFlags::OPTIONAL),
+        "a plain (no `?`) mapped property over a required source stays required"
+    );
+}
+
+// C-C3: `instantiateMappedType` with the `-?` modifier strips optionality, so a
+// `Required`-shaped mapped type over an optional source makes properties
+// required.
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (ExcludeOptional)
+#[test]
+fn instantiate_mapped_type_required_strips_optional() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Required2<T> = { [K in keyof T]-?: T[K] };\n\
+         type R = Required2<{ a?: number }>;",
+    ));
+    let mut c = Checker::new_checker(p.clone());
+    let r = resolve_alias_type(&p, &mut c, "R");
+    let props = get_properties_of_type(&c, r);
+    assert_eq!(props.len(), 1);
+    let a = props[0].1;
+    assert!(
+        !c.synthesized_symbol_flags(a)
+            .contains(SymbolFlags::OPTIONAL),
+        "-? strips optionality, making `a` required"
+    );
+    let ty = get_type_of_symbol(&mut c, p.as_ref(), a, None);
+    assert_eq!(ty, c.number_type());
+}
+
+// C-C3: key remapping via a template-literal `as` clause. `{ [K in keyof T as
+// `p_${K}`]: T[K] }` remaps each key `K` to `p_<K>`, so `Prefixed<{ a: number
+// }>` is `{ p_a: number }`.
+//
+// DIVERGENCE(port): `cmd/tsgo` additionally reports that `K` (a `keyof T` which
+// may be `symbol`) is not assignable to a template placeholder; the port does
+// not check template-literal placeholder constraints, so it only produces the
+// remap. The remapping *behavior* matches Go. The Go-idiomatic
+// `as `p_${string & K}`` (which filters out `symbol`) is DEFER because the
+// port's intersection does not subtype-reduce `string & "a"` to `"a"`.
+// blocked-by: template-literal placeholder constraint checking + intersection
+// subtype reduction.
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (nameType remap)
+#[test]
+fn instantiate_mapped_type_as_remaps_keys() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Prefixed<T> = { [K in keyof T as `p_${K}`]: T[K] };\n\
+         type R = Prefixed<{ a: number }>;",
+    ));
+    let mut c = Checker::new_checker(p.clone());
+    let r = resolve_alias_type(&p, &mut c, "R");
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, p.as_ref(), r),
+        "{ p_a: number; }"
+    );
+    // The original key `a` is gone; the remapped key `p_a` is present.
+    assert!(get_property_of_type(&c, r, "a").is_none());
+    let p_a = get_property_of_type(&c, r, "p_a").expect("remapped key p_a");
+    let ty = get_type_of_symbol(&mut c, p.as_ref(), p_a, None);
+    assert_eq!(ty, c.number_type());
+}
+
+// C-C3: `getTemplateLiteralType` over all-literal placeholders folds into a
+// single string literal.
+// Go: internal/checker/checker.go:Checker.getTemplateLiteralType (all-literal -> string literal)
+#[test]
+fn get_template_literal_type_concrete_folds_to_string_literal() {
+    let mut c = Checker::new();
+    let x = c.get_string_literal_type("x");
+    let t = get_template_literal_type(&mut c, &["a".into(), "b".into()], &[x]);
+    assert_eq!(c.type_to_string(t), "\"axb\"");
+}
+
+// C-C3: `getTemplateLiteralType` distributes over a union placeholder.
+// Go: internal/checker/checker.go:Checker.getTemplateLiteralType (union distribution)
+#[test]
+fn get_template_literal_type_distributes_over_union() {
+    let mut c = Checker::new();
+    let a = c.get_string_literal_type("a");
+    let b = c.get_string_literal_type("b");
+    let union = c.get_union_type(&[a, b]);
+    let t = get_template_literal_type(&mut c, &["x".into(), "".into()], &[union]);
+    assert_eq!(c.type_to_string(t), "\"xa\" | \"xb\"");
+}
+
+// C-C3: `getTemplateLiteralType` with a generic placeholder produces a deferred
+// template literal type.
+// Go: internal/checker/checker.go:Checker.getTemplateLiteralType (generic placeholder)
+#[test]
+fn get_template_literal_type_generic_is_deferred() {
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let t = get_template_literal_type(&mut c, &["p_".into(), "".into()], &[tp]);
+    assert!(c.get_type(t).flags().contains(TypeFlags::TEMPLATE_LITERAL));
+    let d = c
+        .get_type(t)
+        .as_template_literal()
+        .expect("template literal");
+    assert_eq!(d.texts, vec!["p_".to_string(), "".to_string()]);
+    assert_eq!(d.types, vec![tp]);
+}
+
+// C-C3: `getStringMappingType` applies the four intrinsic transforms to a
+// concrete string literal.
+// Go: internal/checker/checker.go:Checker.getStringMappingType / applyStringMapping
+#[test]
+fn get_string_mapping_type_transforms_concrete_literals() {
+    use crate::core::types::StringMappingKind;
+    let mut c = Checker::new();
+    let abc = c.get_string_literal_type("abc");
+    let up = get_string_mapping_type(&mut c, StringMappingKind::Uppercase, abc);
+    assert_eq!(c.type_to_string(up), "\"ABC\"");
+    let cap = get_string_mapping_type(&mut c, StringMappingKind::Capitalize, abc);
+    assert_eq!(c.type_to_string(cap), "\"Abc\"");
+    let upper = c.get_string_literal_type("ABC");
+    let low = get_string_mapping_type(&mut c, StringMappingKind::Lowercase, upper);
+    assert_eq!(c.type_to_string(low), "\"abc\"");
+    let uncap = get_string_mapping_type(&mut c, StringMappingKind::Uncapitalize, upper);
+    assert_eq!(c.type_to_string(uncap), "\"aBC\"");
+}
+
+// C-C3: `getStringMappingType` distributes over a union and keeps a generic
+// target deferred.
+// Go: internal/checker/checker.go:Checker.getStringMappingType (union / generic)
+#[test]
+fn get_string_mapping_type_distributes_and_defers() {
+    use crate::core::types::StringMappingKind;
+    let mut c = Checker::new();
+    let a = c.get_string_literal_type("a");
+    let b = c.get_string_literal_type("b");
+    let union = c.get_union_type(&[a, b]);
+    let up = get_string_mapping_type(&mut c, StringMappingKind::Uppercase, union);
+    assert_eq!(c.type_to_string(up), "\"A\" | \"B\"");
+
+    let tp = c.new_type_parameter(None);
+    let deferred = get_string_mapping_type(&mut c, StringMappingKind::Uppercase, tp);
+    assert!(c
+        .get_type(deferred)
+        .flags()
+        .contains(TypeFlags::STRING_MAPPING));
+    assert_eq!(
+        c.get_type(deferred).as_string_mapping().unwrap().kind,
+        StringMappingKind::Uppercase
+    );
+}
