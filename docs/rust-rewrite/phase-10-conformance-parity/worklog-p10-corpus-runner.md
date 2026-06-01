@@ -78,35 +78,50 @@ whose source is ≤ ~14 lines — deterministic/reproducible, biased to reachabl
 features, away from the heaviest emit/recursive-type cases.
 
 ```
-parity: 30 cases — passed 15, failed 10, errored 5
+parity: 30 cases — passed 18, failed 12, errored 0   (was 15 / 10 / 5)
 ```
 
-**15 / 30 PASS, 10 FAIL, 5 ERROR.** This is a real, reproducible signal, not
-100% — the port is a reachable subset of tsc, so most real conformance cases are
-EXPECTED to diverge. The value is the measurement and the failure-category
-breakdown below. The smoke run completes without aborting (batch runs on a
-256 MiB-stack thread so a deep checker recursion does not overflow the small
-default test-thread stack; `catch_unwind` handles unwinding panics).
+**18 / 30 PASS, 12 FAIL, 0 ERROR** after the panic-robustness triage round
+(below). The original measurement was **15 / 30 PASS, 10 FAIL, 5 ERROR**; all
+five ERROR (panic) cases were root-fixed, dropping `errored` to 0. This is a
+real, reproducible signal, not 100% — the port is a reachable subset of tsc, so
+most real conformance cases are EXPECTED to diverge. The value is the
+measurement and the failure-category breakdown below. The smoke run completes
+without aborting (batch runs on a 256 MiB-stack thread so a deep checker
+recursion does not overflow the small default test-thread stack; `catch_unwind`
+handles unwinding panics).
 
 ## Top failure categories (directs future work)
 
-**ERROR (5 — panics, caught):**
+**ERROR (0 — all five panics root-fixed; see "Panic-robustness triage" below).**
+The five panic cases now either PASS (3) or degrade gracefully to FAIL (2):
 
-- **Emit to a relative `outDir`/declaration-map path the in-memory VFS rejects**
+- ✅ **Emit to a relative `outDir`/declaration-map path the in-memory VFS rejects**
   (`vfs: path "…/x.js[.map]" is not absolute`) — `declarationMapInlineSourcesContent.ts`,
-  `emitEndOfFileJSDocComments.ts`. Output paths from `outDir`/`mapRoot` are not
-  rooted to the current directory before the recorder FS sees them. blocked-by:
-  `outputpaths`/harness rooting of relative out dirs (a P5/P6 emit-path concern).
-- **Text-range slicing off-by-one on top-level `await`** (`begin <= end (35 <= 34)`
-  when slicing) — `awaitObjectLiteral.ts`. A diagnostic/skip-trivia span on a
-  top-level `await` expression computes `end < begin`.
-- **Byte-index out of bounds into source text** (`byte index 48 is out of
+  `emitEndOfFileJSDocComments.ts`. **FIXED** → both PASS. Root cause: the harness
+  did not root the path-typed options (`outDir`, …) to the current directory
+  before emit. `compile_files_ex` now mirrors Go's `CompileFilesEx`
+  (`GetNormalizedAbsolutePath(value, currentDirectory)`).
+- ✅ **`begin <= end` slice panic on top-level `await`** — `awaitObjectLiteral.ts`.
+  **FIXED** (no panic) → FAIL (top-level-await parsing is still a reachable gap,
+  so the case error-recovers and reports parse diagnostics). Root cause was in
+  the **printer**: `get_source_text_of_node` ran `skip_trivia` past `end` on a
+  parser-recovered MISSING (zero-width) node. Now guards `NodeIsMissing` →
+  `""`, mirroring Go's `GetTextOfNodeFromSourceText`.
+- ✅ **Byte-index out of bounds into source text** (`byte index 48 is out of
   bounds`) — `allowSyntheticDefaultImports9.ts` (multi-file `.d.ts` + commonjs).
-- **Arena/index out of bounds** (`index out of bounds: len 44 but index 3028`) —
-  `classExpressionWithComputedPropertyInLoop.ts`. A stale/aliased index into a
-  node arena on a class expression with a computed property inside a loop.
+  **FIXED** (no panic) → FAIL (synthetic-default import is a reachable checker
+  gap). Root cause: the harness blanket-attributed every semantic diagnostic to
+  the first user file, so a diagnostic located in the longer `a.ts` (offset 48)
+  was rendered against the shorter `b.d.ts` (47 bytes). Now uses per-file
+  attribution (`Program::semantic_diagnostics_by_file`).
+- ✅ **Arena/index out of bounds** (`index out of bounds: len 44 but index 3028`) —
+  `classExpressionWithComputedPropertyInLoop.ts`. **FIXED** → PASS. Root cause:
+  the value-type builder read a lib-declared method's (`Array.push`) declaration
+  nodes through the file-under-check's arena. `get_type_of_symbol` now switches
+  to the symbol's owning file view first (the established owning-view switch).
 
-**FAIL (10):**
+**FAIL (12):**
 
 - **Checker false-negative — committed errors we don't yet produce** (~4):
   `anonymousClassDecoratorEs2022.ts`, `asyncFunctionReturnNonPromiseThenable.ts`,
@@ -128,6 +143,64 @@ default test-thread stack; `catch_unwind` handles unwinding panics).
   ("Cannot find name 'x'") that tsc recovers; `assertionWithNoArgument.ts` — we
   emit spurious `TS2304` for the function's own name (binder/scope resolution of
   an `asserts` function referenced before/within its own body).
+
+## Panic-robustness triage round (errored 5 → 0)
+
+A follow-up round root-fixed every panic surfaced by the parity run (a
+production compiler must never panic on valid input). Strict TDD red→green, one
+vertical slice per panic category, each driving the real path in the owning
+crate. No `catch_unwind` masking; no existing test weakened.
+
+- **(b) printer — `NodeIsMissing` guard** (`tsgo_printer`,
+  `printer.rs:get_source_text_of_node`). RED: emitting a parser-recovered
+  MISSING (zero-width) node — `const foo = await { bar: 42 }` error-recovers
+  into a binding pattern with empty (`pos == end`) binding-name identifiers —
+  ran `skip_trivia(pos)` past `end` and sliced `text[pos..end]` with `pos > end`
+  (`begin <= end (35 <= 34)`). GREEN: short-circuit a missing node to `""`,
+  exactly as Go's `GetTextOfNodeFromSourceText` does (`if NodeIsMissing { "" }`).
+  Test: `printer::tests::emit_missing_node_does_not_panic`.
+  Go: `internal/scanner/utilities.go:GetTextOfNodeFromSourceText` +
+  `internal/ast/utilities.go:NodeIsMissing`.
+- **(d) checker — owning-view switch for value types** (`tsgo_checker`,
+  `core/declared_types.rs:get_type_of_symbol`). RED: `array.push(...)` (with
+  `array: any[]`) resolved the `push` method's value type by reading its
+  declaration nodes (which live in `lib.es5.d.ts`'s arena) through the
+  file-under-check's arena → `index out of bounds: the len is 44 but the index
+  is 3028`. GREEN: switch to the symbol's owning file view first (guarded by
+  `file_handle()`), mirroring the switch already in `get_declared_type_of_symbol`
+  / `get_constraint_of_type_parameter`; one switch at the `get_type_of_symbol`
+  dispatcher covers `get_type_of_variable_or_property` and
+  `get_type_of_func_class_enum_module`. Test (real multi-file lib path):
+  `program::tests::property_access_on_lib_declared_method_does_not_panic`.
+  Go: `internal/checker/checker.go:Checker.getTypeOfSymbol` (resolved against the
+  symbol's declaring file).
+- **(c) per-file semantic-diagnostic attribution** (`tsgo_compiler` +
+  `tsgo_testutil_harnessutil`). RED: the harness attributed every semantic
+  diagnostic to the first user file, so a `TS2304` located in the longer `a.ts`
+  (offset 48) was rendered against the shorter `b.d.ts` (47 bytes) →
+  `byte index 48 is out of bounds`. GREEN: new
+  `Program::semantic_diagnostics_by_file` (+
+  `CheckerPool::collect_diagnostics_grouped_excluding`) preserves the per-file
+  partition; `compile_files_ex` attributes each diagnostic to its declaring
+  file. Resolves the explicit "per-file semantic attribution" DEFER from commit
+  `7c567749`. Test:
+  `harnessutil::tests::multi_file_semantic_diagnostics_stay_within_their_own_file`.
+  Go: `internal/compiler/program.go:getDiagnostics` (per-file) +
+  `harnessutil.go:verifyDiagnostics` (a diagnostic renders against its own file).
+- **(a) root path-typed options before emit** (`tsgo_testutil_harnessutil`,
+  `compile_files_ex`). RED: `outDir: dist` produced the relative output path
+  `dist/x.js[.map]`; the in-memory VFS rejects non-absolute paths
+  (`vfs: path "dist/x.js" is not absolute`). GREEN: root `out_dir` / `project` /
+  `root_dir` / `ts_build_info_file` / `base_url` / `declaration_dir` /
+  `root_dirs` / `type_roots` to the current directory, a 1:1 port of Go's
+  `CompileFilesEx` (`ts.convertToOptionsWithAbsolutePaths`). Test:
+  `harnessutil::tests::relative_out_dir_is_rooted_before_emit`.
+  Go: `internal/testutil/harnessutil/harnessutil.go:CompileFilesEx`.
+
+Test deltas (panic-robustness round): `tsgo_printer` +1 unit; `tsgo_compiler`
++1 unit; `tsgo_testutil_harnessutil` +2 unit; `tsgo_testrunner` smoke
+characterization updated to `{passed: 18, failed: 12, errored: 0}`. `tsgo_checker`
+suite unchanged and green (177). No test weakened or deleted.
 
 ## Go anchors (`// Go:` )
 

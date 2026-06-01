@@ -413,9 +413,45 @@ pub fn compile_files_ex(
     input_files: Vec<TestFile>,
     other_files: Vec<TestFile>,
     harness_options: HarnessOptions,
-    compiler_options: CompilerOptions,
+    mut compiler_options: CompilerOptions,
     current_directory: &str,
 ) -> CompilationResult {
+    // Root the path-typed compiler options to the current directory, mirroring
+    // Go's `CompileFilesEx` (`ts.convertToOptionsWithAbsolutePaths`). The
+    // emitter combines `outDir` (etc.) into output paths verbatim; if it stays
+    // relative (e.g. `outDir: dist`), the in-memory VFS — which rejects
+    // non-absolute paths — panics when the emit is written. Rooting keeps the
+    // output path absolute. `type_roots` is the only `Vec` whose Go counterpart
+    // is a slice of file paths; the rest are single paths.
+    // Go: internal/testutil/harnessutil/harnessutil.go:CompileFilesEx
+    let root = |value: &str| get_normalized_absolute_path(value, current_directory);
+    if !compiler_options.out_dir.is_empty() {
+        compiler_options.out_dir = root(&compiler_options.out_dir);
+    }
+    if !compiler_options.project.is_empty() {
+        compiler_options.project = root(&compiler_options.project);
+    }
+    if !compiler_options.root_dir.is_empty() {
+        compiler_options.root_dir = root(&compiler_options.root_dir);
+    }
+    if !compiler_options.ts_build_info_file.is_empty() {
+        compiler_options.ts_build_info_file = root(&compiler_options.ts_build_info_file);
+    }
+    if !compiler_options.base_url.is_empty() {
+        compiler_options.base_url = root(&compiler_options.base_url);
+    }
+    if !compiler_options.declaration_dir.is_empty() {
+        compiler_options.declaration_dir = root(&compiler_options.declaration_dir);
+    }
+    for dir in &mut compiler_options.root_dirs {
+        *dir = root(dir);
+    }
+    if let Some(type_roots) = compiler_options.type_roots.as_mut() {
+        for type_root in type_roots {
+            *type_root = root(type_root);
+        }
+    }
+
     // Root file names (skip JSON / build-info inputs), normalized absolute.
     let mut program_file_names: Vec<String> = Vec::new();
     for file in &input_files {
@@ -494,11 +530,21 @@ pub fn compile_files_ex(
         user_files.push(file);
     }
 
-    // Semantic diagnostics, attributed to the (single) user source file.
-    let attribution = user_files.first().cloned();
-    let semantic = program.semantic_diagnostics();
-    for diag in &semantic {
-        diagnostics.push(HarnessDiagnostic::from_checker(diag, attribution.clone()));
+    // Semantic diagnostics, attributed to the file that actually owns each one.
+    // A checker diagnostic's `start`/`length` are byte offsets into its own
+    // file's text, so a multi-file program must render each diagnostic against
+    // its declaring file (blanket-attributing every diagnostic to the first user
+    // file slices out of bounds when a later file's diagnostic has a byte offset
+    // past the first file's length).
+    let semantic_by_file = program.semantic_diagnostics_by_file();
+    for (file_name, diags) in &semantic_by_file {
+        let file = user_files
+            .iter()
+            .find(|f| f.file_name() == file_name)
+            .cloned();
+        for diag in diags {
+            diagnostics.push(HarnessDiagnostic::from_checker(diag, file.clone()));
+        }
     }
 
     let emit_result = program.emit(EmitOptions::default());

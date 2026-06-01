@@ -472,12 +472,20 @@ fn curated_compiler_subset_parity_smoke() {
     // failure categories behind these numbers). This is EXPECTED to be far from
     // 100% — the port is a reachable subset of tsc. Bump `passed` upward (and
     // lower `failed`/`errored`) only as real parity improves.
+    //
+    // The panic-robustness triage round drove `errored` 5 -> 0 (no compiler /
+    // parser / checker / emit panic on these inputs): the three emit/arena cases
+    // (`classExpressionWithComputedPropertyInLoop`,
+    // `declarationMapInlineSourcesContent`, `emitEndOfFileJSDocComments`) now
+    // PASS, while the two whose underlying feature is still a reachable gap
+    // (`awaitObjectLiteral` top-level await; `allowSyntheticDefaultImports9`
+    // synthetic-default import) degrade gracefully to a FAIL rather than a panic.
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 15,
-            failed: 10,
-            errored: 5,
+            passed: 18,
+            failed: 12,
+            errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
         summary.report()

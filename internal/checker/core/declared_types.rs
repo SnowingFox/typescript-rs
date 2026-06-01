@@ -1187,6 +1187,24 @@ pub fn get_type_of_symbol(
     if super::is_synthesized_symbol(symbol) {
         return get_type_of_synthesized_symbol(checker, program, symbol, globals);
     }
+    // Build the value type against the view of the file that DECLARES the
+    // symbol. In a multi-file program a value symbol (variable / property /
+    // function / method) may be declared in another file — most commonly a lib
+    // file, e.g. `Array.push` and its parameters in `lib.es5.d.ts` — whose
+    // declaration nodes are NOT in `program.arena()`. Reading them through the
+    // current arena (in `get_type_of_variable_or_property` /
+    // `get_type_of_func_class_enum_module`) indexes out of bounds. Mirror the
+    // owning-view switch already used by `get_declared_type_of_symbol` /
+    // `get_constraint_of_type_parameter`; it is guarded by `file_handle()` so it
+    // happens at most once (the owning view returns itself for `symbol`, so no
+    // infinite recursion). For a single-file program `view_for_symbol` is `None`
+    // and this is a no-op.
+    if let Some(view) = program.view_for_symbol(symbol) {
+        if view.file_handle() != program.file_handle() {
+            let owner_globals = view.globals();
+            return get_type_of_symbol(checker, view.as_ref(), symbol, owner_globals);
+        }
+    }
     let flags = program.symbol(symbol).flags;
     if flags.intersects(SymbolFlags::VARIABLE | SymbolFlags::PROPERTY) {
         return get_type_of_variable_or_property(checker, program, symbol, globals);

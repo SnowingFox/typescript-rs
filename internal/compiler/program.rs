@@ -344,6 +344,53 @@ impl Program {
         self.checker_pool.collect_diagnostics_excluding(&exclude)
     }
 
+    /// Like [`Self::semantic_diagnostics`], but returns the diagnostics grouped
+    /// by the source file that owns them, as `(file_name, diagnostics)` pairs in
+    /// source-file order (default-library files excluded, files with no
+    /// diagnostics omitted).
+    ///
+    /// A checker [`Diagnostic`](tsgo_checker::Diagnostic)'s `start`/`length` are
+    /// byte offsets into *its own* file's text. Callers (the harness baseline
+    /// renderer) must attribute each diagnostic to that file; the flat
+    /// [`Self::semantic_diagnostics`] drops the association, which let a later
+    /// file's diagnostic be rendered against an earlier (shorter) file and slice
+    /// out of bounds. This preserves the per-file partition.
+    ///
+    /// Side effects: binds every file and builds the pool's checkers (same as
+    /// [`Self::semantic_diagnostics`]).
+    // Go: internal/compiler/program.go:GetSemanticDiagnostics (per-file)
+    pub fn semantic_diagnostics_by_file(&mut self) -> Vec<(String, Vec<tsgo_checker::Diagnostic>)> {
+        self.create_checkers();
+        let lib_dir = self.default_library_directory();
+        // Bound files in `source_files()` order, with their names — parallel to
+        // the `exclude` mask and the pool's grouped output.
+        let bound_file_names: Vec<String> = self
+            .processed
+            .files()
+            .iter()
+            .filter(|f| f.is_bound())
+            .map(|f| f.file_name().to_string())
+            .collect();
+        let exclude: Vec<bool> = self
+            .processed
+            .files()
+            .iter()
+            .filter(|f| f.is_bound())
+            .map(|f| match &lib_dir {
+                Some(dir) if !dir.is_empty() => f.file_name().starts_with(dir.as_str()),
+                _ => false,
+            })
+            .collect();
+        let groups = self
+            .checker_pool
+            .collect_diagnostics_grouped_excluding(&exclude);
+        bound_file_names
+            .into_iter()
+            .zip(groups)
+            .filter(|(_, diags)| !diags.is_empty())
+            .collect()
+    }
+
     /// Reports whether `file` is one of the auto-included default-library files
     /// (`lib.*.d.ts`) — i.e. it lives under the default-library directory (the
     /// directory of the resolved default lib). `tsc` does not report syntactic or

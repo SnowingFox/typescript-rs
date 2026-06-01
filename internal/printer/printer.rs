@@ -770,6 +770,14 @@ impl<'a> Printer<'a> {
     /// Returns the raw source text of a node (skipping leading trivia unless
     /// `include_trivia`), mirroring `GetSourceTextOfNodeFromSourceFile`.
     fn get_source_text_of_node(&self, node: NodeId, include_trivia: bool) -> &str {
+        // A missing (zero-width) node has no source text. Mirror Go's
+        // `GetTextOfNodeFromSourceText`, which returns "" for `NodeIsMissing`.
+        // Without this guard, `skip_trivia` can advance `pos` past `end` when an
+        // empty (error-recovered) node sits on whitespace, producing a
+        // `pos > end` slice panic (`begin <= end`).
+        if tsgo_ast::utilities::node_is_missing(self.arena(), node) {
+            return "";
+        }
         let loc = self.arena().loc(node);
         let pos = if include_trivia {
             loc.pos()

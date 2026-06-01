@@ -258,6 +258,38 @@ impl CompilerCheckerPool {
         }
         diagnostics
     }
+
+    /// Like [`Self::collect_diagnostics_excluding`], but returns the diagnostics
+    /// *grouped per source file* (parallel to [`BoundProgram::source_files`]
+    /// order), so callers can attribute each diagnostic to the file that owns
+    /// it. An excluded file's slot is an empty `Vec`. This is what lets the
+    /// harness render each diagnostic against its own file's text (a span only
+    /// indexes the file it belongs to), rather than blanket-attributing every
+    /// diagnostic to the first file (which slices out of bounds when a later
+    /// file's diagnostic has a byte offset past the first file's length).
+    // Go: internal/compiler/program.go:getDiagnostics (per-file partitioning)
+    pub fn collect_diagnostics_grouped_excluding(
+        &mut self,
+        exclude: &[bool],
+    ) -> Vec<Vec<Diagnostic>> {
+        let Some(program) = self.program.clone() else {
+            return Vec::new();
+        };
+        let mut groups = Vec::new();
+        for (file_index, handle) in program.source_files().into_iter().enumerate() {
+            if exclude.get(file_index).copied().unwrap_or(false) {
+                groups.push(Vec::new());
+                continue;
+            }
+            let checker_index = self.checker_index_for_file(file_index).unwrap_or(0);
+            groups.push(
+                self.checkers[checker_index]
+                    .get_diagnostics(handle)
+                    .to_vec(),
+            );
+        }
+        groups
+    }
 }
 
 #[cfg(test)]

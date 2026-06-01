@@ -62,6 +62,33 @@ where
     printer.emit_source_file(source_file, input)
 }
 
+/// Parses `input` *allowing* parser diagnostics (error-recovered trees), emits
+/// the whole source file, and returns the produced text. Used to exercise the
+/// printer on the malformed/error-recovered trees the corpus produces (e.g. a
+/// missing/zero-width node), where the regular [`emit`] helper would reject the
+/// input for having diagnostics.
+pub(crate) fn emit_allowing_diagnostics(input: &str) -> String {
+    let file_name = "/main.ts";
+    let script_kind = get_script_kind_from_file_name(file_name);
+    let parse = parse_source_file(
+        SourceFileParseOptions {
+            file_name: file_name.to_string(),
+        },
+        input,
+        script_kind,
+    );
+    let ec = EmitContext::with_arena(parse.arena);
+    let mut printer = Printer::new(
+        PrinterOptions {
+            new_line: NewLineKind::Lf,
+            ..Default::default()
+        },
+        PrintHandlers::default(),
+        &ec,
+    );
+    printer.emit_source_file(parse.source_file, input)
+}
+
 /// Parses `input`, emits the whole source file, and returns the produced text
 /// (including the trailing newline the emitter writes).
 pub(crate) fn emit(input: &str, jsx: bool) -> String {

@@ -386,6 +386,40 @@ fn resolves_string_length_via_real_lib_es5() {
     );
 }
 
+/// Panic-robustness (P10 corpus triage, category d): checking a property access
+/// whose property is a method DECLARED IN A LIB FILE (`array.push(...)`, where
+/// `array: any[]`) must not panic. The `push` symbol's declarations live in
+/// `lib.es5.d.ts`'s arena, not the file-under-check's arena; the value-type
+/// builder (`getTypeOfFuncClassEnumModule` -> `getSignaturesOfSymbol`) read them
+/// through `program.arena()` (the wrong arena) and indexed out of bounds
+/// (`index out of bounds: the len is 44 but the index is 3028`). The fix
+/// switches to the symbol's owning file view first, mirroring the owning-view
+/// switch already used by `getDeclaredTypeOfSymbol` /
+/// `getConstraintOfTypeParameter`. Reproduces the corpus case
+/// `classExpressionWithComputedPropertyInLoop.ts`.
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModule (resolved against the symbol's declaring file)
+#[test]
+fn property_access_on_lib_declared_method_does_not_panic() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es2015,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[(
+            "/src/index.ts",
+            "const array: any[] = [];\nconst key = \"myKey\";\nfor (let i = 0; i < 3; i++) {\n    array.push(class C {\n        [key] = i;\n        #field = i;\n    });\n}\n",
+        )],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    // Previously panicked with a cross-arena out-of-bounds index; now it returns.
+    // The exact diagnostics are not asserted (this is a panic-robustness slice);
+    // only that resolving `array.push` does not abort.
+    let _ = program.semantic_diagnostics();
+}
+
 /// End to end (P6-8): a program with the DEFAULT lib (no explicit `--lib`)
 /// resolves a real global declared in a *referenced* lib. The aggregator
 /// `lib.d.ts` pulls in `lib.es5.d.ts` via `/// <reference lib>`, so the merged
