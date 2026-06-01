@@ -1655,7 +1655,7 @@ fn get_widened_literal_type_for_initializer(
 // the enclosing `VariableDeclarationList`, with ambient/export bits on the
 // `VariableStatement`, so the flags are OR-folded up that chain.
 // Go: internal/ast/utilities.go:getCombinedNodeFlags / getCombinedFlags
-fn combined_node_flags(program: &dyn BoundProgram, node: NodeId) -> NodeFlags {
+pub(crate) fn combined_node_flags(program: &dyn BoundProgram, node: NodeId) -> NodeFlags {
     let arena = program.arena();
     let mut combined = arena.flags(node);
     if let Some(list) = arena.parent(node) {

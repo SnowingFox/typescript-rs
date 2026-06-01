@@ -17,12 +17,117 @@
 //! adds fixed-arity tuple printing `[A, B]` / `readonly [A, B]` and the
 //! `readonly` adornment on a const object-literal property.)
 
-use tsgo_ast::{SymbolFlags, SymbolId};
+use tsgo_ast::{Kind, SymbolFlags, SymbolId};
 
 use super::declared_types::{get_declared_type_of_symbol, get_type_of_symbol};
 use super::program::BoundProgram;
-use super::types::{ObjectFlags, TypeData, TypeFlags, TypeId};
+use super::types::{LiteralValue, ObjectFlags, TypeData, TypeFlags, TypeId};
 use super::Checker;
+
+/// A syntactic *type node* produced for a type by the node builder, serialized
+/// as a closed descriptor the declaration transformer reconstructs into AST.
+///
+/// Go's `NodeBuilderImpl.typeToTypeNode` builds an `*ast.TypeNode` directly in
+/// the emit context's factory. This port cannot hand back an `ast::NodeId`: the
+/// checker's [`BoundProgram`] arena and the transformer's `EmitContext` arena
+/// are independent (the two-arena split documented across this crate). So,
+/// mirroring the existing [`SerializedTypeNode`](super::emit_resolver::SerializedTypeNode)
+/// bridge for `design:type` metadata, `type_to_type_node` *names* the type node
+/// it would build and the transformer reconstructs the real AST in its own
+/// arena. Each variant maps one-to-one to a Go `typeToTypeNode` result for the
+/// reachable declaration-emit subset.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::SynthesizedTypeNode;
+/// use tsgo_ast::Kind;
+/// // `number` serializes to a keyword type node.
+/// assert_eq!(
+///     SynthesizedTypeNode::Keyword(Kind::NumberKeyword),
+///     SynthesizedTypeNode::Keyword(Kind::NumberKeyword),
+/// );
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/nodebuilderimpl.go:NodeBuilderImpl.typeToTypeNode
+#[derive(Clone, Debug, PartialEq)]
+pub enum SynthesizedTypeNode {
+    /// A keyword type node: `number`/`string`/`boolean`/`bigint`/`symbol`/
+    /// `void`/`undefined`/`never`/`any`/`unknown`/`object`. Go:
+    /// `b.f.NewKeywordTypeNode(kind)`.
+    Keyword(Kind),
+    /// A numeric literal type (`1` / `-1`); `text` is the unsigned literal text,
+    /// `negative` records a leading unary minus. Go:
+    /// `NewLiteralTypeNode(NewNumericLiteral(..))` (with `NewPrefixUnaryExpression`
+    /// for a negative).
+    NumberLiteral { text: String, negative: bool },
+    /// A string literal type (`"a"`); `value` is the unescaped text. Go:
+    /// `NewLiteralTypeNode(newStringLiteral(value))`.
+    StringLiteral(String),
+    /// A boolean literal type (`true`/`false`). Go:
+    /// `NewLiteralTypeNode(NewKeywordExpression(True/FalseKeyword))`.
+    BooleanLiteral(bool),
+    /// The `null` literal type. Go:
+    /// `NewLiteralTypeNode(NewKeywordExpression(NullKeyword))`.
+    Null,
+    /// An array type (`T[]`). Go: `b.f.NewArrayTypeNode(elementType)`.
+    Array(Box<SynthesizedTypeNode>),
+    /// A type reference (`Foo` / `Foo<A, B>`); `name` is the entity name, `args`
+    /// the type arguments. Go: `b.f.NewTypeReferenceNode(name, typeArguments)`.
+    TypeReference {
+        /// The referenced entity's printed name.
+        name: String,
+        /// The type-argument nodes (`<A, B>`), empty for a bare reference.
+        args: Vec<SynthesizedTypeNode>,
+    },
+    /// A `typeof X` type query (the value side of a namespace/module symbol).
+    /// Go: `b.f.NewTypeQueryNode(name, nil)` (the value-module arm).
+    TypeQuery(String),
+    /// A union type (`A | B`). Go: `b.f.NewUnionTypeNode(types)`.
+    Union(Vec<SynthesizedTypeNode>),
+    /// An intersection type (`A & B`). Go: `b.f.NewIntersectionTypeNode(types)`.
+    Intersection(Vec<SynthesizedTypeNode>),
+    /// A fixed-arity tuple type (`[A, B]` / `readonly [A, B]`). Go:
+    /// the tuple-type-node arm of `typeToTypeNode`.
+    Tuple {
+        /// The positional element type nodes.
+        elements: Vec<SynthesizedTypeNode>,
+        /// Whether the tuple is `readonly` (an `as const` tuple).
+        readonly: bool,
+    },
+    /// An anonymous object/type-literal (`{ a: number; }`). Go:
+    /// `createAnonymousTypeNode` -> `NewTypeLiteralNode(members)`.
+    TypeLiteral(Vec<SynthesizedProperty>),
+}
+
+/// One member of a [`SynthesizedTypeNode::TypeLiteral`] (`a: number`).
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{SynthesizedProperty, SynthesizedTypeNode};
+/// use tsgo_ast::Kind;
+/// let p = SynthesizedProperty {
+///     name: "a".to_string(),
+///     type_node: SynthesizedTypeNode::Keyword(Kind::NumberKeyword),
+///     readonly: false,
+///     optional: false,
+/// };
+/// assert_eq!(p.name, "a");
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/nodebuilderimpl.go (createTypeNodesFromResolvedType property member)
+#[derive(Clone, Debug, PartialEq)]
+pub struct SynthesizedProperty {
+    /// The property name (an identifier-named member in the reachable subset).
+    pub name: String,
+    /// The property's type node.
+    pub type_node: SynthesizedTypeNode,
+    /// Whether the property is `readonly` (an `as const` member).
+    pub readonly: bool,
+    /// Whether the property is optional (`a?: T`).
+    pub optional: bool,
+}
 
 /// Returns the printed name of `symbol` (Go's `symbolToString` for the simple
 /// declaration-name case).
@@ -224,6 +329,264 @@ pub fn type_to_string(checker: &mut Checker, program: &dyn BoundProgram, ty: Typ
     // Intrinsics/literals/unions (and not-yet-handled kinds) use the
     // program-less printer.
     checker.type_to_string(ty)
+}
+
+/// Builds a syntactic *type node* descriptor for `ty` (Go's
+/// `NodeBuilderImpl.typeToTypeNode`), for the reachable declaration-emit subset.
+///
+/// The result is a [`SynthesizedTypeNode`] the declaration transformer
+/// reconstructs into AST in its own arena (see [`SynthesizedTypeNode`] for the
+/// two-arena rationale). This mirrors Go's `typeToTypeNode` switch one arm at a
+/// time: primitive keyword types, literal types, arrays (`T[]`), bare type
+/// references (`Foo<...>`), unions / intersections, fixed-arity tuples, and
+/// anonymous object type-literals (`{ a: number; }`). Reuses the same
+/// type-walking the program-aware [`type_to_string`] already performs.
+///
+/// Returns `None` for the deferred type kinds (`keyof`/indexed-access/
+/// conditional/template-literal/string-mapping, generic type parameters,
+/// function/constructor types, bigint literals, import types); the caller falls
+/// back to an `any` keyword node, mirroring Go's `serializeTypeForDeclaration`
+/// `result == nil -> NewKeywordTypeNode(any)` tail.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{type_to_type_node, BoundProgram, Checker, SynthesizedTypeNode};
+/// # fn demo<P: BoundProgram>(c: &mut Checker, p: &P, t: tsgo_checker::TypeId) -> Option<SynthesizedTypeNode> {
+/// type_to_type_node(c, p, t)
+/// # }
+/// ```
+///
+/// Side effects: may resolve and cache member/element types.
+// Go: internal/checker/nodebuilderimpl.go:NodeBuilderImpl.typeToTypeNode
+pub fn type_to_type_node(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    ty: TypeId,
+) -> Option<SynthesizedTypeNode> {
+    let flags = checker.get_type(ty).flags();
+    // Go's leading primitive arms (`t.flags & TypeFlagsAny/Unknown/String/...`).
+    // The error type carries `TypeFlagsAny`, so an unresolved type degrades to
+    // the `any` keyword exactly as Go's `typeToTypeNode(errorType)` does.
+    if flags.intersects(TypeFlags::ANY) {
+        return Some(SynthesizedTypeNode::Keyword(Kind::AnyKeyword));
+    }
+    if flags.intersects(TypeFlags::UNKNOWN) {
+        return Some(SynthesizedTypeNode::Keyword(Kind::UnknownKeyword));
+    }
+    if flags.intersects(TypeFlags::STRING) {
+        return Some(SynthesizedTypeNode::Keyword(Kind::StringKeyword));
+    }
+    if flags.intersects(TypeFlags::NUMBER) {
+        return Some(SynthesizedTypeNode::Keyword(Kind::NumberKeyword));
+    }
+    if flags.intersects(TypeFlags::BIG_INT) {
+        return Some(SynthesizedTypeNode::Keyword(Kind::BigIntKeyword));
+    }
+    if flags.intersects(TypeFlags::BOOLEAN) {
+        return Some(SynthesizedTypeNode::Keyword(Kind::BooleanKeyword));
+    }
+    // Go's `typeToTypeNode` keys `boolean` on `t.flags & TypeFlagsBoolean`; this
+    // port represents `boolean` as the singleton `false | true` union (no
+    // `BOOLEAN` flag on the union), so a widened boolean literal is recognized by
+    // its singleton type id before the generic union arm turns it into
+    // `false | true`.
+    if ty == checker.boolean_type() {
+        return Some(SynthesizedTypeNode::Keyword(Kind::BooleanKeyword));
+    }
+    // An enum-like type prints by its symbol name (Go's `EnumLike` arm). The
+    // reachable subset emits a bare type reference to that name; the dotted
+    // `E.A` enum-member form and the union-expansion are deferred.
+    if flags.intersects(TypeFlags::ENUM_LIKE) {
+        if let Some(symbol) = checker.get_type(ty).symbol {
+            return Some(SynthesizedTypeNode::TypeReference {
+                name: symbol_to_string(program, symbol),
+                args: Vec::new(),
+            });
+        }
+    }
+    if flags.intersects(TypeFlags::STRING_LITERAL) {
+        if let Some(LiteralValue::String(s)) = checker.get_type(ty).literal_value() {
+            return Some(SynthesizedTypeNode::StringLiteral(s.clone()));
+        }
+    }
+    if flags.intersects(TypeFlags::NUMBER_LITERAL) {
+        if let Some(LiteralValue::Number(n)) = checker.get_type(ty).literal_value() {
+            let value = f64::from(*n);
+            // Go splits a negative numeric literal into a unary-minus over the
+            // unsigned text (`NewPrefixUnaryExpression(Minus, NewNumericLiteral)`).
+            let negative = value < 0.0;
+            let text = if negative {
+                (-value).to_string()
+            } else {
+                value.to_string()
+            };
+            return Some(SynthesizedTypeNode::NumberLiteral { text, negative });
+        }
+    }
+    if flags.intersects(TypeFlags::BOOLEAN_LITERAL) {
+        if let Some(LiteralValue::Boolean(b)) = checker.get_type(ty).literal_value() {
+            return Some(SynthesizedTypeNode::BooleanLiteral(*b));
+        }
+    }
+    if flags.intersects(TypeFlags::VOID) {
+        return Some(SynthesizedTypeNode::Keyword(Kind::VoidKeyword));
+    }
+    if flags.intersects(TypeFlags::UNDEFINED) {
+        return Some(SynthesizedTypeNode::Keyword(Kind::UndefinedKeyword));
+    }
+    if flags.intersects(TypeFlags::NULL) {
+        return Some(SynthesizedTypeNode::Null);
+    }
+    if flags.intersects(TypeFlags::NEVER) {
+        return Some(SynthesizedTypeNode::Keyword(Kind::NeverKeyword));
+    }
+    if flags.intersects(TypeFlags::ES_SYMBOL) {
+        return Some(SynthesizedTypeNode::Keyword(Kind::SymbolKeyword));
+    }
+    if flags.intersects(TypeFlags::NON_PRIMITIVE) {
+        return Some(SynthesizedTypeNode::Keyword(Kind::ObjectKeyword));
+    }
+    // A fixed-arity tuple becomes a tuple type node (`[A, B]` / `readonly
+    // [A, B]`), checked before the type-reference/anonymous arms because a tuple
+    // carries its elements in `resolved_type_arguments` with no `target`.
+    if checker
+        .get_type(ty)
+        .object_flags()
+        .contains(ObjectFlags::TUPLE)
+    {
+        let (elements, readonly) = match &checker.get_type(ty).data {
+            TypeData::Object(o) => (o.resolved_type_arguments.clone(), o.readonly),
+            _ => return None,
+        };
+        let element_nodes: Option<Vec<SynthesizedTypeNode>> = elements
+            .iter()
+            .map(|&e| type_to_type_node(checker, program, e))
+            .collect();
+        return Some(SynthesizedTypeNode::Tuple {
+            elements: element_nodes?,
+            readonly,
+        });
+    }
+    // Union / intersection map their constituents (Go's union/intersection arm);
+    // a single-element list unwraps to that element.
+    if let TypeData::Union(u) = &checker.get_type(ty).data {
+        let members = u.types.clone();
+        if members.len() == 1 {
+            return type_to_type_node(checker, program, members[0]);
+        }
+        let nodes: Option<Vec<SynthesizedTypeNode>> = members
+            .iter()
+            .map(|&m| type_to_type_node(checker, program, m))
+            .collect();
+        return Some(SynthesizedTypeNode::Union(nodes?));
+    }
+    if let TypeData::Intersection(i) = &checker.get_type(ty).data {
+        let members = i.types.clone();
+        if members.len() == 1 {
+            return type_to_type_node(checker, program, members[0]);
+        }
+        let nodes: Option<Vec<SynthesizedTypeNode>> = members
+            .iter()
+            .map(|&m| type_to_type_node(checker, program, m))
+            .collect();
+        return Some(SynthesizedTypeNode::Intersection(nodes?));
+    }
+    let symbol = checker.get_type(ty).symbol;
+    let object_info = match &checker.get_type(ty).data {
+        TypeData::Object(o) => Some((o.target, o.resolved_type_arguments.clone())),
+        _ => None,
+    };
+    if let Some((target, type_arguments)) = object_info {
+        // A type reference (`Foo<...>`). Go's `typeReferenceToTypeNode` special-
+        // cases the global `Array` type with a single argument as `T[]`; the
+        // reachable stand-in detects it by the target symbol's name being
+        // `Array` (the same by-name resolution `createArrayLiteralType` uses,
+        // since the real `globalArrayType` needs lib globals — P6).
+        if let Some(target) = target {
+            let target_name = checker
+                .get_type(target)
+                .symbol
+                .map(|s| symbol_to_string(program, s))
+                .unwrap_or_default();
+            if target_name == "Array" && type_arguments.len() == 1 {
+                let element = type_to_type_node(checker, program, type_arguments[0])?;
+                return Some(SynthesizedTypeNode::Array(Box::new(element)));
+            }
+            let args: Option<Vec<SynthesizedTypeNode>> = type_arguments
+                .iter()
+                .map(|&a| type_to_type_node(checker, program, a))
+                .collect();
+            return Some(SynthesizedTypeNode::TypeReference {
+                name: target_name,
+                args: args?,
+            });
+        }
+        // A named interface/class/enum type prints as its name; a module value
+        // type prints as `typeof N`. An anonymous type-literal symbol carries an
+        // internal `__type`/`__object` name and serializes its member literal.
+        if let Some(symbol) = symbol {
+            let name = symbol_to_string(program, symbol);
+            if !name.starts_with(tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_PREFIX) {
+                if program.symbol(symbol).flags.intersects(SymbolFlags::MODULE) {
+                    return Some(SynthesizedTypeNode::TypeQuery(name));
+                }
+                return Some(SynthesizedTypeNode::TypeReference {
+                    name,
+                    args: Vec::new(),
+                });
+            }
+        }
+        // An anonymous object type becomes a type-literal of its members. The
+        // bare function/constructor shorthand and mixed signature forms are
+        // deferred (no test slice reaches them; they fall to `None` -> `any`).
+        return synthesize_members(checker, program, ty);
+    }
+    // Deferred kinds (type parameters, function/constructor types, `keyof`,
+    // indexed-access, conditional, template-literal, string-mapping, bigint
+    // literals, import types) degrade to the `any` keyword via the caller.
+    None
+}
+
+// Builds a type-literal descriptor for an anonymous object type's members
+// (`{ a: number; }`), mirroring [`serialize_members`] but emitting
+// [`SynthesizedProperty`] nodes instead of text. Returns `None` (caller -> `any`)
+// when a member type cannot be synthesized.
+// Go: internal/checker/nodebuilderimpl.go:createTypeNodesFromResolvedType (properties)
+fn synthesize_members(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    ty: TypeId,
+) -> Option<SynthesizedTypeNode> {
+    let properties = match &checker.get_type(ty).data {
+        TypeData::Object(o) => o.properties.clone(),
+        _ => return None,
+    };
+    let mut members = Vec::with_capacity(properties.len());
+    for property in properties {
+        // A synthesized (object-literal) property's name lives in the checker's
+        // transient arena, and an `as const` member carries the `Readonly` check
+        // flag; a program (interface/class) member reads its name from the
+        // program. Mirrors [`serialize_members`].
+        let (name, readonly) = if super::is_synthesized_symbol(property) {
+            (
+                checker.synthesized_symbol_name(property),
+                checker
+                    .synthesized_symbol_check_flags(property)
+                    .contains(tsgo_ast::CheckFlags::READONLY),
+            )
+        } else {
+            (program.symbol(property).name.clone(), false)
+        };
+        let property_type = get_type_of_symbol(checker, program, property, None);
+        let type_node = type_to_type_node(checker, program, property_type)?;
+        members.push(SynthesizedProperty {
+            name,
+            type_node,
+            readonly,
+            optional: false,
+        });
+    }
+    Some(SynthesizedTypeNode::TypeLiteral(members))
 }
 
 // Prints a bare function/constructor type in arrow shorthand (Go's

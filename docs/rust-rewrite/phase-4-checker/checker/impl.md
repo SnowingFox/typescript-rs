@@ -4029,6 +4029,56 @@ impl EmitResolver {
 
 **P4 checker 状态（reachable subset）**：**C-A..C-E 全部落地 ⇒ P4 checker 可达子集完成**。函数类型关系（C-A）+ 泛型基石/推断/实例化（C-B）+ 高级类型 keyof/index/conditional/mapped/template（C-C）+ strictNull/枚举/namespaces/this/abstract/overload/exhaustiveness（C-D）+ EmitResolver 剩余 + lib globals 双侧（C-E）收口 P4 的可达路径。剩余按各 `// DEFER` 锚移交 P5（transformers/declarations）/P6（compiler + 真 lib 端到端）/P10（conformance 对拍）。
 
+## D-F2 落地记录（worklog 摘要）—— 声明 emit 句法 type-node 合成（`create_type_of_declaration` + `type_to_type_node`，C-E 交接落地；跨-crate lane checker + transformers）
+
+> C-E 把 `CreateTypeOfDeclaration` 等声明 type-node 合成**交接 D-F**（C-E worklog 已记）。本轮（D-F2）在 checker 侧建这套合成的可达核心：nodebuilder `type_to_type_node`（type → 句法 type-node）+ EmitResolver `create_type_of_declaration`/`create_return_type_of_signature_declaration`/`is_literal_const_declaration`/`create_literal_const_value`，由 transformers 侧 `ensure_type` 消费（见 transformers `impl.md` 的「D-F2 worklog」）。逐切片 `/tdd` 红→绿，单 lane（深链 checker→transformers），cargo 仅 `-p tsgo_checker`（+ `cargo build -p tsgo_transformers`/`-p tsgo_compiler` 验 additive）。`.d.ts` Go 真值经 `go build -o /tmp/tsgo ./cmd/tsgo` 实跑 `--declaration --emitDeclarationOnly --strict` 逐 snippet 捕获后才断言。
+
+**两-arena 桥（受认可偏离）**：Go `typeToTypeNode` 直接在 `EmitContext.Factory` 建 `*ast.TypeNode`。本 port 的 checker `BoundProgram` arena 与 transformer `EmitContext` arena 独立（不能跨 arena 传 `NodeId`），故镜像既有 `SerializedTypeNode`（4at/4av 元数据）模式：`type_to_type_node` 返**闭合描述符** `SynthesizedTypeNode`（pub enum：`Keyword(Kind)`/`NumberLiteral`/`StringLiteral`/`BooleanLiteral`/`Null`/`Array`/`TypeReference{name,args}`/`TypeQuery`/`Union`/`Intersection`/`Tuple{elements,readonly}`/`TypeLiteral(Vec<SynthesizedProperty>)`），transformer 在自身 arena 重建 AST。`create_literal_const_value` 同理返 `LiteralConstValue`（pub enum：`Number{text,negative}`/`String`/`Boolean`）。
+
+**Go 函数镜像（`// Go:` 锚）**：`emitresolver.go:CreateTypeOfDeclaration(941)`→`nodebuilderimpl.go:serializeTypeForDeclaration(2176)`（`t = getWidenedLiteralType(getTypeOfSymbol(symbol))`）、`CreateReturnTypeOfSignatureDeclaration(917)`→`SerializeReturnTypeForSignature`→`serializeReturnTypeForSignature(2030)`→`getReturnTypeOfSignature`/`getReturnTypeFromBody`、`IsLiteralConstDeclaration(630)`、`CreateLiteralConstValue(955)`、`nodebuilderimpl.go:typeToTypeNode(3149)`（type→node switch）。
+
+**严格 TDD（逐切片 red→green，先实测红的对的原因，再最小绿）**：
+
+| # | 切片（checker unit）| 最小 input → observable | 实现触点 |
+|---|---|---|---|
+| C1 tracer | `create_type_of_declaration_widens_let_number` | `let n = 1;` → `Keyword(NumberKeyword)`（红：方法不存在=编译错误）| `SynthesizedTypeNode` enum + nodebuilder `type_to_type_node`（keyword 臂）+ emit_resolver `create_type_of_declaration`（`get_widened_literal_type(get_type_of_symbol)`）|
+| C2 | `..._widens_let_string_and_boolean` | `let s="a"`→`String`、`let b=true`→`Boolean`（**genuine RED**：`let b=true` 初产 `Union([false,true])`——Rust 把 `boolean` 表示为 `false\|true` union 单例无 `BOOLEAN` flag）| 加 `ty == checker.boolean_type()` 单例判定（Go `flags & TypeFlagsBoolean` stand-in）|
+| C3 | `..._widens_const_literal` | `const x=1` → `Keyword(Number)`（`serializeTypeForDeclaration` 无条件 widen）| 既有 create 路径 |
+| C4 | `..._array_is_array_type_node` / `type_to_type_node_array_reference` | `Array<number>` → `Array(Number)`（`number[]`）| `type_to_type_node` reference 臂：target 符号名 `Array` + 1 实参 → `Array`（`createArrayLiteralType` 按名解析 stand-in）|
+| C5 | `..._object_literal_is_type_literal` / `type_to_type_node_anonymous_object_type_literal` | `{ a: 1 }` → `TypeLiteral([a: Number])`| `synthesize_members`（属性 `check_expression_for_mutable_location` 已 widen）|
+| C6 | `create_return_type_of_signature_declaration_infers_from_body` | `function f(){return 1}` → `Number`（**genuine RED**：初产 `Any`——`function_like_body` 只覆盖 arrow/fn-expr）| 扩 `function_like_body` 覆盖 FunctionDeclaration/Method/GetAccessor（唯一调用者是 body 推断，安全）+ `get_return_type_from_body`→`pub(crate)` |
+| C7 | `is_literal_const_declaration_detects_fresh_primitive_const` / `create_literal_const_value_reachable_primitives` | `const x=1`/`const s="a"`/`const b=true` literal-const + 值；`let`/数组/对象非 | `is_literal_const_declaration`（var const + `is_fresh_literal_type`）+ `create_literal_const_value`（字面值→描述符）+ `combined_node_flags`→`pub(crate)` |
+| C8 | `type_to_type_node_{primitive_keywords,literal_types,type_reference_with_args,union,tuple}` | 直接构造类型断言各臂 | nodebuilder 各 type 臂 |
+
+> 红→绿证据：C1/C4/C5/C6/C7/C8 **genuine RED（方法/枚举不存在=编译错误）**；C2 **genuine RED（boolean union 单例无 flag → `Union` 而非 `Boolean`）**；C6 **genuine RED（`function_like_body` 缺 FunctionDeclaration 臂 → `Any`）**。
+
+**可达裁剪（faithful-but-reachable）**：
+- **`type_to_type_node` 可达臂**：primitive keyword（含 error type 带 `ANY` flag → `any`，忠实 Go）、enum-like→名（dotted `E.A` / union 展开 DEFER）、string/number/boolean 字面、`void`/`undefined`/`null`/`never`/`symbol`/`object`、tuple、union/intersection（单元素 unwrap）、object reference（`Array` 1 实参→`T[]`，否则 `Foo<args>`）、命名 interface/class→名、module→`typeof N`、匿名 object→type-literal。DEFER（返 `None`→caller 回落 `any`）：type parameter、function/constructor 类型节点、`keyof`/indexed-access/conditional/template-literal/string-mapping、import-type、bigint 字面。
+- **boolean 单例判定**：Rust 把 `boolean` 表示为 `false | true` union 单例（无 `BOOLEAN` flag），故 `ty == checker.boolean_type()` 是 Go `t.flags & TypeFlagsBoolean` 的可达 stand-in。
+- **`create_type_of_declaration` = `getWidenedLiteralType(getTypeOfSymbol)`**：accessor write-type（setter `getWriteTypeOfSymbol`）、`enclosingSymbolTypes` 复用、`tryReuse` pseudochecker 注解复用、`instantiateType` mapper、`requiresAddingImplicitUndefined` DEFER。
+- **`create_return_type_of_signature_declaration` = `getReturnTypeFromBody`**：`getSignatureFromDeclaration` 的 body 推断本缺（返 `any`），故经 `get_return_type_from_body`（扩 `function_like_body`）；注解复用/type-predicate/`SuppressAnyReturnType` DEFER。
+- **`is_literal_const_declaration` 仅 `var const` 臂**：`isDeclarationReadonly`（readonly 字段/参数属性）DEFER。`create_literal_const_value` 仅 primitive 字面；enum-like（`SymbolToExpression`）/ bigint / `Infinity`/`NaN` DEFER。
+
+**本轮交付（全部 `internal/checker/**` + `lib.rs` re-export）**：
+- `core/nodebuilder.rs`：`pub enum SynthesizedTypeNode` + `pub struct SynthesizedProperty` + `pub fn type_to_type_node` + 私有 `synthesize_members`。
+- `core/emit_resolver.rs`：`pub enum LiteralConstValue` + pub 方法 `create_type_of_declaration`/`create_return_type_of_signature_declaration`/`is_literal_const_declaration`/`create_literal_const_value`。
+- `core/check.rs`：`get_return_type_from_body` → `pub(crate)`；`function_like_body` 扩 FunctionDeclaration/MethodDeclaration/GetAccessor 臂（注释更新）。
+- `core/declared_types.rs`：`combined_node_flags` → `pub(crate)`。
+- `lib.rs`：加法 re-export `SynthesizedTypeNode`/`SynthesizedProperty`/`type_to_type_node`/`LiteralConstValue`。
+- 测试：`emit_resolver_test.rs`（+8）、`nodebuilder_test.rs`（+7）。
+
+**新公开 API 形状（additive-only 确认）**：无既有 `pub fn` 签名变更、无 `lib.rs` 既有项移除、无依赖/`.go`/`internal/ast`/`internal/binder` 改动。新增物全为加法（pub enum `SynthesizedTypeNode`/`SynthesizedProperty`/`LiteralConstValue`、pub fn `type_to_type_node`、`EmitResolver` 上 4 个 pub 方法、`lib.rs` re-export）；`combined_node_flags`/`get_return_type_from_body` 仅升 `pub(crate)`（crate 内），`function_like_body` 行为加法扩展（唯一调用者 `get_return_type_from_body`，原仅收 arrow/fn-expr，新臂不影响既有行为）。`cargo build -p tsgo_compiler` + `-p tsgo_transformers` 绿。
+
+**测试增量**：**720→735 单测**（+15：`emit_resolver_test`+8、`nodebuilder_test`+7）+ **169→177 doctest**（+8：`type_to_type_node`/`SynthesizedTypeNode`/`SynthesizedProperty`/`LiteralConstValue`/4 个 EmitResolver 方法各一）。**无既有测试弱化/删除**。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker`（735 单测 + 177 doctest 绿）；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿；`cargo build -p tsgo_transformers` 绿。未 `git commit`（父级提交）。
+
+**本轮 DEFER（带 blocked-by）**：
+- **异域 type-node**（`type_to_type_node` 返 `None`→`any`）：type parameter / function·constructor 类型节点 / `keyof`·indexed-access·conditional·template·string-mapping / import-type / bigint 字面 / enum 成员点号 / deep generic。blocked-by: 各类型构造器节点序列化 + 真 lib 全局 `Array`/`Promise`（P6）+ `serializeReturnTypeForSignature` pseudochecker 复用。
+- **`SymbolTracker` / 可访问性报告（D-F3）**：node builder 的 inaccessible-symbol 报告（`ReportInaccessible*Error`）本轮全 no-op（不收集）。blocked-by: `symboltracker.go` + `SymbolAccessibilityResult`。
+- **accessor write-type / `requiresAddingImplicitUndefined` / 注解复用 / mapper**（见上可达裁剪）。
+- **`create_type_of_expression` / `create_type_parameters_of_signature_declaration` / `create_late_bound_index_signatures`**：未达（D-F 后续 / 消费者驱动）。blocked-by: 表达式类型序列化 + type-param 节点 + late-bound index sig。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

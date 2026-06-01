@@ -74,10 +74,14 @@ pub use core::declared_types::{
     get_type_of_property_of_type, get_type_of_symbol, instantiate_mapped_type,
     resolve_structured_type_members,
 };
-pub use core::emit_resolver::{EmitResolver, SerializedTypeNode, TypeReferenceSerializationKind};
+pub use core::emit_resolver::{
+    EmitResolver, LiteralConstValue, SerializedTypeNode, TypeReferenceSerializationKind,
+};
 pub use core::inference::{InferenceContext, InferenceInfo, InferencePriority};
 pub use core::mapper::TypeMapper;
-pub use core::nodebuilder::{symbol_to_string, type_to_string};
+pub use core::nodebuilder::{
+    symbol_to_string, type_to_string, type_to_type_node, SynthesizedProperty, SynthesizedTypeNode,
+};
 pub use core::program::BoundProgram;
 pub use core::relations::RelationKind;
 pub use core::signatures::{

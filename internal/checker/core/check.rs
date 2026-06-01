@@ -2593,7 +2593,11 @@ impl Checker {
     // literal-preservation step. blocked-by: awaited/iterable types + return
     // control-flow analysis.
     // Go: internal/checker/checker.go:Checker.getReturnTypeFromBody
-    fn get_return_type_from_body(&mut self, program: &dyn BoundProgram, arg: NodeId) -> TypeId {
+    pub(crate) fn get_return_type_from_body(
+        &mut self,
+        program: &dyn BoundProgram,
+        arg: NodeId,
+    ) -> TypeId {
         let body = function_like_body(program, arg);
         let Some(body) = body else {
             return self.error_type;
@@ -5724,12 +5728,19 @@ fn function_like_parameters(program: &dyn BoundProgram, node: NodeId) -> Vec<Nod
     }
 }
 
-// Returns the body node of an arrow/function expression, if any.
+// Returns the body node of a function-like declaration, if any.
+//
+// Covers arrow/function expressions (the contextual-inference path) plus the
+// function/method/accessor declaration kinds (declaration-emit return-type
+// inference, `create_return_type_of_signature_declaration`).
 // Go: internal/ast: FunctionLikeData body
 fn function_like_body(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
     match program.arena().data(node) {
         NodeData::ArrowFunction(d) => Some(d.body),
         NodeData::FunctionExpression(d) => d.body,
+        NodeData::FunctionDeclaration(d) => d.body,
+        NodeData::MethodDeclaration(d) => d.body,
+        NodeData::GetAccessorDeclaration(d) => d.body,
         _ => None,
     }
 }

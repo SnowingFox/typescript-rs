@@ -16,7 +16,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use tsgo_ast::{NodeId, SymbolId};
 use tsgo_checker::{
-    BoundProgram, Checker, EmitResolver, SerializedTypeNode, TypeReferenceSerializationKind,
+    BoundProgram, Checker, EmitResolver, LiteralConstValue, SerializedTypeNode,
+    SynthesizedTypeNode, TypeReferenceSerializationKind,
 };
 use tsgo_printer::EmitContext;
 
@@ -351,6 +352,118 @@ impl EmitReferenceResolver {
             self.program.as_ref(),
             type_node,
         )
+    }
+
+    /// Synthesizes the *type node* declaration emit annotates an un-annotated
+    /// declaration `node` with (the declaration's widened type), as a
+    /// [`SynthesizedTypeNode`] descriptor the declaration transformer
+    /// reconstructs into AST.
+    ///
+    /// Delegates to [`EmitResolver::create_type_of_declaration`] against the
+    /// bound program and the owned [`Checker`] (Go's
+    /// `emitResolver.CreateTypeOfDeclaration`). The checker is borrowed mutably
+    /// internally (building the declaration's type populates caches), so this
+    /// stays a `&self` method. `node`'s id must be the original (pre-transform)
+    /// declaration node so it resolves to the same syntactic node in the bound
+    /// program.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// use tsgo_checker::SynthesizedTypeNode;
+    /// # fn demo(r: &EmitReferenceResolver, decl: tsgo_ast::NodeId) -> Option<SynthesizedTypeNode> {
+    /// r.create_type_of_declaration(decl)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may build and cache the declaration's type.
+    // Go: internal/checker/emitresolver.go:EmitResolver.CreateTypeOfDeclaration
+    pub fn create_type_of_declaration(&self, node: NodeId) -> Option<SynthesizedTypeNode> {
+        let mut checker = self.checker.borrow_mut();
+        self.resolver
+            .create_type_of_declaration(&mut checker, self.program.as_ref(), node)
+    }
+
+    /// Synthesizes the *return type node* declaration emit annotates an
+    /// un-annotated function-like declaration `node` with (inferred from its
+    /// body), as a [`SynthesizedTypeNode`] descriptor.
+    ///
+    /// Delegates to [`EmitResolver::create_return_type_of_signature_declaration`]
+    /// against the bound program and the owned [`Checker`] (Go's
+    /// `emitResolver.CreateReturnTypeOfSignatureDeclaration`). `node`'s id must
+    /// be the original (pre-transform) declaration node.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// use tsgo_checker::SynthesizedTypeNode;
+    /// # fn demo(r: &EmitReferenceResolver, decl: tsgo_ast::NodeId) -> Option<SynthesizedTypeNode> {
+    /// r.create_return_type_of_signature_declaration(decl)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may check the function body and cache its return type.
+    // Go: internal/checker/emitresolver.go:EmitResolver.CreateReturnTypeOfSignatureDeclaration
+    pub fn create_return_type_of_signature_declaration(
+        &self,
+        node: NodeId,
+    ) -> Option<SynthesizedTypeNode> {
+        let mut checker = self.checker.borrow_mut();
+        self.resolver.create_return_type_of_signature_declaration(
+            &mut checker,
+            self.program.as_ref(),
+            node,
+        )
+    }
+
+    /// Reports whether `node` is a *literal const* declaration whose initializer
+    /// declaration emit keeps verbatim (so `const x = 1` emits
+    /// `declare const x = 1;`).
+    ///
+    /// Delegates to [`EmitResolver::is_literal_const_declaration`] against the
+    /// bound program and the owned [`Checker`] (Go's
+    /// `emitResolver.IsLiteralConstDeclaration`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// # fn demo(r: &EmitReferenceResolver, decl: tsgo_ast::NodeId) -> bool {
+    /// r.is_literal_const_declaration(decl)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may build and cache the declaration's type.
+    // Go: internal/checker/emitresolver.go:EmitResolver.IsLiteralConstDeclaration
+    pub fn is_literal_const_declaration(&self, node: NodeId) -> bool {
+        let mut checker = self.checker.borrow_mut();
+        self.resolver
+            .is_literal_const_declaration(&mut checker, self.program.as_ref(), node)
+    }
+
+    /// Returns the constant *value* declaration emit keeps for a literal `const`
+    /// declaration `node` (`1`/`"a"`/`true`), as a [`LiteralConstValue`]
+    /// descriptor the declaration transformer reconstructs into the kept
+    /// initializer.
+    ///
+    /// Delegates to [`EmitResolver::create_literal_const_value`] against the
+    /// bound program and the owned [`Checker`] (Go's
+    /// `emitResolver.CreateLiteralConstValue`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_transformers::EmitReferenceResolver;
+    /// use tsgo_checker::LiteralConstValue;
+    /// # fn demo(r: &EmitReferenceResolver, decl: tsgo_ast::NodeId) -> Option<LiteralConstValue> {
+    /// r.create_literal_const_value(decl)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may build and cache the declaration's type.
+    // Go: internal/checker/emitresolver.go:EmitResolver.CreateLiteralConstValue
+    pub fn create_literal_const_value(&self, node: NodeId) -> Option<LiteralConstValue> {
+        let mut checker = self.checker.borrow_mut();
+        self.resolver
+            .create_literal_const_value(&mut checker, self.program.as_ref(), node)
     }
 }
 

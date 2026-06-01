@@ -456,7 +456,7 @@
 | `commonjs_named_import` | moduletransforms | ESM→CJS 命名导入 | `import {x} from "m"` → `const m_1 = require("m")` | `NewCommonJSModuleTransformer` | |
 | `jsx_classic_runtime` | jsxtransforms | `<a/>` → createElement | `<a/>` → `React.createElement("a", null)` | `NewJSXTransformer` | |
 | `const_enum_inline` | inliners | const enum 成员内联 | `const enum E{A=1} E.A` → `1 /* E.A */` | `NewConstEnumInliningTransformer` | |
-| `declaration_simple` | declarations | 基础 `.d.ts` 形状 | `export const x = 1;` → `export declare const x: number;` | `NewDeclarationTransformer` | |
+| `declaration_simple` | declarations | 基础 `.d.ts` 形状（**D-F2 实测修正**：字面 const 保留初始化器，非 `: number`）| `export const x = 1;` → `export declare const x = 1;`；`let n = 1;` → `declare let n: number;` | `NewDeclarationTransformer` | ✓（D-F2）|
 
 > 上述行为级 expected 取自 TS/Go 已知降级形态；精确字节由 P10 兜底。const enum/declaration 等依赖 checker（P4），未就绪则该行 `—`。
 
@@ -486,6 +486,24 @@
 | `overload_implementation_is_elided_via_resolver` | 重载实现（带 body）省略，签名保（resolver）| 2 签名 + 1 实现 → 2 `export declare function` | `IsImplementationOfOverload`（`EmitReferenceResolver`）| ✓ |
 | `lone_function_with_body_is_kept_as_signature` | 单声明带 body 函数仍保为签名（无 resolver）| `export function f(x:number):number{return x}` → 签名 | resolver 接线对照 | ✓ |
 | `util::tests::*`（13）| util 纯函数 | `is_always_type`/`is_modifier`/`modifier_kinds_from_flags`/`modifiers_to_flags`/`mask_modifier_flags`(+default fixups)/`combined_modifier_flags`(own + 变量语句折叠)/`effective_declaration_flags`/`has_parameter_property_modifier`/`is_optional_parameter`/`this`-参/`get_first_constructor_with_body`/`node_modifiers` | util.go + ast/checker 可达子集 | ✓ |
+
+### declarations D-F2（推断类型 node 合成，+9 Rust 单测 + 4 doctest；`check_with_resolver`）
+
+> expected 全部取自 `/tmp/tsgo --p tsconfig{declaration,emitDeclarationOnly,strict}` 实测（python `repr`，见 impl.md「D-F2 Go ground truth」表）。每条经 `parse_shared`→`new_declarations_transformer(opt, Some(resolver))`→`emit`。`resolver` = `build_reference_resolver`（同源 parse+bind 的 `BoundProgram` + `Checker`）。
+
+| Rust 测试（`declarations::transform::tests`）| 验证内容 | input → expected | 依据 | 完成 |
+|---|---|---|---|---|
+| `inferred_let_gets_number_annotation` | 无注解非 const `let` → 合成 widened 类型 | `let n = 1;` → `declare let n: number;` | `ensureType`→`CreateTypeOfDeclaration` | ✓ |
+| `inferred_exported_let_gets_number_annotation` | export 保留 + 合成类型 | `export let n = 1;` → `export declare let n: number;` | 同上 + `ensureModifierFlags` | ✓ |
+| `literal_const_keeps_initializer` | **字面 const 保留初始化器**（非合成类型）| `const x = 1;` → `declare const x = 1;`；`export const x = 1;` → `export declare const x = 1;` | `shouldPrintWithInitializer`/`ensureNoInitializer`→`IsLiteralConstDeclaration`/`CreateLiteralConstValue` | ✓ |
+| `literal_const_string_and_boolean_keep_initializer` | 字面 const string/bool 保留 | `const s = "a";` → `declare const s = "a";`；`const b = true;` → `declare const b = true;` | 同上 | ✓ |
+| `inferred_function_return_type` | 无注解函数 body 推断返回类型 | `function f() { return 1; }` → `declare function f(): number;`（+ export 例）| `ensureType`→`CreateReturnTypeOfSignatureDeclaration`→`getReturnTypeFromBody` | ✓ |
+| `inferred_class_property_type` | 无注解类字段推断 | `class C { x = 1; }` → `…{\n    x: number;\n}`；`export class C { s = "h"; }` → `…s: string;` | `transformPropertyDeclaration`→`ensureType` | ✓ |
+| `inferred_array_type_is_number_array` | 数组（非字面 const）→ `number[]` | `interface Array<T> {}\nconst xs = [1, 2];` → `interface Array<T> {\n}\ndeclare const xs: number[];` | `typeToTypeNode` array reference 臂 | ✓ |
+| `inferred_object_literal_type` | 对象字面 → type-literal（多行，属性 widened）| `const o = { a: 1 };` → `…{\n    a: number;\n};`；`{ a: 1, b: "x" }` 例 | `createAnonymousTypeNode`→`synthesize_members` | ✓ |
+| `annotated_const_with_resolver_keeps_annotation` | 无回归：注解 const 仍直通（非字面 const）；注解函数返回直通 | `export const x: number = 1;` → `export declare const x: number;`；`export function f(x: number): void {}` → `export declare function f(x: number): void;` | 注解臂 + `is_literal_const_declaration`=false | ✓ |
+
+> **checker 侧单测**（`tsgo_checker`，见 checker `tests.md`）：`emit_resolver_test` +8（`create_type_of_declaration` widen number/string/boolean/const、array、object、`create_return_type_of_signature_declaration`、`is_literal_const_declaration`、`create_literal_const_value`），`nodebuilder_test` +7（`type_to_type_node` keyword/literal/array/type-ref/union/object/tuple）。
 
 ## tstransforms conformance 切片（P10 端到端兜底）
 
@@ -563,6 +581,6 @@
 | moduletransforms CJS/ESM/AMD parity | 需 `tsc --module` baseline | P10 |
 | jsxtransforms classic/automatic runtime | 需 `tsc --jsx` baseline | P10 |
 | declarations `.d.ts` **注解声明核心**（函数/变量/类/接口/类型别名 + 修饰符 + 重载省略）| ~~依赖 checker~~ → **D-F1 已落地**（34 单测，注解直通）| ✅ 完成 |
-| declarations 推断类型 node 合成（无注解 → `createTypeOfDeclaration`）| 依赖 `EmitResolver::create_type_of_declaration` + 句法 type-node builder + `SymbolTracker` | D-F2 |
+| declarations 推断类型 node 合成（无注解 → `createTypeOfDeclaration`）| ~~依赖 `EmitResolver::create_type_of_declaration` + 句法 type-node builder~~ → **D-F2 已落地**（9 单测 + checker 15 单测；keyword/字面/array/object/函数返回 + 字面 const 保初始化器）| ✅ 完成（异域 type-node + `SymbolTracker` → D-F3）|
 | declarations 可见性/可访问性 gating + isolatedDeclarations 诊断（`tracker.go`/`diagnostics.go`）| 依赖 `is_declaration_visible` 脚本案 + `PrecalculateDeclarationEmitVisibility` + `SymbolTracker` | D-F3 |
 | declarations `.d.ts` 全量（enum/namespace/import·export/`export=`/index sig/literal-const/declaration-map/triple-slash）| 依赖 nodebuilder/modulespecifiers + checker host | P10 |

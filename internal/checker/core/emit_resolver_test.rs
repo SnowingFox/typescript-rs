@@ -919,3 +919,163 @@ fn get_constant_value_of_non_const_enum_property_access_is_none() {
     );
     assert_eq!(resolver.get_constant_value(&p, use_ea), EvalValue::None);
 }
+
+// ── D-F2: create_type_of_declaration + type_to_type_node ───────────────────
+
+use crate::core::emit_resolver::LiteralConstValue;
+use crate::core::nodebuilder::{SynthesizedProperty, SynthesizedTypeNode};
+use tsgo_ast::Kind;
+
+// Go: internal/checker/emitresolver.go:EmitResolver.CreateTypeOfDeclaration
+// (tracer: an un-annotated mutable `let n = 1` widens its inferred literal `1`
+// to the `number` keyword type node — the headline inferred-type-node case).
+#[test]
+fn create_type_of_declaration_widens_let_number() {
+    let p = StubProgram::parse_and_bind("/a.ts", "let n = 1;");
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let n = first_var_declaration(&p, 0);
+    assert_eq!(
+        resolver.create_type_of_declaration(&mut c, &p, n),
+        Some(SynthesizedTypeNode::Keyword(Kind::NumberKeyword))
+    );
+}
+
+// Go: CreateTypeOfDeclaration — a `let s = "a"` widens to `string`, `let b =
+// true` to `boolean` (the widened-literal keyword arms of typeToTypeNode).
+#[test]
+fn create_type_of_declaration_widens_let_string_and_boolean() {
+    let p = StubProgram::parse_and_bind("/a.ts", "let s = \"a\";\nlet b = true;");
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let s = first_var_declaration(&p, 0);
+    let b = first_var_declaration(&p, 1);
+    assert_eq!(
+        resolver.create_type_of_declaration(&mut c, &p, s),
+        Some(SynthesizedTypeNode::Keyword(Kind::StringKeyword))
+    );
+    assert_eq!(
+        resolver.create_type_of_declaration(&mut c, &p, b),
+        Some(SynthesizedTypeNode::Keyword(Kind::BooleanKeyword))
+    );
+}
+
+// Go: CreateTypeOfDeclaration — even a `const x = 1` *widens* its fresh literal
+// to `number` here (`serializeTypeForDeclaration` applies `getWidenedLiteralType`
+// unconditionally). The literal-const initializer carve-out lives in the
+// transformer (`shouldPrintWithInitializer`), not here.
+#[test]
+fn create_type_of_declaration_widens_const_literal() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const x = 1;");
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let x = first_var_declaration(&p, 0);
+    assert_eq!(
+        resolver.create_type_of_declaration(&mut c, &p, x),
+        Some(SynthesizedTypeNode::Keyword(Kind::NumberKeyword))
+    );
+}
+
+// Go: typeToTypeNode object reference arm — a `const xs = [1, 2]` (with a global
+// `Array` in scope) serializes to a `number[]` array type node.
+#[test]
+fn create_type_of_declaration_array_is_array_type_node() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface Array<T> {}\nconst xs = [1, 2];");
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let xs = first_var_declaration(&p, 1);
+    assert_eq!(
+        resolver.create_type_of_declaration(&mut c, &p, xs),
+        Some(SynthesizedTypeNode::Array(Box::new(
+            SynthesizedTypeNode::Keyword(Kind::NumberKeyword)
+        )))
+    );
+}
+
+// Go: createAnonymousTypeNode — a `const o = { a: 1 }` serializes to a
+// `{ a: number; }` type-literal node (the property value widened to `number`).
+#[test]
+fn create_type_of_declaration_object_literal_is_type_literal() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1 };");
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let o = first_var_declaration(&p, 0);
+    assert_eq!(
+        resolver.create_type_of_declaration(&mut c, &p, o),
+        Some(SynthesizedTypeNode::TypeLiteral(vec![
+            SynthesizedProperty {
+                name: "a".to_string(),
+                type_node: SynthesizedTypeNode::Keyword(Kind::NumberKeyword),
+                readonly: false,
+                optional: false,
+            }
+        ]))
+    );
+}
+
+// Go: EmitResolver.CreateReturnTypeOfSignatureDeclaration — an un-annotated
+// `function f() { return 1; }` infers the `number` return type node from its
+// body.
+#[test]
+fn create_return_type_of_signature_declaration_infers_from_body() {
+    let p = StubProgram::parse_and_bind("/a.ts", "function f() { return 1; }");
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let f = statement(&p, 0);
+    assert_eq!(
+        resolver.create_return_type_of_signature_declaration(&mut c, &p, f),
+        Some(SynthesizedTypeNode::Keyword(Kind::NumberKeyword))
+    );
+}
+
+// Go: EmitResolver.IsLiteralConstDeclaration — a `const` whose symbol type is a
+// fresh primitive literal is a literal const (`const x = 1`/`const s = "a"`/
+// `const b = true`); a `let`, or a `const` array/object (non-literal type), is
+// not.
+#[test]
+fn is_literal_const_declaration_detects_fresh_primitive_const() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = 1;\nlet n = 1;\nconst o = { a: 1 };\ninterface Array<T> {}\nconst xs = [1];",
+    );
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let x = first_var_declaration(&p, 0);
+    let n = first_var_declaration(&p, 1);
+    let o = first_var_declaration(&p, 2);
+    let xs = first_var_declaration(&p, 4);
+    assert!(resolver.is_literal_const_declaration(&mut c, &p, x));
+    // A `let` is not a const, so not a literal const.
+    assert!(!resolver.is_literal_const_declaration(&mut c, &p, n));
+    // A `const` object literal's type is not a fresh primitive literal.
+    assert!(!resolver.is_literal_const_declaration(&mut c, &p, o));
+    // A `const` array's type is not a fresh primitive literal.
+    assert!(!resolver.is_literal_const_declaration(&mut c, &p, xs));
+}
+
+// Go: EmitResolver.CreateLiteralConstValue — returns the literal value kept in
+// place of a type for a literal const (`1`/`"a"`/`true`).
+#[test]
+fn create_literal_const_value_reachable_primitives() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const x = 1;\nconst s = \"a\";\nconst b = true;");
+    let mut c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let x = first_var_declaration(&p, 0);
+    let s = first_var_declaration(&p, 1);
+    let b = first_var_declaration(&p, 2);
+    assert_eq!(
+        resolver.create_literal_const_value(&mut c, &p, x),
+        Some(LiteralConstValue::Number {
+            text: "1".to_string(),
+            negative: false
+        })
+    );
+    assert_eq!(
+        resolver.create_literal_const_value(&mut c, &p, s),
+        Some(LiteralConstValue::String("a".to_string()))
+    );
+    assert_eq!(
+        resolver.create_literal_const_value(&mut c, &p, b),
+        Some(LiteralConstValue::Boolean(true))
+    );
+}

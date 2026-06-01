@@ -201,7 +201,7 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 - [x] **D-F1 CORE**：`pub struct DeclarationsTransformer` + `new_declarations_transformer(opt, resolver: Option<EmitReferenceResolver>) -> Transformer`（注解声明核心）—— `visit_source_file`（顶层语句逐条变换 + 重建 `is_declaration_file` 源文件）、`transform_top_level_statement` 路由、`transform_function_declaration`（删 body→签名）、`transform_variable_statement`/`transform_variable_declaration`（删 initializer、保 const/let flags）、`transform_class_declaration`（成员 body/initializer 删、参数属性提升、accessor/ctor、private 仅名）、`transform_interface_declaration`/`transform_type_alias_declaration`（直通，不加 declare）、成员臂（property/method/constructor/get·set accessor + `omit_private_method_type`）、`ensure_modifiers`/`ensure_modifier_flags`（export 保留、declare 顶层加一次、public/async/override 删）、`ensure_type`（注解直通 / 推断 DEFER-D-F2）、`ensure_type_params`/`update_param_list`/`ensure_parameter`（`?`、rest、默认→可选）/`update_accessor_param_list`、`ensure_no_initializer`　`// Go: transform.go:DeclarationTransformer.{visitSourceFile,transformSourceFile,transformFunctionDeclaration,transformVariableStatement,transformClassDeclaration,transformInterfaceDeclaration,transformTypeAliasDeclaration,ensureModifiers,ensureType,...}`
 - [x] **D-F1 CORE** util：`is_always_type`/`node_modifiers`/`combined_modifier_flags`/`effective_declaration_flags`/`mask_modifier_flags`/`is_modifier`/`modifiers_to_flags`/`modifier_kinds_from_flags`/`is_this_parameter`/`get_this_parameter`/`get_first_constructor_with_body`/`has_parameter_property_modifier`/`is_optional_parameter`　`// Go: util.go + ast/utilities.go + checker/checker.go（可达子集）`
 - [x] **D-F1 CORE** resolver 接线：`EmitReferenceResolver::is_implementation_of_overload`（加法式，重载实现签名省略）`// Go: emitresolver.go:IsImplementationOfOverload`
-- [ ] **DEFER-D-F2**：推断类型 node 合成（`ensure_type` 当前注解直通；无注解返 `None`）　blocked-by：`EmitResolver::create_type_of_declaration` + 句法 type-node builder + `SymbolTracker`
+- [x] **D-F2**：推断类型 node 合成 —— `ensure_type` 无注解时经 `EmitReferenceResolver::create_type_of_declaration`（变量/属性/参数）/ `create_return_type_of_signature_declaration`（函数 like 返回）拿 checker 合成的 `SynthesizedTypeNode` 描述符并在 `.d.ts` arena 重建；字面 `const` 改走 `should_print_with_initializer`/`ensure_no_initializer`（消费 `is_literal_const_declaration` + `create_literal_const_value`）保留初始化器。新增 `has_inferred_type`/`is_function_like`/`can_have_literal_initializer`/`node_initializer` 谓词 + `synthesized_type_node_to_ast`/`synthesized_property_to_ast`/`literal_const_value_to_ast` 重建器（既有 arena 构造器：`new_keyword_expression`/`new_array_type_node`/`new_type_literal_node`/`new_property_signature`/`new_type_reference_node`/`new_union_type_node`/`new_tuple_type_node`/`new_literal_type_node`/`new_numeric_literal`/`new_string_literal`/`new_prefix_unary_expression`）。`let n = 1`→`declare let n: number;`、`const x = 1`→`declare const x = 1;`、`function f(){return 1}`→`declare function f(): number;`、`class C{x=1}`→`x: number`、`const xs=[1,2]`→`number[]`、`const o={a:1}`→`{ a: number; }`。`EmitReferenceResolver` 加 additive 透传 `create_type_of_declaration`/`create_return_type_of_signature_declaration`/`is_literal_const_declaration`/`create_literal_const_value`　`// Go: transform.go:ensureType/shouldPrintWithInitializer/ensureNoInitializer`
 - [ ] **DEFER-D-F3**：`SymbolTrackerImpl` + `new_symbol_tracker` + `SymbolTrackerSharedState`（`tracker.go`）；`SymbolAccessibilityDiagnostic` + `GetSymbolAccessibilityDiagnostic` 回调表（`diagnostics.go`）；可见性/可访问性 gating（非导出脚本声明 vs module、late-painted import alias）+ isolatedDeclarations 诊断　blocked-by：`EmitResolver::is_declaration_visible` 脚本文件案 + `PrecalculateDeclarationEmitVisibility`
 - [ ] **DEFER**：`DeclarationEmitHost`/`OutputPaths`（host 抽象，需 `compiler.Program` P6）；enum/namespace/import·export/`export =`/`export default`/index signature/literal-const initializer/binding-pattern var·param-prop/JS·expando/declaration-map/triple-slash　`// Go: transform.go:NewDeclarationTransformer`
 
@@ -1828,6 +1828,66 @@ checker 4aw 的 `get_type_reference_serialization_kind(&self, checker: &mut Chec
 - **DEFER-D-F3 可见性/可访问性 gating + 诊断**：所有可达顶层声明均发；非导出声明不省略（脚本 vs module 可见性分流 + late-painted import-alias 未建模）；无诊断。`tracker.rs`/`diagnostics.rs` 未创建。blocked-by：`EmitResolver::is_declaration_visible` 脚本文件案 + `PrecalculateDeclarationEmitVisibility` + `SymbolTracker`。
 - **DEFER 字面 const initializer**（`declare const x = 1`）：`shouldPrintWithInitializer` 视作 false，initializer 恒删。blocked-by：`EmitResolver::is_literal_const_declaration` + `CreateLiteralConstValue`。
 - **DEFER 其它顶层/成员种类**：enum、namespace/module、import/export、`export =`/`export default`、index signature、binding-pattern 变量/参数属性、JS/expando、declaration-map（`.d.ts.map`）、triple-slash 指令、heritage base-expression 提升、type-node 内的 entity-name 可见性检查 / import-type module-specifier 重写。blocked-by：enum 常量折叠接线 / module-specifier 重写 / resolver host / nodebuilder。
+
+## D-F2 worklog（declarations 推断类型 node 合成 — 跨 crate 协调，red→green 推进记录）
+
+> **目标**：填上 D-F1 的洞 —— 无注解声明经 checker 节点构造器合成句法 type-node 注入 `.d.ts`。**跨 crate**（checker + transformers，深链单 lane）。checker 侧建 `EmitResolver::create_type_of_declaration`/`create_return_type_of_signature_declaration` + nodebuilder `type_to_type_node`（type → `SynthesizedTypeNode` 描述符）+ 字面 const（`is_literal_const_declaration`/`create_literal_const_value`）；transformers 侧 `ensure_type` 无注解臂消费描述符并在自身 arena 重建。
+
+### Go ground truth（`/tmp/tsgo --p tsconfig{declaration,emitDeclarationOnly,strict}` 实测，逐 snippet，python `repr`）
+
+| 输入 | `.d.ts` 输出 | 说明 |
+|---|---|---|
+| `export const x = 1;` | `export declare const x = 1;` | **字面 const 保留初始化器**（非 `: number`！）|
+| `const s = "a";` | `declare const s = "a";` | 字面 const |
+| `const b = true;` | `declare const b = true;` | 字面 const |
+| `let n = 1;` | `declare let n: number;` | **非 const → 合成 widened 类型**（真·推断 type-node）|
+| `function f() { return 1; }` | `declare function f(): number;` | body 推断返回类型 |
+| `export function f() { return 1; }` | `export declare function f(): number;` | |
+| `class C { x = 1; }` | `declare class C {\n    x: number;\n}` | 属性推断 |
+| `const xs = [1, 2];` | `declare const xs: number[];` | 数组非字面 const → 合成 `number[]` |
+| `const o = { a: 1 };` | `declare const o: {\n    a: number;\n};` | 对象字面 → type-literal（属性 widened）|
+| `export const x: number = 1;` | `export declare const x: number;` | 注解直通（D-F1 既有）|
+
+> **关键发现 / 偏离纠正**：briefing 的切片把 `const x = 1` 写成 `→ : number`，但**真实 Go 保留 `= 1`**（`isLiteralConstDeclaration` → `shouldPrintWithInitializer`）。遵 "FOLLOW GO"：本轮**实现**了字面 const 路径（briefing DEFER 列表本拟推迟，但实测要求它才能匹配 Go），故 `const x = 1` → `declare const x = 1;`，而 `let n = 1`/数组/对象/类属性/函数返回才是真正合成 type-node 的可达面。全部 byte-for-byte 匹配 Go。
+
+### 架构决策（两-arena 桥）
+
+checker 的 `BoundProgram` arena 与 transformer 的 `EmitContext` arena 独立（无法跨 arena 传 `NodeId`），故镜像既有 `SerializedTypeNode`（元数据 4at/4av）模式：checker 的 `type_to_type_node` 返回**闭合描述符** `SynthesizedTypeNode`（keyword / 字面 / `T[]` / `Foo<...>` / union / intersection / tuple / `{ ... }` type-literal / `typeof N`），transformer 在自身 arena 重建 AST。`create_literal_const_value` 同理返回 `LiteralConstValue`（number/string/boolean）。这是受认可的、必要的偏离（Go `typeToTypeNode` 直接在 `EmitContext.Factory` 建节点）。
+
+### red→green 垂直切片（每片：测试 → 实测 → 最小实现）
+
+- checker 侧（unit，emit_resolver_test/nodebuilder_test）：
+  1. `create_type_of_declaration(let n = 1)` → `Keyword(NumberKeyword)`（tracer，函数缺失 = 编译红）。RED 后建 `SynthesizedTypeNode` + nodebuilder `type_to_type_node`（keyword 臂）+ emit_resolver `create_type_of_declaration`（`getWidenedLiteralType(getTypeOfSymbol)`）。
+  2. string/boolean：`let b = true` 起初产 `Union([false,true])`（Rust 把 `boolean` 表示为 `false|true` union 单例，无 `BOOLEAN` flag）→ 加 `ty == checker.boolean_type()` 单例判定（Go `flags & TypeFlagsBoolean` 的可达 stand-in）。
+  3. `const x = 1` → `Keyword(Number)`（`serializeTypeForDeclaration` 无条件 widen 字面；字面 const 的初始化器保留逻辑在 transformer 而非此）。
+  4. array：`type_to_type_node` reference 臂 detect target 符号名 `Array` + 1 实参 → `Array(elem)`（`createArrayLiteralType` 按名解析 `Array` 的同款 stand-in）。
+  5. object：anonymous object → `synthesize_members` → `TypeLiteral([SynthesizedProperty])`（属性 `check_expression_for_mutable_location` 已 widen `1`→`number`）。
+  6. 函数返回：`create_return_type_of_signature_declaration` 初产 `any`（`function_like_body` 只覆盖 arrow/fn-expr）→ 扩 `function_like_body` 覆盖 FunctionDeclaration/MethodDeclaration/GetAccessor（唯一调用者是 body 推断，安全）+ `get_return_type_from_body` 升 `pub(crate)`。
+  7. `is_literal_const_declaration`（var const + `is_fresh_literal_type`）+ `create_literal_const_value`（字面值 → 描述符）。
+- transformers 侧（end-to-end，transform_test，`check_with_resolver`）：
+  1. `let n = 1;` → `declare let n: number;`（tracer；RED：D-F1 `ensure_type` 无注解返 `None` → `declare let n;`）。重构 `ensure_type`：private→nil；`should_print_with_initializer`→nil；注解直通；否则 resolver 合成（`has_inferred_type`→`create_type_of_declaration`，`is_function_like`→`create_return_type_of_signature_declaration`），`synthesized_type_node_to_ast` 重建，nil→`any` keyword。
+  2. `const x = 1;` → `declare const x = 1;`（`should_print_with_initializer` + `ensure_no_initializer` 经 `create_literal_const_value` 重建）。
+  3. string/bool 字面 const、函数返回、类属性、数组（`interface Array<T>{}` 提供全局）、对象字面，各 1 片，全部对齐实测。
+  7. 无回归：注解 const（`is_literal_const_declaration`=false 因类型非 fresh 字面）仍直通注解。
+
+### 交付（`internal/checker/**` + `internal/transformers/**` + docs）
+
+- **checker**：`core/nodebuilder.rs` 加 `pub enum SynthesizedTypeNode` + `pub struct SynthesizedProperty` + `pub fn type_to_type_node` + `synthesize_members`；`core/emit_resolver.rs` 加 `pub enum LiteralConstValue` + `create_type_of_declaration`/`create_return_type_of_signature_declaration`/`is_literal_const_declaration`/`create_literal_const_value`；`core/check.rs` `get_return_type_from_body` + `function_like_body`（扩 FunctionDeclaration/Method/GetAccessor）→ `pub(crate)`；`core/declared_types.rs` `combined_node_flags` → `pub(crate)`；`lib.rs` 加法 re-export。
+- **transformers**：`lib.rs` `EmitReferenceResolver` 加 4 个 additive 透传方法；`declarations/transform.rs` 重构 `ensure_type`/`ensure_no_initializer` + 加 `should_print_with_initializer` + 谓词/重建器自由函数。
+- **ZERO** `internal/ast`/`internal/printer`/`internal/binder` 改动；ZERO `.go` 改动；ZERO 既有 `pub fn` 签名变更（全 additive）。`cargo build -p tsgo_compiler` 绿（证明 API 加法）。
+
+### 测试计数
+
+- `tsgo_checker` **720→735 unit**（+15：emit_resolver +8、nodebuilder +7）+ doctest **169→177**（+8：新 pub 项 doc examples）。
+- `tsgo_transformers` **286→295 unit**（+9：D-F2 切片）+ doctest **53→57**（+4：4 透传方法）。
+- **无既有测试弱化/删除**。gate 全绿（test/clippy `-D warnings`/fmt 双 crate + compiler build）。未 `git commit`（父级提交）。
+
+### DEFER（本轮确认 blocked-by）
+
+- **DEFER-D-F3 可见性/可访问性 + isolatedDeclarations 诊断**：`SymbolTracker`（`tracker.go`/`diagnostics.go`）未建；`ensureType` 的 `errorNameNode`/`getSymbolAccessibilityDiagnostic`/`checkEntityNameVisibility`、`requiresAddingImplicitUndefined`（可选参数 `| undefined`）、`ReportInferenceFallback`（非原始字面初始化器）均未接。blocked-by：`SymbolTracker` + `IsEntityNameVisible` + `requiresAddingImplicitUndefined`。
+- **DEFER 异域 type-node**：泛型类型参数、function/constructor 类型节点（`(x:T)=>R`/`new ()=>C`）、`keyof`/indexed-access/conditional/template-literal/string-mapping、import-type、bigint 字面类型、enum 成员点号形（`E.A`）、union 展开 enum、deep generic 实例 → `type_to_type_node` 返 `None`，`ensure_type` 回落 `any` keyword（Go 会产更具体节点）。blocked-by：各类型构造器节点序列化 + `serializeReturnTypeForSignature` 的 pseudochecker 复用 + 真实 lib 全局 `Array`/`Promise`。
+- **DEFER 字面 const readonly 臂**：`is_literal_const_declaration` 仅覆盖 `var const`；`isDeclarationReadonly`（readonly 字段/参数属性）未接。blocked-by：属性 readonly 修饰符解析。
+- **DEFER accessor write-type / 注解复用 / mapper**：`serializeTypeForDeclaration` 的 setter `getWriteTypeOfSymbol`、`enclosingSymbolTypes` 复用、`tryReuse` pseudochecker 注解复用、`instantiateType` mapper 均未接（直接 `getWidenedLiteralType(getTypeOfSymbol)` + `typeToTypeNode`）。blocked-by：accessor 写类型 + pseudochecker。
 
 ## TDD 推进顺序（tracer bullet → 增量）
 

@@ -13,17 +13,18 @@
 //! alias/reference/host-dependent queries are deferred (see the per-method
 //! `// blocked-by:` notes).
 
-use tsgo_ast::{Kind, ModifierFlags, NodeData, NodeId, SymbolFlags, SymbolId};
+use tsgo_ast::{Kind, ModifierFlags, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId};
 use tsgo_evaluator::EvalValue;
 
 use super::declared_types::{
-    get_declared_type_of_symbol, get_enum_member_value as declared_enum_member_value,
-    get_type_of_symbol,
+    combined_node_flags, get_declared_type_of_symbol,
+    get_enum_member_value as declared_enum_member_value, get_type_of_symbol,
 };
-use super::nodebuilder::type_to_string;
+use super::nodebuilder::{type_to_string, type_to_type_node, SynthesizedTypeNode};
 use super::program::BoundProgram;
 use super::symbols::resolve_name;
 use super::symbols_query::get_symbol_of_declaration;
+use super::types::{LiteralValue, TypeFlags};
 use super::Checker;
 
 /// The checker's emit-time query surface (Go's `EmitResolver`).
@@ -168,6 +169,43 @@ pub enum TypeReferenceSerializationKind {
     ObjectType,
 }
 
+/// The constant *value expression* declaration emit keeps in place of a type for
+/// a literal `const` (`declare const x = 1;`), the closed descriptor the
+/// declaration transformer reconstructs into AST.
+///
+/// Go's `CreateLiteralConstValue` builds the expression directly in the emit
+/// context's factory (`NewNumericLiteral` / `NewStringLiteral` /
+/// `NewKeywordExpression`); like [`SynthesizedTypeNode`] this *names* that result
+/// for the transformer to rebuild across the two-arena split.
+///
+/// 4 (D-F2) ports the reachable primitive-literal subset (number/string/
+/// boolean). The enum-member (`SymbolToExpression`) and bigint arms are
+/// deferred.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::LiteralConstValue;
+/// assert_eq!(LiteralConstValue::Boolean(true), LiteralConstValue::Boolean(true));
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/emitresolver.go:EmitResolver.CreateLiteralConstValue
+#[derive(Clone, Debug, PartialEq)]
+pub enum LiteralConstValue {
+    /// A numeric literal value (`1` / `-1`); `text` is the unsigned literal
+    /// text, `negative` a leading unary minus.
+    Number {
+        /// The unsigned literal text.
+        text: String,
+        /// Whether the value is negative (a leading unary minus).
+        negative: bool,
+    },
+    /// A string literal value (`"a"`); the unescaped text.
+    String(String),
+    /// A boolean literal value (`true`/`false`).
+    Boolean(bool),
+}
+
 impl EmitResolver {
     /// Reports whether `node`'s declaration is visible to declaration emit
     /// (Go's `IsDeclarationVisible`).
@@ -235,6 +273,202 @@ impl EmitResolver {
             None => checker.error_type(),
         };
         type_to_string(checker, program, ty)
+    }
+
+    /// Synthesizes the *type node* declaration emit annotates `declaration` with
+    /// when it has no explicit annotation (Go's `CreateTypeOfDeclaration`).
+    ///
+    /// Mirrors Go's `CreateTypeOfDeclaration` -> `SerializeTypeForDeclaration`:
+    /// the declaration's symbol type is taken and *widened* to its base
+    /// primitive (`getWidenedLiteralType(getTypeOfSymbol(symbol))`), then run
+    /// through the node builder's [`type_to_type_node`]. So `let n = 1` yields a
+    /// `number` keyword node, `const xs = [1, 2]` (with a global `Array`) a
+    /// `number[]` array node, and `const o = { a: 1 }` a `{ a: number; }`
+    /// type-literal. The result is a [`SynthesizedTypeNode`] descriptor the
+    /// declaration transformer reconstructs into AST in its own arena.
+    ///
+    /// A node with no symbol, or whose type the reachable node builder cannot
+    /// serialize, falls back to the `any` keyword (Go's
+    /// `serializeTypeForDeclaration` `result == nil` tail).
+    ///
+    /// DEFER(phase-5-emit-D-F3): the accessor write-type path
+    /// (`getWriteTypeOfSymbol`), the `enclosingSymbolTypes` reuse, the
+    /// `requiresAddingImplicitUndefined` optional-parameter widening, the
+    /// pseudo-type annotation reuse (`tryReuse`), the `instantiateType` mapper,
+    /// and the `SymbolTracker` accessibility reporting. blocked-by: accessor
+    /// write types + pseudochecker reuse + the symbol tracker (D-F3).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker, EmitResolver, SynthesizedTypeNode};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> Option<SynthesizedTypeNode> {
+    /// r.create_type_of_declaration(c, p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may resolve and cache the declaration's type.
+    // Go: internal/checker/emitresolver.go:EmitResolver.CreateTypeOfDeclaration
+    pub fn create_type_of_declaration(
+        &self,
+        checker: &mut Checker,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> Option<SynthesizedTypeNode> {
+        // Go: symbol = getSymbolOfDeclaration(declaration); then
+        // serializeTypeForDeclaration computes
+        // `t = getWidenedLiteralType(getTypeOfSymbol(symbol))`.
+        let symbol = get_symbol_of_declaration(program, node)?;
+        let ty = get_type_of_symbol(checker, program, symbol, None);
+        let widened = checker.get_widened_literal_type(ty);
+        Some(
+            type_to_type_node(checker, program, widened)
+                .unwrap_or(SynthesizedTypeNode::Keyword(Kind::AnyKeyword)),
+        )
+    }
+
+    /// Synthesizes the *return type node* declaration emit annotates a
+    /// function-like declaration with when it has no return annotation (Go's
+    /// `CreateReturnTypeOfSignatureDeclaration`).
+    ///
+    /// Mirrors Go's `CreateReturnTypeOfSignatureDeclaration` ->
+    /// `SerializeReturnTypeForSignature` -> `getReturnTypeOfSignature`: the
+    /// reachable subset infers the return type from the body
+    /// (`getReturnTypeFromBody`), so `function f() { return 1; }` yields a
+    /// `number` keyword node. A bodyless declaration degrades to the `any`
+    /// keyword (its return type is `any`).
+    ///
+    /// DEFER(phase-5-emit-D-F3): the annotated-signature reuse, the
+    /// `enclosingSymbolTypes` reuse, the pseudo-type annotation reuse, the
+    /// inferred type-predicate path, `SuppressAnyReturnType`, and the
+    /// `SymbolTracker`. blocked-by: signature-scope node building + pseudochecker
+    /// reuse + the symbol tracker (D-F3).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker, EmitResolver, SynthesizedTypeNode};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> Option<SynthesizedTypeNode> {
+    /// r.create_return_type_of_signature_declaration(c, p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may check the function body and cache its return type.
+    // Go: internal/checker/emitresolver.go:EmitResolver.CreateReturnTypeOfSignatureDeclaration
+    pub fn create_return_type_of_signature_declaration(
+        &self,
+        checker: &mut Checker,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> Option<SynthesizedTypeNode> {
+        // Go: getSignatureFromDeclaration(node) -> getReturnTypeOfSignature.
+        // The reachable subset has no body-based inference in
+        // `getSignatureFromDeclaration` (it yields `any`), so the return type is
+        // inferred from the body here (Go's `getReturnTypeFromBody`, which
+        // `getReturnTypeOfSignature` calls for an un-annotated function).
+        let return_type = checker.get_return_type_from_body(program, node);
+        Some(
+            type_to_type_node(checker, program, return_type)
+                .unwrap_or(SynthesizedTypeNode::Keyword(Kind::AnyKeyword)),
+        )
+    }
+
+    /// Reports whether `node` is a *literal const* declaration whose initializer
+    /// declaration emit keeps verbatim instead of a synthesized type (so
+    /// `const x = 1` emits `declare const x = 1;`, Go's
+    /// `IsLiteralConstDeclaration`).
+    ///
+    /// 4 (D-F2) ports the reachable `var const` arm: a `const` variable
+    /// declaration whose symbol type is a *fresh* literal (`1` / `"a"` /
+    /// `true`). The `isDeclarationReadonly` arm (a `readonly` property /
+    /// parameter property) is deferred.
+    ///
+    /// DEFER(phase-5-emit-later): `isDeclarationReadonly` (readonly fields). An
+    /// array/object/enum const is not a literal const (its type is not a fresh
+    /// primitive literal), so it correctly takes a synthesized type instead.
+    /// blocked-by: readonly-modifier resolution on properties/parameters.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker, EmitResolver};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// r.is_literal_const_declaration(c, p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may resolve and cache the declaration's type.
+    // Go: internal/checker/emitresolver.go:EmitResolver.IsLiteralConstDeclaration
+    pub fn is_literal_const_declaration(
+        &self,
+        checker: &mut Checker,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        // Go: isDeclarationReadonly(node) || (IsVariableDeclaration(node) &&
+        // IsVarConst(node)). DEFER: the readonly arm.
+        let is_var_const = program.arena().kind(node) == Kind::VariableDeclaration
+            && combined_node_flags(program, node).intersects(NodeFlags::CONSTANT);
+        if !is_var_const {
+            return false;
+        }
+        // Go: isFreshLiteralType(getTypeOfSymbol(getSymbolOfDeclaration(node))).
+        let Some(symbol) = get_symbol_of_declaration(program, node) else {
+            return false;
+        };
+        let ty = get_type_of_symbol(checker, program, symbol, None);
+        checker.is_fresh_literal_type(ty)
+    }
+
+    /// Returns the constant *value expression* declaration emit keeps for a
+    /// literal `const` declaration (Go's `CreateLiteralConstValue`).
+    ///
+    /// 4 (D-F2) ports the reachable primitive-literal subset: the declaration's
+    /// symbol type's literal value is returned as a [`LiteralConstValue`]
+    /// (number/string/boolean), which the declaration transformer rebuilds into
+    /// the kept initializer. A non-literal type yields `None`.
+    ///
+    /// DEFER(phase-5-emit-later): the enum-like (`SymbolToExpression`) and
+    /// bigint / `Infinity` / `NaN` arms, and the `regularTrue`/`regularFalse`
+    /// special-casing. blocked-by: enum symbol-to-expression + bigint literal
+    /// values.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker, EmitResolver, LiteralConstValue};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> Option<LiteralConstValue> {
+    /// r.create_literal_const_value(c, p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may resolve and cache the declaration's type.
+    // Go: internal/checker/emitresolver.go:EmitResolver.CreateLiteralConstValue
+    pub fn create_literal_const_value(
+        &self,
+        checker: &mut Checker,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> Option<LiteralConstValue> {
+        let symbol = get_symbol_of_declaration(program, node)?;
+        let ty = get_type_of_symbol(checker, program, symbol, None);
+        // Go: enum-like -> SymbolToExpression (DEFER); trueType/falseType ->
+        // keyword; then `if t.flags & Literal == 0 { return nil }` and a switch
+        // on the literal value. The reachable subset is the primitive-literal
+        // switch (boolean handled via its literal value).
+        if !checker.get_type(ty).flags().intersects(TypeFlags::LITERAL) {
+            return None;
+        }
+        match checker.get_type(ty).literal_value()? {
+            LiteralValue::String(s) => Some(LiteralConstValue::String(s.clone())),
+            LiteralValue::Boolean(b) => Some(LiteralConstValue::Boolean(*b)),
+            LiteralValue::Number(n) => {
+                let value = f64::from(*n);
+                let negative = value < 0.0;
+                let text = if negative {
+                    (-value).to_string()
+                } else {
+                    value.to_string()
+                };
+                Some(LiteralConstValue::Number { text, negative })
+            }
+        }
     }
 
     /// Resolves an identifier *use* (`node`, in value position) to the

@@ -24,12 +24,23 @@
 //! [`is_implementation_of_overload`](crate::EmitReferenceResolver::is_implementation_of_overload)
 //! query, which elides an overload set's implementation signature.
 //!
+//! # Round D-F2: inferred-type node synthesis
+//!
+//! `ensure_type` now fills the inferred-type hole: when a declaration has no
+//! explicit annotation, it asks the [`EmitReferenceResolver`] to synthesize one
+//! (`create_type_of_declaration` for a variable / property / parameter,
+//! `create_return_type_of_signature_declaration` for a function-like return
+//! type) and reconstructs the returned
+//! [`SynthesizedTypeNode`](tsgo_checker::SynthesizedTypeNode) descriptor into the
+//! `.d.ts` arena. A *literal* `const` instead keeps its initializer verbatim
+//! (`should_print_with_initializer` / `ensure_no_initializer` consult
+//! `is_literal_const_declaration` + `create_literal_const_value`), mirroring Go.
+//! So `let n = 1` → `declare let n: number;`, `const x = 1` →
+//! `declare const x = 1;`, `function f() { return 1; }` →
+//! `declare function f(): number;`, `class C { x = 1; }` → `x: number;`.
+//!
 //! # Deferred (with blocked-by)
 //!
-//! - **Inferred types (no annotation) → D-F2.** `ensure_type` returns the
-//!   existing annotation; an un-annotated declaration yields `None` (no
-//!   synthesized type). blocked-by: `EmitResolver::create_type_of_declaration`
-//!   + the syntactic type-node builder + `SymbolTracker`.
 //! - **Visibility / accessibility gating + isolatedDeclarations diagnostics →
 //!   D-F3.** Every reachable top-level declaration is emitted; non-exported
 //!   declarations are not elided (the script-vs-module visibility split and the
@@ -47,7 +58,10 @@
 //!   constant folding wiring / module-specifier rewriting / the resolver host.
 
 use crate::{new_transformer, EmitReferenceResolver, TransformOptions, Transformer};
-use tsgo_ast::{Kind, ModifierFlags, ModifierList, NodeArena, NodeData, NodeId, NodeList};
+use tsgo_ast::{
+    Kind, ModifierFlags, ModifierList, NodeArena, NodeData, NodeId, NodeList, TokenFlags,
+};
+use tsgo_checker::{LiteralConstValue, SynthesizedProperty, SynthesizedTypeNode};
 use tsgo_printer::EmitContext;
 
 use super::util::{
@@ -261,7 +275,8 @@ impl DeclarationsTransformer {
             _ => unreachable!("kind/data mismatch"),
         };
         let type_node = self.ensure_type(arena, node, false);
-        arena.new_variable_declaration(name, None, type_node, self.ensure_no_initializer())
+        let initializer = self.ensure_no_initializer(arena, node);
+        arena.new_variable_declaration(name, None, type_node, initializer)
     }
 
     /// Transforms a class declaration into an ambient class: member bodies and
@@ -304,13 +319,9 @@ impl DeclarationsTransformer {
                 if arena.kind(pname) == Kind::Identifier {
                     let pmods = self.ensure_modifiers(arena, param);
                     let ptype = self.ensure_type(arena, param, false);
-                    let prop = arena.new_property_declaration(
-                        pmods,
-                        pname,
-                        question_token,
-                        ptype,
-                        self.ensure_no_initializer(),
-                    );
+                    let pinit = self.ensure_no_initializer(arena, param);
+                    let prop =
+                        arena.new_property_declaration(pmods, pname, question_token, ptype, pinit);
                     member_nodes.push(prop);
                 }
             }
@@ -414,13 +425,8 @@ impl DeclarationsTransformer {
         let postfix_token = postfix_token.filter(|&t| arena.kind(t) != Kind::ExclamationToken);
         let modifiers = self.ensure_modifiers(arena, node);
         let type_node = self.ensure_type(arena, node, false);
-        Some(arena.new_property_declaration(
-            modifiers,
-            name,
-            postfix_token,
-            type_node,
-            self.ensure_no_initializer(),
-        ))
+        let initializer = self.ensure_no_initializer(arena, node);
+        Some(arena.new_property_declaration(modifiers, name, postfix_token, type_node, initializer))
     }
 
     /// Transforms a class method into its signature (body removed), or a
@@ -580,12 +586,26 @@ impl DeclarationsTransformer {
     // --- shared helpers --------------------------------------------------
 
     /// Returns the type node to emit for declaration `node`: the existing
-    /// annotation (annotated path), or `None` when the type would be inferred
-    /// (deferred) or the node is `private` and not exempt.
+    /// annotation (annotated path), a synthesized type for an inferred
+    /// declaration (D-F2), or `None` when the node is a literal `const` (whose
+    /// initializer is kept instead) or `private` and not exempt.
     ///
-    /// Side effects: none (reads `arena`).
+    /// The inferred path (D-F2) asks the resolver to synthesize a type: a
+    /// variable / property / parameter takes its widened declared type
+    /// (`create_type_of_declaration`), a function-like takes its inferred return
+    /// type (`create_return_type_of_signature_declaration`); the returned
+    /// [`SynthesizedTypeNode`] descriptor is reconstructed into `arena`. When no
+    /// resolver is wired (the bare-context path), an un-annotated declaration
+    /// emits no type, preserving the pre-D-F2 behavior.
+    ///
+    /// Side effects: may push synthesized type nodes onto `arena`.
     // Go: internal/transformers/declarations/transform.go:DeclarationTransformer.ensureType
-    fn ensure_type(&self, arena: &NodeArena, node: NodeId, ignore_private: bool) -> Option<NodeId> {
+    fn ensure_type(
+        &self,
+        arena: &mut NodeArena,
+        node: NodeId,
+        ignore_private: bool,
+    ) -> Option<NodeId> {
         if !ignore_private
             && effective_declaration_flags(arena, node, ModifierFlags::PRIVATE)
                 .contains(ModifierFlags::PRIVATE)
@@ -594,25 +614,71 @@ impl DeclarationsTransformer {
             // whose parameter types are visible — handled via `ignore_private`).
             return None;
         }
-        // DEFER(D-F1): `shouldPrintWithInitializer` (literal-const) is treated as
-        // false, so a literal const keeps no initializer-in-place-of-type.
-        //
+        // A literal `const` keeps its initializer (`ensure_no_initializer`)
+        // rather than a type (Go's `shouldPrintWithInitializer`).
+        if self.should_print_with_initializer(arena, node) {
+            return None;
+        }
         // Annotated path: copy the existing annotation as-is (DEFER(D-F3): the
         // entity-name visibility checks and import-type module-specifier
-        // rewriting Go's `Visitor().Visit(type)` performs). A `None` result is
-        // the inferred-type case — DEFER(D-F2): `createTypeOfDeclaration` + the
-        // syntactic type-node builder.
-        node_type_annotation(arena, node)
+        // rewriting Go's `Visitor().Visit(type)` performs).
+        if let Some(annotation) = node_type_annotation(arena, node) {
+            return Some(annotation);
+        }
+        // Inferred path (D-F2): synthesize a type via the resolver. Without a
+        // resolver the type cannot be inferred, so no type is emitted (the
+        // pre-D-F2 behavior).
+        let resolver = self.resolver.as_ref()?;
+        let synthesized = if has_inferred_type(arena, node) {
+            // Go: ast.HasInferredType(node) -> CreateTypeOfDeclaration.
+            resolver.create_type_of_declaration(node)
+        } else if is_function_like(arena, node) {
+            // Go: ast.IsFunctionLike(node) -> CreateReturnTypeOfSignatureDeclaration.
+            resolver.create_return_type_of_signature_declaration(node)
+        } else {
+            None
+        };
+        // Go: `if typeNode == nil { return NewKeywordTypeNode(KindAnyKeyword) }`.
+        Some(match synthesized {
+            Some(t) => synthesized_type_node_to_ast(arena, &t),
+            None => arena.new_keyword_expression(Kind::AnyKeyword),
+        })
     }
 
-    /// Returns the initializer to keep for a declaration, always `None` in the
-    /// reachable subset (initializers are stripped).
+    /// Reports whether declaration `node`'s initializer is kept verbatim in the
+    /// `.d.ts` (a literal `const`, e.g. `const x = 1` -> `declare const x = 1;`),
+    /// Go's `shouldPrintWithInitializer`.
     ///
-    /// Side effects: none.
+    /// Side effects: may build and cache the declaration's type (via the
+    /// resolver).
+    // Go: internal/transformers/declarations/transform.go:DeclarationTransformer.shouldPrintWithInitializer
+    fn should_print_with_initializer(&self, arena: &NodeArena, node: NodeId) -> bool {
+        let Some(resolver) = self.resolver.as_ref() else {
+            // No resolver: cannot determine literal-const-ness, so the
+            // initializer is always stripped (the pre-D-F2 behavior).
+            return false;
+        };
+        can_have_literal_initializer(arena, node)
+            && node_initializer(arena, node).is_some()
+            && resolver.is_literal_const_declaration(node)
+    }
+
+    /// Returns the initializer to keep for a declaration: the literal value for a
+    /// literal `const` (`= 1`), else `None` (initializers are stripped).
+    ///
+    /// Side effects: may push the rebuilt literal value onto `arena`.
     // Go: internal/transformers/declarations/transform.go:DeclarationTransformer.ensureNoInitializer
-    fn ensure_no_initializer(&self) -> Option<NodeId> {
-        // DEFER(D-F1): the literal-const carve-out (`shouldPrintWithInitializer`)
-        // keeps a `const x = 1` initializer; not modelled here.
+    fn ensure_no_initializer(&self, arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
+        if self.should_print_with_initializer(arena, node) {
+            // DEFER(D-F3): Go's `ReportInferenceFallback` when the unwrapped
+            // initializer is not a primitive literal value (an isolatedModules
+            // diagnostic); not modelled here.
+            if let Some(resolver) = self.resolver.as_ref() {
+                if let Some(value) = resolver.create_literal_const_value(node) {
+                    return Some(literal_const_value_to_ast(arena, &value));
+                }
+            }
+        }
         None
     }
 
@@ -680,13 +746,14 @@ impl DeclarationsTransformer {
             None
         };
         let type_node = self.ensure_type(arena, param, true);
+        let initializer = self.ensure_no_initializer(arena, param);
         arena.new_parameter_declaration(
             None,
             dot_dot_dot_token,
             name,
             question_token,
             type_node,
-            self.ensure_no_initializer(),
+            initializer,
         )
     }
 
@@ -772,6 +839,229 @@ fn node_type_annotation(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
         NodeData::MethodDeclaration(d) => d.type_node,
         NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => d.type_node,
         _ => None,
+    }
+}
+
+/// Returns the initializer node of declaration `node`, for the kinds that can
+/// carry a literal const initializer (Go's `node.Initializer()`).
+///
+/// Side effects: none (pure).
+// Go: internal/ast/ast.go:Node.Initializer
+fn node_initializer(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
+    match arena.data(node) {
+        NodeData::VariableDeclaration(d) => d.initializer,
+        NodeData::ParameterDeclaration(d) => d.initializer,
+        NodeData::PropertyDeclaration(d) => d.initializer,
+        NodeData::PropertySignature(d) => d.initializer,
+        _ => None,
+    }
+}
+
+/// Reports whether declaration `node`'s type is *inferred* when unannotated, so
+/// declaration emit synthesizes it via `CreateTypeOfDeclaration` (Go's
+/// `ast.HasInferredType`).
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:HasInferredType
+fn has_inferred_type(arena: &NodeArena, node: NodeId) -> bool {
+    matches!(
+        arena.kind(node),
+        Kind::Parameter
+            | Kind::PropertySignature
+            | Kind::PropertyDeclaration
+            | Kind::BindingElement
+            | Kind::PropertyAccessExpression
+            | Kind::ElementAccessExpression
+            | Kind::BinaryExpression
+            | Kind::CallExpression
+            | Kind::VariableDeclaration
+            | Kind::ExportAssignment
+            | Kind::PropertyAssignment
+            | Kind::ShorthandPropertyAssignment
+    )
+}
+
+/// Reports whether `node` is a function-like declaration (so declaration emit
+/// synthesizes its return type via `CreateReturnTypeOfSignatureDeclaration`),
+/// Go's `ast.IsFunctionLike`.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsFunctionLike
+fn is_function_like(arena: &NodeArena, node: NodeId) -> bool {
+    matches!(
+        arena.kind(node),
+        Kind::MethodSignature
+            | Kind::CallSignature
+            | Kind::ConstructSignature
+            | Kind::IndexSignature
+            | Kind::FunctionType
+            | Kind::ConstructorType
+            | Kind::FunctionDeclaration
+            | Kind::MethodDeclaration
+            | Kind::Constructor
+            | Kind::GetAccessor
+            | Kind::SetAccessor
+            | Kind::FunctionExpression
+            | Kind::ArrowFunction
+    )
+}
+
+/// Reports whether declaration `node` may keep a literal const initializer in
+/// the `.d.ts` (Go's `canHaveLiteralInitializer`): a non-`private` property /
+/// property signature, a parameter, or a variable declaration.
+///
+/// Side effects: none (reads `arena`).
+// Go: internal/transformers/declarations/util.go:canHaveLiteralInitializer
+fn can_have_literal_initializer(arena: &NodeArena, node: NodeId) -> bool {
+    match arena.kind(node) {
+        Kind::PropertyDeclaration | Kind::PropertySignature => {
+            !effective_declaration_flags(arena, node, ModifierFlags::PRIVATE)
+                .contains(ModifierFlags::PRIVATE)
+        }
+        Kind::Parameter | Kind::VariableDeclaration => true,
+        _ => false,
+    }
+}
+
+/// Reconstructs a [`SynthesizedTypeNode`] descriptor (from the checker's node
+/// builder) into a `.d.ts` AST type node in `arena`.
+///
+/// The checker hands back a closed descriptor (its arena and the transform's are
+/// independent); this rebuilds the equivalent AST through the arena's type-node
+/// constructors, mirroring the nodes Go's `typeToTypeNode` builds directly.
+///
+/// Side effects: pushes the rebuilt type node(s) onto `arena`.
+// Go: internal/checker/nodebuilderimpl.go:NodeBuilderImpl.typeToTypeNode (the built node)
+fn synthesized_type_node_to_ast(arena: &mut NodeArena, node: &SynthesizedTypeNode) -> NodeId {
+    match node {
+        // A keyword type node is represented (as elsewhere in this transform)
+        // by a keyword expression node carrying the keyword kind, which the
+        // printer emits in type position.
+        SynthesizedTypeNode::Keyword(kind) => arena.new_keyword_expression(*kind),
+        SynthesizedTypeNode::NumberLiteral { text, negative } => {
+            let literal = arena.new_numeric_literal(text, TokenFlags::NONE);
+            let expr = if *negative {
+                arena.new_prefix_unary_expression(Kind::MinusToken, literal)
+            } else {
+                literal
+            };
+            arena.new_literal_type_node(expr)
+        }
+        SynthesizedTypeNode::StringLiteral(value) => {
+            let literal = arena.new_string_literal(value, TokenFlags::NONE);
+            arena.new_literal_type_node(literal)
+        }
+        SynthesizedTypeNode::BooleanLiteral(value) => {
+            let keyword = arena.new_keyword_expression(if *value {
+                Kind::TrueKeyword
+            } else {
+                Kind::FalseKeyword
+            });
+            arena.new_literal_type_node(keyword)
+        }
+        SynthesizedTypeNode::Null => {
+            let keyword = arena.new_keyword_expression(Kind::NullKeyword);
+            arena.new_literal_type_node(keyword)
+        }
+        SynthesizedTypeNode::Array(element) => {
+            let element = synthesized_type_node_to_ast(arena, element);
+            arena.new_array_type_node(element)
+        }
+        SynthesizedTypeNode::TypeReference { name, args } => {
+            let name_node = arena.new_identifier(name);
+            let type_arguments = if args.is_empty() {
+                None
+            } else {
+                let nodes: Vec<NodeId> = args
+                    .iter()
+                    .map(|a| synthesized_type_node_to_ast(arena, a))
+                    .collect();
+                Some(NodeList::new(nodes))
+            };
+            arena.new_type_reference_node(name_node, type_arguments)
+        }
+        SynthesizedTypeNode::TypeQuery(name) => {
+            let name_node = arena.new_identifier(name);
+            arena.new_type_query_node(name_node, None)
+        }
+        SynthesizedTypeNode::Union(types) => {
+            let nodes: Vec<NodeId> = types
+                .iter()
+                .map(|t| synthesized_type_node_to_ast(arena, t))
+                .collect();
+            arena.new_union_type_node(NodeList::new(nodes))
+        }
+        SynthesizedTypeNode::Intersection(types) => {
+            let nodes: Vec<NodeId> = types
+                .iter()
+                .map(|t| synthesized_type_node_to_ast(arena, t))
+                .collect();
+            arena.new_intersection_type_node(NodeList::new(nodes))
+        }
+        SynthesizedTypeNode::Tuple { elements, readonly } => {
+            let nodes: Vec<NodeId> = elements
+                .iter()
+                .map(|e| synthesized_type_node_to_ast(arena, e))
+                .collect();
+            let tuple = arena.new_tuple_type_node(NodeList::new(nodes));
+            if *readonly {
+                arena.new_type_operator_node(Kind::ReadonlyKeyword, tuple)
+            } else {
+                tuple
+            }
+        }
+        SynthesizedTypeNode::TypeLiteral(properties) => {
+            let members: Vec<NodeId> = properties
+                .iter()
+                .map(|p| synthesized_property_to_ast(arena, p))
+                .collect();
+            arena.new_type_literal_node(NodeList::new(members))
+        }
+    }
+}
+
+/// Reconstructs one [`SynthesizedProperty`] into a `PropertySignature` member of
+/// a type-literal (`a: number` / `readonly a?: T`).
+///
+/// Side effects: pushes the rebuilt member node(s) onto `arena`.
+// Go: internal/checker/nodebuilderimpl.go (createTypeNodesFromResolvedType property member)
+fn synthesized_property_to_ast(arena: &mut NodeArena, property: &SynthesizedProperty) -> NodeId {
+    let name = arena.new_identifier(&property.name);
+    let type_node = synthesized_type_node_to_ast(arena, &property.type_node);
+    let postfix_token = property
+        .optional
+        .then(|| arena.new_token(Kind::QuestionToken));
+    let modifiers = property.readonly.then(|| {
+        let token = arena.new_token(Kind::ReadonlyKeyword);
+        ModifierList {
+            list: NodeList::new(vec![token]),
+            modifier_flags: ModifierFlags::READONLY,
+        }
+    });
+    arena.new_property_signature(modifiers, name, postfix_token, Some(type_node), None)
+}
+
+/// Reconstructs a [`LiteralConstValue`] descriptor into the `.d.ts` initializer
+/// expression a literal `const` keeps (`= 1` / `= "a"` / `= true`).
+///
+/// Side effects: pushes the rebuilt expression node(s) onto `arena`.
+// Go: internal/checker/emitresolver.go:EmitResolver.CreateLiteralConstValue (the built expr)
+fn literal_const_value_to_ast(arena: &mut NodeArena, value: &LiteralConstValue) -> NodeId {
+    match value {
+        LiteralConstValue::Number { text, negative } => {
+            let literal = arena.new_numeric_literal(text, TokenFlags::NONE);
+            if *negative {
+                arena.new_prefix_unary_expression(Kind::MinusToken, literal)
+            } else {
+                literal
+            }
+        }
+        LiteralConstValue::String(value) => arena.new_string_literal(value, TokenFlags::NONE),
+        LiteralConstValue::Boolean(value) => arena.new_keyword_expression(if *value {
+            Kind::TrueKeyword
+        } else {
+            Kind::FalseKeyword
+        }),
     }
 }
 

@@ -269,3 +269,115 @@ fn lone_function_with_body_is_kept_as_signature() {
         "export declare function f(x: number): number;",
     );
 }
+
+// ── D-F2 slice 1: inferred variable type → synthesized keyword ─────────────
+// Go: transform.go:ensureType -> CreateTypeOfDeclaration. A non-const `let n = 1`
+// widens its inferred literal to the `number` keyword type node.
+// tsgo --declaration: `let n = 1;` -> `declare let n: number;`
+// (RED before D-F2: `ensure_type` returned `None`, so emit was `declare let n;`).
+#[test]
+fn inferred_let_gets_number_annotation() {
+    check_with_resolver("let n = 1;", "declare let n: number;");
+}
+
+// An exported inferred `let` keeps `export` and gains the synthesized type.
+// tsgo --declaration: `export let n = 1;` -> `export declare let n: number;`.
+#[test]
+fn inferred_exported_let_gets_number_annotation() {
+    check_with_resolver("export let n = 1;", "export declare let n: number;");
+}
+
+// ── D-F2 slice 2: literal const keeps its initializer (not a type) ─────────
+// Go: transform.go:shouldPrintWithInitializer (IsLiteralConstDeclaration) ->
+// ensureNoInitializer keeps the literal value; ensureType returns nil.
+// tsgo --declaration: `const x = 1;` -> `declare const x = 1;`.
+#[test]
+fn literal_const_keeps_initializer() {
+    check_with_resolver("const x = 1;", "declare const x = 1;");
+    check_with_resolver("export const x = 1;", "export declare const x = 1;");
+}
+
+// A literal const string / boolean likewise keeps its initializer verbatim.
+// tsgo --declaration: `const s = "a";` -> `declare const s = "a";`;
+//                     `const b = true;` -> `declare const b = true;`.
+#[test]
+fn literal_const_string_and_boolean_keep_initializer() {
+    check_with_resolver("const s = \"a\";", "declare const s = \"a\";");
+    check_with_resolver("const b = true;", "declare const b = true;");
+}
+
+// ── D-F2 slice 3: inferred function return type ────────────────────────────
+// Go: transform.go:ensureType -> CreateReturnTypeOfSignatureDeclaration. An
+// un-annotated `function f() { return 1; }` infers the `number` return type.
+// tsgo --declaration: `function f() { return 1; }` -> `declare function f(): number;`.
+#[test]
+fn inferred_function_return_type() {
+    check_with_resolver(
+        "function f() { return 1; }",
+        "declare function f(): number;",
+    );
+    check_with_resolver(
+        "export function f() { return 1; }",
+        "export declare function f(): number;",
+    );
+}
+
+// ── D-F2 slice 4: inferred class property type ─────────────────────────────
+// Go: transform.go:transformPropertyDeclaration -> ensureType. An un-annotated
+// `x = 1` field widens to `x: number`.
+// tsgo --declaration: `class C { x = 1; }` -> `declare class C {\n    x: number;\n}`.
+#[test]
+fn inferred_class_property_type() {
+    check_with_resolver("class C { x = 1; }", "declare class C {\n    x: number;\n}");
+    check_with_resolver(
+        "export class C { s = \"h\"; }",
+        "export declare class C {\n    s: string;\n}",
+    );
+}
+
+// ── D-F2 slice 5: inferred array type → `number[]` ─────────────────────────
+// Go: typeToTypeNode array reference arm. `const xs = [1, 2]` (with a global
+// `Array` in scope) synthesizes `number[]` (an array, not a literal const).
+// tsgo --declaration: `interface Array<T> {}\nconst xs = [1, 2];`
+//   -> `interface Array<T> {\n}\ndeclare const xs: number[];`.
+#[test]
+fn inferred_array_type_is_number_array() {
+    check_with_resolver(
+        "interface Array<T> {}\nconst xs = [1, 2];",
+        "interface Array<T> {\n}\ndeclare const xs: number[];",
+    );
+}
+
+// ── D-F2 slice 6: inferred object-literal type → type literal ──────────────
+// Go: createAnonymousTypeNode. `const o = { a: 1 }` synthesizes a multiline
+// `{ a: number; }` type literal (the property value widened to `number`).
+// tsgo --declaration: `const o = { a: 1 };` -> `declare const o: {\n    a: number;\n};`.
+#[test]
+fn inferred_object_literal_type() {
+    check_with_resolver(
+        "const o = { a: 1 };",
+        "declare const o: {\n    a: number;\n};",
+    );
+    check_with_resolver(
+        "const o = { a: 1, b: \"x\" };",
+        "declare const o: {\n    a: number;\n    b: string;\n};",
+    );
+}
+
+// ── D-F2 slice 7: no regression — annotated declarations still copy through ─
+// An annotated `const x: number = 1` is NOT a literal const (its type is the
+// annotation `number`, not a fresh literal), so the resolver path keeps the
+// annotation and strips the initializer (unchanged from D-F1).
+// tsgo --declaration: `export const x: number = 1;` -> `export declare const x: number;`.
+#[test]
+fn annotated_const_with_resolver_keeps_annotation() {
+    check_with_resolver(
+        "export const x: number = 1;",
+        "export declare const x: number;",
+    );
+    // An annotated function return is copied through (no body inference).
+    check_with_resolver(
+        "export function f(x: number): void {}",
+        "export declare function f(x: number): void;",
+    );
+}
