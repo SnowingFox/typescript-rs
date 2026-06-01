@@ -46,6 +46,7 @@ members = [
     "internal/compiler",
     "internal/execute",
     "internal/execute/incremental",
+    "cmd/tsgo",
     "internal/testutil/baseline",
     "internal/testutil/stringtestutil",
     "internal/testutil/race",
