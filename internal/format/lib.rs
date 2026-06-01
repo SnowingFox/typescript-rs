@@ -9,10 +9,9 @@
 //! (`FormatDocument`/`FormatSelection`/`FormatOnSemicolon`/...) turn the result
 //! into `core.TextChange` edits.
 //!
-//! # Scope of this port (P7 `format`, round 1)
+//! # Scope of this port (P7 `format`, rounds 1–2)
 //!
-//! This round ports the **deterministic rule engine** — the genuinely reachable
-//! core that needs only `tsgo_ast::Kind` + `tsgo_core::Tristate`:
+//! **Round 1** ported the **deterministic rule engine**:
 //!
 //! - [`rule`]: the rule model (`RuleAction`, `RuleFlags`, `TokenRange`,
 //!   `RuleSpec`, `RuleImpl`, [`rule`](rule::rule), `to_token_range`).
@@ -25,48 +24,74 @@
 //!   AST that the predicates consult) and the reachable context predicates.
 //! - [`format_code_settings`]: [`FormatCodeSettings`] + defaults (Go
 //!   `lsutil/formatcodeoptions.go`).
-//! - [`span`]: the pure indentation-string helper
-//!   ([`get_indentation_string`](span::get_indentation_string)).
+//!
+//! **Round 2** adds the AST-walking machinery over the `tsgo_astnav` shared
+//! navigation surface ([`tsgo_astnav::NavSourceFile`]/[`tsgo_astnav::RcSourceFile`]):
+//!
+//! - [`scanner`]: the trivia-aware [`FormattingScanner`] (`scanner.go`).
+//! - [`indent`]: the reachable [`SmartIndenter`](indent) subset
+//!   (`should_indent_child_node` / `node_will_indent_child` /
+//!   `get_indentation_for_node`) (`indent.go`).
+//! - [`span`]: the [`FormatSpanWorker`] (`span.go`) that walks the AST, consults
+//!   [`get_rules`](rulesmap::get_rules) between adjacent tokens, and emits
+//!   `core.TextChange` edits — plus the pure
+//!   [`get_indentation_string`](span::get_indentation_string).
+//! - [`api`]: the public entries [`format_document`]/[`format_span`]/
+//!   [`format_on_semicolon`]/[`format_on_closing_curly`] (`api.go`).
 //!
 //! # `FormattingContext` projection (deliberate, documented divergence)
 //!
 //! Go's `FormattingContext` holds raw `*ast.Node` pointers and the predicates
 //! call accessors on them (`context.contextNode.AsBinaryExpression()...`). The
-//! Rust `tsgo_ast` arena is owned by an `&mut` navigation context
-//! (`tsgo_astnav::SourceFile`), which cannot be threaded through a recursive
-//! visitor that also reads node data and drives a scanner. So — like the arena
-//! deviation documented in `PORTING.md §5` — [`FormattingContext`] stores the
-//! *projection* of the AST the predicates actually read (token kinds, the
-//! context/parent node kinds, the option values, and the line-relationship
-//! booleans that Go computes lazily from positions). Each predicate body still
-//! translates 1:1 (`context.contextNode.Kind == ast.KindForStatement` becomes
-//! `ctx.context_node_kind == Kind::ForStatement`). When the AST-walking worker is
-//! ported, its `UpdateContext` populates these fields from real nodes.
+//! Rust `tsgo_ast` arena is borrowed by the navigation context, so
+//! [`FormattingContext`] stores the *projection* of the AST the predicates read
+//! (token kinds, context/parent node kinds, option values, line-relationship
+//! booleans). The worker's `update_formatting_context` (Go's `UpdateContext`)
+//! populates these fields from the real nodes via the nav context.
+//!
+//! # Worker traversal divergence (deliberate, documented)
+//!
+//! Go drives the walk with `ast.NewNodeVisitor`, distinguishing node *lists*
+//! (`processChildNodes`, which opens a list indentation scope) from single
+//! children (`processChildNode`). The shared `tsgo_astnav` surface exposes only
+//! the flat `visit_each_child_and_jsdoc` child stream, so the worker collapses the
+//! two into one path: list start/end tokens and commas are consumed as ordinary
+//! "parent tokens" between children (exactly how Go consumes non-list tokens),
+//! producing identical spacing/indent edits for the reachable cases. See
+//! [`span`] and the worklog.
 //!
 //! # Deferred to later P7 `format` rounds (blocked-by)
 //!
-//! - The AST-walking worker (`span.go`: `formatSpanWorker`), the
-//!   `formattingScanner` (`scanner.go`), the `SmartIndenter` (`indent.go`), and
-//!   the public entries (`api.go`: `FormatDocument`/`FormatSpan`/`FormatOn*`).
-//!   blocked-by: the arena `&mut`-threading design + SourceFile-aware scanner
-//!   line/position helpers (`GetECMALineOfPosition`/`GetECMALineStarts`/
-//!   `GetTokenPosOfNode`) + `tsgo_astnav` `&mut SourceFile` integration +
-//!   `ast::NodeVisitor`/`VisitEachChild` plumbing.
+//! - Multi-line list **continuation** indent (`processChildNodes`' list scope +
+//!   `tryComputeIndentationForListItem`), comment re-indentation
+//!   (`indentMultilineComment` + the format-selection trivia tail), JSX/template
+//!   rescans, decorators (`has_decorators` treated as false), and the
+//!   position-based standalone `GetIndentation` (codefix / on-enter) with its
+//!   comment-aware helpers.
+//! - `FormatOnEnter` / `FormatOnOpeningCurly` / `FormatSelection` /
+//!   `FormatNodeGivenIndentation`.
 //! - The deep-AST context predicates (`isSemicolonDeletionContext`,
 //!   `isSemicolonInsertionContext`, `isEndOfDecoratorContextOnSameLine`).
-//!   blocked-by: `astnav.FindNextToken`/`FindPrecedingToken` and
-//!   `lsutil.PositionIsASICandidate` (deferred in `tsgo_ls_lsutil`).
+//!   blocked-by: `lsutil.PositionIsASICandidate` (deferred in `tsgo_ls_lsutil`)
+//!   and decorator/expression parent walks.
+//! - `rangeContainsError`: the nav context carries no diagnostics, so ranges are
+//!   treated as error-free.
 //!
 //! See the phase-7 worklog for the full deferral list.
 
+pub mod api;
 pub mod context;
 pub mod format_code_settings;
+pub mod indent;
 pub mod rule;
 mod rulecontext;
 pub mod rules;
 pub mod rulesmap;
+pub mod scanner;
 pub mod span;
+mod util;
 
+pub use api::{format_document, format_on_closing_curly, format_on_semicolon, format_span};
 pub use context::{any_context, ContextPredicate, FormatRequestKind, FormattingContext};
 pub use format_code_settings::{
     get_default_format_code_settings, EditorSettings, FormatCodeSettings, IndentStyle,
@@ -77,4 +102,8 @@ pub use rule::{
 };
 pub use rules::get_all_rules;
 pub use rulesmap::{build_rules_map, get_rules, get_rules_map};
-pub use span::get_indentation_string;
+pub use scanner::{FormattingScanner, TextRangeWithKind, TokenInfo};
+pub use span::{
+    find_enclosing_node, get_indentation_string, get_own_or_inherited_delta,
+    get_scan_start_position, FormatContext, FormatSpanWorker, LineAction,
+};

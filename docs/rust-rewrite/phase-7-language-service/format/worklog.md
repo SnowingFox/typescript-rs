@@ -5,6 +5,11 @@
 > so this round touched **only** `internal/format/**` + this doc. No root
 > `Cargo.toml` edit (the crate was already registered).
 
+> **See [Round 2 worklog](#format--round-2-worklog-ast-walking-worker--public-api)
+> at the bottom of this file** for the AST-walking worker, `formattingScanner`,
+> `SmartIndenter`, and the public `FormatDocument`/`FormatSpan`/`FormatOn*` entries
+> (the DEFER list below is the round-2 backlog; most of it landed in round 2).
+
 ## Scope decision
 
 `internal/format` is a large package (10 non-test `.go` files) whose public
@@ -216,3 +221,202 @@ slice, config defaults, and representative predicates).
 - **Go integration tests** (`format_test.go`/`api_test.go`/`indent_test.go`/
   `indent_getindentation_test.go`/`comment_test.go`): exercise the full worker;
   deferred with the worker (and ultimately P10 baseline parity).
+
+---
+
+# format — Round 2 worklog (AST-walking worker + public API)
+
+> P7 `format` round 2. Strict TDD (red→green vertical slices). Crate-scoped gates
+> only (`-p tsgo_format`); a concurrent P10 lane was editing
+> `internal/testrunner/**` + `internal/testutil/**`, so this round touched
+> **only** `internal/format/**` + this doc. Added deps to
+> `internal/format/Cargo.toml` ONLY (`tsgo_astnav`, `tsgo_scanner`,
+> `tsgo_stringutil`, dev-dep `tsgo_parser`); **no root `Cargo.toml` edit**, no
+> other crate touched.
+
+## What landed
+
+Round 1 was blocked on the AST-walking engine because the navigation context
+owned the arena by `&mut`. The committed **`tsgo_astnav` shared-borrow surface**
+(`NavSourceFile<'a>` / `RcSourceFile` with `&self` `get_token_at_position` /
+`find_preceding_token` / `find_next_token` / `find_child_of_kind` +
+`visit_each_child_and_jsdoc`) unblocks it: the worker holds a `&NavEngine<A>`
+(shared) and threads it through the recursive walk while a separate
+`tsgo_scanner::Scanner` runs the formatting scan. This round ports:
+
+- **`formattingScanner`** (`scanner.rs`, Go `scanner.go`): the trivia-aware
+  scanner over `tsgo_scanner::Scanner` (`set_skip_trivia(false)`), `tokenInfo`,
+  `TextRangeWithKind`, the `scanAction` rescan state machine, `advance` /
+  `readTokenInfo` / `getNextToken` / `fixTokenKind` / `isOnToken` / `isOnEOF` /
+  `skipToEndOf` / `skipToStartOf` / `readEOFTokenRange`.
+- **`SmartIndenter`** (`indent.rs`, Go `indent.go`, reachable subset):
+  `ShouldIndentChildNode`, `NodeWillIndentChild` (full per-kind switch),
+  `GetIndentationForNode` → `getIndentationForNodeWorker`, the column/line
+  helpers, and the `childStartsOnTheSameLineWithElseInIfStatement` /
+  `childIsUnindentedBranchOfConditionalExpression` /
+  `argumentStartsOnSameLineAsPreviousArgument` predicates used by the worker's
+  `computeIndentation`.
+- **Span worker** (`span.rs`, Go `span.go`): `formatSpanWorker` (`execute` →
+  `run`), `processNode`, `processChildNode`, `computeIndentation`, `processPair`,
+  `applyRuleEdits`, `processRange`, `processTrivia`,
+  `consumeTokenAndAdvanceScanner`, the `dynamicIndenter`
+  (`getIndentation`/`getDelta`/`getIndentationForToken`/`getIndentationForComment`/
+  `shouldAddDelta`/`recomputeIndentation`), `insertIndentation` /
+  `characterToColumn` / `indentationIsDifferent`,
+  `trimTrailingWhitespacesForLines` / `getTrailingWhitespaceStartPosition` /
+  `GetECMAEndLinePosition`, `recordDelete`/`recordReplace`/`recordInsert`,
+  `findEnclosingNode`, `getScanStartPosition`, `getOwnOrInheritedDelta`, and
+  `UpdateContext` (as `update_formatting_context`, populating the projection).
+- **`util.rs`** (Go `util.go` + `context.go` helpers): `withTokenStart`,
+  `rangeIsOnOneLine`, `GetLineStartPositionForPosition`, `isGrammarError`
+  (reachable), `findImmediatelyPrecedingTokenOfKind`,
+  `findOutermostNodeWithinListLevel`, `isListElement` (statement-list
+  containers), plus `node_parent` (resolves synthesized-token parents — see
+  divergence 3).
+- **Public API** (`api.rs`, Go `api.go`): `format_document`, `format_span`,
+  `format_on_semicolon`, `format_on_closing_curly`, `formatNodeLines`. All
+  generic over `A: Borrow<NodeArena>`, so they work with `NavSourceFile` /
+  `RcSourceFile` / owned `SourceFile`.
+
+## Deliberate, documented divergences (round 2)
+
+1. **Flat child walk instead of Go's list-distinguishing `NodeVisitor`.** Go's
+   visitor routes node *lists* to `processChildNodes` (a list indentation scope
+   around the list start/end tokens) and single children to `processChildNode`.
+   The `tsgo_astnav` surface exposes only the flat `visit_each_child_and_jsdoc`
+   stream (its own docs say callers "replace the per-list binary search with a
+   linear scan over the same (sorted) children — same result"). So the worker
+   collapses both into `process_child_node`: list start/end tokens, commas, and
+   close brackets are consumed as ordinary "parent tokens" between children
+   (exactly how Go consumes non-list tokens), producing **identical** spacing and
+   single-level-indent edits for the reachable cases. Multi-line list
+   *continuation* indent (`tryComputeIndentationForListItem` + the list scope) is
+   deferred.
+2. **Immutable `FormatContext` + `&Ctx` copy.** The shared nav context, text,
+   line map, options, and newline live behind one `&FormatContext`; each worker
+   method copies that shared reference (`let ctx = self.ctx;`) and then mutates
+   the worker's own state (edits / scanner / fcx) without borrow conflicts. Line
+   queries use `tsgo_scanner::compute_line_of_position` over a line map computed
+   once (Go caches it on the file).
+3. **`node_parent` for synthesized tokens.** Go reads `token.Parent` directly on
+   the `}`/`;`/`]` tokens returned by `FindPrecedingToken`. `tsgo_astnav` keeps
+   synthesized tokens in a side store without an arena `parent`, so `node_parent`
+   recovers it as the smallest real node enclosing the token
+   (`find_enclosing_node`). Real nodes use the arena back-edge.
+4. **No diagnostics → `rangeContainsError` is always `false`** (the nav context
+   carries none; well-formed input has no errors).
+
+## RED → GREEN slices (observed symptoms)
+
+Infrastructure (scanner/indent/worker/api) was written, then each behavior slice
+was driven red→green against `cargo test -p tsgo_format`:
+
+1. **`format_document([1,2,3])` → `[1, 2, 3]`** (space after comma). First full
+   run: the public-API slices **panicked** with
+   `internal/ast/lib.rs:1694 index out of bounds: ... index is 2147483648`
+   (`= 1<<31`, the `tsgo_astnav` synthesized-token tag) — the worker's
+   trailing-edit block and `findOutermostNodeWithinListLevel` were calling
+   `arena.parent`/`arena.loc` on a synthesized `]`/`}` token. GREEN after adding
+   `node_parent` (divergence 3) + reading synthesized-token ranges through the
+   nav accessors. Observed edits: insert `" "` at the byte after each comma →
+   `[1, 2, 3]`. — Go: `rules.go:SpaceAfterComma` via the worker.
+2. **`1+2` → `1 + 2`** (binary-op spaces). `(NumericLiteral, Plus)` and
+   `(Plus, NumericLiteral)` in a `BinaryExpression` context →
+   `SpaceBefore/AfterBinaryOperator`. — Go: `rules.go:SpaceBeforeBinaryOperator`.
+3. **`const x=1` → `const x = 1`** (assignment spaces). `=` in a
+   `VariableDeclaration`: `isBinaryOpContext` returns true for the
+   `EqualsToken` → `SpaceBefore/AfterBinaryOperator`. Verified the projection
+   `context_node_kind == VariableDeclaration` drives it. — Go:
+   `rulecontext.go:isBinaryOpContext` (VariableDeclaration case).
+4. **`function f() {\nreturn 1;\n}` → `return 1;` indented 4** (SmartIndenter).
+   `computeIndentation` gives the `Block`'s statement indentation `0 + delta(4)`;
+   `consumeTokenAndAdvanceScanner` indents the `return` token (first token after a
+   newline) via `insertIndentation`. Observed edit: insert `"    "` at the line
+   start before `return`. — Go: `span.go:computeIndentation` + `dynamicIndenter`.
+   4b. Combined `function f() {\nreturn 1+2;\n}` → indent **and** binary-op spaces.
+5. **`format_on_closing_curly` / `format_on_semicolon`** reachable cases:
+   `findImmediatelyPrecedingTokenOfKind` + `findOutermostNodeWithinListLevel` →
+   `formatNodeLines` → `FormatSpan`. On-`}` over the function indents the body;
+   on-`;` over `const x=1;` produces `const x = 1;`. — Go:
+   `api.go:FormatOnClosingCurly`/`FormatOnSemicolon`.
+6. **Already-formatted → ZERO edits (idempotence).** `[1, 2, 3]`, `1 + 2`,
+   `const x = 1`, `function f() {\n    return 1;\n}` all yield empty edit lists;
+   the `applyRuleEdits` `InsertSpace` path no-ops when a single space is already
+   present, and `trimTrailingWhitespacesForLines` finds none. Also verified the
+   **fixed point**: `format(format(x)) == format(x)`. — Go: `rulesmap.go:getRules`
+   (no applicable action) + `applyRuleEdits` early-outs.
+
+## Files (Go → Rust), round 2
+
+| Go file | Rust file | Ported this round |
+|---|---|---|
+| `scanner.go` | `scanner.rs` | full reachable (rescan state machine; JSX-attr-value precise check deferred) |
+| `indent.go` | `indent.rs` | `ShouldIndentChildNode`/`NodeWillIndentChild`/`GetIndentationForNode`/worker predicates + column helpers (GetIndentation + actual-indentation-from-source deferred) |
+| `span.go` | `span.rs` | `formatSpanWorker` + `dynamicIndenter` + edit recording + `findEnclosingNode`/`getScanStartPosition`/`getOwnOrInheritedDelta` (list scope, comments, decorators deferred) |
+| `util.go` | `util.rs` | `withTokenStart`/`rangeIsOnOneLine`/`GetLineStartPositionForPosition`/`isGrammarError`/`findImmediatelyPrecedingTokenOfKind`/`findOutermostNodeWithinListLevel`/`isListElement` + `node_parent` |
+| `api.go` | `api.rs` | `FormatDocument`/`FormatSpan`/`FormatOnSemicolon`/`FormatOnClosingCurly`/`formatNodeLines` |
+| `context.go` (`UpdateContext`) | `span.rs:update_formatting_context` | projection population from real nodes |
+
+## Test deltas
+
+Round 1 ended at **55 unit + 27 doctests = 82**. Round 2 adds **27 unit tests +
+1 doctest** → **82 unit + 28 doctests = 110** (all green). New tests:
+`api_test.rs` (11: the 6 slices + idempotence/fixed-point/option-driven/empty),
+`scanner_test.rs` (5: token sequence, trailing trivia, newline tracking, EOF),
+`util_test.rs` (7: helpers), `indent_test.rs` (4: indentation + `NodeWillIndentChild`).
+No existing test was weakened or deleted (round-1 `span_test.rs`/`rule_test.rs`/
+`rulesmap_test.rs`/`context_test.rs`/`rulecontext_test.rs`/`rules_test.rs`/
+`format_code_settings_test.rs` are all intact).
+
+## Gate results (crate-scoped)
+
+- `cargo test -p tsgo_format` → **ok. 82 passed** (unit) + **28 passed** (doctests).
+- `cargo clippy -p tsgo_format --all-targets -- -D warnings` → **clean**.
+- `cargo fmt -p tsgo_format -- --check` → **clean**.
+- `cargo build -p tsgo_format` → **clean**.
+- Did NOT run `--workspace` (a concurrent P10 lane was active).
+
+## Public API (additive, within crate)
+
+`format_document`, `format_span`, `format_on_semicolon`, `format_on_closing_curly`
+(re-exported at the crate root); `FormattingScanner`, `TextRangeWithKind`,
+`TokenInfo`; `FormatContext`, `FormatSpanWorker`, `LineAction`,
+`find_enclosing_node`, `get_scan_start_position`, `get_own_or_inherited_delta`;
+the `indent` module (`should_indent_child_node`, `node_will_indent_child`,
+`get_indentation_for_node`, column helpers). Round-1 API unchanged.
+
+## DEFER list (round 2, blocked-by)
+
+- **Multi-line list continuation indent** (`processChildNodes`' list scope +
+  `tryComputeIndentationForListItem`, `getOpenTokenForList` /
+  `getCloseTokenForOpenToken`). blocked-by: the flat-child-walk divergence (no
+  list/single distinction on the shared `tsgo_astnav` surface).
+- **`GetIndentation`** (position-based standalone indenter for codefix / on-enter)
+  + its comment-aware helpers (`getRangeOfEnclosingComment`, `getCommentIndent`,
+  `getBlockIndent`, `getSmartIndent`, `nextTokenIsCurlyBraceOnSameLineAsCursor`),
+  and "actual indentation from source" (`getActualIndentationForNode` /
+  `getActualIndentationForListItem` / `deriveActualIndentationFromList` /
+  `getListByRange` / `getVisualListRange`). The reachable format-span path always
+  passes the span as the ignore range, so `useActualIndentation` is false for
+  every node walked. blocked-by: `IsDeclaration`/`IsStatementButNotDeclaration` +
+  per-node list accessors.
+- **Comment re-indentation** (`indentMultilineComment`) + the format-selection
+  "remaining leading trivia" tail in `execute`.
+- **Decorators** (`getNonDecoratorTokenPosOfNode`, undecorated-start-line,
+  `getFirstNonDecoratorTokenOfNode`): `has_decorators` treated as `false`.
+  blocked-by: modifier-list accessors in `tsgo_ast`.
+- **`FormatOnEnter` / `FormatOnOpeningCurly` / `FormatSelection` /
+  `FormatNodeGivenIndentation`**. blocked-by: `FormatOnEnter` selection math +
+  list-level widening (the deferred list scope).
+- **JSX / template / regex rescans** in the formatting scanner (the rescan state
+  machine is ported, but `shouldRescanJsxAttributeValue`'s precise
+  `Initializer() == node` check is stubbed; no JSX in the reachable set).
+- **The 3 deep-AST context predicates** (`isSemicolonDeletionContext`,
+  `isSemicolonInsertionContext`, `isEndOfDecoratorContextOnSameLine`) remain
+  stubbed (round-1 state). blocked-by: `lsutil.PositionIsASICandidate`
+  (deferred in `tsgo_ls_lsutil`) + decorator/expression parent walks.
+- **`rangeContainsError`** (diagnostics overlap): always `false`. blocked-by:
+  diagnostics threading through the shared nav context.
+- **Go integration tests** (`format_test.go`/`api_test.go`/`indent_test.go`/
+  `indent_getindentation_test.go`/`comment_test.go`): exercise the full worker
+  incl. the deferred pieces; remain deferred to P10 baseline parity.
