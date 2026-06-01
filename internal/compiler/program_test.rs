@@ -952,6 +952,95 @@ fn jsx_intrinsic_paired_reports_two_ts7026_with_real_lib() {
     );
 }
 
+/// End to end with the REAL bundled lib (the path the P10 corpus parity runner
+/// exercises): a CommonJS `module.exports = X` assignment in a checked JS file
+/// makes the binder declare `module`/`exports` as file locals, so they resolve
+/// through the normal scope walk and report NO `TS2591`/`TS2304` — and the
+/// `module.exports` member access does not spuriously report `TS2339` (the
+/// CJS-declared symbol's type is benign / `any`-like). This clears the
+/// `module`/`exports` sub-cluster of the P10 false positives.
+// Go: internal/binder/binder.go:declareCommonJSVariable
+#[test]
+fn js_module_exports_assignment_resolves_no_2591_with_real_lib() {
+    let options = CompilerOptions {
+        lib: vec!["es5".to_string()],
+        check_js: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.js", "module.exports = { a: 1 };\n")],
+        "/src",
+        &["/src/index.js"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != 2591 && d.code != 2304 && d.code != 2339),
+        "module.exports CommonJS file resolves `module` through the real-lib program \
+         (no 2591/2304/2339): {diags:?}"
+    );
+}
+
+/// End to end with the REAL bundled lib: an `exports.x = Y` CommonJS assignment
+/// resolves `exports` (no 2304) and the `exports.x` member access does not
+/// report 2339.
+// Go: internal/binder/binder.go:declareCommonJSVariable / bindExportsOrObjectDefineProperty
+#[test]
+fn js_exports_property_resolves_no_2304_with_real_lib() {
+    let options = CompilerOptions {
+        lib: vec!["es5".to_string()],
+        check_js: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.js", "exports.foo = 1;\n")],
+        "/src",
+        &["/src/index.js"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != 2591 && d.code != 2304 && d.code != 2339),
+        "exports.foo CommonJS file resolves `exports` (no 2591/2304/2339): {diags:?}"
+    );
+}
+
+/// GUARD (over-resolution): the CommonJS `module`/`exports` file locals one
+/// JS file declares must NOT leak into the program globals — a sibling `.ts`
+/// file in the same program keeps `module` unresolved (TS2591), exactly as tsc.
+/// This proves the multi-file globals merge excludes `SymbolFlagsModuleExports`
+/// symbols, so resolving `module`/`exports` is strictly per-file.
+// Go: internal/checker/checker.go:Checker.globals (excludes IsExternalOrCommonJSModule files)
+#[test]
+fn commonjs_module_locals_do_not_leak_into_sibling_ts_globals() {
+    let options = CompilerOptions {
+        no_lib: tsgo_core::tristate::Tristate::True,
+        check_js: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[("/a.js", "module.exports = {};"), ("/b.ts", "module;")],
+        "/",
+        &["/a.js", "/b.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    // `/a.js` resolves `module` via its own CommonJS locals (no error there);
+    // `/b.ts` must still report the unresolved `module` (TS2591), proving no
+    // cross-file leak.
+    assert!(
+        diags.iter().any(|d| d.code == 2591),
+        "sibling TS file must keep `module` unresolved (no globals leak): {diags:?}"
+    );
+}
+
 /// `SkipTypeChecking`/`canIncludeBindAndCheckDiagnostics`: a JS file compiled
 /// with `checkJs: false` is NOT bind-and-checked, so it produces ZERO semantic
 /// diagnostics (the `module` reference is not even resolved). This mirrors Go's
@@ -983,10 +1072,15 @@ fn js_file_with_check_js_false_is_not_checked() {
 /// Guard (Go-faithful, NOT over-suppression): a *plain* JS file — `checkJs`
 /// unset and no `// @ts-check`/`@ts-nocheck` — IS bind-and-checked in Go
 /// (`IsPlainJSFile` -> the `isPlainJS` branch of
-/// `canIncludeBindAndCheckDiagnostics` is true), so an unresolved `module`
+/// `canIncludeBindAndCheckDiagnostics` is true), so a genuinely undefined name
 /// still reports 2304. The gate skips a JS file ONLY when `checkJs` is
 /// explicitly false (or a `@ts-nocheck` directive is present); it must NOT
 /// blanket-mute plain JS.
+///
+/// The witness is a plain undefined identifier (NOT `module`): as of Round 8
+/// the binder declares `module`/`exports` as CommonJS file locals once it sees
+/// an indicator, so `module.exports = {}` now resolves and emits nothing — it
+/// would no longer prove the file is checked. A bare undefined name does.
 // Go: internal/ast/utilities.go:IsPlainJSFile + Program.canIncludeBindAndCheckDiagnostics
 #[test]
 fn plain_js_file_is_still_checked() {
@@ -995,27 +1089,23 @@ fn plain_js_file_is_still_checked() {
         ..Default::default()
     };
     let mut program = program_with(
-        &[("/index.js", "module.exports = {};")],
+        &[("/index.js", "nonExistentName;")],
         "/",
         &["/index.js"],
         options,
         true,
     );
     let diags = program.semantic_diagnostics();
-    // `module` maps to TS2591 (the "@types/node" hint) via
-    // getCannotFindNameDiagnosticForName (Round 7); the point of this guard is
-    // that plain JS IS bind-and-checked, so the unresolved `module` surfaces a
-    // diagnostic. (`module` resolving via CommonJS binding is a deferred root.)
     assert!(
-        diags.iter().any(|d| d.code == 2591),
-        "plain JS (checkJs unset) is checked in Go, so `module` reports 2591: {diags:?}"
+        diags.iter().any(|d| d.code == 2304),
+        "plain JS (checkJs unset) is checked in Go, so an undefined name reports 2304: {diags:?}"
     );
 }
 
 /// Guard: a JS file compiled with `checkJs: true` IS bind-and-checked (the
 /// `isCheckJS` branch), so the gate is conditioned on the `checkJs` state and
-/// does not blanket-skip JS. (`module` is still a deferred CommonJS-binding
-/// root, so it reports the TS2591 "@types/node" hint here — see the worklog.)
+/// does not blanket-skip JS. The witness is a bare undefined name (not
+/// `module`, which now resolves via CommonJS binding — see Round 8).
 // Go: internal/ast/utilities.go:IsCheckJSEnabledForFile + Program.canIncludeBindAndCheckDiagnostics
 #[test]
 fn js_file_with_check_js_true_is_checked() {
@@ -1025,7 +1115,7 @@ fn js_file_with_check_js_true_is_checked() {
         ..Default::default()
     };
     let mut program = program_with(
-        &[("/index.js", "module.exports = {};")],
+        &[("/index.js", "nonExistentName;")],
         "/",
         &["/index.js"],
         options,
@@ -1033,8 +1123,8 @@ fn js_file_with_check_js_true_is_checked() {
     );
     let diags = program.semantic_diagnostics();
     assert!(
-        diags.iter().any(|d| d.code == 2591),
-        "checkJs:true JS is checked (`module` -> TS2591): {diags:?}"
+        diags.iter().any(|d| d.code == 2304),
+        "checkJs:true JS is checked (undefined name -> TS2304): {diags:?}"
     );
 }
 

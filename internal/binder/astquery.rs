@@ -550,6 +550,227 @@ pub(crate) fn postfix_token(arena: &NodeArena, id: NodeId) -> Option<NodeId> {
     }
 }
 
+/// Reports whether a node belongs to a JavaScript (`.js`/`.jsx`/`.json`) file.
+///
+/// The parser stamps [`NodeFlags::JAVA_SCRIPT_FILE`] on every node of such a
+/// file; the binder uses this to gate CommonJS assignment-declaration handling.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsInJSFile
+pub(crate) fn is_in_js_file(arena: &NodeArena, id: NodeId) -> bool {
+    arena.flags(id).contains(NodeFlags::JAVA_SCRIPT_FILE)
+}
+
+/// Reports whether a node is a property- or element-access expression.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsAccessExpression
+pub(crate) fn is_access_expression(arena: &NodeArena, id: NodeId) -> bool {
+    matches!(
+        arena.kind(id),
+        Kind::PropertyAccessExpression | Kind::ElementAccessExpression
+    )
+}
+
+/// Returns the object expression (`a` in `a.b` / `a[b]`) of an access
+/// expression, mirroring Go `node.Expression()` for the access kinds.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/ast.go:Node.Expression (access expressions)
+pub(crate) fn access_expression_target(arena: &NodeArena, id: NodeId) -> Option<NodeId> {
+    match arena.data(id) {
+        NodeData::PropertyAccessExpression(d) => Some(d.expression),
+        NodeData::ElementAccessExpression(d) => Some(d.expression),
+        _ => None,
+    }
+}
+
+/// Reports whether a node is the identifier `exports`.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsExportsIdentifier
+pub(crate) fn is_exports_identifier(arena: &NodeArena, id: NodeId) -> bool {
+    is_identifier(arena, id) && arena.text(id) == "exports"
+}
+
+/// Reports whether a node is the identifier `module`.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsModuleIdentifier
+pub(crate) fn is_module_identifier(arena: &NodeArena, id: NodeId) -> bool {
+    is_identifier(arena, id) && arena.text(id) == "module"
+}
+
+/// Unwraps any parenthesized expressions, returning the inner expression.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:SkipParentheses
+pub(crate) fn skip_parentheses(arena: &NodeArena, mut id: NodeId) -> NodeId {
+    while let NodeData::ParenthesizedExpression(d) = arena.data(id) {
+        id = d.expression;
+    }
+    id
+}
+
+/// Returns the member name node of an element-/property-access expression
+/// (the `b` of `a.b`, or the literal of `a["b"]` / `a[0]`), if it is a static
+/// name; otherwise `None`.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:GetElementOrPropertyAccessName
+pub(crate) fn get_element_or_property_access_name(arena: &NodeArena, id: NodeId) -> Option<NodeId> {
+    match arena.data(id) {
+        NodeData::PropertyAccessExpression(d) => {
+            if is_identifier(arena, d.name) {
+                Some(d.name)
+            } else {
+                None
+            }
+        }
+        NodeData::ElementAccessExpression(d) => {
+            let arg = skip_parentheses(arena, d.argument_expression);
+            if is_string_or_numeric_literal_like(arena, arg) {
+                Some(arg)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Reports whether a node is a `module.exports` / `module["exports"]` access.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsModuleExportsAccessExpression
+pub(crate) fn is_module_exports_access_expression(arena: &NodeArena, id: NodeId) -> bool {
+    if is_access_expression(arena, id) {
+        if let Some(target) = access_expression_target(arena, id) {
+            if is_module_identifier(arena, target) {
+                if let Some(name) = get_element_or_property_access_name(arena, id) {
+                    return arena.text(name) == "exports";
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Reports whether a node is a `require(...)` call: a call expression whose
+/// callee is the identifier `require` and that has exactly one argument
+/// (`requireStringLiteralLikeArgument` is always `false` at the binder).
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsRequireCall
+pub(crate) fn is_require_call(arena: &NodeArena, id: NodeId) -> bool {
+    match arena.data(id) {
+        NodeData::CallExpression(d) => {
+            is_identifier(arena, d.expression)
+                && arena.text(d.expression) == "require"
+                && d.arguments.nodes.len() == 1
+        }
+        _ => false,
+    }
+}
+
+/// Reports whether a node is an entity-name expression, optionally allowing the
+/// JS-only `this`-keyword and element-access forms (`allow_js`).
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsEntityNameExpressionEx
+pub(crate) fn is_entity_name_expression_ex(arena: &NodeArena, id: NodeId, allow_js: bool) -> bool {
+    if is_identifier(arena, id) {
+        return true;
+    }
+    if let NodeData::PropertyAccessExpression(d) = arena.data(id) {
+        return is_identifier(arena, d.name)
+            && is_entity_name_expression_ex(arena, d.expression, allow_js);
+    }
+    if allow_js {
+        if arena.kind(id) == Kind::ThisKeyword {
+            return true;
+        }
+        if let NodeData::ElementAccessExpression(d) = arena.data(id) {
+            return is_string_or_numeric_literal_like(arena, d.argument_expression)
+                && is_entity_name_expression_ex(arena, d.expression, allow_js);
+        }
+    }
+    false
+}
+
+/// The kind of JS assignment declaration an expression represents (Go's
+/// `JSDeclarationKind`), used by the binder to recognize CommonJS module
+/// patterns. Only the binary-expression cases are classified here; the
+/// `Object.defineProperty` call cases are deferred.
+///
+/// Side effects: none (pure value type).
+// Go: internal/ast/utilities.go:JSDeclarationKind
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum JsDeclarationKind {
+    /// Not an assignment declaration.
+    None,
+    /// `module.exports = expr` (except `module.exports = exports`).
+    ModuleExports,
+    /// `exports.name = expr` / `module.exports.name = expr`.
+    ExportsProperty,
+    /// `this.name = expr`.
+    ThisProperty,
+    /// `F.name = expr`, `F[name] = expr`.
+    Property,
+}
+
+/// Classifies a binary-expression assignment as a JS declaration pattern.
+///
+/// DEFER(phase-4): the `Object.defineProperty(...)` call-expression cases
+/// (`ObjectDefinePropertyValue` / `ObjectDefinePropertyExports`) are not
+/// classified — the require-call path covers the CommonJS indicator they would
+/// otherwise set. blocked-by: `IsBindableObjectDefinePropertyCall`.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:GetAssignmentDeclarationKind
+pub(crate) fn get_assignment_declaration_kind(arena: &NodeArena, id: NodeId) -> JsDeclarationKind {
+    let bin = match arena.data(id) {
+        NodeData::BinaryExpression(d) => d,
+        _ => return JsDeclarationKind::None,
+    };
+    if arena.kind(bin.operator_token) != Kind::EqualsToken || !is_access_expression(arena, bin.left)
+    {
+        return JsDeclarationKind::None;
+    }
+    let left = bin.left;
+    let left_target = access_expression_target(arena, left);
+    if is_in_js_file(arena, left) {
+        if is_module_exports_access_expression(arena, left)
+            && !is_exports_identifier(arena, bin.right)
+        {
+            return JsDeclarationKind::ModuleExports;
+        }
+        if let Some(target) = left_target {
+            if (is_module_exports_access_expression(arena, target)
+                || is_exports_identifier(arena, target))
+                && get_element_or_property_access_name(arena, left).is_some()
+            {
+                return JsDeclarationKind::ExportsProperty;
+            }
+            if arena.kind(target) == Kind::ThisKeyword {
+                return JsDeclarationKind::ThisProperty;
+            }
+        }
+    }
+    let allow_js = is_in_js_file(arena, left);
+    if let Some(target) = left_target {
+        let is_prop_access = arena.kind(left) == Kind::PropertyAccessExpression
+            && is_entity_name_expression_ex(arena, target, allow_js)
+            && matches!(arena.data(left), NodeData::PropertyAccessExpression(d) if is_identifier(arena, d.name));
+        let is_elem_access = arena.kind(left) == Kind::ElementAccessExpression
+            && is_entity_name_expression_ex(arena, target, allow_js);
+        if is_prop_access || is_elem_access {
+            return JsDeclarationKind::Property;
+        }
+    }
+    JsDeclarationKind::None
+}
+
 /// Returns the text of an identifier or literal-like name node.
 ///
 /// Mirrors a narrow slice of Go `scanner.DeclarationNameToString` sufficient for

@@ -1184,3 +1184,186 @@ generic `extra TS2304` to the Go-faithful `extra TS2591`. The genuine fix
 
 No `--no-verify`; no test weakened/deleted; additive only; no dependency / no
 `Cargo.toml`/`Cargo.lock` change. Default arm (ordinary names) stays TS2304.
+
+---
+
+# Round 8 — CommonJS module/exports resolution (bind them as file locals)
+
+Round goal: make `module` and `exports` RESOLVE inside CommonJS-context JS files
+so they stop producing false-positive "cannot find name" diagnostics — the
+dominant remaining `extra` false-positive root on the P10 subset. SOLO lane,
+strict TDD red→green. Edits: `internal/binder/{lib.rs,astquery.rs,symbols.rs}` +
+their `_test.rs`, `internal/checker/core/check_test.rs` (tests only),
+`internal/compiler/{multifile.rs,program_test.rs}`,
+`internal/testrunner/compiler_runner_test.rs` (re-measured snapshot) + this
+worklog. No `tsgo_checker` production change (the `any`-like CJS typing was
+already benign).
+
+## Step-0 root + leverage finding (validated before any code)
+
+The Round-7 note was confirmed and refined against the Go source + committed
+baselines. The Rust binder had a `common_js_module_indicator` field that was
+NEVER set and never declared the `module`/`exports` CommonJS variables. tsc
+resolves them via the **CommonJS binder** (`declareCommonJSVariable`), NOT via
+ambient `@types/node` — proven by the committed baselines:
+
+- Pure-CJS files emit NO `module`/`exports` error: `exportAssignmentMerging5`
+  (`module.exports = X`), `numericExportNameDeclaration`
+  (`exports[1] = 2; module.exports[1] = 2;`),
+  `jsDeclarationExportDefaultAssignmentCrash` (`exports.default = …`),
+  `erasableSyntaxOnlyJS` (`bar.cjs`/`foo.js`), `multipleModuleExportsAssignments`
+  (`x.js`), `nestedJSDocImportType` (`b.js`) — all committed-clean for
+  `module`/`exports`, so our `extra TS2591`/`extra TS2304` on them are false
+  positives.
+- The ONE file where tsc DOES emit `module` TS2591 is `exportAssignmentMerging6`'s
+  `a.js`, which has `export const x = 1` — i.e. a real **external-module
+  indicator** → `setCommonJSModuleIndicator` returns false → `module` stays
+  unresolved. This is the GUARD case (ES module must NOT be treated as CJS), and
+  it confirms the root is the CJS binder, not ambient node types.
+
+Measured BEFORE (Round 7): `extra TS2591 ×12` (module) + `extra TS2304 ×44`
+(includes the `exports` sub-cluster). Predicted leverage: resolving
+`module`/`exports` clears the `extra TS2591`/`exports`-`TS2304` false positives
+and flips the committed-clean cases. Measured actual: **+5 PASS** (better than
+the +3 predicted).
+
+## Go functions ported (→ Rust locations)
+
+- `internal/ast/utilities.go:GetAssignmentDeclarationKind` (binary-expression
+  cases) → `binder/astquery.rs:get_assignment_declaration_kind` +
+  `JsDeclarationKind` enum. (The `Object.defineProperty` call cases are DEFERRED
+  — the require-call path covers the indicator they would set.)
+- `IsRequireCall`, `IsModuleExportsAccessExpression`, `IsExportsIdentifier`,
+  `IsModuleIdentifier`, `IsAccessExpression`, `GetElementOrPropertyAccessName`,
+  `IsEntityNameExpressionEx`, `SkipParentheses`, `IsInJSFile` →
+  `binder/astquery.rs` (same names, `// Go:` anchored, unit-tested).
+- `binder.go:setCommonJSModuleIndicator` → `binder/lib.rs:set_common_js_module_indicator`.
+- `binder.go:bindCallExpression` → `binder/lib.rs:bind_call_expression` (wired in
+  the `bind` dispatch `KindCallExpression` arm, JS-gated).
+- `binder.go:bindModuleExportsAssignment` / `bindExportsOrObjectDefineProperty`
+  → `binder/lib.rs:bind_module_exports_assignment` /
+  `bind_exports_or_object_define_property` (wired in the `KindBinaryExpression`
+  arm via `get_assignment_declaration_kind`). The export-symbol declaration on
+  the file symbol + `trackNestedCJSExport` are DEFERRED (SECONDARY scope); only
+  the indicator is set, which is what resolution needs.
+- `binder.go:declareCommonJSVariable` → `binder/symbols.rs:declare_common_js_variable`
+  (file-local `FunctionScopedVariable|ModuleExports`; `module` owns an `exports`
+  member `ModuleExports|Property`; both declared on the source file). Invoked in
+  the `bind_container` SourceFile finalizer when the indicator is set and the
+  file is JS (Go's `bindContainer` SourceFile tail).
+
+The checker needed NO change: a `FunctionScopedVariable|ModuleExports` symbol
+whose value declaration is the SourceFile flows through
+`get_type_of_variable_or_property` → `any` (no type node / initializer), so
+`module.exports` / `exports.foo` member access short-circuits on the existing
+any-like-receiver guard (Round 3) — verified by tests (no TS2339).
+
+## Over-resolution fix (compiler, Go-faithful, necessary)
+
+A multi-file program merged EVERY file's root `locals` into the program globals
+(`multifile.rs`), so a CJS file's newly-declared `module`/`exports` would LEAK
+into globals and resolve in sibling files (caught reproducing
+`exportAssignmentMerging6`: its ES-module `a.js` stopped reporting `module`).
+Fixed surgically: the globals merge now SKIPS `SymbolFlags::MODULE_EXPORTS`
+symbols (they are always per-file CommonJS constructs — Go's `Checker.globals`
+likewise excludes `IsExternalOrCommonJSModule` files entirely). Guarded by
+`commonjs_module_locals_do_not_leak_into_sibling_ts_globals` (a `.ts` sibling of
+a CJS `.js` keeps `module` unresolved → TS2591).
+
+## RED→GREEN slices + guard tests
+
+`tsgo_binder` (`lib_test.rs`, +8): `js_module_exports_assignment_declares_module_and_exports`
+(headline: `module` + `exports` locals, `module` owns the `exports` member,
+correct flags), `js_require_call_declares_module_and_exports`,
+`js_exports_property_assignment_declares_module_and_exports`,
+`js_module_exports_property_assignment_sets_indicator`,
+`js_exports_element_access_assignment_sets_indicator`; GUARDS
+`ts_module_exports_assignment_does_not_declare_commonjs_locals` (TS file),
+`js_without_commonjs_indicator_does_not_declare_module` (no indicator → still
+unresolved), `js_es_module_does_not_declare_commonjs_locals` (ES module). Plus
+`astquery_test.rs` (+9) unit-testing every new predicate.
+
+`tsgo_checker` (`check_test.rs`, +4): `js_module_exports_assignment_resolves_no_diagnostics`
+(no 2304/2591 AND no 2339), `js_exports_property_assignment_resolves_no_diagnostics`,
+`js_require_call_makes_bare_module_resolve`; GUARD
+`js_without_commonjs_indicator_module_still_reports_2591`.
+
+`tsgo_compiler` (`program_test.rs`, real bundled-lib path, +3):
+`js_module_exports_assignment_resolves_no_2591_with_real_lib`,
+`js_exports_property_resolves_no_2304_with_real_lib`,
+`commonjs_module_locals_do_not_leak_into_sibling_ts_globals` (the leak guard).
+Two pre-existing guards (`plain_js_file_is_still_checked`,
+`js_file_with_check_js_true_is_checked`) had their WITNESS updated from
+`module.exports = {}` (which now correctly resolves) to a bare undefined name —
+intent (plain/checkJs JS IS bind-and-checked) preserved, not weakened.
+
+## Headline — measured parity BEFORE → AFTER (150-case subset)
+
+```
+BEFORE (Round 7):  150 cases — passed 61, failed 89, errored 0
+                   extra: TS2304 ×44, TS2339 ×18, TS2591 ×12
+                   categories: no_baseline 31, missing_all 32, divergent 26
+AFTER  (Round 8):  150 cases — passed 66, failed 84, errored 0
+                   extra: TS2304 ×41, TS2339 ×18, TS2591 ×1
+                   categories: no_baseline 26, missing_all 35, divergent 23
+```
+
+- **passed 61 → 66 (+5)** — flipped to PASS (verified produced==committed; the
+  two bonus cases beyond the 3 Step-0 predicted have NO committed baseline):
+  `exportAssignmentMerging5`, `numericExportNameDeclaration`,
+  `jsDeclarationExportDefaultAssignmentCrash`, `cjsExportGenericTypes`,
+  `panicSatisfiesOnExportEqualsDeclaration`.
+- **extra TS2591 ×12 → ×1** — all false positives cleared; the lone survivor is
+  `exportAssignmentMerging6`'s `a.js`, an ES module where tsc ALSO reports
+  TS2591 (committed `a.js(5,1)` vs our `a.js(4,20)` — a pre-existing error-range
+  POSITION discrepancy, NOT over-resolution; `module` correctly stays
+  unresolved there). It pairs with `missing TS2591 ×1`.
+- **extra TS2304 ×44 → ×41 (−3)** — the `exports` sub-cluster
+  (`numericExportNameDeclaration` ×2, `jsDeclarationExportDefaultAssignmentCrash`
+  ×1) cleared.
+- **extra TS2339 ×18 — UNCHANGED** — no new cascade; member access on the benign
+  `any`-like `module`/`exports` symbols does not spuriously 2339 (proved no
+  over-resolution regression).
+- **ZERO PASS→FAIL regressions** (PASS sets diffed BEFORE vs AFTER). Category
+  shift reflects cleared false positives moving `divergent` → `missing_all_errors`.
+
+## Gate results (Round 8)
+
+- `cargo test -p tsgo_binder` — GREEN (57 unit + 10 doctests; +8 lib + 9 astquery).
+- `cargo test -p tsgo_checker` — GREEN (768 unit + 178 doctests; +4).
+- `cargo test -p tsgo_compiler` — GREEN (98 unit + 11 doctests; +3, 2 witnesses
+  updated) [real bundled-lib path].
+- `cargo test -p tsgo_testrunner` — GREEN (47 unit + 11 doctests; 150-case
+  re-measure; snapshot updated to 66/84/0).
+- `cargo clippy -p tsgo_binder -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner
+  --all-targets -- -D warnings` — GREEN.
+- `cargo fmt … -- --check` — GREEN.
+- `cargo build --workspace --all-targets` — GREEN.
+
+No `--no-verify`; no test weakened/deleted; byte comparison unchanged; no new
+dependency; `Cargo.toml`/`Cargo.lock` untouched.
+
+## DEFER list (blocked-by) — Round 8
+
+- **CommonJS export-symbol shape** (`bindModuleExportsAssignment` /
+  `bindExportsOrObjectDefineProperty` declaring the `module.exports`/`exports.x`
+  export symbols on the file symbol; `trackNestedCJSExport` for declaration
+  emit) — only the module indicator is set this round (the resolution-relevant
+  effect). blocked-by: the full CommonJS export-symbol model + declaration emit
+  (TS6424/TS6425 in `multipleModuleExportsAssignments`).
+- **`require(...)` import → `typeof import(...)` member resolution** (the
+  `b.js(2,14)` TS2339 in `exportAssignmentMerging6`) — `require` resolves to
+  `any`, so `a.a` does not error, but the precise `typeof import("a")` member
+  check is unmodeled. blocked-by: external-module require resolution.
+- **`Object.defineProperty(exports, …)` assignment kinds**
+  (`ObjectDefinePropertyValue`/`ObjectDefinePropertyExports`) — not classified;
+  the require/`exports.x` indicator already covers the corpus cases (e.g.
+  `numericExportNameDeclaration` flips without it). blocked-by:
+  `IsBindableObjectDefinePropertyCall`.
+- **TS `import x = require()` / `export =` alias resolution** (the `a`/`foo`
+  TS2304 in `exportAssignmentMerging1-4`) — unchanged from Round 3/4
+  (`resolveExternalModuleSymbol`/`resolveAlias`).
+- **`module` error-range position in multi-file extracted files** (the
+  `exportAssignmentMerging6` `a.js(4,20)` vs committed `a.js(5,1)`) — a
+  pre-existing error-range/offset discrepancy, NOT touched by this round.
+  blocked-by: multi-file error-range attribution.

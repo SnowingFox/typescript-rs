@@ -518,6 +518,41 @@ impl Binder<'_> {
         self.add_declaration_to_symbol(symbol, node, symbol_flags);
     }
 
+    // Go: internal/binder/binder.go:declareCommonJSVariable
+    pub(crate) fn declare_common_js_variable(&mut self, name: &str) {
+        let file = self.file;
+        // Ensure the file's locals table exists, then bail if the name is
+        // already present (e.g. an explicit top-level `var module` shadow).
+        if self.locals.get(&file).is_some_and(|t| t.contains_key(name)) {
+            return;
+        }
+        let symbol = self.new_symbol(
+            SymbolFlags::FUNCTION_SCOPED_VARIABLE | SymbolFlags::MODULE_EXPORTS,
+            name.to_string(),
+        );
+        self.symbols[symbol.index()].declarations.push(file);
+        self.symbols[symbol.index()].value_declaration = Some(file);
+        if name == "module" {
+            // `module` carries an `exports` member (`module.exports` access).
+            let exports_property = self.new_symbol(
+                SymbolFlags::MODULE_EXPORTS | SymbolFlags::PROPERTY,
+                "exports".to_string(),
+            );
+            self.symbols[exports_property.index()]
+                .declarations
+                .push(file);
+            self.symbols[exports_property.index()].value_declaration = Some(file);
+            self.symbols[exports_property.index()].parent = Some(symbol);
+            self.symbols[symbol.index()]
+                .members
+                .insert("exports".to_string(), exports_property);
+        }
+        self.locals
+            .entry(file)
+            .or_default()
+            .insert(name.to_string(), symbol);
+    }
+
     // Go: internal/binder/binder.go:bindBlockScopedDeclaration
     pub(crate) fn bind_block_scoped_declaration(
         &mut self,

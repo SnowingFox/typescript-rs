@@ -35,7 +35,7 @@ use std::rc::{Rc, Weak};
 
 use rustc_hash::FxHashMap;
 use tsgo_ast::flow::{FlowList, FlowListId, FlowNode, FlowNodeId, FlowSwitchClauseData};
-use tsgo_ast::{NodeArena, NodeId, Symbol, SymbolId, SymbolTable};
+use tsgo_ast::{NodeArena, NodeId, Symbol, SymbolFlags, SymbolId, SymbolTable};
 use tsgo_checker::BoundProgram;
 use tsgo_core::compileroptions::CompilerOptions;
 
@@ -271,6 +271,21 @@ impl MultiFileBoundProgram {
             let bind = file.bind_result().expect("bound");
             if let Some(locals) = bind.locals.get(&file.node()) {
                 for (name, &sid) in locals {
+                    // The CommonJS `module`/`exports` file locals (Go's
+                    // `declareCommonJSVariable`, `SymbolFlagsModuleExports`) are
+                    // per-file constructs that must NEVER leak into the program
+                    // globals — otherwise `module`/`exports` would resolve in
+                    // every sibling file (including ES modules and `.ts`),
+                    // masking the TS2304/TS2591 tsc reports there. They resolve
+                    // only through their own file's `locals` scope walk. Go's
+                    // globals merge likewise excludes external/CommonJS module
+                    // files entirely (`!IsExternalOrCommonJSModule`).
+                    if bind.symbols[sid.index()]
+                        .flags
+                        .contains(SymbolFlags::MODULE_EXPORTS)
+                    {
+                        continue;
+                    }
                     merged_globals
                         .entry(name.clone())
                         .or_insert(SymbolId(sid.0 + off));

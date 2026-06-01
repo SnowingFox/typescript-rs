@@ -8700,3 +8700,88 @@ fn get_suggested_lib_for_non_existent_name_matches_feature_map() {
     assert_eq!(lib_of("foo"), "");
     assert_eq!(lib_of(""), "");
 }
+
+// ---------------------------------------------------------------------------
+// Round 8 — CommonJS module/exports resolution: once the binder sees a CommonJS
+// module indicator in a JS file (`module.exports = X`, `exports.x = Y`, or a
+// `require(...)` call), it declares `module`/`exports` as file locals, so they
+// resolve through the normal scope walk and no longer report TS2304/TS2591.
+// Their declared type is benign (`any`-like), so member access on them
+// (`module.exports`, `exports.foo`) does not spuriously report TS2339.
+// Go: internal/binder/binder.go:declareCommonJSVariable
+//     + internal/checker/checker.go:Checker.getTypeOfSymbol (SymbolFlagsModuleExports)
+// ---------------------------------------------------------------------------
+
+// Headline: `module.exports = {};` in a JS file resolves `module` (no 2304/2591)
+// and the `module.exports` member access does not report 2339.
+#[test]
+fn js_module_exports_assignment_resolves_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_js(
+        "/a.js",
+        "module.exports = {};",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2304 && d.code != 2591),
+        "`module` must resolve via CommonJS binding (no 2304/2591): {diags:?}"
+    );
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "`module.exports` member access on the benign CJS type must not report 2339: {diags:?}"
+    );
+}
+
+// `exports.foo = 1;` resolves `exports` (no 2304) and the `exports.foo` member
+// access does not report 2339.
+#[test]
+fn js_exports_property_assignment_resolves_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_js("/a.js", "exports.foo = 1;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2304 && d.code != 2591),
+        "`exports` must resolve via CommonJS binding (no 2304/2591): {diags:?}"
+    );
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "`exports.foo` member access on the benign CJS type must not report 2339: {diags:?}"
+    );
+}
+
+// A bare `module` reference resolves once any CommonJS indicator is present,
+// even one introduced by a `require(...)` call elsewhere in the file.
+#[test]
+fn js_require_call_makes_bare_module_resolve() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_js(
+        "/a.js",
+        "const x = require(\"./y\"); module; exports;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2304 && d.code != 2591),
+        "a require(...) indicator makes `module`/`exports` resolve (no 2304/2591): {diags:?}"
+    );
+}
+
+// GUARD: a JS file with NO CommonJS indicator keeps `module` unresolved → the
+// Round 7 node-typedefs hint TS2591 is preserved (no over-resolution).
+// Go: internal/binder/binder.go:setCommonJSModuleIndicator
+#[test]
+fn js_without_commonjs_indicator_module_still_reports_2591() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_js(
+        "/a.js",
+        "var y = 1; module;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2591),
+        "a plain JS file with no CJS pattern keeps `module` unresolved (2591): {diags:?}"
+    );
+}

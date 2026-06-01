@@ -727,6 +727,30 @@ impl<'a> Binder<'a> {
                     self.set_node_flow(node);
                 }
             }
+            Kind::BinaryExpression => {
+                // CommonJS assignment-declaration recognition. Only the patterns
+                // that set the module indicator are handled here; the expando
+                // (`F.x = Y`) and `this.x = Y` cases declare nothing in this
+                // port (their symbol creation is deferred), and the strict-mode
+                // binary-expression check is also deferred.
+                match astquery::get_assignment_declaration_kind(self.arena, node) {
+                    astquery::JsDeclarationKind::ModuleExports => {
+                        self.bind_module_exports_assignment(node)
+                    }
+                    astquery::JsDeclarationKind::ExportsProperty => {
+                        self.bind_exports_or_object_define_property(node)
+                    }
+                    _ => {}
+                }
+            }
+            Kind::CallExpression => {
+                // `Object.defineProperty(...)` assignment-declaration cases are
+                // deferred; the require-call indicator is the parity-relevant
+                // path. Go: internal/binder/binder.go:bind (KindCallExpression).
+                if astquery::is_in_js_file(self.arena, node) {
+                    self.bind_call_expression(node);
+                }
+            }
             Kind::TypeParameter => self.bind_type_parameter(node),
             Kind::Parameter => self.bind_parameter(node),
             Kind::VariableDeclaration => self.bind_variable_declaration_or_binding_element(node),
@@ -887,6 +911,52 @@ impl<'a> Binder<'a> {
         let file = self.file;
         self.bind_anonymous_declaration(file, SymbolFlags::VALUE_MODULE, name);
         self.file_symbol = self.symbol_of(file);
+    }
+
+    // Go: internal/binder/binder.go:bindCallExpression
+    fn bind_call_expression(&mut self, node: NodeId) {
+        // We're only inspecting call expressions to detect CommonJS modules, so
+        // we can skip this check if we've already seen the module indicator.
+        if self.common_js_module_indicator.is_none() && astquery::is_require_call(self.arena, node)
+        {
+            self.set_common_js_module_indicator(node);
+        }
+    }
+
+    // Go: internal/binder/binder.go:setCommonJSModuleIndicator
+    fn set_common_js_module_indicator(&mut self, node: NodeId) -> bool {
+        // A real external-module indicator (a non-file `import`/`export`) means
+        // the file is an ES module, not CommonJS.
+        if let Some(indicator) = self.external_module_indicator {
+            if indicator != self.file {
+                return false;
+            }
+        }
+        if self.common_js_module_indicator.is_none() {
+            self.common_js_module_indicator = Some(node);
+            if self.external_module_indicator.is_none() {
+                self.bind_source_file_as_external_module();
+            }
+        }
+        true
+    }
+
+    // Go: internal/binder/binder.go:bindModuleExportsAssignment
+    fn bind_module_exports_assignment(&mut self, node: NodeId) {
+        // Setting the indicator (and synthesizing the file symbol) is the
+        // resolution-relevant effect. DEFER(phase-4): `trackNestedCJSExport`
+        // (declaration-emit serialization tracking) and the `module.exports`
+        // export-symbol declaration on the file symbol.
+        // blocked-by: CommonJS export-symbol shape + declaration emit.
+        self.set_common_js_module_indicator(node);
+    }
+
+    // Go: internal/binder/binder.go:bindExportsOrObjectDefineProperty
+    fn bind_exports_or_object_define_property(&mut self, node: NodeId) {
+        // DEFER(phase-4): the `exports.x` export-symbol declaration on the file
+        // symbol; only the module indicator is set here.
+        // blocked-by: CommonJS export-symbol shape.
+        self.set_common_js_module_indicator(node);
     }
 
     // Go: internal/binder/binder.go:setExportContextFlag
@@ -1164,6 +1234,23 @@ impl<'a> Binder<'a> {
             self.seen_this_keyword = save_seen_this_keyword;
         } else {
             self.bind_children(node);
+        }
+
+        // After binding a JS source file's children, declare the CommonJS
+        // `module`/`exports` file locals if a CommonJS module indicator was seen
+        // during that walk (a `require(...)` call or a `module.exports` /
+        // `exports.x` assignment). This makes them resolve through the normal
+        // scope lookup so the checker does not report TS2304/TS2591 for them.
+        // DEFER(phase-4): the deferred top-level JSTypeAliasDeclaration binding
+        // and `bindCommonJSTypeExports` (export `=` promotion). blocked-by: JS
+        // type-alias reparsing + CommonJS export-symbol shape.
+        // Go: internal/binder/binder.go:bindContainer (SourceFile finalizer)
+        if self.arena.kind(node) == Kind::SourceFile
+            && astquery::is_in_js_file(self.arena, node)
+            && self.common_js_module_indicator.is_some()
+        {
+            self.declare_common_js_variable("module");
+            self.declare_common_js_variable("exports");
         }
 
         self.container = save_container;
