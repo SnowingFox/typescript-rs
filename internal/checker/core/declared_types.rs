@@ -88,6 +88,201 @@ fn get_declared_type_of_type_parameter(checker: &mut Checker, symbol: SymbolId) 
     t
 }
 
+/// Returns the resolved `extends` constraint of a type parameter, or `None`
+/// when it is unconstrained (Go's `getConstraintOfTypeParameter` ->
+/// `getConstraintFromTypeParameter`).
+///
+/// The constraint type node (`T extends U`) is resolved through the declaring
+/// type-parameter symbol and cached per type id (Go caches on
+/// `TypeParameter.constraint`).
+///
+/// DEFER(phase-4-checker-C-C): the inferred constraint (`infer T`), the mapped
+/// type key constraint, and instantiated-target constraint chaining
+/// (`tp.target`/`tp.mapper`). blocked-by: conditional/mapped types + nested
+/// generic instantiation.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{get_constraint_of_type_parameter, BoundProgram, Checker, TypeId};
+/// fn demo<P: BoundProgram>(c: &mut Checker, p: &P, tp: TypeId) {
+///     let _ = get_constraint_of_type_parameter(c, p, tp);
+/// }
+/// ```
+///
+/// Side effects: may build the constraint type and populate the constraint cache.
+// Go: internal/checker/checker.go:Checker.getConstraintOfTypeParameter / getConstraintFromTypeParameter
+pub fn get_constraint_of_type_parameter(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    type_parameter: TypeId,
+) -> Option<TypeId> {
+    if let Some(&cached) = checker.type_parameter_constraints.get(&type_parameter) {
+        return cached;
+    }
+    let symbol = checker
+        .get_type(type_parameter)
+        .as_type_parameter()
+        .and_then(|d| d.symbol);
+    let constraint_node =
+        symbol.and_then(|sym| {
+            program.symbol(sym).declarations.iter().find_map(|&decl| {
+                match program.arena().data(decl) {
+                    NodeData::TypeParameterDeclaration(d) => d.constraint,
+                    _ => None,
+                }
+            })
+        });
+    let result = constraint_node.map(|node| get_type_from_type_node(checker, program, node, None));
+    checker
+        .type_parameter_constraints
+        .insert(type_parameter, result);
+    result
+}
+
+/// Returns the resolved `= Default` of a type parameter, or `None` when it has
+/// no default (Go's `getDefaultFromTypeParameter`).
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{get_default_from_type_parameter, BoundProgram, Checker, TypeId};
+/// fn demo<P: BoundProgram>(c: &mut Checker, p: &P, tp: TypeId) {
+///     let _ = get_default_from_type_parameter(c, p, tp);
+/// }
+/// ```
+///
+/// Side effects: may build the default type and populate the default cache.
+// Go: internal/checker/checker.go:Checker.getDefaultFromTypeParameter / getResolvedTypeParameterDefault
+pub fn get_default_from_type_parameter(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    type_parameter: TypeId,
+) -> Option<TypeId> {
+    if let Some(&cached) = checker.type_parameter_defaults.get(&type_parameter) {
+        return cached;
+    }
+    let symbol = checker
+        .get_type(type_parameter)
+        .as_type_parameter()
+        .and_then(|d| d.symbol);
+    let default_node =
+        symbol.and_then(|sym| {
+            program.symbol(sym).declarations.iter().find_map(|&decl| {
+                match program.arena().data(decl) {
+                    NodeData::TypeParameterDeclaration(d) => d.default_type,
+                    _ => None,
+                }
+            })
+        });
+    let result = default_node.map(|node| get_type_from_type_node(checker, program, node, None));
+    checker
+        .type_parameter_defaults
+        .insert(type_parameter, result);
+    result
+}
+
+// Reports whether a type parameter declares a `= Default` (Go's
+// `hasTypeParameterDefault`): true when any declaring `TypeParameterDeclaration`
+// has a default type node.
+// Go: internal/checker/checker.go:Checker.hasTypeParameterDefault
+fn has_type_parameter_default(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    type_parameter: TypeId,
+) -> bool {
+    let Some(symbol) = checker
+        .get_type(type_parameter)
+        .as_type_parameter()
+        .and_then(|d| d.symbol)
+    else {
+        return false;
+    };
+    program
+        .symbol(symbol)
+        .declarations
+        .iter()
+        .any(|&decl| match program.arena().data(decl) {
+            NodeData::TypeParameterDeclaration(d) => d.default_type.is_some(),
+            _ => false,
+        })
+}
+
+/// Returns the minimum number of type arguments a generic declaration requires:
+/// the count up to (and including) the last type parameter without a default
+/// (Go's `getMinTypeArgumentCount`).
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{get_min_type_argument_count, BoundProgram, Checker};
+/// fn demo<P: BoundProgram>(c: &mut Checker, p: &P, tps: &[tsgo_checker::TypeId]) {
+///     let _ = get_min_type_argument_count(c, p, tps);
+/// }
+/// ```
+///
+/// Side effects: none (reads declarations).
+// Go: internal/checker/checker.go:Checker.getMinTypeArgumentCount
+pub fn get_min_type_argument_count(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    type_parameters: &[TypeId],
+) -> usize {
+    let mut min = 0;
+    for (i, &tp) in type_parameters.iter().enumerate() {
+        if !has_type_parameter_default(checker, program, tp) {
+            min = i + 1;
+        }
+    }
+    min
+}
+
+/// Pads a type-argument list with defaults (and the `unknown` base default) so
+/// it matches the type-parameter arity (Go's `fillMissingTypeArguments`).
+///
+/// When fewer arguments than parameters are supplied, each missing slot is
+/// filled with the corresponding type parameter's default — instantiated
+/// through the partially-filled mapper, so a later default can reference an
+/// earlier parameter (`<T, U = T>`) — or `unknown` when there is no default.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{fill_missing_type_arguments, BoundProgram, Checker};
+/// fn demo<P: BoundProgram>(c: &mut Checker, p: &P, args: &[tsgo_checker::TypeId], tps: &[tsgo_checker::TypeId]) {
+///     let _ = fill_missing_type_arguments(c, p, args, tps);
+/// }
+/// ```
+///
+/// Side effects: may build default types and instantiate them.
+// Go: internal/checker/checker.go:Checker.fillMissingTypeArguments
+pub fn fill_missing_type_arguments(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    type_arguments: &[TypeId],
+    type_parameters: &[TypeId],
+) -> Vec<TypeId> {
+    let num_parameters = type_parameters.len();
+    if num_parameters == 0 {
+        return Vec::new();
+    }
+    let num_arguments = type_arguments.len();
+    if num_arguments >= num_parameters {
+        return type_arguments.to_vec();
+    }
+    let mut result = type_arguments.to_vec();
+    // Go maps invalid forward references in default types to the error type.
+    result.resize(num_parameters, checker.error_type());
+    let base_default = checker.unknown_type();
+    for i in num_arguments..num_parameters {
+        let default = get_default_from_type_parameter(checker, program, type_parameters[i]);
+        result[i] = match default {
+            Some(default_type) => {
+                let mapper = super::mapper::TypeMapper::new(type_parameters, &result);
+                checker.instantiate_type(default_type, &mapper)
+            }
+            None => base_default,
+        };
+    }
+    result
+}
+
 // Go: internal/checker/checker.go:Checker.getDeclaredTypeOfClassOrInterface
 fn get_declared_type_of_class_or_interface(
     checker: &mut Checker,
@@ -512,6 +707,7 @@ fn collect_local_type_parameters(
             NodeData::InterfaceDeclaration(d)
             | NodeData::ClassDeclaration(d)
             | NodeData::ClassExpression(d) => d.type_parameters.clone(),
+            NodeData::TypeAliasDeclaration(d) => d.type_parameters.clone(),
             _ => None,
         };
         if let Some(list) = type_param_nodes {
@@ -633,6 +829,13 @@ fn get_declared_type_of_type_alias(
             NodeData::TypeAliasDeclaration(d) => Some(d.type_node),
             _ => None,
         });
+    // Record the alias's local type parameters (Go's
+    // `typeAliasLinks.typeParameters`), so a generic-alias reference can check
+    // its type-argument arity and constraints. Done before resolving the RHS so
+    // the parameter types are interned by symbol.
+    let declarations = program.symbol(symbol).declarations.clone();
+    let type_parameters = collect_local_type_parameters(checker, program, &declarations);
+    checker.type_alias_links.get(symbol).type_parameters = type_parameters;
     let t = match type_node {
         Some(node) => get_type_from_type_node(checker, program, node, globals),
         None => checker.error_type(),
@@ -862,10 +1065,47 @@ fn get_signature_from_declaration(
     };
     let mut signature = Signature::new(flags);
     signature.declaration = Some(declaration);
+    signature.type_parameters = get_signature_type_parameters(checker, program, declaration);
     signature.parameters = parameters;
     signature.min_argument_count = min_argument_count;
     signature.resolved_return_type = Some(resolved_return_type);
     checker.new_signature(signature)
+}
+
+// Collects the type-parameter types declared by a function-like declaration's
+// `<...>` list (Go's `getSignatureFromDeclaration` populating
+// `signature.typeParameters` from `getEffectiveTypeParameterDeclarations`).
+// Each declared type-parameter symbol is mapped to its (cached) type-parameter
+// type, so the same `T` referenced inside the parameter/return annotations —
+// resolved by name through `resolve_type_parameter_in_scope` ->
+// `get_declared_type_of_type_parameter` — shares the type id stored here.
+//
+// DEFER(phase-4-checker-C-B2+): the inherited (outer) type parameters of a
+// nested generic declaration and JSDoc type-parameter tags.
+// blocked-by: outer-type-parameter threading + JSDoc reparse.
+// Go: internal/checker/checker.go:Checker.getSignatureFromDeclaration (typeParameters)
+fn get_signature_type_parameters(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    declaration: NodeId,
+) -> Vec<TypeId> {
+    let list = match program.arena().data(declaration) {
+        NodeData::FunctionDeclaration(d) => d.type_parameters.clone(),
+        NodeData::MethodSignature(d) => d.type_parameters.clone(),
+        NodeData::MethodDeclaration(d) => d.type_parameters.clone(),
+        NodeData::FunctionType(d) | NodeData::ConstructorType(d) => d.type_parameters.clone(),
+        _ => None,
+    };
+    let mut result = Vec::new();
+    if let Some(list) = list {
+        for node in list.nodes {
+            match program.symbol_of_node(node) {
+                Some(sym) => result.push(get_declared_type_of_type_parameter(checker, sym)),
+                None => result.push(checker.new_type_parameter(None)),
+            }
+        }
+    }
+    result
 }
 
 // Reports whether a parameter declaration is optional for arity purposes (Go's
@@ -1450,17 +1690,39 @@ fn get_type_from_type_reference(
             None => return checker.error_type(),
         },
     };
+    let symbol_flags = program.symbol(symbol).flags;
     let target = get_declared_type_of_symbol(checker, program, symbol, globals);
-    // `Foo<A, B>` becomes a generic type reference; `Foo` stays the bare target.
-    if let Some(list) = type_arguments {
-        if !list.nodes.is_empty() {
-            let args: Vec<TypeId> = list
-                .nodes
+    let provided_args: Vec<TypeId> = type_arguments
+        .as_ref()
+        .map(|list| {
+            list.nodes
                 .iter()
                 .map(|&arg| get_type_from_type_node(checker, program, arg, globals))
-                .collect();
-            return checker.create_type_reference(target, args);
+                .collect()
+        })
+        .unwrap_or_default();
+    // A generic class/interface reference fills any missing local type arguments
+    // from their defaults (or `unknown`), then forms a type reference — so `C`
+    // with `interface C<T = number>` resolves to `C<number>`, and reading `c.v`
+    // instantiates `T -> number` (Go's `getTypeFromClassOrInterfaceReference`
+    // -> `fillMissingTypeArguments` -> `createTypeReference`). The arity/2314
+    // diagnostic itself is emitted separately by `check_type_reference_node`.
+    if symbol_flags.intersects(SymbolFlags::CLASS | SymbolFlags::INTERFACE) {
+        let type_parameters = checker
+            .get_type(target)
+            .as_object()
+            .map(|o| o.type_parameters.clone())
+            .unwrap_or_default();
+        if !type_parameters.is_empty() {
+            let filled =
+                fill_missing_type_arguments(checker, program, &provided_args, &type_parameters);
+            return checker.create_type_reference(target, filled);
         }
+    }
+    // `Foo<A, B>` (a non-generic-target or alias) with explicit arguments forms a
+    // plain reference; a bare name stays the target.
+    if !provided_args.is_empty() {
+        return checker.create_type_reference(target, provided_args);
     }
     target
 }

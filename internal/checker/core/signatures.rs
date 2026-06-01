@@ -101,6 +101,12 @@ pub struct Signature {
     pub resolved_return_type: Option<TypeId>,
     /// The signature this was instantiated from, if any.
     pub target: Option<SignatureId>,
+    /// For an instantiated signature, the type mapper applied to its parameter
+    /// and return types (Go's `Signature.mapper`). `None` for an un-instantiated
+    /// signature. Parameter symbols are kept as the un-instantiated base
+    /// symbols; their types are mapped through this on read (Go re-instantiates
+    /// the parameter symbols, which is observationally equivalent).
+    pub mapper: Option<super::mapper::TypeMapper>,
 }
 
 impl Default for SignatureFlags {

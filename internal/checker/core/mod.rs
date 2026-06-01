@@ -142,6 +142,13 @@ pub struct Checker {
     /// Resolved global types by name; populated when declared types are built
     /// (sub-phase 4c). Empty in 4a.
     global_types: FxHashMap<String, TypeId>,
+    /// Resolved `extends` constraint per type-parameter type id (Go caches this
+    /// on `TypeParameter.constraint`; the port keys a checker map because the
+    /// declaration node lives in the program). `None` records "no constraint".
+    type_parameter_constraints: FxHashMap<TypeId, Option<TypeId>>,
+    /// Resolved `= Default` per type-parameter type id (Go's
+    /// `TypeParameter.resolvedDefaultType`). `None` records "no default".
+    type_parameter_defaults: FxHashMap<TypeId, Option<TypeId>>,
     /// Interned union types, keyed by their sorted constituent ids (Go uses a
     /// hashed `CacheHashKey`; the sorted id vector is an equivalent stable key).
     union_types: FxHashMap<Vec<TypeId>, TypeId>,
@@ -359,6 +366,8 @@ impl Checker {
             types,
             symbol_reference_links: SymbolLinks::default(),
             global_types: FxHashMap::default(),
+            type_parameter_constraints: FxHashMap::default(),
+            type_parameter_defaults: FxHashMap::default(),
             union_types,
             intersection_types: FxHashMap::default(),
             string_literal_types: FxHashMap::default(),

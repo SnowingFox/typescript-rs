@@ -625,7 +625,13 @@ impl Checker {
         pos: usize,
     ) -> Option<TypeId> {
         let symbol = self.signature(signature).parameters.get(pos).copied()?;
-        Some(get_type_of_symbol(self, program, symbol, None))
+        let base = get_type_of_symbol(self, program, symbol, None);
+        // An instantiated signature substitutes its parameter types through its
+        // mapper (matching `get_type_at_position`).
+        Some(match self.signature(signature).mapper.clone() {
+            Some(mapper) => self.instantiate_type(base, &mapper),
+            None => base,
+        })
     }
 
     /// Widens a literal value type for a mutable location, *unless* its

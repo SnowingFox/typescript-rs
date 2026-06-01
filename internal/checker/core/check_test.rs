@@ -6143,3 +6143,419 @@ fn array_of_function_types_contravariant_element_is_assignable() {
         "contravariant element params make the array assignable"
     );
 }
+
+// ===========================================================================
+// C-B1: generics foundation — explicit type arguments + constraints +
+// defaults + arity + instantiation.
+// ===========================================================================
+
+// C-B1 slice 1 (end-to-end): a generic function called with an explicit type
+// argument instantiates its signature so the result type is the substituted
+// type. `id<number>(1)` yields `number`, so `const s: string = r` reports 2322.
+// Verified against `cmd/tsgo`: `t.ts(3,7): error TS2322: Type 'number' is not
+// assignable to type 'string'.`
+// Go: internal/checker/checker.go:getSignatureInstantiation / instantiateSignature
+#[test]
+fn generic_function_explicit_type_argument_instantiates_return() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function id<T>(x: T): T { return x; }\nconst r = id<number>(1);\nconst s: string = r;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-B1 slice 3 (constraint, call site): an explicit type argument that does not
+// satisfy its `extends` constraint reports 2344 on the type-argument node, and
+// the call aborts (no follow-on 2345). `f<string>("a")` with
+// `f<T extends number>` reports exactly one 2344.
+// Verified against `cmd/tsgo`: `t.ts(2,3): error TS2344: Type 'string' does not
+// satisfy the constraint 'number'.`
+// Go: internal/checker/checker.go:Checker.checkTypeArguments
+#[test]
+fn explicit_type_argument_violates_constraint_reports_2344() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T extends number>(x: T) {}\nf<string>(\"a\");",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2344, got {diags:?}");
+    assert_eq!(diags[0].code, 2344);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' does not satisfy the constraint 'number'."
+    );
+}
+
+// C-B1 slice 3 (constraint, call site): a failing constraint suppresses the
+// argument-assignability error — `f<string>(1)` reports only the 2344, not a
+// 2345 for `1` vs the instantiated `string` parameter.
+// Verified against `cmd/tsgo`: a single `TS2344`.
+// Go: internal/checker/checker.go:Checker.checkTypeArguments (returns nil)
+#[test]
+fn failing_constraint_suppresses_argument_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T extends number>(x: T) {}\nf<string>(1);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "only the 2344, no 2345: {diags:?}");
+    assert_eq!(diags[0].code, 2344);
+}
+
+// C-B1 slice 3 (constraint satisfied, call site): an explicit type argument that
+// satisfies its constraint produces no diagnostics. `f<1>(1)` with
+// `f<T extends number>` is accepted.
+// Verified against `cmd/tsgo`: no diagnostics.
+// Go: internal/checker/checker.go:Checker.checkTypeArguments
+#[test]
+fn explicit_type_argument_satisfies_constraint_ok() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T extends number>(x: T) {}\nf<1>(1);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "1 satisfies `extends number`"
+    );
+}
+
+// C-B1 slice 3 (constraint, type-reference site): a type-alias instantiation
+// whose explicit argument violates the alias type parameter's constraint reports
+// 2344 on the argument node. `type G<T extends number> = T; type X = G<string>;`
+// reports one 2344.
+// Verified against `cmd/tsgo`: `t.ts(2,12): error TS2344: Type 'string' does not
+// satisfy the constraint 'number'.`
+// Go: internal/checker/checker.go:Checker.checkTypeArgumentConstraints
+#[test]
+fn type_alias_reference_violates_constraint_reports_2344() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type G<T extends number> = T;\ntype X = G<string>;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2344, got {diags:?}");
+    assert_eq!(diags[0].code, 2344);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' does not satisfy the constraint 'number'."
+    );
+}
+
+// C-B1 slice 3 (constraint satisfied, type-reference site): `G<1>` satisfies
+// `T extends number`, so no diagnostics.
+// Verified against `cmd/tsgo`: no diagnostics.
+#[test]
+fn type_alias_reference_satisfies_constraint_ok() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type G<T extends number> = T;\ntype X = G<1>;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "1 satisfies the constraint"
+    );
+}
+
+// C-B1 slice 4 (default applied): an omitted type argument uses the type
+// parameter's default. `interface C<T = number> { v: T }` referenced bare as `C`
+// resolves `v` to `number`, so `const w: string = c.v` reports 2322.
+// Verified against `cmd/tsgo`: `t.ts(3,7): error TS2322: Type 'number' is not
+// assignable to type 'string'.`
+// Go: internal/checker/checker.go:Checker.fillMissingTypeArguments
+#[test]
+fn default_type_argument_applied_to_member() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface C<T = number> { v: T }\nconst c: C = { v: 1 };\nconst w: string = c.v;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-B1 slice 4 (default overridden): an explicit type argument overrides the
+// default. `C<string>` makes `v` `string`, so `const w: number = c2.v` reports
+// 2322 ('string' not assignable to 'number').
+// Verified against `cmd/tsgo`: `t.ts(3,7): error TS2322: Type 'string' is not
+// assignable to type 'number'.`
+#[test]
+fn default_type_argument_overridden_by_explicit() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface C<T = number> { v: T }\nconst c2: C<string> = { v: \"x\" };\nconst w: number = c2.v;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// C-B1 slice 5 (arity, too many on interface): `Box<number, string>` reports
+// 2314 with the interface name printed as `Box<T>`.
+// Verified against `cmd/tsgo`: `t.ts(2,10): error TS2314: Generic type 'Box<T>'
+// requires 1 type argument(s).`
+// Go: internal/checker/checker.go:Checker.getTypeFromClassOrInterfaceReference
+#[test]
+fn interface_too_many_type_arguments_reports_2314() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Box<T> { v: T }\ntype X = Box<number, string>;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2314, got {diags:?}");
+    assert_eq!(diags[0].code, 2314);
+    assert_eq!(
+        diags[0].message,
+        "Generic type 'Box<T>' requires 1 type argument(s)."
+    );
+}
+
+// C-B1 slice 5 (arity, too few on interface): `Pair<number>` reports 2314 with
+// the interface name `Pair<A, B>` and the required count 2.
+// Verified against `cmd/tsgo`: `t.ts(2,10): error TS2314: Generic type
+// 'Pair<A, B>' requires 2 type argument(s).`
+#[test]
+fn interface_too_few_type_arguments_reports_2314() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Pair<A, B> { a: A; b: B }\ntype X = Pair<number>;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2314, got {diags:?}");
+    assert_eq!(diags[0].code, 2314);
+    assert_eq!(
+        diags[0].message,
+        "Generic type 'Pair<A, B>' requires 2 type argument(s)."
+    );
+}
+
+// C-B1 slice 5 (arity, alias): a type alias prints as just its name `G`.
+// `type G<T> = T; type X = G<number, string>;` reports 2314 'Generic type 'G'...'.
+// Verified against `cmd/tsgo`: `t.ts(2,10): error TS2314: Generic type 'G'
+// requires 1 type argument(s).`
+// Go: internal/checker/checker.go:Checker.getTypeFromTypeAliasReference
+#[test]
+fn type_alias_too_many_type_arguments_reports_2314() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type G<T> = T;\ntype X = G<number, string>;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2314, got {diags:?}");
+    assert_eq!(diags[0].code, 2314);
+    assert_eq!(
+        diags[0].message,
+        "Generic type 'G' requires 1 type argument(s)."
+    );
+}
+
+// C-B1 slice 5 (arity range, 2707): when defaults make the count a range, too
+// many arguments report 2707. `C<T = number, U = string>` with three arguments
+// reports 'requires between 0 and 2'.
+// Verified against `cmd/tsgo`: `t.ts(2,10): error TS2707: Generic type 'C<T, U>'
+// requires between 0 and 2 type arguments.`
+// Go: internal/checker/checker.go:Checker.getTypeFromClassOrInterfaceReference
+#[test]
+fn interface_type_arguments_out_of_range_reports_2707() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface C<T = number, U = string> { a: T; b: U }\ntype X = C<number, string, boolean>;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2707, got {diags:?}");
+    assert_eq!(diags[0].code, 2707);
+    assert_eq!(
+        diags[0].message,
+        "Generic type 'C<T, U>' requires between 0 and 2 type arguments."
+    );
+}
+
+// C-B1 slice 5 (arity, call site, 2558): a generic function called with too many
+// type arguments reports 2558. `id<number, string>(1)` reports 'Expected 1 type
+// arguments, but got 2.'
+// Verified against `cmd/tsgo`: `t.ts(2,14): error TS2558: Expected 1 type
+// arguments, but got 2.`
+// Go: internal/checker/checker.go:Checker.getTypeArgumentArityError
+#[test]
+fn generic_call_too_many_type_arguments_reports_2558() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function id<T>(x: T): T { return x; }\nconst r = id<number, string>(1);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2558, got {diags:?}");
+    assert_eq!(diags[0].code, 2558);
+    assert_eq!(diags[0].message, "Expected 1 type arguments, but got 2.");
+}
+
+// C-B1 slice 5 (grammar, 2706): a required type parameter following an optional
+// (defaulted) one reports 2706 on the required parameter.
+// Verified against `cmd/tsgo`: `t.ts(1,25): error TS2706: Required type
+// parameters may not follow optional type parameters.`
+// Go: internal/checker/checker.go:Checker.checkTypeParameters
+#[test]
+fn required_type_parameter_after_optional_reports_2706() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface C<T = number, U> { a: T; b: U }\ntype X = C<number, string>;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    // Exactly the 2706 grammar error (the `C<number, string>` reference is then
+    // within the [min=2, max=2] range, so no arity error).
+    assert!(
+        diags.iter().any(|d| d.code == 2706),
+        "expected a 2706, got {diags:?}"
+    );
+    let d = diags.iter().find(|d| d.code == 2706).unwrap();
+    assert_eq!(
+        d.message,
+        "Required type parameters may not follow optional type parameters."
+    );
+}
+
+// C-B1 slice 6 (composition, nested reference type argument): a generic function
+// instantiated with a generic type argument substitutes through the reference.
+// `id<Box<number>>(bn)` yields `Box<number>`, so `r.v` is `number` and
+// `const bad: string = r.v` reports 2322.
+// Verified against `cmd/tsgo`: `t.ts(5,7): error TS2322: Type 'number' is not
+// assignable to type 'string'.`
+// Go: internal/checker/checker.go:Checker.instantiateType (type reference args)
+#[test]
+fn generic_call_with_nested_reference_type_argument() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Box<T> { v: T }\nfunction id<T>(x: T): T { return x; }\ndeclare const bn: Box<number>;\nconst r = id<Box<number>>(bn);\nconst bad: string = r.v;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-B1 slice 6 (composition, return reference instantiation): a generic function
+// whose return type is a generic reference instantiates the reference's argument.
+// `wrap<number>(1)` returns `Box<number>`, so `r.v` is `number` and
+// `const bad: string = r.v` reports 2322.
+// Verified against `cmd/tsgo`: `t.ts(4,7): error TS2322: Type 'number' is not
+// assignable to type 'string'.`
+// Go: internal/checker/checker.go:Checker.instantiateSignature (return type)
+#[test]
+fn generic_function_returning_reference_instantiates_argument() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Box<T> { v: T }\nfunction wrap<T>(x: T): Box<T> { return { v: x }; }\nconst r = wrap<number>(1);\nconst bad: string = r.v;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-B1 slice 2 (end-to-end): a generic interface instantiation reads its member
+// type through the reference's `T -> arg` mapper. `b: Box<number>` exposes `v`
+// as `number`, so `const n: string = b.v` reports 2322. (Builds on 4bp's member
+// instantiation; here the member TYPE is read back through a property access.)
+// Verified against `cmd/tsgo`: `t.ts(3,7): error TS2322: Type 'number' is not
+// assignable to type 'string'.`
+// Go: internal/checker/checker.go:Checker.getTypeOfPropertyOfType (instantiated)
+#[test]
+fn generic_interface_member_reads_instantiated_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Box<T> { v: T }\nconst b: Box<number> = { v: 1 };\nconst n: string = b.v;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// C-B1 slice 2 (positive): assigning `b.v` to its real `number` type holds.
+// Verified against `cmd/tsgo`: no diagnostics.
+#[test]
+fn generic_interface_member_assignable_to_match() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Box<T> { v: T }\nconst b: Box<number> = { v: 1 };\nconst n: number = b.v;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "b.v is number through Box<number>"
+    );
+}
+
+// C-B1 slice 1 (positive): the same call assigned to the matching type is
+// accepted — `const n: number = r` produces no diagnostics, confirming `r` is
+// genuinely `number` (not `any`/`unknown`/error).
+// Verified against `cmd/tsgo`: no diagnostics.
+#[test]
+fn generic_function_explicit_type_argument_assignable_to_match() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function id<T>(x: T): T { return x; }\nconst r = id<number>(1);\nconst n: number = r;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "id<number>(1) is number; assignment to number holds"
+    );
+}

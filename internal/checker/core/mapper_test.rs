@@ -140,6 +140,103 @@ fn instantiate_type_remaps_type_reference_arguments() {
     assert_eq!(obj.resolved_type_arguments, vec![c.string_type()]);
 }
 
+// Go: internal/checker/checker.go:instantiateTypeWorker (intersection recursion)
+#[test]
+fn instantiate_type_maps_intersection_members() {
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let a = c.new_object_type(ObjectFlags::INTERFACE, None, Default::default());
+    let inter = c.get_intersection_type(&[tp, a]);
+    let m = TypeMapper::Simple {
+        source: tp,
+        target: c.string_type(),
+    };
+    // { tp & A } with tp -> string  ==>  string & A
+    let instantiated = c.instantiate_type(inter, &m);
+    let members = c
+        .get_type(instantiated)
+        .intersection_types()
+        .unwrap()
+        .to_vec();
+    assert!(members.contains(&c.string_type()));
+    assert!(members.contains(&a));
+    assert!(!members.contains(&tp));
+}
+
+// An intersection with no type variables in any member is returned unchanged
+// (the `instantiated == members` short-circuit).
+// Go: internal/checker/checker.go:instantiateTypeWorker
+#[test]
+fn instantiate_type_intersection_without_type_vars_is_identity() {
+    let mut c = Checker::new();
+    let a = c.new_object_type(ObjectFlags::INTERFACE, None, Default::default());
+    let b = c.new_object_type(ObjectFlags::INTERFACE, None, Default::default());
+    let inter = c.get_intersection_type(&[a, b]);
+    let tp = c.new_type_parameter(None);
+    let m = TypeMapper::Simple {
+        source: tp,
+        target: c.string_type(),
+    };
+    assert_eq!(c.instantiate_type(inter, &m), inter);
+}
+
+// Go: internal/checker/mapper.go:newSimpleTypeMapper / mergeTypeMappers / appendTypeMapping
+#[test]
+fn mapper_combinators_compose() {
+    let mut c = Checker::new();
+    let a = c.new_type_parameter(None);
+    let b = c.new_type_parameter(None);
+    // unary
+    let unary = TypeMapper::unary(a, c.number_type());
+    assert_eq!(c.map_type(&unary, a), c.number_type());
+    // merge: a -> b then b -> string
+    let merged = TypeMapper::merge(
+        TypeMapper::unary(a, b),
+        TypeMapper::unary(b, c.string_type()),
+    );
+    assert_eq!(c.map_type(&merged, a), c.string_type());
+    // combine(None, m) == m
+    let combined_none = TypeMapper::combine(None, TypeMapper::unary(a, c.number_type()));
+    assert_eq!(c.map_type(&combined_none, a), c.number_type());
+    // combine(Some, m) re-instantiates (composite): a -> b (changed) then b -> number
+    let combined = TypeMapper::combine(
+        Some(TypeMapper::unary(a, b)),
+        TypeMapper::unary(b, c.number_type()),
+    );
+    assert_eq!(c.map_type(&combined, a), c.number_type());
+    // append_mapping: None -> unary; Some -> merge after
+    let appended = TypeMapper::append_mapping(None, a, c.string_type());
+    let appended = TypeMapper::append_mapping(Some(appended), b, c.number_type());
+    assert_eq!(c.map_type(&appended, a), c.string_type());
+    assert_eq!(c.map_type(&appended, b), c.number_type());
+}
+
+// An instantiated signature composes mappers so a re-instantiation applies both,
+// and the parameter symbols stay the base symbols (mapped on read).
+// Go: internal/checker/checker.go:instantiateSignatureEx (mapper composition)
+#[test]
+fn instantiate_signature_composes_mappers_and_keeps_parameters() {
+    let mut c = Checker::new();
+    let a = c.new_type_parameter(None);
+    let b = c.new_type_parameter(None);
+    let mut sig = Signature::new(SignatureFlags::NONE);
+    sig.resolved_return_type = Some(a);
+    let id = c.new_signature(sig);
+    // First instantiation a -> b.
+    let inst1 = c.instantiate_signature(id, &TypeMapper::unary(a, b));
+    assert_eq!(c.signature(inst1).resolved_return_type, Some(b));
+    assert!(c.signature(inst1).mapper.is_some());
+    // Second instantiation b -> number; the composed mapper takes a -> number.
+    let inst2 = c.instantiate_signature(inst1, &TypeMapper::unary(b, c.number_type()));
+    assert_eq!(
+        c.signature(inst2).resolved_return_type,
+        Some(c.number_type())
+    );
+    // The composed mapper still resolves the original `a` to `number`.
+    let mapper = c.signature(inst2).mapper.clone().unwrap();
+    assert_eq!(c.map_type(&mapper, a), c.number_type());
+}
+
 // Go: internal/checker/checker.go:instantiateSignature
 #[test]
 fn instantiate_signature_maps_return_type() {

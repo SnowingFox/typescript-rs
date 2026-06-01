@@ -314,6 +314,166 @@ fn type_of_property_through_reference_is_instantiated() {
     );
 }
 
+// Go: internal/checker/checker.go:getSignatureFromDeclaration (typeParameters)
+// C-B1 slice A: a generic function's call signature carries its type-parameter
+// list, and the type-parameter type identity matches the `T` referenced inside
+// the parameter/return type annotations (so the same `T` flows through).
+#[test]
+fn generic_function_signature_carries_type_parameters() {
+    let p = StubProgram::parse_and_bind("/a.ts", "function id<T>(x: T): T { return x; }");
+    let mut c = Checker::new();
+    let id_ty = get_type_of_symbol(&mut c, &p, local(&p, "id"), None);
+    let sig = c
+        .get_type(id_ty)
+        .as_object()
+        .expect("object")
+        .call_signatures[0];
+    let type_params = c.signature(sig).type_parameters.clone();
+    assert_eq!(type_params.len(), 1, "id<T> has one type parameter");
+    assert!(c.get_type(type_params[0]).as_type_parameter().is_some());
+    // The parameter `x: T` resolves to the *same* type-parameter type id.
+    let param_sym = c.signature(sig).parameters[0];
+    let param_type = get_type_of_symbol(&mut c, &p, param_sym, None);
+    assert_eq!(param_type, type_params[0]);
+    // The declared return type is the same `T` too.
+    assert_eq!(c.signature(sig).resolved_return_type, Some(type_params[0]));
+}
+
+// A non-generic function's signature has an empty type-parameter list (no
+// regression: the inference/instantiation paths only engage for generics).
+// Go: internal/checker/checker.go:getSignatureFromDeclaration
+#[test]
+fn non_generic_function_signature_has_no_type_parameters() {
+    let p = StubProgram::parse_and_bind("/a.ts", "function f(x: number): number { return x; }");
+    let mut c = Checker::new();
+    let f_ty = get_type_of_symbol(&mut c, &p, local(&p, "f"), None);
+    let sig = c
+        .get_type(f_ty)
+        .as_object()
+        .expect("object")
+        .call_signatures[0];
+    assert!(c.signature(sig).type_parameters.is_empty());
+}
+
+// C-B1: `getConstraintOfTypeParameter` resolves a type parameter's `extends`
+// constraint type (or `None` when unconstrained).
+// Go: internal/checker/checker.go:Checker.getConstraintFromTypeParameter
+#[test]
+fn constraint_of_type_parameter_resolves_extends_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface A<T extends number> { v: T }");
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, local(&p, "A"), None);
+    let tp = c.get_type(a).as_object().expect("object").type_parameters[0];
+    assert_eq!(
+        get_constraint_of_type_parameter(&mut c, &p, tp),
+        Some(c.number_type())
+    );
+}
+
+// An unconstrained type parameter has no constraint.
+// Go: internal/checker/checker.go:Checker.getConstraintFromTypeParameter
+#[test]
+fn constraint_of_unconstrained_type_parameter_is_none() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface A<T> { v: T }");
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, local(&p, "A"), None);
+    let tp = c.get_type(a).as_object().expect("object").type_parameters[0];
+    assert_eq!(get_constraint_of_type_parameter(&mut c, &p, tp), None);
+}
+
+// C-B1: `getDefaultFromTypeParameter` resolves a `= Default` type (or `None`).
+// Go: internal/checker/checker.go:Checker.getDefaultFromTypeParameter
+#[test]
+fn default_of_type_parameter_resolves_default_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A<T = string> { v: T }\ninterface B<U> { v: U }",
+    );
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, local(&p, "A"), None);
+    let tp = c.get_type(a).as_object().expect("object").type_parameters[0];
+    assert_eq!(
+        get_default_from_type_parameter(&mut c, &p, tp),
+        Some(c.string_type())
+    );
+    // A parameter without a default returns None.
+    let b = get_declared_type_of_symbol(&mut c, &p, local(&p, "B"), None);
+    let utp = c.get_type(b).as_object().expect("object").type_parameters[0];
+    assert_eq!(get_default_from_type_parameter(&mut c, &p, utp), None);
+}
+
+// C-B1: `getMinTypeArgumentCount` counts up to the last non-defaulted parameter.
+// Go: internal/checker/checker.go:Checker.getMinTypeArgumentCount
+#[test]
+fn min_type_argument_count_excludes_trailing_defaults() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface A<T, U = string> { a: T; b: U }");
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, local(&p, "A"), None);
+    let type_parameters = c
+        .get_type(a)
+        .as_object()
+        .expect("object")
+        .type_parameters
+        .clone();
+    assert_eq!(get_min_type_argument_count(&c, &p, &type_parameters), 1);
+}
+
+// C-B1: `fillMissingTypeArguments` pads omitted arguments with the parameter's
+// default, falling back to `unknown` when there is none.
+// Go: internal/checker/checker.go:Checker.fillMissingTypeArguments
+#[test]
+fn fill_missing_type_arguments_uses_defaults_then_unknown() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A<T, U = string> { a: T; b: U }\ninterface B<X, Y> { a: X; b: Y }",
+    );
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, local(&p, "A"), None);
+    let type_parameters = c
+        .get_type(a)
+        .as_object()
+        .expect("object")
+        .type_parameters
+        .clone();
+    // Only `T` supplied: `U` filled from its `= string` default.
+    let number = c.number_type();
+    let string = c.string_type();
+    let filled = fill_missing_type_arguments(&mut c, &p, &[number], &type_parameters);
+    assert_eq!(filled, vec![number, string]);
+
+    // A parameter with no default fills with `unknown`.
+    let b = get_declared_type_of_symbol(&mut c, &p, local(&p, "B"), None);
+    let b_params = c
+        .get_type(b)
+        .as_object()
+        .expect("object")
+        .type_parameters
+        .clone();
+    let unknown = c.unknown_type();
+    let filled_b = fill_missing_type_arguments(&mut c, &p, &[number], &b_params);
+    assert_eq!(filled_b, vec![number, unknown]);
+}
+
+// C-B1: a generic type alias records its local type parameters (so a reference
+// can check its type-argument arity/constraints).
+// Go: internal/checker/checker.go:typeAliasLinks.typeParameters
+#[test]
+fn generic_type_alias_records_type_parameters() {
+    let p = StubProgram::parse_and_bind("/a.ts", "type G<T extends number> = T;");
+    let mut c = Checker::new();
+    let _ = get_declared_type_of_symbol(&mut c, &p, local(&p, "G"), None);
+    let type_parameters = c
+        .type_alias_links
+        .try_get(&local(&p, "G"))
+        .map(|l| l.type_parameters.clone())
+        .unwrap_or_default();
+    assert_eq!(type_parameters.len(), 1);
+    assert_eq!(
+        get_constraint_of_type_parameter(&mut c, &p, type_parameters[0]),
+        Some(c.number_type())
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.getDeclaredTypeOfTypeParameter
 #[test]
 fn declared_type_of_type_parameter_symbol() {

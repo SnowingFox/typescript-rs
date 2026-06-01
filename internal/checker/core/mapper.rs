@@ -90,6 +90,100 @@ impl TypeMapper {
             }
         }
     }
+
+    /// Builds a one-entry mapper `source -> target` (Go's `makeUnaryTypeMapper`
+    /// / `newSimpleTypeMapper`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{TypeId, TypeMapper};
+    /// let m = TypeMapper::unary(TypeId(1), TypeId(2));
+    /// assert!(matches!(m, TypeMapper::Simple { source, target } if source == TypeId(1) && target == TypeId(2)));
+    /// ```
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/mapper.go:newSimpleTypeMapper
+    pub fn unary(source: TypeId, target: TypeId) -> TypeMapper {
+        TypeMapper::Simple { source, target }
+    }
+
+    /// Sequences two mappers so the result applies `m1` then `m2`
+    /// (`m2(m1(t))`); Go's `mergeTypeMappers`/`newMergedTypeMapper`.
+    ///
+    /// Unlike [`combine`](TypeMapper::combine), this does not re-instantiate
+    /// when `m1` changes the type — it is a plain composition of two
+    /// substitutions, used to thread an outer instantiation through an inner one.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{Checker, TypeId, TypeMapper};
+    /// let mut c = Checker::new();
+    /// let a = c.new_type_parameter(None);
+    /// let b = c.new_type_parameter(None);
+    /// // a -> b, then b -> number.
+    /// let m = TypeMapper::merge(
+    ///     TypeMapper::unary(a, b),
+    ///     TypeMapper::unary(b, c.number_type()),
+    /// );
+    /// assert_eq!(c.map_type(&m, a), c.number_type());
+    /// ```
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/mapper.go:newMergedTypeMapper / mergeTypeMappers
+    pub fn merge(m1: TypeMapper, m2: TypeMapper) -> TypeMapper {
+        TypeMapper::Merged(Box::new(m1), Box::new(m2))
+    }
+
+    /// Combines two mappers so the second re-instantiates the (changed) result
+    /// of the first; Go's `combineTypeMappers`/`newCompositeTypeMapper`.
+    ///
+    /// `None` for `m1` yields `m2` unchanged (Go returns `m2` when `m1 == nil`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{TypeId, TypeMapper};
+    /// let m2 = TypeMapper::unary(TypeId(1), TypeId(2));
+    /// // With no first mapper, the combination is just `m2`.
+    /// assert!(matches!(TypeMapper::combine(None, m2), TypeMapper::Simple { .. }));
+    /// ```
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/mapper.go:Checker.combineTypeMappers
+    pub fn combine(m1: Option<TypeMapper>, m2: TypeMapper) -> TypeMapper {
+        match m1 {
+            Some(m1) => TypeMapper::Composite(Box::new(m1), Box::new(m2)),
+            None => m2,
+        }
+    }
+
+    /// Appends a `source -> target` mapping after `mapper` (Go's
+    /// `appendTypeMapping`): `None` yields the unary mapper, otherwise the unary
+    /// mapping is merged after `mapper`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{Checker, TypeId, TypeMapper};
+    /// let mut c = Checker::new();
+    /// let a = c.new_type_parameter(None);
+    /// let b = c.new_type_parameter(None);
+    /// let m = TypeMapper::append_mapping(None, a, c.string_type());
+    /// let m = TypeMapper::append_mapping(Some(m), b, c.number_type());
+    /// assert_eq!(c.map_type(&m, a), c.string_type());
+    /// assert_eq!(c.map_type(&m, b), c.number_type());
+    /// ```
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/mapper.go:appendTypeMapping
+    pub fn append_mapping(
+        mapper: Option<TypeMapper>,
+        source: TypeId,
+        target: TypeId,
+    ) -> TypeMapper {
+        match mapper {
+            Some(mapper) => TypeMapper::merge(mapper, TypeMapper::unary(source, target)),
+            None => TypeMapper::unary(source, target),
+        }
+    }
 }
 
 impl Checker {
@@ -194,6 +288,21 @@ impl Checker {
             }
             return self.get_union_type(&instantiated);
         }
+        if flags.contains(TypeFlags::INTERSECTION) {
+            let members = self
+                .get_type(t)
+                .intersection_types()
+                .unwrap_or(&[])
+                .to_vec();
+            let instantiated: Vec<TypeId> = members
+                .iter()
+                .map(|&m| self.instantiate_type(m, mapper))
+                .collect();
+            if instantiated == members {
+                return t;
+            }
+            return self.get_intersection_type(&instantiated);
+        }
         if flags.contains(TypeFlags::OBJECT) {
             if let Some(obj) = self.get_type(t).as_object() {
                 if let Some(target) = obj.target {
@@ -220,12 +329,21 @@ impl Checker {
         t
     }
 
-    /// Instantiates a signature's return type through `mapper`, returning a new
-    /// signature id.
+    /// Instantiates a signature through `mapper`, returning a new signature id.
     ///
-    /// DEFER(phase-4-checker-4e): instantiate the signature's own type
-    /// parameters and parameter-symbol types (`instantiateSignature` full form).
-    /// blocked-by: instantiated symbol types (4e).
+    /// The return type is instantiated eagerly; parameter types are mapped on
+    /// read (the new signature stores the composed `mapper` and keeps the base
+    /// parameter symbols), so [`Checker::get_type_at_position`] substitutes them
+    /// through it. Re-instantiating an already-instantiated signature composes
+    /// the two mappers (Go's `instantiateSignatureEx` chains via
+    /// `combineTypeMappers` for the fresh-type-parameter case; the
+    /// `eraseTypeParameters` path 4e/C-B1 uses simply substitutes, so a plain
+    /// `merge` is the observationally-equivalent composition).
+    ///
+    /// DEFER(phase-4-checker-C-B2+): the fresh-type-parameter signature
+    /// (`!eraseTypeParameters`) form, the `this`-parameter instantiation, and
+    /// the type-predicate instantiation. blocked-by: nested generic signatures +
+    /// `this`-typing + type predicates.
     ///
     /// # Examples
     /// ```
@@ -241,7 +359,7 @@ impl Checker {
     /// ```
     ///
     /// Side effects: allocates a new signature; may allocate instantiated types.
-    // Go: internal/checker/checker.go:Checker.instantiateSignature
+    // Go: internal/checker/checker.go:Checker.instantiateSignature / instantiateSignatureEx
     pub fn instantiate_signature(
         &mut self,
         signature: SignatureId,
@@ -249,6 +367,12 @@ impl Checker {
     ) -> SignatureId {
         let mut new_sig = self.signature(signature).clone();
         new_sig.target = Some(signature);
+        // Compose with any mapper already on the source signature so a chained
+        // instantiation applies both (inner first, then the new outer mapper).
+        new_sig.mapper = Some(match new_sig.mapper.take() {
+            Some(existing) => TypeMapper::merge(existing, mapper.clone()),
+            None => mapper.clone(),
+        });
         if let Some(ret) = new_sig.resolved_return_type {
             new_sig.resolved_return_type = Some(self.instantiate_type(ret, mapper));
         }

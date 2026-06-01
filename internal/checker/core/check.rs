@@ -22,14 +22,16 @@
 use std::rc::Rc;
 
 use tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_COMPUTED;
-use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags, SymbolTable};
+use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags, SymbolId, SymbolTable};
 use tsgo_core::compileroptions::ScriptTarget;
 use tsgo_diagnostics::{Category, Message};
 
 use super::contextual::ContextFlags;
 use super::declared_types::{
-    get_apparent_type, get_declared_type_of_symbol, get_indexed_access_type, get_property_of_type,
-    get_type_of_property_of_type, get_type_of_symbol,
+    fill_missing_type_arguments, get_apparent_type, get_constraint_of_type_parameter,
+    get_declared_type_of_symbol, get_indexed_access_type, get_min_type_argument_count,
+    get_property_of_type, get_type_from_type_node, get_type_of_property_of_type,
+    get_type_of_symbol,
 };
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
@@ -1968,8 +1970,12 @@ impl Checker {
     // signatures, and `getApparentType`/lib globals (P6).
     // Go: internal/checker/checker.go:Checker.checkCallExpression(8289)
     fn check_call_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
-        let (callee, args) = match program.arena().data(node) {
-            NodeData::CallExpression(d) => (d.expression, d.arguments.nodes.clone()),
+        let (callee, args, type_argument_nodes) = match program.arena().data(node) {
+            NodeData::CallExpression(d) => (
+                d.expression,
+                d.arguments.nodes.clone(),
+                d.type_arguments.as_ref().map(|l| l.nodes.clone()),
+            ),
             _ => return self.error_type,
         };
         let func_type = self.check_expression(program, callee);
@@ -2000,6 +2006,31 @@ impl Checker {
         if signatures.len() > 1 {
             return self.resolve_overloaded_call(program, node, &signatures, &args);
         }
+        // Explicit type arguments (`f<number>(x)`) instantiate the generic
+        // signature directly (Go's `resolveCall` -> `chooseOverload`, the
+        // user-supplied-type-arguments path), so the parameter and return types
+        // are the substituted types. A wrong type-argument count reports `2558`
+        // (`getTypeArgumentArityError`) and aborts to the error type, while still
+        // checking the argument expressions so nested diagnostics surface.
+        let signature =
+            if let Some(type_arg_nodes) = type_argument_nodes.as_ref().filter(|n| !n.is_empty()) {
+                match self.resolve_explicit_type_argument_signature(
+                    program,
+                    node,
+                    signature,
+                    type_arg_nodes,
+                ) {
+                    Some(instantiated) => instantiated,
+                    None => {
+                        for &arg in &args {
+                            self.check_expression(program, arg);
+                        }
+                        return self.error_type;
+                    }
+                }
+            } else {
+                signature
+            };
         // 4q resolves the single candidate: a correct-arity call has each
         // argument checked for assignability (`2345`); an incorrect-arity call
         // reports `2554` after still checking the argument expressions so nested
@@ -2013,10 +2044,501 @@ impl Checker {
             self.report_argument_arity_error(program, node, signature, &args);
         }
         // The call's result type is the resolved signature's return type (Go's
-        // `getReturnTypeOfSignature`). For the non-generic signatures 4q resolves
-        // this is the declared return type; the parameter/argument-type slices
-        // are unused here (generic call-site inference is deferred).
+        // `getReturnTypeOfSignature`). An explicitly-instantiated signature has
+        // its type parameters erased and its return type already substituted, so
+        // this returns that type directly; for a bare (non-generic) signature it
+        // is the declared return type.
         self.get_return_type_of_call(program, signature, &[], &[])
+    }
+
+    // Instantiates a generic signature with the call's explicit type arguments
+    // (Go's `resolveCall` user-supplied-type-arguments path:
+    // `hasCorrectTypeArgumentArity` -> `checkTypeArguments` ->
+    // `getSignatureInstantiation`). Returns `None` (after reporting `2558`) when
+    // the type-argument count does not match the signature's arity.
+    //
+    // DEFER(phase-4-checker-C-B2+): the overloaded-call type-argument path
+    // (multiple candidates) and the inferred-type-parameter return-signature
+    // re-instantiation. blocked-by: overload resolution + nested generic return
+    // signatures.
+    // Go: internal/checker/checker.go:Checker.resolveCall (typeArguments branch)
+    fn resolve_explicit_type_argument_signature(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        signature: SignatureId,
+        type_argument_nodes: &[NodeId],
+    ) -> Option<SignatureId> {
+        if !self.has_correct_type_argument_arity(program, signature, type_argument_nodes.len()) {
+            self.report_type_argument_arity_error(program, node, signature, type_argument_nodes);
+            return None;
+        }
+        let type_arguments: Vec<TypeId> = type_argument_nodes
+            .iter()
+            .map(|&n| get_type_from_type_node(self, program, n, None))
+            .collect();
+        // Check each explicit type argument against its (instantiated) constraint
+        // (`2344`), mirroring Go's `checkTypeArguments`. A failing constraint
+        // makes the signature inapplicable (Go returns `nil`), so the call
+        // aborts to the error type without a follow-on `2345`.
+        if !self.check_type_arguments(program, signature, type_argument_nodes, &type_arguments) {
+            return None;
+        }
+        Some(self.get_signature_instantiation(program, signature, &type_arguments))
+    }
+
+    // Reports whether the supplied type-argument count matches the signature's
+    // type-parameter arity (Go's `hasCorrectTypeArgumentArity`): zero arguments
+    // is always allowed (inference), otherwise the count must be within
+    // `[minTypeArgumentCount, len(typeParameters)]`.
+    // Go: internal/checker/checker.go:Checker.hasCorrectTypeArgumentArity
+    fn has_correct_type_argument_arity(
+        &self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+        type_argument_count: usize,
+    ) -> bool {
+        let type_parameters = self.signature(signature).type_parameters.clone();
+        if type_argument_count == 0 {
+            return true;
+        }
+        let min = get_min_type_argument_count(self, program, &type_parameters);
+        type_argument_count >= min && type_argument_count <= type_parameters.len()
+    }
+
+    // Reports a wrong type-argument-count error (`2558` for a single signature),
+    // spanning the type-argument list (Go's `getTypeArgumentArityError` ->
+    // `node.TypeArgumentList().Loc`). `expected` is the minimum count, or
+    // `"min-max"` when defaults make the count a range.
+    //
+    // DEFER(phase-4-checker-C-B2): the overloaded-call variant (`2769`-style
+    // "No overload expects N type arguments"). blocked-by: overload resolution.
+    // Go: internal/checker/checker.go:Checker.getTypeArgumentArityError (len==1)
+    fn report_type_argument_arity_error(
+        &mut self,
+        program: &dyn BoundProgram,
+        _node: NodeId,
+        signature: SignatureId,
+        type_argument_nodes: &[NodeId],
+    ) {
+        let type_parameters = self.signature(signature).type_parameters.clone();
+        let min = get_min_type_argument_count(self, program, &type_parameters);
+        let max = type_parameters.len();
+        let expected = if min < max {
+            format!("{min}-{max}")
+        } else {
+            min.to_string()
+        };
+        let arg_count = type_argument_nodes.len().to_string();
+        // Span the type-argument list (Go: node.TypeArgumentList().Loc).
+        let first = type_argument_nodes[0];
+        let last = *type_argument_nodes.last().unwrap();
+        let start = program.arena().loc(first).pos();
+        let end = program.arena().loc(last).end();
+        let message = &tsgo_diagnostics::EXPECTED_0_TYPE_ARGUMENTS_BUT_GOT_1;
+        let diagnostic = Diagnostic {
+            code: message.code(),
+            category: message.category(),
+            message: tsgo_diagnostics::format(&message.to_string(), &[&expected, &arg_count]),
+            start,
+            length: end - start,
+            related_information: Vec::new(),
+            message_chain: Vec::new(),
+        };
+        self.add_diagnostic(program, diagnostic);
+    }
+
+    // Checks each explicit type argument against its (instantiated) constraint,
+    // reporting `2344` "Type 'X' does not satisfy the constraint 'Y'." on the
+    // offending argument node (Go's `checkTypeArguments`). The constraint is
+    // instantiated through the `type parameters -> filled type arguments` mapper
+    // so a constraint that references an earlier parameter (`<T, U extends T>`)
+    // resolves.
+    //
+    // DEFER(phase-4-checker-C-C): the `getTypeWithThisArgument` constraint
+    // adjustment and the head-message chaining. blocked-by: `this`-type
+    // instantiation + diagnostic-chain head messages.
+    // Go: internal/checker/checker.go:Checker.checkTypeArguments
+    fn check_type_arguments(
+        &mut self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+        type_argument_nodes: &[NodeId],
+        type_arguments: &[TypeId],
+    ) -> bool {
+        let type_parameters = self.signature(signature).type_parameters.clone();
+        if type_parameters.is_empty() {
+            return true;
+        }
+        let filled = fill_missing_type_arguments(self, program, type_arguments, &type_parameters);
+        let mapper = TypeMapper::new(&type_parameters, &filled);
+        for (i, &arg_node) in type_argument_nodes.iter().enumerate() {
+            if i >= type_parameters.len() {
+                break;
+            }
+            let Some(constraint) =
+                get_constraint_of_type_parameter(self, program, type_parameters[i])
+            else {
+                continue;
+            };
+            let instantiated_constraint = self.instantiate_type(constraint, &mapper);
+            let argument = filled[i];
+            if !self.is_type_assignable_to(program, argument, instantiated_constraint) {
+                let arg_str = super::nodebuilder::type_to_string(self, program, argument);
+                let constraint_str =
+                    super::nodebuilder::type_to_string(self, program, instantiated_constraint);
+                self.error(
+                    program,
+                    arg_node,
+                    &tsgo_diagnostics::TYPE_0_DOES_NOT_SATISFY_THE_CONSTRAINT_1,
+                    &[arg_str.as_str(), constraint_str.as_str()],
+                );
+                // Go's `checkTypeArguments` returns `nil` at the first failing
+                // constraint, so the signature is inapplicable and no follow-on
+                // argument error is reported.
+                return false;
+            }
+        }
+        true
+    }
+
+    // Instantiates a generic signature with explicit (or defaulted) type
+    // arguments, erasing its type parameters (Go's `getSignatureInstantiation`
+    // -> `createSignatureInstantiation` with `eraseTypeParameters`). Missing
+    // trailing arguments are filled from defaults.
+    // Go: internal/checker/checker.go:Checker.getSignatureInstantiation
+    fn get_signature_instantiation(
+        &mut self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+        type_arguments: &[TypeId],
+    ) -> SignatureId {
+        let type_parameters = self.signature(signature).type_parameters.clone();
+        let filled = fill_missing_type_arguments(self, program, type_arguments, &type_parameters);
+        let mapper = TypeMapper::new(&type_parameters, &filled);
+        let instantiated = self.instantiate_signature(signature, &mapper);
+        // `createSignatureInstantiation` erases the instantiation's own type
+        // parameters, so the result is a concrete (non-generic) signature.
+        self.signatures
+            .get_mut(instantiated)
+            .type_parameters
+            .clear();
+        instantiated
+    }
+
+    // Descends into a type node, validating each contained type-reference node
+    // (Go's `checkSourceElement` over a type node). Recurses through the
+    // composite type-node kinds reachable in C-B1.
+    //
+    // DEFER(phase-4-checker-C-C): type-literal member type nodes, mapped /
+    // conditional / indexed-access / function type-node bodies, and `import()`
+    // types. blocked-by: those type constructors + their member walks.
+    // Go: internal/checker/checker.go:Checker.checkSourceElement (type-node arms)
+    fn check_type_node(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        match program.arena().kind(node) {
+            Kind::TypeReference => {
+                self.check_type_reference_node(program, node);
+                if let NodeData::TypeReference(d) = program.arena().data(node) {
+                    if let Some(list) = d.type_arguments.clone() {
+                        for arg in list.nodes {
+                            self.check_type_node(program, arg);
+                        }
+                    }
+                }
+            }
+            Kind::ArrayType => {
+                if let NodeData::ArrayType(d) = program.arena().data(node) {
+                    let element = d.element_type;
+                    self.check_type_node(program, element);
+                }
+            }
+            Kind::TupleType => {
+                if let NodeData::TupleType(d) = program.arena().data(node) {
+                    for element in d.types.nodes.clone() {
+                        self.check_type_node(program, element);
+                    }
+                }
+            }
+            Kind::UnionType => {
+                if let NodeData::UnionType(d) = program.arena().data(node) {
+                    for member in d.types.nodes.clone() {
+                        self.check_type_node(program, member);
+                    }
+                }
+            }
+            Kind::IntersectionType => {
+                if let NodeData::IntersectionType(d) = program.arena().data(node) {
+                    for member in d.types.nodes.clone() {
+                        self.check_type_node(program, member);
+                    }
+                }
+            }
+            Kind::ParenthesizedType => {
+                if let NodeData::ParenthesizedType(d) = program.arena().data(node) {
+                    let inner = d.type_node;
+                    self.check_type_node(program, inner);
+                }
+            }
+            Kind::TypeOperator => {
+                if let NodeData::TypeOperator(d) = program.arena().data(node) {
+                    let operand = d.type_node;
+                    self.check_type_node(program, operand);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Validates a type-reference node's type arguments against the referenced
+    // declaration's type parameters: arity (`2314`/`2707`) and constraints
+    // (`2344`). Mirrors Go's `checkTypeReferenceOrImport` (the constraint half)
+    // plus the arity diagnostics `getTypeFromClassOrInterfaceReference`/
+    // `getTypeFromTypeAliasReference` emit during type formation — the port emits
+    // them here so the diagnostic surfaces once per node.
+    //
+    // DEFER(phase-4-checker-C-C): qualified-name references, the
+    // `Type_0_is_not_generic` (2315) arm for arguments on a non-generic type,
+    // and the JS-implicit-any relaxation. blocked-by: namespace resolution +
+    // JS-file gating.
+    // Go: internal/checker/checker.go:Checker.checkTypeReferenceNode / checkTypeReferenceOrImport
+    fn check_type_reference_node(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let (type_name, type_arg_nodes) = match program.arena().data(node) {
+            NodeData::TypeReference(d) => (
+                d.type_name,
+                d.type_arguments
+                    .as_ref()
+                    .map(|l| l.nodes.clone())
+                    .unwrap_or_default(),
+            ),
+            _ => return,
+        };
+        if program.arena().kind(type_name) != Kind::Identifier {
+            return;
+        }
+        let name = program.arena().text(type_name).to_string();
+        let Some(symbol) = resolve_name(
+            program,
+            node,
+            &name,
+            SymbolFlags::TYPE,
+            false,
+            program.globals(),
+        ) else {
+            return;
+        };
+        let flags = program.symbol(symbol).flags;
+        if flags.intersects(SymbolFlags::CLASS | SymbolFlags::INTERFACE) {
+            self.check_class_or_interface_type_reference(program, node, symbol, &type_arg_nodes);
+        } else if flags.contains(SymbolFlags::TYPE_ALIAS) {
+            self.check_type_alias_type_reference(program, node, symbol, &type_arg_nodes);
+        }
+        // DEFER(phase-4-checker-C-C): enum/type-parameter references with
+        // arguments report `Type_0_is_not_generic` (2315). blocked-by:
+        // checkNoTypeArguments for the non-generic-symbol path.
+    }
+
+    // Arity + constraint checking for a class/interface type reference (Go's
+    // `getTypeFromClassOrInterfaceReference` arity arm + `checkTypeArgumentConstraints`).
+    // Go: internal/checker/checker.go:Checker.getTypeFromClassOrInterfaceReference
+    fn check_class_or_interface_type_reference(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        symbol: SymbolId,
+        type_arg_nodes: &[NodeId],
+    ) {
+        let declared = get_declared_type_of_symbol(self, program, symbol, program.globals());
+        if declared == self.error_type {
+            return;
+        }
+        let type_parameters = self
+            .get_type(declared)
+            .as_object()
+            .map(|o| o.type_parameters.clone())
+            .unwrap_or_default();
+        if type_parameters.is_empty() {
+            return;
+        }
+        let num_args = type_arg_nodes.len();
+        let min = get_min_type_argument_count(self, program, &type_parameters);
+        let max = type_parameters.len();
+        if num_args < min || num_args > max {
+            // A class/interface prints with its type parameters: `Box<T>` (Go's
+            // `TypeToStringEx(t, ..., WriteArrayAsGenericType)`).
+            let name = super::nodebuilder::symbol_to_string(program, symbol);
+            let type_str = self.format_generic_type_name(program, &name, &type_parameters);
+            self.report_generic_arity_error(program, node, &type_str, min, max);
+            return;
+        }
+        if !type_arg_nodes.is_empty() {
+            self.check_type_argument_constraints_for_reference(
+                program,
+                &type_parameters,
+                type_arg_nodes,
+            );
+        }
+    }
+
+    // Arity + constraint checking for a type-alias reference (Go's
+    // `getTypeFromTypeAliasReference` arity arm + `checkTypeArgumentConstraints`).
+    // Go: internal/checker/checker.go:Checker.getTypeFromTypeAliasReference
+    fn check_type_alias_type_reference(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        symbol: SymbolId,
+        type_arg_nodes: &[NodeId],
+    ) {
+        // Populate the alias's local type parameters (set in its declared type).
+        let _ = get_declared_type_of_symbol(self, program, symbol, program.globals());
+        let type_parameters = self
+            .type_alias_links
+            .try_get(&symbol)
+            .map(|l| l.type_parameters.clone())
+            .unwrap_or_default();
+        if type_parameters.is_empty() {
+            return;
+        }
+        let num_args = type_arg_nodes.len();
+        let min = get_min_type_argument_count(self, program, &type_parameters);
+        let max = type_parameters.len();
+        if num_args < min || num_args > max {
+            // A type alias prints as just its name `G` (Go's `c.symbolToString`).
+            let type_str = super::nodebuilder::symbol_to_string(program, symbol);
+            self.report_generic_arity_error(program, node, &type_str, min, max);
+            return;
+        }
+        if !type_arg_nodes.is_empty() {
+            self.check_type_argument_constraints_for_reference(
+                program,
+                &type_parameters,
+                type_arg_nodes,
+            );
+        }
+    }
+
+    // Renders a generic class/interface name with its type parameters, e.g.
+    // `Box<T>` / `Pair<A, B>` (each parameter printed by its declaration name).
+    // Mirrors `TypeToStringEx`'s generic-target form for the arity message.
+    // Go: internal/checker/nodebuilderimpl.go (type reference with type parameters)
+    fn format_generic_type_name(
+        &self,
+        program: &dyn BoundProgram,
+        name: &str,
+        type_parameters: &[TypeId],
+    ) -> String {
+        let params: Vec<String> = type_parameters
+            .iter()
+            .map(|&tp| {
+                self.get_type(tp)
+                    .as_type_parameter()
+                    .and_then(|d| d.symbol)
+                    .map(|s| program.symbol(s).name.clone())
+                    .unwrap_or_else(|| "T".to_string())
+            })
+            .collect();
+        format!("{name}<{}>", params.join(", "))
+    }
+
+    // Emits `2314` (single count) or `2707` (a `min..max` range, when defaults
+    // make the count a range) for a wrong type-argument count on a generic type
+    // reference, spanning the whole reference node.
+    // Go: internal/checker/checker.go (Generic_type_0_requires_* emission)
+    fn report_generic_arity_error(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        type_str: &str,
+        min: usize,
+        max: usize,
+    ) {
+        let message = if min == max {
+            &tsgo_diagnostics::GENERIC_TYPE_0_REQUIRES_1_TYPE_ARGUMENT_S
+        } else {
+            &tsgo_diagnostics::GENERIC_TYPE_0_REQUIRES_BETWEEN_1_AND_2_TYPE_ARGUMENTS
+        };
+        self.error(
+            program,
+            node,
+            message,
+            &[type_str, &min.to_string(), &max.to_string()],
+        );
+    }
+
+    // Checks each provided type argument of a type reference against its
+    // (instantiated) constraint, reporting `2344` on the offending argument node
+    // (Go's `checkTypeArgumentConstraints`). All type parameters are visited so
+    // the constraint mapper covers defaults, but only explicitly-provided
+    // arguments carry an error node (Go's `core.ElementOrNil`).
+    // Go: internal/checker/checker.go:Checker.checkTypeArgumentConstraints
+    fn check_type_argument_constraints_for_reference(
+        &mut self,
+        program: &dyn BoundProgram,
+        type_parameters: &[TypeId],
+        type_arg_nodes: &[NodeId],
+    ) {
+        let provided: Vec<TypeId> = type_arg_nodes
+            .iter()
+            .map(|&n| get_type_from_type_node(self, program, n, None))
+            .collect();
+        let effective = fill_missing_type_arguments(self, program, &provided, type_parameters);
+        let mapper = TypeMapper::new(type_parameters, &effective);
+        for (i, &tp) in type_parameters.iter().enumerate() {
+            let Some(constraint) = get_constraint_of_type_parameter(self, program, tp) else {
+                continue;
+            };
+            let instantiated_constraint = self.instantiate_type(constraint, &mapper);
+            if !self.is_type_assignable_to(program, effective[i], instantiated_constraint) {
+                let Some(&arg_node) = type_arg_nodes.get(i) else {
+                    continue;
+                };
+                let arg_str = super::nodebuilder::type_to_string(self, program, effective[i]);
+                let constraint_str =
+                    super::nodebuilder::type_to_string(self, program, instantiated_constraint);
+                self.error(
+                    program,
+                    arg_node,
+                    &tsgo_diagnostics::TYPE_0_DOES_NOT_SATISFY_THE_CONSTRAINT_1,
+                    &[arg_str.as_str(), constraint_str.as_str()],
+                );
+            }
+        }
+    }
+
+    // Grammar-checks a type-parameter list for `2706` "Required type parameters
+    // may not follow optional type parameters." (a required parameter after one
+    // with a `= Default`), mirroring Go's `checkTypeParameters` (the
+    // `seenDefault` arm).
+    //
+    // DEFER(phase-4-checker-C-C): `checkTypeParametersNotReferenced` (a default
+    // referencing a later parameter) and the duplicate-identifier check.
+    // blocked-by: forward-reference detection + per-list duplicate tracking.
+    // Go: internal/checker/checker.go:Checker.checkTypeParameters
+    fn check_grammar_type_parameter_defaults(
+        &mut self,
+        program: &dyn BoundProgram,
+        type_parameters: Option<tsgo_ast::NodeList>,
+    ) {
+        let Some(list) = type_parameters else {
+            return;
+        };
+        let mut seen_default = false;
+        for node in list.nodes {
+            let has_default = matches!(
+                program.arena().data(node),
+                NodeData::TypeParameterDeclaration(d) if d.default_type.is_some()
+            );
+            if has_default {
+                seen_default = true;
+            } else if seen_default {
+                self.error(
+                    program,
+                    node,
+                    &tsgo_diagnostics::REQUIRED_TYPE_PARAMETERS_MAY_NOT_FOLLOW_OPTIONAL_TYPE_PARAMETERS,
+                    &[],
+                );
+            }
+        }
     }
 
     // Reports whether the argument count matches the signature's arity (the
@@ -2359,7 +2881,16 @@ impl Checker {
         pos: usize,
     ) -> TypeId {
         match self.signature(signature).parameters.get(pos).copied() {
-            Some(symbol) => get_type_of_symbol(self, program, symbol, None),
+            Some(symbol) => {
+                let base = get_type_of_symbol(self, program, symbol, None);
+                // For an instantiated signature, the base parameter type is
+                // substituted through the signature's mapper (Go re-instantiates
+                // the parameter symbols in `instantiateSignature`).
+                match self.signature(signature).mapper.clone() {
+                    Some(mapper) => self.instantiate_type(base, &mapper),
+                    None => base,
+                }
+            }
             None => self.any_type,
         }
     }
@@ -2537,6 +3068,21 @@ impl Checker {
         }
         if let NodeData::VariableStatement(d) = program.arena().data(node) {
             self.check_variable_declaration_list(program, d.declaration_list);
+        }
+        // A type-alias declaration grammar-checks its type-parameter list (2706)
+        // and descends into its aliased type node so a generic reference there
+        // has its arity/constraints checked (Go's `checkTypeAliasDeclaration` ->
+        // `checkSourceElement(node.Type())`).
+        if let NodeData::TypeAliasDeclaration(d) = program.arena().data(node) {
+            let (type_parameters, type_node) = (d.type_parameters.clone(), d.type_node);
+            self.check_grammar_type_parameter_defaults(program, type_parameters);
+            self.check_type_node(program, type_node);
+        }
+        // An interface declaration grammar-checks its type-parameter list (2706);
+        // its member type nodes are not yet descended (DEFER below).
+        if let NodeData::InterfaceDeclaration(d) = program.arena().data(node) {
+            let type_parameters = d.type_parameters.clone();
+            self.check_grammar_type_parameter_defaults(program, type_parameters);
         }
         // A `{ ... }` block checks each contained statement (Go's `checkBlock` ->
         // `checkSourceElements`).
@@ -3195,6 +3741,12 @@ impl Checker {
             NodeData::VariableDeclaration(d) => (d.name, d.initializer, d.type_node),
             _ => return,
         };
+        // Check the type annotation's type nodes (Go's `checkSourceElement`
+        // descent into `node.Type()`), so a generic type reference in the
+        // annotation has its type-argument arity and constraints validated.
+        if let Some(type_node) = type_node {
+            self.check_type_node(program, type_node);
+        }
         // DEFER(phase-4-checker-4m+): binding patterns (destructuring).
         // blocked-by: binding-element checking.
         if program.arena().kind(name) != Kind::Identifier {

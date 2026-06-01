@@ -3388,6 +3388,79 @@ impl EmitResolver {
 
 **推荐下一轮（C-B 或 C-A 续）**：(a) **泛型实例化基石**（解锁 `getVariances` marker-probe ⇒ contravariant/invariant 类型参数位 + 泛型签名 erase/instantiate）；(b) **`this`/rest 参数 + top-signature**（`getSignatureFromDeclaration` 收 `this:` + rest tuple）；(c) **interface/type-literal 级 call/construct 签名收集 + 混合打印**（`{ (x):T; a:U }` 关系与打印）。
 
+## C-B1 落地记录（worklog 摘要）—— 泛型基石：类型参数 + 约束 + 显式类型实参 + 实例化/TypeMapper
+
+**目标**：把**显式类型实参**泛型端到端打通——泛型函数签名携带类型参数表、`f<number>(x)` 实例化签名、`Foo<string>` 引用实例化成员、约束满足检查（2344）、默认类型实参填充、类型实参 arity 诊断（2314/2707/2558）+ 类型参数次序 grammar（2706），并深化 `instantiate_type`/`instantiate_signature` + `TypeMapper` 组合子。**仅显式类型实参**：从调用实参**推断**类型实参留给 C-B2（既有 4e 推断不动、不扩）。逐切片红→绿；单 lane；cargo 仅 `-p tsgo_checker`（+ `cargo build -p tsgo_compiler` 验 additive）；未 `git commit`。
+
+**Go 真值（ground truth，`go build ./cmd/tsgo` 实跑 `--noEmit --strict --target es2020` 逐一快照，非凭空推断）**：
+- `function id<T>(x:T):T{return x;} const r=id<number>(1); const s:string=r;` → `t.ts(3,7) 2322`「Type 'number' is not assignable to type 'string'.」（`r` 实为 `number`）。
+- `interface Box<T>{v:T} const b:Box<number>={v:1}; const n:string=b.v;` → `t.ts(3,7) 2322`「...'number'...'string'.」。
+- 约束违反（alias）`type G<T extends number>=T; type X=G<string>;` → `t.ts(2,12) 2344`「Type 'string' does not satisfy the constraint 'number'.」；满足 `G<1>` → **0**。
+- 约束违反（call）`function f<T extends number>(x:T){} f<string>("a");` → `t.ts(2,3) 2344`；`f<string>(1)` → **仅** `2344`（**无** 2345，约束失败使签名不适用，Go `checkTypeArguments` `return nil`）；`f<1>(1)` → **0**。
+- 默认 `interface C<T=number>{v:T} const c:C={v:1}; const w:string=c.v;` → `2322`「...'number'...'string'.」（默认 `number` 应用）；`const c2:C<string>={v:"x"}; const w:number=c2.v;` → `2322`「...'string'...'number'.」（显式覆盖默认）。
+- arity（interface 太多）`type X=Box<number,string>;` → `t.ts(2,10) 2314`「Generic type 'Box<T>' requires 1 type argument(s).」；（太少）`Pair<number>`（`Pair<A,B>`）→ `2314`「Generic type 'Pair<A, B>' requires 2 type argument(s).」；（alias）`type G<T>=T; type X=G<number,string>;` → `2314`「Generic type 'G' requires 1 type argument(s).」（alias 印名不带参）。
+- arity 区间（2707）`interface C<T=number,U=string>{a:T;b:U} type X=C<number,string,boolean>;` → `t.ts(2,10) 2707`「Generic type 'C<T, U>' requires between 0 and 2 type arguments.」。
+- arity（call 2558）`const r=id<number,string>(1);` → `t.ts(2,14) 2558`「Expected 1 type arguments, but got 2.」。
+- grammar（2706）`interface C<T=number,U>{...}` → `t.ts(1,25) 2706`「Required type parameters may not follow optional type parameters.」。
+- 组合 `id<Box<number>>(bn)` → `r.v` 为 `number`（嵌套引用实参代入）；`wrap<T>(x:T):Box<T>` → `wrap<number>(1).v` 为 `number`（返回引用实参实例化）。两者 `const bad:string=...` 各报 1×`2322`。
+
+**Go 函数镜像（`// Go:` 锚）**：`getSignatureFromDeclaration`（typeParameters）、`getEffectiveTypeParameterDeclarations`、`getConstraintOfTypeParameter`/`getConstraintFromTypeParameter`、`getDefaultFromTypeParameter`/`getResolvedTypeParameterDefault`、`hasTypeParameterDefault`、`getMinTypeArgumentCount`、`fillMissingTypeArguments`、`getTypeFromTypeReference`/`getTypeFromClassOrInterfaceReference`/`getTypeFromTypeAliasReference`（arity 2314/2707 + 默认填充）、`checkTypeReferenceNode`/`checkTypeReferenceOrImport`/`checkTypeArgumentConstraints`、`checkTypeArguments`（call-site 2344 + `return nil`）、`hasCorrectTypeArgumentArity`/`getTypeArgumentArityError`（2558）、`getSignatureInstantiation`/`createSignatureInstantiation`/`instantiateSignatureEx`、`instantiateType`/`instantiateTypeWorker`（intersection 臂）、`newTypeMapper`/`makeUnaryTypeMapper`/`mergeTypeMappers`/`combineTypeMappers`/`appendTypeMapping`、`checkTypeParameters`（2706）。
+
+**严格 TDD（逐切片 red→green；每切片先实测红的对的原因，再最小绿）**：
+
+| # | 切片 | 最小 input → observable（实测红）| 实现触点 |
+|---|---|---|---|
+| A | `generic_function_signature_carries_type_parameters` | `id<T>` 签名 `type_parameters` 红：**0**（应 1）；且与 `x:T` 同 id | `get_signature_type_parameters`（`getSignatureFromDeclaration`）|
+| B1 | `generic_function_explicit_type_argument_instantiates_return` | `id<number>(1)` 红：`2345`(arg vs `T`)+`2322`(`unknown`)，应仅 `2322`(`number`) | `check_call_expression` 显式类型实参分支 + `get_signature_instantiation` + 参数 mapper-on-read |
+| B2 | `generic_interface_member_reads_instantiated_type` | `b:Box<number>` 的 `b.v`（验证，4bp 成员实例化 + 属性读）| 既有 `get_type_of_property_of_type`（验证切片）|
+| C约束 | `..._violates_constraint_reports_2344`（call+alias）/`failing_constraint_suppresses_argument_error` | `f<string>(1)` 红：含 `2345`，应仅 `2344` | `check_type_arguments`(call, bool, `return nil`) + `check_type_argument_constraints_for_reference`(ref) + `get_constraint_of_type_parameter` |
+| C默认 | `default_type_argument_applied_to_member`/`..._overridden_by_explicit` | `const c:C; c.v` 红：`c.v` 为 `T` 非 `number` | `get_type_from_type_reference` class/interface 默认填充 + `fill_missing_type_arguments` + `get_default_from_type_parameter` |
+| C-arity | `interface_too_many.../too_few...` `2314`、`..._reports_2707`、`..._reports_2558`、`..._reports_2706` | 检查相位此前**不访问类型节点** ⇒ 红：**0** 诊断 | `check_type_node` walk + `check_type_reference_node` + arity 报告 + `check_grammar_type_parameter_defaults` |
+| 组合 | `generic_call_with_nested_reference_type_argument`/`generic_function_returning_reference_instantiates_argument` | `id<Box<number>>`/`wrap<number>` → `r.v` 为 `number` | `instantiate_type`（reference 臂）+ `instantiate_signature`（返回）|
+| 单测 | mapper 组合子、intersection 实例化、签名 mapper 复合、约束/默认/min/fill | 见 tests.md | `TypeMapper::{unary,merge,combine,append_mapping}`、`instantiate_type_worker`(intersection)、`get_*`/`fill_*` |
+
+> 红→绿证据：A/B1/C约束/C-arity 均 **genuine RED**（A 类型参数表空；B1 把实参当 `T` 报 2345 且返回 `unknown`；C约束失败时尚报 2345；C-arity 检查相位根本不访问类型节点 ⇒ 0 诊断）。B2 与组合切片建立在 4bp 成员实例化 + 本轮 reference/signature 实例化之上（B2 为既有机制验证）。单测覆盖新机器（mapper 组合子/intersection/签名复合/约束/默认/fill/min）。
+
+**可达裁剪（faithful-but-reachable）**：
+- **参数类型 mapper-on-read（而非铸造实例化参数符号）**：`Signature` 加 `mapper: Option<TypeMapper>`；`instantiate_signature` 急切实例化返回类型、存**复合后的 mapper**（链式实例化 `merge(m0, m)`）、参数符号保持基符号；`get_type_at_position`/`try_get_type_at_position` 读参数时按 mapper 代入。等价于 Go `instantiateSymbols`（重铸参数符号），但贴合本 port「参数=SymbolId、类型经 `value_symbol_links` 全局缓存」的架构，避免铸造符号。`get_signature_instantiation` 走 `eraseTypeParameters=true`（清空实例化签名的 `type_parameters`），故 `get_return_type_of_call` 视其为非泛型直接取返回类型。
+- **arity/约束诊断在检查相位发出（而非类型形成时）**：Go 在 `getTypeFromClassOrInterfaceReference` 形成类型时发 2314/2707 并经 per-node `links.resolvedType` 记忆化「每节点一次」。本 port 类型节点**未记忆化**（`get_type_from_type_node` 每次重算），若在形成处发诊断会重复。故把 2314/2707/2344 的发出搬到检查相位 `check_type_reference_node`（每节点一次），`get_type_from_type_reference` 保持纯（不发诊断），仅**默认填充 + 形成引用**。
+- **默认填充进引用类型**：`get_type_from_type_reference` 对 **class/interface** target（`type_parameters` 非空）`fill_missing_type_arguments` 后 `create_type_reference`，使 `C`（默认）→ `C<number>`、`c.v` 实例化为 `number`。alias 实例化（按类型实参代入 RHS）仍 DEFER（本轮 alias 仅做 arity/约束诊断，X 的实际类型未断言）。
+- **约束/默认惰性解析 + 按 TypeId 缓存**：`get_constraint_of_type_parameter`/`get_default_from_type_parameter` 经类型参数符号声明读 `constraint`/`default_type` 类型节点解析，结果存 `Checker.type_parameter_constraints`/`type_parameter_defaults`（镜像 Go `tp.constraint`/`resolvedDefaultType`，因声明节点在 program 故按 TypeId 键 checker 缓存）。
+- **类型节点 walk 范围**：`check_type_node` 递归 `TypeReference`/`ArrayType`/`TupleType`/`Union`/`Intersection`/`ParenthesizedType`/`TypeOperator`；接线到 `VariableDeclaration` 注解 + `TypeAliasDeclaration` 体 + `Type/Interface` 声明的类型参数 grammar。type-literal 成员类型节点 / 函数·映射·条件·indexed-access 类型节点体 DEFER。
+- **arity 印名**：class/interface 印 `Box<T>`/`Pair<A, B>`（`format_generic_type_name`：类型参数按其符号名打印——修正 `type_to_string` 既有「类型参数恒印 'T'」局限的等价路径）；alias 印裸名 `G`（`symbolToString`）。
+- **2706 grammar**：`checkTypeParameters` 的 `seenDefault` 臂（必选参数跟在默认参数后）。`checkTypeParametersNotReferenced`（默认引用后继参数）+ duplicate-identifier DEFER。
+
+**本轮交付**：
+- `core/signatures.rs`：`Signature` 加 `mapper: Option<TypeMapper>` 字段（additive 公开字段）。
+- `core/mapper.rs`：`TypeMapper::{unary,merge,combine,append_mapping}` 组合子（new `pub fn`/assoc）；`instantiate_type_worker` 加 INTERSECTION 臂；`instantiate_signature` 复合 mapper + 文档更新。
+- `core/declared_types.rs`：`get_signature_type_parameters`（私有）填 `signature.type_parameters`；`get_constraint_of_type_parameter`/`get_default_from_type_parameter`/`get_min_type_argument_count`/`fill_missing_type_arguments`（new `pub fn`）+ `has_type_parameter_default`（私有）；`get_type_from_type_reference` class/interface 默认填充；`get_declared_type_of_type_alias` 填 `type_alias_links.type_parameters`；`collect_local_type_parameters` 加 `TypeAliasDeclaration` 臂。
+- `core/check.rs`：`check_call_expression` 显式类型实参分支 + `resolve_explicit_type_argument_signature`/`has_correct_type_argument_arity`/`report_type_argument_arity_error`(2558)/`check_type_arguments`(2344,bool)/`get_signature_instantiation`；`check_type_node`/`check_type_reference_node`/`check_class_or_interface_type_reference`/`check_type_alias_type_reference`/`format_generic_type_name`/`report_generic_arity_error`(2314/2707)/`check_type_argument_constraints_for_reference`/`check_grammar_type_parameter_defaults`(2706)；`get_type_at_position` mapper-on-read；`check_variable_declaration` 检查注解类型节点；`check_statement` 接线 `TypeAliasDeclaration`/`InterfaceDeclaration` 的类型参数 grammar + alias 体。
+- `core/contextual.rs`：`try_get_type_at_position` mapper-on-read（与 `get_type_at_position` 一致）。
+- `core/mod.rs`：`Checker` 加 `type_parameter_constraints`/`type_parameter_defaults` 缓存字段。
+- `lib.rs`：re-export `fill_missing_type_arguments`/`get_constraint_of_type_parameter`/`get_default_from_type_parameter`/`get_min_type_argument_count`（additive）。
+- 测试：`check_test.rs`（+19 端到端）、`mapper_test.rs`（+5）、`declared_types_test.rs`（+7）。
+
+**新公开 API 形状（additive-only 确认）**：新 `pub` 面全 additive——`Signature.mapper`（新公开字段）、`TypeMapper::{unary,merge,combine,append_mapping}`（新 assoc fn）、`get_constraint_of_type_parameter`/`get_default_from_type_parameter`/`get_min_type_argument_count`/`fill_missing_type_arguments`（新 `pub fn` + lib.rs re-export）。**无既有 `pub fn` 签名变更**（`instantiate_signature`/`get_type_from_type_reference`/`get_declared_type_of_type_alias` 行为深化但签名不变；`check_type_arguments` 等全新私有 `fn`）、无 `.go` / `internal/ast` / 依赖 改动。`cargo build -p tsgo_compiler` 绿。
+
+**测试增量**：**600 单测**（+31，相对 C-A 基线 569：`check_test`+19、`mapper_test`+5、`declared_types_test`+7）+ **144 doctest**（+8：mapper 组合子 4 + 约束/默认/min/fill 等 doc 例）。**无既有测试弱化/删除**（C-A 569 全绿；新行为均新增测试）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker`（600 lib + 144 doc 绿）；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。
+
+**与 Go 的已知偏离（本轮，记录在案）**：
+- **错误 arity 引用类型形成结果**：Go `getTypeFromClassOrInterfaceReference` 在 arity 错时返 `errorType`；本 port `get_type_from_type_reference` 对 class/interface 仍 `fill_missing` 形成 `Box<unknown>`/`Pair<number, unknown>`（用 `unknown` 补位），**诊断 2314/2707 由检查相位单独发出且文本/code 与 Go 对齐**；仅「错误引用的实际结果类型」偏离（无测试断言该类型）。blocked-by: 类型节点 `links.resolvedType` 记忆化（统一形成/检查路径）。
+- **alias 实例化**：泛型 alias 引用（`G<string>`）本轮仅做 arity/约束诊断；按类型实参代入 alias RHS（`getTypeAliasInstantiation`）DEFER（X 的实际类型未断言）。blocked-by: alias 实例化缓存 + `instantiateTypeWithAlias`。
+
+**本轮 DEFER（带 blocked-by）**：
+- **从调用实参推断类型实参（C-B2）**：本轮**仅显式类型实参**。`check_call_expression` 对无显式类型实参的泛型调用仍走既有 4e `get_return_type_of_call`（空 sources/targets ⇒ 推断 `unknown`）——**不扩**。blocked-by: C-B2（推断上下文 + 实参/参数喂入 + 优先级格）。
+- **`getVariances` marker-probe 变型**：仍保 4bp 全 covariant 默认（本轮泛型实例化基石已就位，C-C 可用 marker 类型实例化 target 探关系）。blocked-by: marker 类型 + `relateVariances`。
+- **实例化缓存（type,mapper）**：`instantiate_type` 无缓存（`TypeMapper` 含 fn 指针/Box，不廉价可哈希）；Go 的签名实例化缓存（`cachedSignatures` 按 type-list key）本轮亦未加。blocked-by: 可哈希 mapper key / type-list key 缓存。
+- **anonymous object 深实例化**：`instantiate_type_worker` 对无 target 的 anonymous object 仍返原值（成员类型实例化需 program 解析成员符号类型，`instantiate_type` 无 program）。引用/命名 interface 成员实例化经属性读路径（`get_type_of_property_of_type`）已覆盖。blocked-by: `getObjectTypeInstantiation` + 实例化符号表（需 program）。
+- **`this`/rest/泛型签名实例化、约束 `getTypeWithThisArgument`、`checkTypeParametersNotReferenced`/duplicate-identifier grammar、`Type_0_is_not_generic`(2315)、qualified-name 引用**：均 DEFER（blocked-by 见各 `// DEFER` 锚）。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/types/typeParameters/`（typeParameterConstraints / typeArgumentList / typeParameterDefaults 最基础子集）+ `genericFunctionInference` 的**显式类型实参**子集——无推断、无 keyof/条件/映射、无 variance marker。
+
+**推荐下一轮（C-B2）**：(a) **从调用实参推断类型实参**（推断上下文喂入 `check_call_expression` 实参/参数类型 + 优先级格 + contravariant 位）；(b) **contextual-return 推断**（C-B3）；(c) **alias 实例化**（`getTypeAliasInstantiation`）解锁泛型 alias 成员读。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

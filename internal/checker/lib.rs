@@ -66,8 +66,10 @@ pub mod tracer;
 
 pub use core::check::{Diagnostic, DiagnosticMessageChain};
 pub use core::declared_types::{
-    get_apparent_type, get_declared_type_of_symbol, get_global_type, get_index_infos_of_type,
-    get_indexed_access_type, get_properties_of_type, get_property_of_type, get_type_from_type_node,
+    fill_missing_type_arguments, get_apparent_type, get_constraint_of_type_parameter,
+    get_declared_type_of_symbol, get_default_from_type_parameter, get_global_type,
+    get_index_infos_of_type, get_indexed_access_type, get_min_type_argument_count,
+    get_properties_of_type, get_property_of_type, get_type_from_type_node,
     get_type_of_property_of_type, get_type_of_symbol, resolve_structured_type_members,
 };
 pub use core::emit_resolver::{EmitResolver, SerializedTypeNode, TypeReferenceSerializationKind};
