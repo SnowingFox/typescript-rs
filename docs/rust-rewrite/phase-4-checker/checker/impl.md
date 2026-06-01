@@ -3097,6 +3097,81 @@ impl EmitResolver {
 
 **推荐下一轮（4bn）**：(a) **成员特定阐释 2416**（`issueMemberSpecificError` 的成员遍历 + 产诊断关系引擎 chain，把 2415/2420 的广播降级为 per-member 2416）；(b) **`isValidBaseType` 分流**（implements 非对象 2422 + implements-a-class 2720）；(c) **静态侧 extends 2417 + base 构造可达性**（需类 value 符号 static-side 类型）。
 
+## 4bn 落地记录（worklog 摘要）—— 关系引擎诊断**阐释链**（reporting 路径：嵌套 "Types of property 'x' are incompatible." / "Property 'x' is missing" 链）
+
+**目标**：把 Go `relater.go` 的**产诊断**关系路径（`checkTypeRelatedToEx` + `reportError`/`reportRelationError` + `propertiesRelatedTo`/`propertyRelatedTo` 的 reporting twin）接入 checker。此前 var-decl/assignment/property-decl 失败位只在**调用点**用 `type_to_string(source)`/`type_to_string(target)` 发一条**扁平 2322**，无嵌套阐释解释**哪个属性**不兼容。本轮新增 reporting recursion 在**关系顶层失败后**重走结构、构建 Go 的 `messageChain` 嵌套链，并把那三个 2322 站点改走链路径。bool 快路径（`check_type_related_to`）**完全不动**（热路径无回归），reporting 仅在出错路径触发。逐行为红→绿。单 lane。cargo 仅 `-p tsgo_checker`（未触 `internal/ast`，故未 `--workspace`）。未 `git commit`。
+
+**Go 真值（ground truth，**用 `go build ./cmd/tsgo` 实跑快照逐一核对**，非凭空推断）**：
+- 单层属性不兼容（`{ a: string }`→`{ a: number }`，非字面量源）：`2322` 头 "Type '{ a: string; }' is not assignable to type '{ a: number; }'." → `2326` "Types of property 'a' are incompatible." → 叶 `2322` "Type 'string' is not assignable to type 'number'."。
+- 嵌套属性不兼容（`{ a: { b: string } }`→`{ a: { b: number } }`）：`2322` 头 → **`2200`** "The types of 'a.b' are incompatible between these types."（**dotted-name 折叠**）→ 叶 `2322`；三层 `{a:{b:{c}}}` 折叠成 "a.b.c"。
+- 缺失必需属性（单个，`{ a: number }`→`{ a: number; b: number }`）：**单条 `2741`** "Property 'b' is missing in type '{ a: number; }' but required in type '{ a: number; b: number; }'."（`2322` 头被 `reportRelationError` **抑制**）。
+- 嵌套缺失（`{a:{b}}`→`{a:{b;c}}`）：`2322` 头 → `2326` "Types of property 'a' are incompatible." → `2741`（内层 `2322` 头被抑制，故 `2326` **不**折叠成 dotted）。
+- 多个缺失（`{}`→`{a;b}`）：**单条 `2739`** "Type '{}' is missing the following properties from type '{ a: number; b: number; }': a, b"（`2322` 头被抑制）。
+- optional-source vs required-target（非严格，`{ a?: string }`→`{ a: string }`）：`2322` 头 → `2327` "Property 'a' is optional in type 'S' but required in type 'T'."（**严格**模式下 optional 注入 `undefined`，转而是 `2326` + union 叶链——port 默认非严格，命中 `2327`）。
+
+**Go 函数镜像（`// Go:` 锚）**：`ErrorChain`（链节点）、`Relater.{getChainMessage,chainArgsMatch,reportError}`（含 dotted 折叠 `addToDottedName`/`getPropertyNameArg`）、`reportRelationError`（头消息选择 + generalizedSource + 2741/2739/2740 头抑制）、`isRelatedToEx`/`structuredTypeRelatedTo`/`propertiesRelatedTo`/`propertyRelatedTo`（reporting twin）、`getUnmatchedPropertiesWorker`/`getUnmatchedProperties`、`shouldReportUnmatchedPropertyError`、`reportUnmatchedProperty`、`tryElaborateArrayLikeErrors`、`createDiagnosticChainFromErrorChain`（`error_chain_to_report`）、`isConversionOrInterfaceImplementationMessage`。
+
+**链表示（additive；保留在 `internal/checker/**`，**未触 `internal/ast`**）**：
+- `core/check.rs`：新 `pub struct DiagnosticMessageChain { code, category, message, next: Vec<DiagnosticMessageChain> }`（镜像 Go `messageChain []*Diagnostic` 的链节点；`next` 用 `Vec` 对齐 Go `[]`，可达子集恒 0/1 子）；`Diagnostic` 新增**additive 字段** `pub message_chain: Vec<DiagnosticMessageChain>`（默认空）。3 处既有 `Diagnostic { .. }` 字面量（2 doctest + `diagnostic_for_node`）补 `message_chain: Vec::new()`。`lib.rs` additive `pub use ...DiagnosticMessageChain`。
+- 选择理由：checker 的 `Diagnostic` 是自洽子集类型（非 `ast.Diagnostic`），消费者目前仅测试 + P5 printer（未到）；把链挂在它上面零跨 crate 破坏，且不必动 `internal/ast`（任务优先项）。
+
+**可达裁剪（faithful-but-reachable）**：
+- reporting recursion 是 bool 路径的**孪生**，只在顶层关系 already-false 后**重走一遍**建链——出错路径罕见，热路径 bool `check_type_related_to`/`is_type_related_to` 一字未改，无 perf 回归。
+- 仅 **object↔object** 属性比较产链；union/intersection/其它 structured 回落 bool 路径（**不**产子链，仅顶层 2322 头）——故 `A & B` 缺失（既有测试 `variable_initializer_not_assignable_to_intersection`）仍报 `2322` 头（无 2741 子），DEFER 交集阐释。
+- `report`（`reportError`）忠实实现 dotted-name 折叠（嵌套 `2326`→`2200` + `a.b` 累积）；signature 返回类型折叠臂 + excess-prop 抑制臂 DEFER。
+- `report_relation_error` 实现 2741/2739/2740 头抑制（`chainArgsMatch`），头消息 comparable/assignable 二选；type-parameter 约束臂、string-literal "Did you mean"、exactOptional、同名消歧 DEFER。
+- `should_report_unmatched_property_error`：有属性→true；property-less 看 call 签名（construct 签名 + target-similar-sig 精化 DEFER）。
+- cycle guard：reporting 用 `in_progress: FxHashSet<(TypeId,TypeId)>` 把已在栈上的 pair 视作 related 以终止 co-recursive 结构（替代 Go `maybeKeys`/递归深度模型，DEFER 完整版）。
+
+**严格 TDD（逐行为 red→green）**：
+
+| # | 切片 | 最小 input → observable（实测红/绿） | 实现触点 |
+|---|---|---|---|
+| 1 tracer（genuine RED）| `assignability_chain_single_level_property_mismatch` | `interface A{a:number} interface B{a:string}; var x:A=b;` → 2322 头 + `message_chain`=[2326 'a' → 2322 leaf]（红：实测 `message_chain.len()==0`，头/码已对但**无链**）| `DiagnosticMessageChain`+field + 全 reporting 机器 + var-decl 接线 |
+| 2（genuine RED）| `assignability_chain_nested_property_collapses_to_dotted_message` | `{a:{b:string}}`→`{a:{b:number}}` → 2322 头 + [**2200** "a.b" → 2322 leaf]（红：临时禁用折叠分支 → 子码实测 **2326**≠2200）| `ChainReporter::report` dotted 折叠 |
+| 3（genuine RED）| `assignability_missing_required_property_reports_2741_head` | `S{a}`→`T{a;b}` → **单条 2741**（红：临时禁用 2741 抑制臂 → 头码实测 **2322**≠2741）| `report_relation_error` 抑制 + `report_unmatched_property` |
+| 3b | `assignability_chain_nested_missing_property_keeps_2326_over_2741` | `{a:{b}}`→`{a:{b;c}}` → 2322 头 + [2326 'a' → 2741 'c']（内层 2322 抑制，2326 不折叠）| 同上 + reporting recursion |
+| 3c | `assignability_multiple_missing_properties_report_2739_head` | `{}`→`{a;b}` → **单条 2739** "... : a, b"| `report_unmatched_property` 多属性臂 + 2739 抑制 |
+| 4 守卫（无回归）| `assignability_flat_primitive_mismatch_has_no_chain` | `const n:number="x";` → 单条 2322（`message_chain` 空）| reporting leaf-only 路径 |
+| 附 | `assignability_chain_optional_source_required_target_reports_2327` | `{a?:string}`→`{a:string}` → 2322 头 + [2327]| `report_property_related_to` optional 臂 |
+| 单测 | `get_property_name_arg_brackets_quoted_names_only` / `add_to_dotted_name_joins_segments` / `is_conversion_or_interface_implementation_message_matches_codes` | 纯函数 input→output | 自由 fn |
+| 单测 | `chain_reporter_get_chain_message_and_args_match` / `chain_reporter_report_prepends_without_collapse` / `chain_reporter_collapses_nested_property_messages` | 直接驱动 `ChainReporter` | `ChainReporter::{chain_message,chain_args_match,report}` |
+| 单测 | `get_unmatched_property_finds_first_missing_required` / `..._skips_optional_target_unless_required` / `should_report_unmatched_property_error_is_true_for_object_with_properties` | StubProgram + 接口 | `get_unmatched_propert*`/`should_report_*` |
+| 单测 | `build_relation_error_chain_single_property_mismatch` / `..._returns_none_when_assignable` | 直接驱动公开入口 | `build_relation_error_chain` |
+
+> 红→绿证据：slice 1 **genuine RED**（实测 `message_chain.len()==0`）；slice 2 **genuine RED**（临时 `if false &&` 禁用折叠 → 子码 2326≠2200）；slice 3 **genuine RED**（临时 `Some(2741) if false` 禁用抑制 → 头码 2322≠2741）。两处 RED 实测后已恢复并复绿。其余 slice/单测为 green-on-arrival（机器为一体），**如实记录**（同 4bc–4bm 口径）。
+
+**本轮交付**：
+- `core/relations.rs`：新 `ErrorChain`/`ChainReporter`（`chain_message`/`chain_args_match`/`report`）/`RelationErrorReport`；自由 fn `get_property_name_arg`/`add_to_dotted_name`/`error_chain_to_report`/`error_chain_node_to_message_chain`/`localize_chain_entry`/`is_conversion_or_interface_implementation_message`/`message_the_types_of_are_incompatible`；`Checker` 新 `pub(crate) build_relation_error_chain` + 私有 reporting twin（`report_is_related_to`/`report_structured_type_related_to`/`report_properties_related_to`/`report_property_related_to`/`report_relation_error`/`get_unmatched_property`/`get_unmatched_properties`/`should_report_unmatched_property_error`/`report_unmatched_property`/`try_elaborate_array_like_errors`）；import `Category`/`Message`/`FxHashSet`/`DiagnosticMessageChain`/`symbol_to_string`/`type_to_string`。
+- `core/check.rs`：`Diagnostic` 加 `message_chain` field + 新 `DiagnosticMessageChain` 类型；新 `pub(crate) report_type_not_assignable`；var-decl(`check_variable_declaration`)/assignment(`check_assignment_operator`)/property-decl(`check_property_declaration`)失败位改走链路径；`generalized_source_for_error` `fn`→`pub(crate)`（relations.rs 复用）；import `RelationKind`。
+- `lib.rs`：additive `pub use ...DiagnosticMessageChain`。
+- 测试：`check_test.rs`（+7：slice 1–4 + 3b/3c + 2327）、`relations_test.rs`（+11 单测）。
+
+**新公开 API 形状（additive-only 确认）**：新 `pub struct DiagnosticMessageChain`（+ `pub use`）；`Diagnostic` 新 `pub message_chain` field（additive，默认空——既有 `.code`/`.message` 读者不变，既有 var-decl/assignment 测试头码/头消息全部不变，链为附加）。无既有 `pub fn` 签名变更、无 `.go` 改动、**无 `internal/ast` 改动**、无新依赖。`report_type_not_assignable`/`build_relation_error_chain`/`generalized_source_for_error` 均 `pub(crate)`。`cargo build -p tsgo_compiler` 绿（下游 `checkerpool.rs` 仅消费 `&[Diagnostic]`，不构造字面量，不受 additive field 影响）。
+
+**测试增量**：**526 单测**（+18，相对 4bm 基线 508：7 check_test + 11 relations_test）+ **135 doctest**（+1：新 `DiagnosticMessageChain` doctest）。
+
+**gate（实测，均已 RUN）**：`cargo test -p tsgo_checker --lib`（526 绿）+ `--doc`（135 绿）；`cargo clippy -p tsgo_checker --all-targets -- -D warnings` 干净；`cargo fmt -p tsgo_checker -- --check` 干净；`cargo build -p tsgo_compiler` 绿。未触 `internal/ast`，故未跑 `--workspace`。未 `git commit`。
+
+**与任务命名预期的偏离（已对 Go 实测，遵 "verify against Go, do NOT invent"）**：任务 slice 1 写"2326 'a' → 2326 'b'"，但 Go 对嵌套对象**折叠**成单条 `2200` "a.b"（`reportError` 的 `addToDottedName`）——已按 Go 实测匹配。任务 slice 2 写"top 2322 chain → 2741"，但 Go 对单对象缺失**抑制 2322 头**、产**单条 2741**（`reportRelationError` 抑制 + `chainArgsMatch`）——已按 Go 实测匹配（任务原文亦提示"verify Go's exact output ... if Go reports ..."）。
+
+**本轮 DEFER（带 blocked-by）**：
+- **`elaborateError`/`elaborateObjectLiteral`/`elaborateArrayLiteral`/`elaborateArrowFunction`/`elaborateJsxComponents`（对象/数组字面量 element-wise 逐元素阐释，指向具体字面量成员节点）**：未做。故 var-decl 的**字面量源**（`const o:{...}={...}`）走链路径而非 Go 的 elaborate 路径（Go 对字面量在元素节点位报叶诊断）——**已知偏离**，与任务 DEFER 一致。blocked-by: `getContextualType` 元素遍历 + `checkExpressionForMutableLocation` element-wise + per-element error node。
+- **union/intersection 阐释**（`unionOrIntersectionRelatedTo`/`typeRelatedToSomeType`/`getBestMatchingType`/`typeRelatedToDiscriminatedType`）：reporting 回落 bool（仅顶层 2322 头，无子）。blocked-by: union 判别 + best-matching。
+- **signature/parameter 阐释**（`signaturesRelatedTo`/`signatureRelatedTo`：`2328` 参数不兼容 + `Call_signature_return_types_..._are_incompatible` + `reportError` 的 `x()`/`x(...)` 返回类型折叠臂）：未做。blocked-by: 产诊断签名关系。
+- **index-signature 阐释**（`indexSignaturesRelatedTo`/`membersRelatedToIndexInfo`：`2329`/`2330`）：未做。blocked-by: 产诊断 index 关系。
+- **tuple/array element 链**（`propertiesRelatedTo` 的 tuple 臂 + `tryElaborateArrayLikeErrors` 的 tuple/readonly-array 臂）：`try_elaborate_array_like_errors` 恒 true（可达 object 子集）。blocked-by: tuple/array 类型。
+- **excess-property "did you mean"**（`hasExcessProperties` → `2353`/`Object_literal_may_only_specify_known_properties...` + `reportError` 中对其的抑制）：excess 检查仍在调用点（4bg）独立，链路径未联动其抑制臂。blocked-by: excess-prop reporting 并入关系引擎。
+- **`reportUnmatchedProperty` 的 `'{0}' is declared here` related-info + private-identifier same-description 臂**：未做。blocked-by: 合成属性声明节点的 related-info + 私名符号表键。
+- **`reportRelationError` 的 type-parameter 约束臂 / string-literal "Did you mean 2" / exactOptionalPropertyTypes / 同名 `getTypeNamesForErrorDisplay` 消歧（fully-qualified）**：未做（`getTypeNamesForErrorDisplay` 可达子集 = `type_to_string` 双取）。blocked-by: 约束解析 + 建议类型 + exactOptional + 全限定名。
+- **`maybeKeys`/relation-count/recursion-depth 上限 + overflow 诊断**（`Excessive_complexity/stack_depth_comparing_types`）：以 `in_progress` set 替代 cycle break，未建完整模型。blocked-by: maybe-stack 移植。
+- **`headMessage` 透传 + heritage 成员特定 2416**（`checkTypeRelatedToEx(headMessage)` / `issueMemberSpecificError`）：本轮 wiring 恒 `headMessage=None`（var-decl/assignment/property-decl）；class 2415/2420 仍广播头（4bm），未降级 per-member 2416。blocked-by: heritage 成员遍历接 `report_type_not_assignable` + headMessage 通道。
+- **其它 2322 站点**（return-position `check_return`/箭头体 2788、`in`-算子 `check_type_assignable_to_or_error`、call 实参 2345/2322）：仍走扁平 `error(2322)`（原语目标无链，输出等价）。可后续逐站点改走 `report_type_not_assignable`。blocked-by: 无（增量接线）。
+
+**conformance 切片（登记，端到端对拍仍在 P10）**：`tests/cases/conformance/types/typeRelationships/typeComparability/`（属性不兼容嵌套链）+ `types/typeRelationships/assignmentCompatibility/`（缺失必需属性 2741/2739）最基础子集——无 union/signature/index/tuple/excess 阐释、无 object-literal element-wise elaborate。
+
+**推荐下一轮（4bo）**：(a) **`elaborateObjectLiteral`/`elaborateArrayLiteral`**（让字面量源在具体成员节点位报叶诊断，对齐 Go 字面量路径——当前字面量走链路径是已知偏离）；(b) **signature/parameter 阐释 `2328` + 返回类型折叠**（`signaturesRelatedTo` reporting + `reportError` 的 `x()`/`x(...)` 臂）；(c) **heritage 成员特定 2416**（`issueMemberSpecificError` 接 `report_type_not_assignable` + headMessage 通道，把 4bm 的 2415/2420 广播降级）。
+
 ## 与 Go 的已知偏离（divergence）
 
 - **`Type` / `Symbol` / `Signature` / `IndexInfo` 全部 arena + 句柄索引**（`TypeId`/`SymbolId`/`SignatureId`/`IndexInfoId`），不用 `*T`。Go 的 interning `map[...]*Type` → `FxHashMap<Key, TypeId>`。（PORTING §5）

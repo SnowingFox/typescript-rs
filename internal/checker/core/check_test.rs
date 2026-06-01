@@ -4948,3 +4948,198 @@ fn annotated_object_empty_array_property_element_access_is_number() {
     let number = c.number_type();
     assert_eq!(c.check_expression(&p, access), number);
 }
+
+// 4bn: relation-engine diagnostic elaboration chains.
+// Go: internal/checker/relater.go:Relater.propertyRelatedTo (2326 over leaf 2322)
+#[test]
+fn assignability_chain_single_level_property_mismatch() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { a: number }\ninterface B { a: string }\ndeclare const b: B;\nvar x: A = b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message, "Type 'B' is not assignable to type 'A'.");
+    // The head carries a chain: 2326 "Types of property 'a' are incompatible."
+    // over a leaf 2322 "Type 'string' is not assignable to type 'number'.".
+    assert_eq!(d.message_chain.len(), 1);
+    let prop = &d.message_chain[0];
+    assert_eq!(prop.code, 2326);
+    assert_eq!(prop.message, "Types of property 'a' are incompatible.");
+    assert_eq!(prop.next.len(), 1);
+    let leaf = &prop.next[0];
+    assert_eq!(leaf.code, 2322);
+    assert_eq!(
+        leaf.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// 4bn slice 2: a nested object-property mismatch collapses to a single dotted
+// `2200` "The types of 'a.b' are incompatible between these types." over the
+// leaf `2322` (Go's `reportError` `addToDottedName` transform).
+// Go: internal/checker/relater.go:Relater.reportError (dotted-name collapse)
+#[test]
+fn assignability_chain_nested_property_collapses_to_dotted_message() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: { a: { b: string } };\nconst o: { a: { b: number } } = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type '{ a: { b: string; }; }' is not assignable to type '{ a: { b: number; }; }'."
+    );
+    // The two object levels collapse into one `2200` dotted `a.b` message.
+    assert_eq!(d.message_chain.len(), 1);
+    let dotted = &d.message_chain[0];
+    assert_eq!(dotted.code, 2200);
+    assert_eq!(
+        dotted.message,
+        "The types of 'a.b' are incompatible between these types."
+    );
+    assert_eq!(dotted.next.len(), 1);
+    let leaf = &dotted.next[0];
+    assert_eq!(leaf.code, 2322);
+    assert_eq!(
+        leaf.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// 4bn slice 3: a single missing required target property surfaces as a `2741`
+// head (Go's `reportRelationError` suppresses the `2322` head when the chain
+// leads with `Property_0_is_missing_in_type_1_but_required_in_type_2` and the
+// source/target names match).
+// Go: internal/checker/relater.go:Relater.reportUnmatchedProperty + reportRelationError
+#[test]
+fn assignability_missing_required_property_reports_2741_head() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface S { a: number }\ninterface T { a: number; b: number }\ndeclare const s: S;\nvar t: T = s;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2741);
+    assert_eq!(
+        d.message,
+        "Property 'b' is missing in type 'S' but required in type 'T'."
+    );
+    // The `2322` head is suppressed, so there is no nested chain.
+    assert!(d.message_chain.is_empty());
+}
+
+// 4bn slice 3b: a nested missing required property keeps the outer `2326`
+// "Types of property 'a' are incompatible." over the inner `2741` (the inner
+// `2322` head is suppressed, so `2326` does NOT collapse to a dotted message).
+// Go: internal/checker/relater.go:Relater.reportError (no collapse over 2741)
+#[test]
+fn assignability_chain_nested_missing_property_keeps_2326_over_2741() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: { a: { b: number } };\nconst o: { a: { b: number; c: number } } = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    let prop = &d.message_chain[0];
+    assert_eq!(prop.code, 2326);
+    assert_eq!(prop.message, "Types of property 'a' are incompatible.");
+    assert_eq!(prop.next.len(), 1);
+    let missing = &prop.next[0];
+    assert_eq!(missing.code, 2741);
+    assert_eq!(
+        missing.message,
+        "Property 'c' is missing in type '{ b: number; }' but required in type '{ b: number; c: number; }'."
+    );
+    assert!(missing.next.is_empty());
+}
+
+// 4bn slice 3c: several missing required properties surface as a single `2739`
+// head "Type '{}' is missing the following properties from type 'T': a, b"
+// (Go's `reportUnmatchedProperty` multi-property arm; the `2322` head is
+// suppressed).
+// Go: internal/checker/relater.go:Relater.reportUnmatchedProperty (2739)
+#[test]
+fn assignability_multiple_missing_properties_report_2739_head() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: {};\nconst o: { a: number; b: number } = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2739);
+    assert_eq!(
+        d.message,
+        "Type '{}' is missing the following properties from type '{ a: number; b: number; }': a, b"
+    );
+    assert!(d.message_chain.is_empty());
+}
+
+// 4bn slice 4 (no regression): a flat primitive mismatch keeps a single chain-less
+// `2322`; the reporting path adds no spurious elaboration.
+// Go: internal/checker/relater.go:Relater.reportRelationError (leaf 2322 only)
+#[test]
+fn assignability_flat_primitive_mismatch_has_no_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const n: number = \"x\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+        d.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+    assert!(d.message_chain.is_empty());
+}
+
+// 4bn: the optional-source vs required-target property surfaces as `2327`
+// "Property 'a' is optional in type 'S' but required in type 'T'." under the
+// `2322` head (non-strict: the optional property type still matches).
+// Go: internal/checker/relater.go:Relater.propertyRelatedTo (2327 arm)
+#[test]
+fn assignability_chain_optional_source_required_target_reports_2327() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface S { a?: string }\ninterface T { a: string }\ndeclare const s: S;\nvar t: T = s;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message, "Type 'S' is not assignable to type 'T'.");
+    assert_eq!(d.message_chain.len(), 1);
+    let opt = &d.message_chain[0];
+    assert_eq!(opt.code, 2327);
+    assert_eq!(
+        opt.message,
+        "Property 'a' is optional in type 'S' but required in type 'T'."
+    );
+    assert!(opt.next.is_empty());
+}

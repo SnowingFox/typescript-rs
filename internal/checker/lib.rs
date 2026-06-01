@@ -64,7 +64,7 @@
 pub mod core;
 pub mod tracer;
 
-pub use core::check::Diagnostic;
+pub use core::check::{Diagnostic, DiagnosticMessageChain};
 pub use core::declared_types::{
     get_apparent_type, get_declared_type_of_symbol, get_global_type, get_index_infos_of_type,
     get_indexed_access_type, get_properties_of_type, get_property_of_type, get_type_from_type_node,

@@ -391,3 +391,209 @@ fn relation_cache_get_set() {
     );
     assert_eq!(cache.len(), 1);
 }
+
+// ---- 4bn: relation-error chain machinery unit tests ----
+
+// Go: internal/checker/relater.go:getPropertyNameArg
+#[test]
+fn get_property_name_arg_brackets_quoted_names_only() {
+    assert_eq!(get_property_name_arg("a"), "a");
+    assert_eq!(get_property_name_arg("foo"), "foo");
+    assert_eq!(get_property_name_arg("\"a b\""), "[\"a b\"]");
+    assert_eq!(get_property_name_arg("'k'"), "['k']");
+    assert_eq!(get_property_name_arg("`t`"), "[`t`]");
+}
+
+// Go: internal/checker/relater.go:addToDottedName
+#[test]
+fn add_to_dotted_name_joins_segments() {
+    // Plain identifier segments join with a dot.
+    assert_eq!(add_to_dotted_name("a", "b"), "a.b");
+    // An indexed tail attaches without a dot.
+    assert_eq!(add_to_dotted_name("a", "[0]"), "a[0]");
+    // A `new ...` head is parenthesized.
+    assert_eq!(add_to_dotted_name("new C", "x"), "(new C).x");
+    // A parenthesized tail prefix is preserved ahead of the head.
+    assert_eq!(add_to_dotted_name("a", "(b)"), "(a.b)");
+}
+
+// Go: internal/checker/relater.go:isConversionOrInterfaceImplementationMessage
+#[test]
+fn is_conversion_or_interface_implementation_message_matches_codes() {
+    assert!(is_conversion_or_interface_implementation_message(
+        &tsgo_diagnostics::CLASS_0_INCORRECTLY_IMPLEMENTS_INTERFACE_1
+    ));
+    assert!(!is_conversion_or_interface_implementation_message(
+        &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1
+    ));
+    assert!(!is_conversion_or_interface_implementation_message(
+        &tsgo_diagnostics::PROPERTY_0_IS_MISSING_IN_TYPE_1_BUT_REQUIRED_IN_TYPE_2
+    ));
+}
+
+// Go: internal/checker/relater.go:Relater.getChainMessage / chainArgsMatch
+#[test]
+fn chain_reporter_get_chain_message_and_args_match() {
+    let mut r = ChainReporter::default();
+    r.report(
+        &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1,
+        vec!["string".into(), "number".into()],
+    );
+    r.report(
+        &tsgo_diagnostics::TYPES_OF_PROPERTY_0_ARE_INCOMPATIBLE,
+        vec!["a".into()],
+    );
+    // Head is the most recently reported (prepended) entry.
+    assert_eq!(r.chain_message(0).map(Message::code), Some(2326));
+    assert_eq!(r.chain_message(1).map(Message::code), Some(2322));
+    assert_eq!(r.chain_message(2).map(Message::code), None);
+    // chain_args_match compares against the head ('a'); None is a wildcard.
+    assert!(r.chain_args_match(&[Some("a")]));
+    assert!(r.chain_args_match(&[None]));
+    assert!(!r.chain_args_match(&[Some("b")]));
+}
+
+// Go: internal/checker/relater.go:Relater.reportError (no collapse, simple prepend)
+#[test]
+fn chain_reporter_report_prepends_without_collapse() {
+    let mut r = ChainReporter::default();
+    r.report(
+        &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1,
+        vec!["string".into(), "number".into()],
+    );
+    r.report(
+        &tsgo_diagnostics::TYPES_OF_PROPERTY_0_ARE_INCOMPATIBLE,
+        vec!["a".into()],
+    );
+    let report = error_chain_to_report(*r.chain.expect("chain"));
+    assert_eq!(report.code, 2326);
+    assert_eq!(report.message, "Types of property 'a' are incompatible.");
+    assert_eq!(report.message_chain.len(), 1);
+    assert_eq!(report.message_chain[0].code, 2322);
+    assert_eq!(
+        report.message_chain[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+    assert!(report.message_chain[0].next.is_empty());
+}
+
+// Go: internal/checker/relater.go:Relater.reportError (dotted-name collapse)
+#[test]
+fn chain_reporter_collapses_nested_property_messages() {
+    let mut r = ChainReporter::default();
+    // Leaf primitive mismatch.
+    r.report(
+        &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1,
+        vec!["string".into(), "number".into()],
+    );
+    // Inner property 'b' incompatibility.
+    r.report(
+        &tsgo_diagnostics::TYPES_OF_PROPERTY_0_ARE_INCOMPATIBLE,
+        vec!["b".into()],
+    );
+    // Inner object-level head (dropped on the collapse below).
+    r.report(
+        &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1,
+        vec!["{ b: string; }".into(), "{ b: number; }".into()],
+    );
+    // Outer property 'a' incompatibility -> collapses with 'b' into `a.b`.
+    r.report(
+        &tsgo_diagnostics::TYPES_OF_PROPERTY_0_ARE_INCOMPATIBLE,
+        vec!["a".into()],
+    );
+    let report = error_chain_to_report(*r.chain.expect("chain"));
+    assert_eq!(report.code, 2200);
+    assert_eq!(
+        report.message,
+        "The types of 'a.b' are incompatible between these types."
+    );
+    assert_eq!(report.message_chain.len(), 1);
+    assert_eq!(report.message_chain[0].code, 2322);
+    assert_eq!(
+        report.message_chain[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/relater.go:Checker.getUnmatchedPropertiesWorker
+#[test]
+fn get_unmatched_property_finds_first_missing_required() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface S { a: number }\ninterface T { a: number; b: number }",
+    );
+    let mut c = Checker::new();
+    let s = get_declared_type_of_symbol(&mut c, &p, sym(&p, "S"), None);
+    let t = get_declared_type_of_symbol(&mut c, &p, sym(&p, "T"), None);
+    // `S` lacks `b`, which is required in `T`.
+    let unmatched = c
+        .get_unmatched_property(&p, s, t, false)
+        .expect("unmatched");
+    assert_eq!(p.symbol(unmatched).name, "b");
+    // `T` has every member of `S`, so nothing is unmatched in that direction.
+    assert!(c.get_unmatched_property(&p, t, s, false).is_none());
+}
+
+// Go: internal/checker/relater.go:Checker.getUnmatchedPropertiesWorker (optional skipped)
+#[test]
+fn get_unmatched_property_skips_optional_target_unless_required() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface S { a: number }\ninterface T { a: number; b?: number }",
+    );
+    let mut c = Checker::new();
+    let s = get_declared_type_of_symbol(&mut c, &p, sym(&p, "S"), None);
+    let t = get_declared_type_of_symbol(&mut c, &p, sym(&p, "T"), None);
+    // Optional `b` is not "missing" for assignability.
+    assert!(c.get_unmatched_property(&p, s, t, false).is_none());
+    // But requiring optional properties (subtype) does flag it.
+    assert!(c.get_unmatched_property(&p, s, t, true).is_some());
+}
+
+// Go: internal/checker/relater.go:Checker.shouldReportUnmatchedPropertyError
+#[test]
+fn should_report_unmatched_property_error_is_true_for_object_with_properties() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface A { a: number }\ninterface E {}");
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, sym(&p, "A"), None);
+    let e = get_declared_type_of_symbol(&mut c, &p, sym(&p, "E"), None);
+    assert!(c.should_report_unmatched_property_error(a));
+    // An empty object has no call signatures, so the error is still reported.
+    assert!(c.should_report_unmatched_property_error(e));
+}
+
+// Go: internal/checker/relater.go:Checker.checkTypeRelatedToEx (chain materialization)
+#[test]
+fn build_relation_error_chain_single_property_mismatch() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { a: number }\ninterface B { a: string }",
+    );
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, sym(&p, "A"), None);
+    let b = get_declared_type_of_symbol(&mut c, &p, sym(&p, "B"), None);
+    let report = c
+        .build_relation_error_chain(&p, b, a, RelationKind::Assignable)
+        .expect("chain");
+    assert_eq!(report.code, 2322);
+    assert_eq!(report.message, "Type 'B' is not assignable to type 'A'.");
+    assert_eq!(report.message_chain.len(), 1);
+    assert_eq!(report.message_chain[0].code, 2326);
+    assert_eq!(report.message_chain[0].next[0].code, 2322);
+}
+
+// Go: internal/checker/relater.go:Checker.checkTypeRelatedToEx (assignable -> no chain)
+#[test]
+fn build_relation_error_chain_returns_none_when_assignable() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { a: number }\ninterface C { a: number; b: number }",
+    );
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, sym(&p, "A"), None);
+    let cc = get_declared_type_of_symbol(&mut c, &p, sym(&p, "C"), None);
+    // `C` is assignable to `A` (C has all of A's members), so no chain is built.
+    assert!(c
+        .build_relation_error_chain(&p, cc, a, RelationKind::Assignable)
+        .is_none());
+}

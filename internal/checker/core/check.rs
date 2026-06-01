@@ -33,6 +33,7 @@ use super::declared_types::{
 };
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
+use super::relations::RelationKind;
 use super::signatures::{IndexInfo, IndexInfoId, SignatureId};
 use super::symbols::resolve_name;
 use super::type_facts::TypeFacts;
@@ -41,13 +42,17 @@ use super::Checker;
 
 /// A type-checking diagnostic produced while checking a source file.
 ///
-/// A minimal stand-in for Go's `ast.Diagnostic` (which also carries the file
-/// and message chains); 4g records the span, code, category, and localized
-/// text, and 4aj adds the related-information list (Go's `relatedInformation`).
+/// A minimal stand-in for Go's `ast.Diagnostic` (which also carries the file);
+/// 4g records the span, code, category, and localized text, 4aj adds the
+/// related-information list (Go's `relatedInformation`), and 4bn adds the
+/// nested [`message_chain`](Diagnostic::message_chain) (Go's `messageChain`)
+/// that carries relation-error elaboration ("Types of property 'x' are
+/// incompatible." over a leaf "Type 'string' is not assignable to type
+/// 'number'.").
 ///
-/// DEFER(phase-4-checker-4j): message chains + the owning `SourceFile`.
-/// blocked-by: the real `ast.Diagnostic`/`DiagnosticsCollection` (program-level,
-/// P6) and the node builder (4j).
+/// DEFER(phase-4-checker-4j): the owning `SourceFile`. blocked-by: the real
+/// `ast.Diagnostic`/`DiagnosticsCollection` (program-level, P6) and the node
+/// builder (4j).
 // Go: internal/ast/diagnostic.go:Diagnostic (subset)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -66,6 +71,57 @@ pub struct Diagnostic {
     /// `next()` method" hung under a primary `2488` "not iterable". Empty for
     /// most diagnostics; populated via [`Diagnostic::add_related_info`].
     pub related_information: Vec<Diagnostic>,
+    /// The nested elaboration chain hung under this diagnostic (Go's
+    /// `Diagnostic.messageChain`). Empty for most diagnostics; a failed
+    /// assignability check fills it with the "Types of property 'x' are
+    /// incompatible." / "Property 'x' is missing ..." elaboration produced by
+    /// the relation engine's reporting path. Mirrors how Go nests
+    /// `[]*Diagnostic` under a head diagnostic.
+    pub message_chain: Vec<DiagnosticMessageChain>,
+}
+
+/// One node of a diagnostic's nested elaboration chain (Go's `messageChain`
+/// entries, which are themselves `*Diagnostic`s).
+///
+/// The relation engine builds these head-to-leaf when an assignability check
+/// fails: a head [`Diagnostic`] (e.g. `2322` "Type 'A' is not assignable to
+/// type 'B'.") carries a [`message_chain`](Diagnostic::message_chain) of these,
+/// each of which may carry its own [`next`](DiagnosticMessageChain::next) child,
+/// bottoming out at a leaf (e.g. `2322` "Type 'string' is not assignable to
+/// type 'number'.").
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{Category, DiagnosticMessageChain};
+/// let leaf = DiagnosticMessageChain {
+///     code: 2322,
+///     category: Category::Error,
+///     message: "Type 'string' is not assignable to type 'number'.".to_string(),
+///     next: Vec::new(),
+/// };
+/// let parent = DiagnosticMessageChain {
+///     code: 2326,
+///     category: Category::Error,
+///     message: "Types of property 'a' are incompatible.".to_string(),
+///     next: vec![leaf],
+/// };
+/// assert_eq!(parent.next[0].code, 2322);
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/ast/diagnostic.go:Diagnostic.messageChain (a chain entry is a *Diagnostic)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiagnosticMessageChain {
+    /// The numeric diagnostic code (e.g. `2326`).
+    pub code: i32,
+    /// The diagnostic category (error/warning/...).
+    pub category: Category,
+    /// The localized, argument-substituted message text.
+    pub message: String,
+    /// Nested child elaboration(s) hung under this entry (Go's per-entry
+    /// `messageChain`). For the structural-object relation chain this holds 0
+    /// or 1 child; modeled as a `Vec` to mirror Go's `[]*Diagnostic`.
+    pub next: Vec<DiagnosticMessageChain>,
 }
 
 impl Diagnostic {
@@ -86,6 +142,7 @@ impl Diagnostic {
     ///     start: 0,
     ///     length: 1,
     ///     related_information: Vec::new(),
+    ///     message_chain: Vec::new(),
     /// };
     /// let mut primary = Diagnostic {
     ///     code: 2488,
@@ -94,6 +151,7 @@ impl Diagnostic {
     ///     start: 0,
     ///     length: 1,
     ///     related_information: Vec::new(),
+    ///     message_chain: Vec::new(),
     /// };
     /// primary.add_related_info(related);
     /// assert_eq!(primary.related_information.len(), 1);
@@ -1657,15 +1715,7 @@ impl Checker {
             return;
         }
         if !self.is_type_assignable_to(program, right_type, left_type) {
-            let generalized = self.generalized_source_for_error(right_type, left_type);
-            let source_str = super::nodebuilder::type_to_string(self, program, generalized);
-            let target_str = super::nodebuilder::type_to_string(self, program, left_type);
-            self.error(
-                program,
-                left,
-                &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1,
-                &[source_str.as_str(), target_str.as_str()],
-            );
+            self.report_type_not_assignable(program, left, right_type, left_type);
         }
     }
 
@@ -3072,15 +3122,7 @@ impl Checker {
         let declared = get_type_of_symbol(self, program, symbol, globals);
         let initializer_type = self.check_expression(program, initializer);
         if !self.is_type_assignable_to(program, initializer_type, declared) {
-            let generalized = self.generalized_source_for_error(initializer_type, declared);
-            let source_str = super::nodebuilder::type_to_string(self, program, generalized);
-            let target_str = super::nodebuilder::type_to_string(self, program, declared);
-            self.error(
-                program,
-                node,
-                &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1,
-                &[source_str.as_str(), target_str.as_str()],
-            );
+            self.report_type_not_assignable(program, node, initializer_type, declared);
         }
     }
 
@@ -3160,15 +3202,7 @@ impl Checker {
             return;
         }
         if !self.is_type_assignable_to(program, initializer_type, declared) {
-            let generalized = self.generalized_source_for_error(initializer_type, declared);
-            let source_str = super::nodebuilder::type_to_string(self, program, generalized);
-            let target_str = super::nodebuilder::type_to_string(self, program, declared);
-            self.error(
-                program,
-                node,
-                &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1,
-                &[source_str.as_str(), target_str.as_str()],
-            );
+            self.report_type_not_assignable(program, node, initializer_type, declared);
         }
     }
 
@@ -3691,7 +3725,7 @@ impl Checker {
     // (e.g. `"s"` -> `string`) when the `target` cannot hold top-level singleton
     // types, so the message reads `Type 'string' ...` rather than `Type '"s"' ...`.
     // Go: internal/checker/relater.go:errorReporter.reportRelationError
-    fn generalized_source_for_error(&self, source: TypeId, target: TypeId) -> TypeId {
+    pub(crate) fn generalized_source_for_error(&self, source: TypeId, target: TypeId) -> TypeId {
         if !self.get_type(target).flags().contains(TypeFlags::NEVER)
             && self.is_literal_type(source)
             && !self.type_could_have_top_level_singleton_types(target)
@@ -3887,7 +3921,58 @@ impl Checker {
             start: loc.pos(),
             length: loc.end() - loc.pos(),
             related_information: Vec::new(),
+            message_chain: Vec::new(),
         }
+    }
+
+    // Reports that `source` is not assignable to `target` at `node`, building
+    // the nested elaboration chain via the relation engine's reporting path
+    // (4bn). The head is normally `2322` "Type 'X' is not assignable to type
+    // 'Y'." carrying a chain (`2326` "Types of property 'x' are incompatible." /
+    // the dotted `2200` "The types of 'x.y' are incompatible between these
+    // types." over a leaf `2322`); a single missing required property collapses
+    // to a `2741` head (Go suppresses the `2322` head in that case).
+    //
+    // This replaces the old flat `type_to_string`-only `2322` emission at the
+    // var-decl / assignment / property-decl sites. The head text is identical to
+    // the old flat path for a non-structural mismatch (e.g. `number` vs
+    // `string`), so those cases keep a single chain-less `2322`.
+    // Go: internal/checker/checker.go:Checker.checkTypeAssignableTo* + relater.go
+    pub(crate) fn report_type_not_assignable(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        source: TypeId,
+        target: TypeId,
+    ) {
+        let Some(report) =
+            self.build_relation_error_chain(program, source, target, RelationKind::Assignable)
+        else {
+            // Defensive: the caller only reaches here after the bool fast path
+            // reported the relation as failing, so a chain is expected. Fall
+            // back to the flat head if it somehow holds.
+            let generalized = self.generalized_source_for_error(source, target);
+            let source_str = super::nodebuilder::type_to_string(self, program, generalized);
+            let target_str = super::nodebuilder::type_to_string(self, program, target);
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1,
+                &[source_str.as_str(), target_str.as_str()],
+            );
+            return;
+        };
+        let loc = program.arena().loc(node);
+        let diagnostic = Diagnostic {
+            code: report.code,
+            category: report.category,
+            message: report.message,
+            start: loc.pos(),
+            length: loc.end() - loc.pos(),
+            related_information: Vec::new(),
+            message_chain: report.message_chain,
+        };
+        self.add_diagnostic(program, diagnostic);
     }
 
     // Records an already-built diagnostic into the per-file collection, keyed by
