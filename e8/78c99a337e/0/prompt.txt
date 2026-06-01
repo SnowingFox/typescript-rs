@@ -111,15 +111,7 @@ After all tests pass, look for [refactor candidates](refactoring.md):
 [ ] No speculative features added
 ```
 </manually_attached_skills>
-<timestamp>Sunday, May 31, 2026, 11:57 PM (UTC+8)</timestamp>
-
-以及后续的 subagent 我希望可以遵循 /tdd 的同时，给每个比较重要的函数都加上，即使 go 源码里面没有，我们也要加上覆盖，确保稳定性，即使多一点也没事，我们单测覆盖率要到 90% 以上，记住这个规则写进去，比 go 单测只能多不能少
-
----
-
-resume
-
----
+<timestamp>Monday, Jun 1, 2026, 10:17 AM (UTC+8)</timestamp>
 
 等会哈，我先打断一下，你这个 subagent 应该 run in background 而不应该阻塞流程，你应该等 subagent 回调，以及后续的 p4 todo 可以不用拆的那么细吧？你拆了几十轮了，但是进度感觉一般，评估一下拆成 5-10 轮的大 todo 能不能一次性完成 + 评估工作量和每轮的代码函数
 
