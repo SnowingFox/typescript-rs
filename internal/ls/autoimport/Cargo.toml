@@ -5,3 +5,15 @@ edition = "2021"
 
 [lib]
 path = "lib.rs"
+
+[dependencies]
+tsgo_ast = { path = "../../ast" }
+tsgo_core = { path = "../../core" }
+tsgo_ls_lsutil = { path = "../lsutil" }
+tsgo_modulespecifiers = { path = "../../modulespecifiers" }
+tsgo_parser = { path = "../../parser" }
+tsgo_tspath = { path = "../../tspath" }
+
+[dev-dependencies]
+tsgo_packagejson = { path = "../../packagejson" }
+tsgo_symlinks = { path = "../../symlinks" }
