@@ -16,6 +16,7 @@ tsgo_diagnostics = { path = "../diagnostics" }
 tsgo_locale = { path = "../locale" }
 tsgo_lsproto = { path = "../lsp/lsproto" }
 tsgo_ls_lsconv = { path = "lsconv" }
+tsgo_ls_lsutil = { path = "lsutil" }
 tsgo_parser = { path = "../parser" }
 tsgo_tspath = { path = "../tspath" }
 

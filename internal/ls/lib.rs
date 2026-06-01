@@ -15,6 +15,7 @@
 mod host;
 mod languageservice;
 
+pub mod completions;
 pub mod definition;
 pub mod diagnostics;
 pub mod documenthighlights;
@@ -22,6 +23,7 @@ pub mod hover;
 pub mod references;
 pub mod rename;
 
+pub use completions::CompletionList;
 pub use documenthighlights::{DocumentHighlight, DocumentHighlightKind};
 pub use host::LanguageServiceHost;
 pub use hover::QuickInfo;
