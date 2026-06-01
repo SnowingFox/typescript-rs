@@ -887,6 +887,71 @@ fn require_call_in_js_file_resolves_no_2304_with_real_lib() {
     );
 }
 
+/// End to end with the REAL bundled lib (the path the P10 corpus parity runner
+/// exercises, mirroring `jsxMultilineAttributeStringValues2`): an intrinsic
+/// `.tsx` element with `@jsx: preserve` and NO `JSX.IntrinsicElements` in scope
+/// is implicitly `any` and reports TS7026 under the default `noImplicitAny`. A
+/// SELF-CLOSING element reports it exactly ONCE — and nothing else (no spurious
+/// cascade), matching tsc's committed baseline shape for the corpus case.
+// Go: internal/checker/jsx.go:Checker.getIntrinsicTagSymbol (c.noImplicitAny -> TS7026)
+#[test]
+fn jsx_intrinsic_self_closing_reports_one_ts7026_with_real_lib() {
+    let options = CompilerOptions {
+        jsx: tsgo_core::compileroptions::JsxEmit::Preserve,
+        target: tsgo_core::compileroptions::ScriptTarget::Es2015,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.tsx", "const a = <div className=\"foo\" />;\n")],
+        "/src",
+        &["/src/index.tsx"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert_eq!(
+        diags.len(),
+        1,
+        "self-closing intrinsic with no JSX.IntrinsicElements -> exactly one TS7026, no cascade: {diags:?}"
+    );
+    assert_eq!(diags[0].code, 7026);
+    assert_eq!(
+        diags[0].message,
+        "JSX element implicitly has type 'any' because no interface 'JSX.IntrinsicElements' exists."
+    );
+}
+
+/// End to end with the REAL bundled lib: a PAIRED intrinsic `<div></div>` with
+/// no `JSX.IntrinsicElements` reports TS7026 TWICE (opening + closing element),
+/// the exact count tsc's byte-compared baseline expects for paired intrinsic
+/// elements (`checkJsxElementDeferred` resolves both tags).
+// Go: internal/checker/jsx.go:Checker.checkJsxElementDeferred (open + close TS7026)
+#[test]
+fn jsx_intrinsic_paired_reports_two_ts7026_with_real_lib() {
+    let options = CompilerOptions {
+        jsx: tsgo_core::compileroptions::JsxEmit::Preserve,
+        target: tsgo_core::compileroptions::ScriptTarget::Es2015,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.tsx", "const a = <div></div>;\n")],
+        "/src",
+        &["/src/index.tsx"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    let ts7026 = diags.iter().filter(|d| d.code == 7026).count();
+    assert_eq!(
+        ts7026, 2,
+        "paired intrinsic element reports TS7026 on the opening AND closing element: {diags:?}"
+    );
+    assert!(
+        diags.iter().all(|d| d.code == 7026),
+        "no spurious diagnostics beyond the two TS7026: {diags:?}"
+    );
+}
+
 /// `SkipTypeChecking`/`canIncludeBindAndCheckDiagnostics`: a JS file compiled
 /// with `checkJs: false` is NOT bind-and-checked, so it produces ZERO semantic
 /// diagnostics (the `module` reference is not even resolved). This mirrors Go's

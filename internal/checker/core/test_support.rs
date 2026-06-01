@@ -24,6 +24,7 @@ pub(crate) struct StubProgram {
     source_file: NodeId,
     bind: tsgo_binder::BindResult,
     options: CompilerOptions,
+    text: String,
 }
 
 impl StubProgram {
@@ -46,6 +47,17 @@ impl StubProgram {
             ScriptKind::Tsx,
             CompilerOptions::default(),
         )
+    }
+
+    /// Parses `text` as a `.tsx` file (JSX enabled) named `file_name`, binds it,
+    /// and carries `options` so option-gated JSX behavior (e.g. `noImplicitAny`
+    /// gating TS7026) can be driven from a test.
+    pub(crate) fn parse_and_bind_tsx_with_options(
+        file_name: &str,
+        text: &str,
+        options: CompilerOptions,
+    ) -> StubProgram {
+        StubProgram::parse_and_bind_with(file_name, text, ScriptKind::Tsx, options)
     }
 
     /// Parses `text` as a `.js` file named `file_name` and binds it, so the
@@ -88,6 +100,7 @@ impl StubProgram {
             source_file: parsed.source_file,
             bind,
             options,
+            text: text.to_string(),
         }
     }
 }
@@ -111,6 +124,10 @@ impl BoundProgram for StubProgram {
 
     fn locals(&self, container: NodeId) -> Option<&SymbolTable> {
         self.bind.locals.get(&container)
+    }
+
+    fn source_text(&self) -> Option<&str> {
+        Some(&self.text)
     }
 
     fn globals(&self) -> Option<&SymbolTable> {

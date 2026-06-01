@@ -59,6 +59,27 @@ pub trait BoundProgram {
     /// The `locals` table of a locals-bearing container node, if it has one.
     fn locals(&self, container: NodeId) -> Option<&SymbolTable>;
 
+    /// The raw source text of the file this program/view is checking (Go's
+    /// `SourceFile.Text()`), if available.
+    ///
+    /// Byte offsets in this file's [`arena`](BoundProgram::arena) (node
+    /// `pos`/`end`) index into this string. The checker needs it to reproduce
+    /// Go's trivia-skipped diagnostic start (`scanner.GetErrorRangeForNode`,
+    /// which does `SkipTrivia(text, node.Pos())`) — a node's `pos` is its
+    /// FULL-start (leading trivia included), so an error span that must match
+    /// `tsc`'s committed baseline byte-for-byte (e.g. a JSX element's TS7026)
+    /// has to skip the leading whitespace before the first token.
+    ///
+    /// The default returns `None`: such a diagnostic then falls back to the raw
+    /// node `pos` (correct whenever the node has no leading trivia). A program
+    /// that owns the file's text overrides this.
+    ///
+    /// Side effects: none (a read-only view).
+    // Go: internal/ast/ast.go:SourceFile.Text / internal/scanner/scanner.go:GetErrorRangeForNode
+    fn source_text(&self) -> Option<&str> {
+        None
+    }
+
     /// The program's merged global symbol table (Go's `Checker.globals`), if the
     /// program exposes one.
     ///

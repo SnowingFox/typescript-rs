@@ -44,6 +44,9 @@ use crate::host::ParsedFile;
 // Go: internal/compiler/program.go:Program (the bound-file query surface)
 pub struct BoundFile {
     arena: Rc<NodeArena>,
+    /// This file's source text, so the checker can reproduce Go's trivia-skipped
+    /// diagnostic spans (see [`BoundProgram::source_text`]).
+    text: Rc<str>,
     root: NodeId,
     bind: Rc<BindResult>,
     /// The program's real compiler options (see
@@ -83,6 +86,7 @@ impl BoundFile {
         let bind = file.bind_rc()?;
         Some(BoundFile {
             arena: file.arena_rc(),
+            text: Rc::from(file.text()),
             root: file.node(),
             bind,
             options,
@@ -109,6 +113,10 @@ impl BoundProgram for BoundFile {
 
     fn locals(&self, container: NodeId) -> Option<&SymbolTable> {
         self.bind.locals.get(&container)
+    }
+
+    fn source_text(&self) -> Option<&str> {
+        Some(&self.text)
     }
 
     fn globals(&self) -> Option<&SymbolTable> {

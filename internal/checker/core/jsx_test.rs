@@ -3,6 +3,8 @@ use crate::core::program::BoundProgram;
 use crate::core::test_support::StubProgram;
 use crate::core::Checker;
 use tsgo_ast::{NodeData, NodeId, SymbolId};
+use tsgo_core::compileroptions::CompilerOptions;
+use tsgo_core::tristate::Tristate;
 
 fn sym(p: &StubProgram, name: &str) -> SymbolId {
     *p.locals(p.root())
@@ -121,6 +123,135 @@ fn element_children_are_typed() {
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, 2304);
     assert_eq!(diags[0].message, "Cannot find name 'y'.");
+}
+
+// Go: internal/checker/jsx.go:Checker.getIntrinsicTagSymbol (TS7026, self-closing)
+#[test]
+fn self_closing_intrinsic_without_jsx_intrinsic_elements_reports_one_ts7026() {
+    // No `JSX.IntrinsicElements` in scope + `noImplicitAny` (default) -> the
+    // intrinsic `<div/>` is implicitly `any` and reports TS7026 exactly once, on
+    // the (self-closing) element node.
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_tsx("/a.tsx", "<div/>;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, 7026);
+    assert_eq!(
+        diags[0].message,
+        "JSX element implicitly has type 'any' because no interface 'JSX.IntrinsicElements' exists."
+    );
+}
+
+// Go: internal/checker/jsx.go:Checker.checkJsxElementDeferred (TS7026, open + close)
+#[test]
+fn paired_intrinsic_element_without_jsx_intrinsic_elements_reports_two_ts7026() {
+    // A paired intrinsic `<div></div>` with no `JSX.IntrinsicElements` reports
+    // TS7026 TWICE under `noImplicitAny`: once on the opening element (via the
+    // opening-like check) and once on the closing element (via the deferred
+    // closing-tag resolution), matching Go's per-element span/count.
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_tsx("/a.tsx", "<div></div>;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 2);
+    for d in diags {
+        assert_eq!(d.code, 7026);
+        assert_eq!(
+            d.message,
+            "JSX element implicitly has type 'any' because no interface 'JSX.IntrinsicElements' exists."
+        );
+    }
+    // The two diagnostics fall on DISTINCT spans (opening vs closing element).
+    assert_ne!(diags[0].start, diags[1].start);
+}
+
+// Go: internal/scanner/scanner.go:GetErrorRangeForNode — the TS7026 span starts
+// at the element's first non-trivia character (the `<`), NOT the node's
+// full-start (which includes the leading whitespace before `<`). Drives the
+// `error_skipping_leading_trivia` emit so the byte offset matches `tsc`.
+#[test]
+fn self_closing_intrinsic_ts7026_span_skips_leading_trivia() {
+    // Two leading spaces before `<div/>`; the diagnostic must start at the `<`
+    // (byte offset 2), not the element node's full-start (byte 0).
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_tsx("/a.tsx", "  <div/>;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, 7026);
+    assert_eq!(
+        diags[0].start, 2,
+        "span starts at `<`, skipping leading trivia"
+    );
+    // `<div/>` is 6 characters wide (the element node end is byte 8).
+    assert_eq!(diags[0].length, 6);
+}
+
+// GUARD — Go: internal/checker/jsx.go:Checker.getJsxType (JSX.IntrinsicElements
+// resolves -> no TS7026). A `declare namespace JSX { interface IntrinsicElements
+// { div } }` in scope makes `getJsxType(IntrinsicElements)` resolve to a real
+// (non-error) type, so the known intrinsic `<div/>` reports NO TS7026.
+#[test]
+fn intrinsic_element_with_declared_jsx_intrinsic_elements_reports_no_ts7026() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_tsx(
+        "/a.tsx",
+        "declare namespace JSX {\n  interface IntrinsicElements {\n    div: any;\n  }\n}\n<div/>;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 7026),
+        "declared JSX.IntrinsicElements must suppress TS7026; got {diags:?}"
+    );
+}
+
+// GUARD — Go: internal/checker/jsx.go:isJsxIntrinsicTagName (value tags are NOT
+// intrinsic). A capitalized, resolved component `<Foo/>` is value-based, so the
+// intrinsic-only TS7026 never fires (and `Foo` is declared, so no TS2304).
+#[test]
+fn value_element_reports_no_ts7026() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_tsx(
+        "/a.tsx",
+        "declare const Foo: any;\n<Foo/>;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "a resolved value element emits no JSX implicit-any/cannot-find-name; got {diags:?}"
+    );
+}
+
+// GUARD — Go: internal/checker/jsx.go:Checker.getIntrinsicTagSymbol (TS7026 is
+// gated on `c.noImplicitAny`). With `strict: false` AND `noImplicitAny: false`,
+// the intrinsic `<div/>` with no `JSX.IntrinsicElements` stays implicitly `any`
+// SILENTLY (no TS7026).
+#[test]
+fn intrinsic_element_without_no_implicit_any_reports_no_ts7026() {
+    let options = CompilerOptions {
+        strict: Tristate::False,
+        no_implicit_any: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_tsx_with_options(
+        "/a.tsx", "<div/>;", options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 7026),
+        "noImplicitAny disabled must suppress TS7026; got {diags:?}"
+    );
 }
 
 // Go: internal/checker/jsx.go:Checker.checkJsxFragment

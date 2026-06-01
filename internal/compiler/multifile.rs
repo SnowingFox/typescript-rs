@@ -78,6 +78,9 @@ struct ViewRegistry {
 
 pub(crate) struct FileView {
     arena: Rc<NodeArena>,
+    /// This file's source text, so the checker can reproduce Go's trivia-skipped
+    /// diagnostic spans (see [`BoundProgram::source_text`]).
+    text: Rc<str>,
     root: NodeId,
     /// Shared cross-file resolution registry (see [`ViewRegistry`]); lets this
     /// per-file view answer [`view_for_symbol`](BoundProgram::view_for_symbol) /
@@ -123,6 +126,10 @@ impl BoundProgram for FileView {
 
     fn locals(&self, container: NodeId) -> Option<&SymbolTable> {
         self.locals.get(&container)
+    }
+
+    fn source_text(&self) -> Option<&str> {
+        Some(&self.text)
     }
 
     fn globals(&self) -> Option<&SymbolTable> {
@@ -304,6 +311,7 @@ impl MultiFileBoundProgram {
                 .collect();
             views.push(Rc::new(FileView {
                 arena: file.arena_rc(),
+                text: Rc::from(file.text()),
                 root,
                 registry: Rc::clone(&registry),
                 handle: encode_file_handle(i, root),
@@ -361,6 +369,12 @@ impl BoundProgram for MultiFileBoundProgram {
 
     fn locals(&self, container: NodeId) -> Option<&SymbolTable> {
         self.views[0].locals(container)
+    }
+
+    fn source_text(&self) -> Option<&str> {
+        // Degenerate single-file accessor; the checker reaches a specific file's
+        // text via `file_view(...).source_text()`.
+        self.views[0].source_text()
     }
 
     fn globals(&self) -> Option<&SymbolTable> {

@@ -808,3 +808,322 @@ No `--no-verify`; no test weakened or deleted; the byte comparison and the
 methods + the `is_excluded_from_semantic_diagnostics` mask are private; the
 `check.rs` require resolution is internal to `check_identifier`;
 `effective_script_kind` widened to `pub(crate)`).
+
+---
+
+# Round 5 — TS7026 (JSX intrinsic implicit-any) leverage probe → STOP (gate)
+
+Round goal: close the top FALSE-NEGATIVE `missing TS7026 ×15`
+("JSX element implicitly has type 'any' because no interface
+'JSX.IntrinsicElements' exists"). Per the round's Step-0 gate, MEASURE the real
+case-flip leverage of TS7026 *before* implementing, and STOP + report if fewer
+than ~4 cases would flip. **Outcome: STOP — TS7026-only flips exactly 1 case
+(< 4).** No production code changed (a throwaway measurement test was added,
+run, and reverted; tree left clean).
+
+## Step-0 leverage measurement (the deliverable of this probe)
+
+The 150-case curated subset (`curated_subset(25, 150, EXPANDED_DENYLIST)`)
+contains **9** `.tsx` cases. I read each committed `.errors.txt` baseline AND
+ran each case through `error_baseline_for_test` (the real-lib parity path) to
+get the EXACT current produced baseline + categorized mismatch. The `15` missing
+TS7026 diagnostics live in **3** cases; only **1** is TS7026-ONLY:
+
+| case (`@jsx`) | committed codes | TS7026-only? | current produced | flips on… |
+|---|---|---|---|---|
+| `jsxMultilineAttributeStringValues2` (`preserve`) | 4×**7026** | **YES** | `<no content>` | **TS7026 → FLIPS** |
+| `jsxEntityDecoderAfterNonEntityAmpersand` (`react`) | 10×7026 + 5×2874 | no | `<no content>` | TS7026 **+ TS2874** |
+| `jsxAttributeValueBinaryExpression` (`preserve`) | 2304 + 2×7026 + 2657 | no | 2304 + 1128 + 2×2304 + 1109 + 1161 (parser divergence) | needs parser-recovery + 7026 + 2657 |
+| `jsxElementTypeUnexpectedType` (`react`) | 2874 | n/a (no 7026) | `<no content>` | TS2874 |
+| `jsxLibraryManagedAttributesUnexpectedType` (`react`) | 2874 | n/a | `<no content>` | TS2874 |
+| `jsxSpreadWithAssertion` (`react-jsx`) | 2875 | n/a | `<no content>` | TS2875 |
+| `emitReactJsxSelfClosingElement` (`react-jsx`) | 2875 + 2552 | n/a | 2304 (`App`) | TS2875 + TS2552-suggestion |
+| `jsxNestedIndentation` (`react`) | — (clean) | guard | `<no content>` (PASS) | must NOT regress |
+| `jsxPragmaAfterTags` (`react`+`@jsx h`) | — (clean) | guard | `<no content>` (PASS) | must NOT regress |
+
+`missing TS7026 ×15` = `jsxMultiline` (4) + `jsxEntityDecoder` (10) +
+`jsxAttributeValueBinaryExpression` (1; the other co-locates with our `TS1128`
+as a `wrong_code`).
+
+**Flip leverage by feature scope (measured):**
+- **TS7026 alone** → **1** case (`jsxMultilineAttributeStringValues2`).
+  `< ~4` → the Step-0 gate says STOP.
+- **TS7026 + TS2874** (the React-in-scope check, `markJsxAliasReferenced`) →
+  **4** cases (adds `jsxEntityDecoder`, `jsxElementTypeUnexpectedType`,
+  `jsxLibraryManagedAttributesUnexpectedType`).
+- **+ TS2875** (automatic-runtime `react/jsx-runtime` check) → **5** cases
+  (adds `jsxSpreadWithAssertion`).
+
+So the real win is the **whole** JSX opening-element implicit-any/scope check
+(TS7026 **+ TS2874 + TS2875**, all emitted from one Go function chain), not
+TS7026 in isolation — and that is a large feature with two hard blockers below.
+
+## Why TS7026 cannot be cheaply expanded to TS2874/TS2875 in a surgical round
+
+`TS7026`, `TS2874`, `TS2875` all originate in
+`checkJsxOpeningLikeElementOrOpeningFragment` (`jsx.go:129`):
+`checkJsxPreconditions` → `markJsxAliasReferenced` (TS2874/TS2875) →
+`getResolvedSignature` → `getIntrinsicAttributesTypeFromJsxOpeningLikeElement` →
+`getIntrinsicTagSymbol` (TS7026). Co-implementing the siblings is blocked by:
+
+- **TS2874** needs `@jsx`/`@jsxfrag` **pragma scanning** (Go
+  `getLocalJsxNamespace` / `GetPragmaFromSourceFile`). Without it, the guard case
+  `jsxPragmaAfterTags` (a `/** @jsx h */` fileoverview pragma; `h` is declared,
+  `React` is NOT) would resolve the factory namespace to the default `"React"`,
+  fail `resolveName("React")`, and emit a **spurious TS2874** → a real
+  false-positive regression of a currently-PASSING case. The Rust parser
+  explicitly DEFERS pragmas (`internal/parser/lib.rs:386` "DEFER(phase-4):
+  comment directives, pragmas … blocked-by: JSDoc/pragma scanning subsystem").
+- **TS2875** needs the **JSX-runtime module resolution** path
+  (`getJsxNamespaceContainerForImplicitImport` → `program.GetJSXRuntimeImportSpecifier`
+  → `resolveExternalModule("react/jsx-runtime", …)`), which is checker/compiler
+  module-resolution plumbing not yet wired for the implicit JSX import.
+
+## Go ground truth (read; anchors for the eventual implementation)
+
+- TS7026 predicate: `internal/checker/jsx.go:getIntrinsicTagSymbol` (1215) — for
+  an intrinsic tag, `getJsxType(IntrinsicElements, node)` (1294) is `errorType`
+  AND `c.noImplicitAny` → `c.error(node,
+  JSX_element_implicitly_has_type_any_because_no_interface_JSX_0_exists,
+  "IntrinsicElements")` (1252). Span = the **element node** (opening /
+  self-closing / closing element), NOT the tag name. Paired `<div>…</div>`
+  reports TWICE: opening (via `getResolvedSignature` in
+  `checkJsxOpeningLikeElementOrOpeningFragment`) and closing (via
+  `checkJsxElementDeferred` (76) calling `getIntrinsicTagSymbol(closingElement)`
+  when `isJsxIntrinsicTagName`).
+- `noImplicitAny` is `compilerOptions.GetStrictOptionValue(NoImplicitAny)`
+  (`checker.go:918`); `GetStrictOptionValue` returns `Strict != TSFalse`
+  (`compileroptions.go:292`), i.e. **true by default** in this model — which is
+  why these non-`strict` cases DO get TS7026. The Rust `Checker` mirrors this
+  (`mod.rs:get_strict_option_value`), so `no_implicit_any()` would be true by
+  default too. `isJsxIntrinsicTagName` = lowercase-initial / namespaced tag.
+- TS2874: `checker.go:markJsxAliasReferenced` (28178) — `jsxFactoryRefErr =
+  (Jsx == JsxEmitReact) ? TS2874 : nil`; `resolveName(tagName, getJsxNamespace,
+  Value, jsxFactoryRefErr, …)` errors when the factory namespace (default
+  `React`, or the `@jsx`/`jsxFactory`/`reactNamespace` override) is not a value
+  in scope. `getJsxNamespace` = `jsx.go:1340`.
+- TS2875: `jsx.go:getJsxNamespaceContainerForImplicitImport` (1450) →
+  `resolveExternalModule(specifier, moduleReference, TS2875, …)` (1465).
+
+## Rust landing site (for the eventual implementation)
+
+`internal/checker/core/jsx.rs` already has a reachable JSX core. The TS7026 hook
+is `get_jsx_intrinsic_attributes_type` (238): today it returns `None` (no error)
+when the injected `jsx_intrinsic_elements` table is absent (the real-lib path),
+which is exactly the current false-negative. The Go-faithful change would
+resolve the real `JSX.IntrinsicElements` type (a `getJsxType`-style
+`resolve_name("JSX", NAMESPACE)` → exports → `IntrinsicElements` type →
+`get_declared_type_of_symbol`; primitives all exist:
+`symbols.rs:resolve_name`, `program.symbol(_).exports`,
+`declared_types.rs:get_declared_type_of_symbol`), gate the error on a new
+`no_implicit_any()` (mirroring `strict_null_checks()`), emit on the **element**
+node, and add the closing-element resolution from `checkJsxElementDeferred`.
+Blast radius is contained to `.tsx` cases (a `.ts` `<T>x` parses as a type
+assertion, never JSX), and the 2 clean guards are value-elements (no intrinsic
+tag → no TS7026), so TS7026-only is regression-free.
+
+## Recommendation (for the parent to redirect)
+
+TS7026 in isolation is a small, regression-free change worth **+1 PASS** (and
+collapses `missing TS7026 ×15 → ×1`, emitting 14/15 of the false-negatives), but
+it does NOT meet the Step-0 ~4-case bar on its own. To bank the full **+5**, the
+prerequisite is to first land (a) `@jsx`/`@jsxfrag` **pragma scanning** in the
+parser (unblocks TS2874 without regressing `jsxPragmaAfterTags`) and (b) the
+**implicit JSX-runtime module resolution** (unblocks TS2875); then implement the
+whole `checkJsxOpeningLikeElementOrOpeningFragment` precondition/alias-reference
+check (TS7026 + TS2874 + TS2875) as one cohesive feature. Per the gate, this
+round STOPS here for the parent to choose: ship the +1 TS7026-only slice now, or
+sequence the two prerequisite subsystems first for the +5.
+
+No production code changed this round (measurement test reverted; `cargo test
+-p tsgo_testrunner` and the rest of the tree are untouched/green at the prior
+Round-4 numbers `{passed 60, failed 90, errored 0}`, `top_missing TS7026 ×15`).
+
+---
+
+# Round 6 — TS7026 (JSX intrinsic implicit-any) implementation → +1 PASS
+
+Round goal: land the TS7026-ONLY slice the Round-5 probe scoped — emit
+"JSX element implicitly has type 'any' because no interface
+'JSX.IntrinsicElements' exists." for the exact Go condition, and NOTHING more
+(TS2874 / TS2875 stay DEFERRED behind their two unbuilt subsystems). SOLO lane,
+strict TDD red→green. Edits limited to `internal/checker/**`,
+`internal/compiler/{boundfile.rs,multifile.rs,program_test.rs}`,
+`internal/testrunner/compiler_runner_test.rs` (re-measured characterization) +
+this worklog. No `internal/binder`/`parser`/`ast` production change.
+
+## Go ground truth (ported predicate)
+
+`internal/checker/jsx.go:getIntrinsicTagSymbol` (1215): for an intrinsic tag,
+`intrinsicElementsType := c.getJsxType(JsxNames.IntrinsicElements, node)` (1220);
+when `c.isErrorType(intrinsicElementsType)` (the `JSX` namespace / its
+`IntrinsicElements` member cannot be resolved) AND `c.noImplicitAny` (1251) →
+`c.error(node, diagnostics.JSX_element_implicitly_has_type_any_because_no_interface_JSX_0_exists, "IntrinsicElements")`.
+The diagnostic is on the **element node** (opening / self-closing / closing). A
+paired `<div>…</div>` reports TS7026 **twice** — `checkJsxElementDeferred` (76)
+checks the opening element via `checkJsxOpeningLikeElementOrOpeningFragment` →
+`getResolvedSignature` → `getIntrinsicAttributesTypeFromJsxOpeningLikeElement`
+→ `getIntrinsicTagSymbol(openingElement)`, then resolves the closing tag via
+`getIntrinsicTagSymbol(closingElement)` (when `isJsxIntrinsicTagName`); a
+self-closing `<div/>` reports once. `noImplicitAny =
+compilerOptions.GetStrictOptionValue(NoImplicitAny)` (`checker.go:918` +
+`compileroptions.go:292`, `Strict != TSFalse`) → **true by default**, which is
+why these non-`strict` `.tsx` cases DO get TS7026. The span is the node's
+error range (`scanner.GetErrorRangeForNode` default case: `SkipTrivia(text,
+node.Pos())..node.End()`) — the element `pos` is its FULL-start (the leading
+whitespace before `<` is included), so the start MUST skip trivia.
+
+Confirmed `TS7026` text/code byte-identical to the committed baselines:
+`diagnostics_generated.rs:JSX_ELEMENT_IMPLICITLY_HAS_TYPE_ANY_BECAUSE_NO_INTERFACE_JSX_0_EXISTS`
+(`code: 7026`, `"JSX element implicitly has type 'any' because no interface
+'JSX.{0}' exists."`), arg `"IntrinsicElements"`.
+
+## The fix (Rust, surgical/additive)
+
+- **`Checker::no_implicit_any()`** (`core/mod.rs`) — mirrors
+  `strict_null_checks()`: `get_strict_option_value(options.no_implicit_any)`
+  (true by default). Go: `NewChecker` (`c.noImplicitAny`).
+- **`core/jsx.rs:get_intrinsic_tag_symbol`** (renamed predicate of
+  `get_jsx_intrinsic_attributes_type`) now resolves `JSX.IntrinsicElements`
+  Go-faithfully when no table is injected: new private
+  **`get_jsx_type(program, name, location)`** does
+  `resolve_name(location, "JSX", NAMESPACE)` → `JSX` symbol's `exports` →
+  `getSymbol(name, TYPE)` → `get_declared_type_of_symbol`, returning
+  `error_type` when the `JSX` namespace / member is absent (the reachable core
+  of Go's `getJsxType` / `getJsxNamespaceAt` global fallback). When it is
+  `error_type` and `no_implicit_any()` → emit TS7026 on the element node; when
+  it resolves but lacks the tag → the existing TS2339 (now also on the element
+  node, matching Go). A StubProgram-injected `JSX.IntrinsicElements` table still
+  short-circuits resolution (keeps the existing unit tests green).
+- **Closing-element resolution wired** (`check_jsx_element`, Go's
+  `checkJsxElementDeferred`): intrinsic closing tag → `get_intrinsic_tag_symbol`
+  (TS7026 on the closing element); value closing tag → `check_expression`. This
+  is what makes a paired `<div>…</div>` report TS7026 twice (open + close).
+- **Span = trivia-skipped element range** — new
+  `Checker::error_skipping_leading_trivia` (`core/check.rs`) ports the default
+  case of `scanner.GetErrorRangeForNode` (`SkipTrivia(text, node.Pos())..end`),
+  used ONLY by the JSX TS7026 / TS2339 emits so all existing
+  raw-range diagnostics are byte-unchanged. It reads the file text via a new
+  `BoundProgram::source_text()` (default `None`; implemented on `StubProgram`,
+  the compiler's `BoundFile` / `FileView` / `MultiFileBoundProgram`). Without
+  this the element start landed on the whitespace before `<` (off by one
+  column), turning every whitespace-preceded TS7026 into an `extra` + `missing`
+  pair (the first measurement showed `extra TS7026 ×9`); skipping trivia made
+  them byte-match `tsc` exactly.
+
+**Left DEFERRED (NOT implemented, per scope):** **TS2874** (`markJsxAliasReferenced`,
+the `This JSX tag requires 'React' to be in scope` check) — blocked-by
+`@jsx`/`@jsxfrag` **pragma scanning** in the parser (`getLocalJsxNamespace` /
+`GetPragmaFromSourceFile`), without which the guard case `jsxPragmaAfterTags`
+would emit a spurious TS2874 regression. **TS2875** (automatic
+`react/jsx-runtime` check) — blocked-by the implicit **JSX-runtime module
+resolution** (`getJsxNamespaceContainerForImplicitImport` →
+`GetJSXRuntimeImportSpecifier` → `resolveExternalModule`). Both originate from
+the same `checkJsxOpeningLikeElementOrOpeningFragment` chain; implementing them
+now would regress currently-passing cases.
+
+## RED→GREEN slices (one behavior at a time)
+
+`tsgo_checker` (`core/jsx_test.rs`), driven through `check_source_file` (the
+real dispatch):
+
+1. **self-closing `<div/>` → 1 TS7026** —
+   `self_closing_intrinsic_without_jsx_intrinsic_elements_reports_one_ts7026`.
+   RED (0 produced; `get_jsx_intrinsic_attributes_type` returned `None`) → GREEN.
+2. **paired `<div></div>` → 2 TS7026 (open + close, distinct spans)** —
+   `paired_intrinsic_element_without_jsx_intrinsic_elements_reports_two_ts7026`.
+3. **span skips leading trivia** —
+   `self_closing_intrinsic_ts7026_span_skips_leading_trivia` (`  <div/>` → start
+   byte 2 = the `<`, length 6, NOT the node full-start byte 0). RED (start 0) →
+   GREEN (`error_skipping_leading_trivia`).
+4. **GUARD — declared `JSX.IntrinsicElements` suppresses TS7026** —
+   `intrinsic_element_with_declared_jsx_intrinsic_elements_reports_no_ts7026`
+   (`declare namespace JSX { interface IntrinsicElements { div: any } }` resolves
+   via the real `get_jsx_type` path → no TS7026).
+5. **GUARD — value element emits no TS7026** — `value_element_reports_no_ts7026`
+   (a resolved `<Foo/>` is value-based, intrinsic-only check never fires).
+6. **GUARD — `noImplicitAny` disabled suppresses TS7026** —
+   `intrinsic_element_without_no_implicit_any_reports_no_ts7026`
+   (`strict: false` + `noImplicitAny: false`).
+
+`tsgo_compiler` (`program_test.rs`, REAL bundled-lib path the parity runner
+drives):
+
+7. **`jsx_intrinsic_self_closing_reports_one_ts7026_with_real_lib`** — a
+   `@jsx: preserve` `.tsx` (jsxMultiline shape) → exactly ONE TS7026, no cascade.
+8. **`jsx_intrinsic_paired_reports_two_ts7026_with_real_lib`** — paired `<div></div>`
+   → exactly TWO TS7026 (open + close), nothing else.
+
+No existing test weakened or deleted; the injected-table unit tests
+(`check_intrinsic_self_closing_element_resolves`,
+`unknown_intrinsic_tag_reports_diagnostic`, `attribute_type_mismatch...`) stay
+green.
+
+## Headline — measured parity BEFORE → AFTER (150-case subset)
+
+```
+BEFORE (Round 4):  150 cases — passed 60, failed 90, errored 0
+                   missing: TS7026 ×15  | extra: TS2304 ×57, TS2339 ×18  | wrong_code: TS7026 ×1
+                   categories: no_baseline 31, missing_all 34, divergent 25
+AFTER  (Round 6):  150 cases — passed 61, failed 89, errored 0
+                   missing: (TS7026 cleared)  | extra: TS2304 ×57, TS2339 ×18  | wrong_code: TS7026 ×1
+                   categories: no_baseline 31, missing_all 32, divergent 26
+```
+
+- **passed 60 → 61 (+1)** — `jsxMultilineAttributeStringValues2` (4 self-closing
+  intrinsic `<div .../>`, committed `4×7026`) flips to PASS, exactly as the probe
+  predicted.
+- **`missing TS7026 ×15` → cleared** — all 14 reachable false-negative 7026
+  emit with byte-exact spans (`jsxMultiline` 4 + `jsxEntityDecoder*` opening 5 +
+  closing 5); the 15th co-locates with our `TS1128` in
+  `jsxAttributeValueBinaryExpression` (parser-recovery divergence) so it is a
+  `wrong_code TS7026 ×1` (unchanged from before), not a `missing`. The probe's
+  `×1` prediction lands as that wrong_code.
+- **NO new `extra TS7026`** anywhere — the first measurement (pre-trivia-fix)
+  showed `extra TS7026 ×9` from off-by-one spans; after `error_skipping_leading_trivia`
+  the produced 7026 are byte-identical to `tsc`, so they pair away (0 extra).
+  Verified the guard cases stay clean: `jsxNestedIndentation` PASS,
+  `jsxPragmaAfterTags` PASS (both value-element-only), `jsxElementTypeUnexpectedType`
+  still FAIL on its DEFERRED `TS2874` with no spurious 7026.
+- **`extra TS2304 ×57`, `extra TS2339 ×18`, and EVERY other extra/missing/wrong
+  bucket unchanged** — the full histogram was diffed BEFORE vs AFTER; the only
+  delta is `missing TS7026 ×15` → removed. No regression.
+- Category shift: `missing_all 34 → 32` (`jsxMultiline` → PASS,
+  `jsxEntityDecoder` → divergent), `divergent 25 → 26`, `no_baseline 31`
+  unchanged. Byte comparison unchanged; no diagnostic blanket-suppressed.
+
+## Test deltas
+
+- `tsgo_checker`: **744 → 750** unit (+6, the six slices above); **177 → 178**
+  doctests (+1, `Checker::no_implicit_any`). New test-support:
+  `StubProgram::parse_and_bind_tsx_with_options` + `StubProgram::source_text`.
+- `tsgo_compiler`: **93 → 95** unit (+2, the two real-lib JSX gates); doctests
+  unchanged (11). `BoundFile` / `FileView` / `MultiFileBoundProgram` gained
+  `source_text`.
+- `tsgo_testrunner`: unit/doctest counts unchanged (47 / 11); the
+  `expanded_compiler_subset_parity_smoke` characterization re-measured to
+  `{passed: 61, failed: 89, errored: 0}`, `missing_all 34→32`, `divergent 25→26`,
+  `top_missing(1) == [(2874, 7)]` (was `[(7026, 15)]`), plus new asserts that
+  `missing TS7026` and `extra TS7026` are both absent. The 30-case
+  `curated_compiler_subset_parity_smoke` is UNCHANGED and green.
+
+## Gate results (Round 6)
+
+- `cargo test -p tsgo_checker` — GREEN (750 unit + 178 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (95 unit + 11 doctests) [real-lib path].
+- `cargo test -p tsgo_testrunner` — GREEN (47 unit + 11 doctests; 150-case
+  re-measure).
+- `cargo test -p tsgo_transformers` — GREEN (311; sibling jsx-transform suite
+  unaffected).
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner --all-targets
+  -- -D warnings` — GREEN.
+- `cargo fmt -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner -- --check` —
+  GREEN.
+- `cargo build --workspace --all-targets` — GREEN.
+
+No `--no-verify`; no test weakened or deleted; the byte comparison and the
+30-case smoke are unchanged. Public API additive only (`Checker::no_implicit_any`,
+`BoundProgram::source_text` with a `None` default; the JSX resolution + the
+trivia-skipping emit are internal). No new dependency; root `Cargo.toml` /
+`Cargo.lock` untouched. TS2874 / TS2875 left UNIMPLEMENTED (deferred, blocked-by
+pragma scanning + implicit jsx-runtime module resolution).

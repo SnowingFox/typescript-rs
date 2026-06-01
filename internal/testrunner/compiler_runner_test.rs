@@ -640,8 +640,8 @@ fn expanded_compiler_subset_parity_smoke() {
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 60,
-            failed: 90,
+            passed: 61,
+            failed: 89,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -650,8 +650,9 @@ fn expanded_compiler_subset_parity_smoke() {
 
     // The prioritized-backlog histogram (the headline that directs the next
     // checker/parser work). The dominant FALSE POSITIVES are cascading
-    // unresolved-name / missing-property errors (TS2304 / TS2339); the dominant
-    // FALSE NEGATIVE is the JSX intrinsic-elements check (TS7026).
+    // unresolved-name / missing-property errors (TS2304 / TS2339); the JSX
+    // intrinsic-elements false negative (TS7026) is cleared in Round 6 (below),
+    // leaving `TS2874 ×7` (the DEFERRED React-in-scope check) as the top miss.
     //
     // Round 3 drove the cascade down from `extra TS2304 ×82 + TS2339 ×76`
     // (55 pass) to `extra TS2304 ×62 + TS2339 ×18` (60 pass) via two checker
@@ -676,6 +677,19 @@ fn expanded_compiler_subset_parity_smoke() {
     // the worklog). The program-level `SkipTypeChecking` gate this round ports
     // (faithfully) only skips `checkJs: false` / `@ts-nocheck` JS, of which the
     // corpus has none — so it is parity-neutral but corrects a real gap.
+    //
+    // Round 6 (this round) lands the JSX intrinsic-element implicit-any check
+    // (TS7026): an intrinsic `.tsx` tag with no `JSX.IntrinsicElements` in scope
+    // and `noImplicitAny` (the default) reports TS7026 on the element node
+    // (opening + closing for a paired element), exactly as Go's
+    // `getIntrinsicTagSymbol`. This flips `jsxMultilineAttributeStringValues2`
+    // (passed 60 -> 61) and clears the entire `missing TS7026 ×15` false
+    // negative (the remaining JSX cases — `jsxEntityDecoder*`,
+    // `jsxElementTypeUnexpectedType`, ... — still FAIL because they ALSO need
+    // TS2874/TS2875, which are DEFERRED behind `@jsx`-pragma scanning and the
+    // implicit jsx-runtime import; see the worklog). No new `extra TS7026`
+    // (the spans are trivia-skipped to match `tsc` byte-for-byte), and the
+    // dominant `extra TS2304 ×57`/`TS2339 ×18` are unchanged.
     let hist = summary.histogram();
     assert_eq!(
         hist.no_baseline_but_errors + hist.missing_all_errors + hist.divergent,
@@ -683,8 +697,8 @@ fn expanded_compiler_subset_parity_smoke() {
         "every failed case is categorized"
     );
     assert_eq!(hist.no_baseline_but_errors, 31);
-    assert_eq!(hist.missing_all_errors, 34);
-    assert_eq!(hist.divergent, 25);
+    assert_eq!(hist.missing_all_errors, 32);
+    assert_eq!(hist.divergent, 26);
 
     assert_eq!(
         hist.top_extra(2),
@@ -692,10 +706,25 @@ fn expanded_compiler_subset_parity_smoke() {
         "top extra (false-positive) codes; histogram:\n{}",
         hist.report()
     );
+    // The JSX intrinsic-element false negative (`missing TS7026 ×15`) is cleared;
+    // the top remaining false negative is `TS2874 ×7` (the React-in-scope check,
+    // DEFERRED). There must be NO `extra TS7026` (over-firing) anywhere.
     assert_eq!(
         hist.top_missing(1),
-        vec![(7026, 15)],
+        vec![(2874, 7)],
         "top missing (false-negative) code; histogram:\n{}",
+        hist.report()
+    );
+    assert_eq!(
+        hist.missing.get(&7026),
+        None,
+        "the JSX intrinsic-element false negative (missing TS7026) is cleared; histogram:\n{}",
+        hist.report()
+    );
+    assert_eq!(
+        hist.extra.get(&7026),
+        None,
+        "TS7026 must match tsc's spans exactly — no over-firing (extra TS7026); histogram:\n{}",
         hist.report()
     );
 }

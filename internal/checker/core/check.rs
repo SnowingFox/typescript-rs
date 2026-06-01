@@ -5239,6 +5239,43 @@ impl Checker {
         self.add_diagnostic(program, diagnostic);
     }
 
+    // Records a diagnostic on `node` whose span starts at the node's first
+    // non-trivia character — Go's `c.error(node)` span via
+    // `scanner.GetErrorRangeForNode` (default case: `SkipTrivia(text,
+    // node.Pos())..node.End()`). A node's `pos` is its FULL-start (leading
+    // trivia included), so a span byte-compared against `tsc`'s baseline must
+    // skip that trivia. Falls back to the raw `pos` when the file text is not
+    // available (correct when the node has no leading trivia).
+    //
+    // Used by the JSX intrinsic-tag path (TS7026 / TS2339), whose element node
+    // is preceded by whitespace (e.g. `const a = <div/>`); the generic
+    // `self.error` keeps the raw range to match the existing relation-error
+    // emission sites that already byte-match `tsc`.
+    // Go: internal/scanner/scanner.go:GetErrorRangeForNode (default case)
+    pub(crate) fn error_skipping_leading_trivia(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        message: &'static Message,
+        args: &[&str],
+    ) {
+        let loc = program.arena().loc(node);
+        let start = match program.source_text() {
+            Some(text) => tsgo_scanner::skip_trivia(text, loc.pos()),
+            None => loc.pos(),
+        };
+        let diagnostic = Diagnostic {
+            code: message.code(),
+            category: message.category(),
+            message: tsgo_diagnostics::format(&message.to_string(), args),
+            start,
+            length: loc.end() - start,
+            related_information: Vec::new(),
+            message_chain: Vec::new(),
+        };
+        self.add_diagnostic(program, diagnostic);
+    }
+
     // Builds (without recording) a diagnostic at `node` from `message` with
     // `args` substituted; its related-information list starts empty (Go's
     // `createDiagnosticForNode`). Callers attach related entries via

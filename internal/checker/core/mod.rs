@@ -638,6 +638,26 @@ impl Checker {
         self.get_strict_option_value(self.compiler_options().strict_function_types)
     }
 
+    /// Reports whether `noImplicitAny` is in effect (Go's `c.noImplicitAny`,
+    /// `= compilerOptions.GetStrictOptionValue(compilerOptions.NoImplicitAny)`).
+    ///
+    /// True by default (the `strict != false` rule), which is why a `.tsx`
+    /// element with no `JSX.IntrinsicElements` interface in scope reports
+    /// `TS7026` even outside `strict` mode.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// // With all-defaults options, the `strict != false` rule enables it.
+    /// assert!(Checker::new().no_implicit_any());
+    /// ```
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/checker.go:NewChecker (c.noImplicitAny = c.compilerOptions.GetStrictOptionValue(c.compilerOptions.NoImplicitAny))
+    pub fn no_implicit_any(&self) -> bool {
+        self.get_strict_option_value(self.compiler_options().no_implicit_any)
+    }
+
     /// Clones the shared handle to the retained program, if any.
     ///
     /// Returning an owned `Rc` lets a `&mut self` driver (e.g.
