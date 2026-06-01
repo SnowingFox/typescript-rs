@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::{CaseCategory, MismatchKind};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -291,6 +292,76 @@ fn run_case_mismatch_reports_failure_with_diff() {
     }
 }
 
+/// Builds the canonical TS2322 `.errors.txt` baseline for a case named `file`,
+/// optionally with the code swapped to `code` (to force a `wrong_code`).
+fn ts_number_baseline(file: &str, code: &str) -> String {
+    format!(
+        "{file}(1,4): error {code}: Type 'string' is not assignable to type 'number'.\r\n\
+         \r\n\
+         \r\n\
+         ==== {file} (1 errors) ====\r\n    \
+         var x: number = \"s\";\r\n       \
+         ~~~~~~~~~~~~~~~~\r\n\
+         !!! error {code}: Type 'string' is not assignable to type 'number'."
+    )
+}
+
+// Wiring slice (RED->GREEN): a failed case carries a categorized `diff`, and
+// `ParitySummary::histogram` aggregates the per-code backlog over a real runner
+// batch — a `wrong_code` (committed TS9999 vs produced TS2322 at the same span)
+// plus a `no_baseline_but_errors` (extra TS2322).
+#[test]
+fn run_cases_populates_diff_and_histogram() {
+    let tmp = TempDir::new().expect("temp dir");
+    write_case(
+        tmp.path(),
+        "compiler",
+        "wrongcode.ts",
+        "var x: number = \"s\";",
+    );
+    write_reference(
+        tmp.path(),
+        "compiler",
+        "wrongcode.errors.txt",
+        &ts_number_baseline("wrongcode.ts", "TS9999"),
+    );
+    write_case(tmp.path(), "compiler", "extra.ts", "var x: number = \"s\";");
+
+    let runner = CompilerBaselineRunner::new(CompilerTestType::Regression, tmp.path());
+    let summary = runner.run_cases(["wrongcode.ts", "extra.ts"]);
+
+    assert_eq!(summary.counts().failed, 2, "both cases fail parity");
+
+    let wrong = summary
+        .results()
+        .iter()
+        .find(|r| r.name == "wrongcode.ts")
+        .expect("wrongcode result");
+    let diff = wrong.diff.as_ref().expect("failed case carries a diff");
+    assert_eq!(diff.category, CaseCategory::Divergent);
+    assert!(
+        diff.mismatches
+            .iter()
+            .any(|m| m.kind == MismatchKind::WrongCode
+                && m.code == 9999
+                && m.actual_code == Some(2322)),
+        "expected wrong_code 9999->2322: {:?}",
+        diff.mismatches
+    );
+
+    let hist = summary.histogram();
+    assert_eq!(hist.wrong_code.get(&9999), Some(&1));
+    assert_eq!(hist.extra.get(&2322), Some(&1));
+    assert_eq!(hist.no_baseline_but_errors, 1);
+    assert_eq!(hist.divergent, 1);
+    // The report embeds the prioritized-backlog histogram.
+    assert!(
+        summary.report().contains("category histogram:"),
+        "report:\n{}",
+        summary.report()
+    );
+}
+
 // Slice 4 (RED->GREEN): a case that PANICS the parse/compile pipeline is caught
 // and counted `errored`, and the batch run continues past it (the clean case
 // after it still passes).
@@ -398,6 +469,28 @@ fn enumerate_test_files_walks_recursively_sorted() {
     assert_eq!(names, vec!["a.tsx", "b.ts", "c.ts"]);
 }
 
+// `curated_subset` selects sorted `.ts`/`.tsx` cases at most `max_lines` long,
+// excluding the denylist, capped at `limit` — deterministically.
+#[test]
+fn curated_subset_is_deterministic_and_filtered() {
+    let tmp = TempDir::new().expect("temp dir");
+    write_case(tmp.path(), "compiler", "a.ts", "1\n2\n3");
+    write_case(tmp.path(), "compiler", "b.ts", &"x\n".repeat(30));
+    write_case(tmp.path(), "compiler", "c.ts", "1\n2\n3\n4\n5");
+    write_case(tmp.path(), "compiler", "d.tsx", "1\n2");
+    write_case(tmp.path(), "compiler", "skip.ts", "1");
+    write_case(tmp.path(), "compiler", "note.txt", "1");
+
+    let runner = CompilerBaselineRunner::new(CompilerTestType::Regression, tmp.path());
+    // <=10 lines, exclude skip.ts, cap at 2: candidates a.ts(3) c.ts(5) d.tsx(2)
+    // [b.ts is 30 lines -> excluded], sorted -> first two.
+    let subset = runner.curated_subset(10, 2, &["skip.ts"]);
+    assert_eq!(subset, vec!["a.ts".to_string(), "c.ts".to_string()]);
+
+    // Stable across calls.
+    assert_eq!(subset, runner.curated_subset(10, 2, &["skip.ts"]));
+}
+
 // === curated smoke subset (characterization) ================================
 
 /// A deterministic, reproducible subset of the `tests/cases/compiler` corpus:
@@ -492,6 +585,97 @@ fn curated_compiler_subset_parity_smoke() {
     );
 }
 
+/// Cases excluded from the expanded subset: unbounded-recursion / combinatorial
+/// stress cases that tsc handles via internal complexity limits we have not yet
+/// ported, so they can abort the harness with a stack overflow (which
+/// `catch_unwind` cannot catch) or hang. Documented + deterministic.
+const EXPANDED_DENYLIST: &[&str] = &[
+    // `const f = () => 42 satisfies typeof f;` — self-referential `typeof`.
+    "noTypeToStringStackOverflow.ts",
+    // 49-fold template literal: a combinatorial union explosion tsc rejects with
+    // TS2590; without the complexity guard the union is materialized (hang/OOM).
+    "templateLiteralTypeTooComplex.ts",
+];
+
+// Expanded characterization (RED->GREEN): the parity SMOKE over the LARGER
+// deterministic subset — the sorted `tests/cases/compiler` cases at most 25
+// lines (minus the documented stress denylist), capped at 150. Asserts the
+// ACTUAL measured `{passed, failed, errored}` AND the top mismatched diagnostic
+// codes (the prioritized backlog). This is a MEASUREMENT: most cases are
+// EXPECTED to fail parity because the port is a reachable subset of tsc; the
+// value is the categorized histogram, not a pass rate. Update the expected
+// numbers as parity improves — never assert 100%.
+// Go: internal/testrunner/compiler_runner.go:CompilerBaselineRunner.RunTests
+#[test]
+fn expanded_compiler_subset_parity_smoke() {
+    let runner = CompilerBaselineRunner::new(
+        CompilerTestType::Regression,
+        Path::new(tsgo_repo::test_data_path()),
+    );
+    let cases = runner.curated_subset(25, 150, EXPANDED_DENYLIST);
+    assert_eq!(cases.len(), 150, "deterministic subset size");
+
+    // The compile batch runs on a large-stack thread so a deep checker recursion
+    // does not overflow the small default test-thread stack; `catch_unwind`
+    // inside `run_case` turns any unwinding panic into an `Errored` verdict so a
+    // single bad case never aborts the batch.
+    let summary = with_silenced_panics(|| {
+        std::thread::Builder::new()
+            .stack_size(512 * 1024 * 1024)
+            .spawn(move || runner.run_cases(cases))
+            .expect("spawn smoke thread")
+            .join()
+            .expect("smoke thread panicked")
+    });
+
+    // Print the full parity report (counts + prioritized-backlog histogram +
+    // per-case detail) so the measured signal is visible with `--nocapture`.
+    println!("{}", summary.report());
+
+    let counts = summary.counts();
+    assert_eq!(counts.total(), 150);
+    // Measured parity on the larger subset (characterization; see the worklog).
+    // EXPECTED to be far from 100% — the port is a reachable subset of tsc. Bump
+    // `passed` upward (and lower `failed`) only as real parity improves.
+    assert_eq!(
+        counts,
+        ParityCounts {
+            passed: 55,
+            failed: 95,
+            errored: 0,
+        },
+        "parity counts drifted; measured report:\n{}",
+        summary.report()
+    );
+
+    // The prioritized-backlog histogram (the headline that directs the next
+    // checker/parser work). The dominant FALSE POSITIVES are cascading
+    // unresolved-name / missing-property errors (TS2304 / TS2339); the dominant
+    // FALSE NEGATIVE is the JSX intrinsic-elements check (TS7026).
+    let hist = summary.histogram();
+    assert_eq!(
+        hist.no_baseline_but_errors + hist.missing_all_errors + hist.divergent,
+        counts.failed,
+        "every failed case is categorized"
+    );
+    assert_eq!(hist.no_baseline_but_errors, 36);
+    assert_eq!(hist.missing_all_errors, 29);
+    assert_eq!(hist.divergent, 30);
+
+    assert_eq!(
+        hist.top_extra(2),
+        vec![(2304, 82), (2339, 76)],
+        "top extra (false-positive) codes; histogram:\n{}",
+        hist.report()
+    );
+    assert_eq!(
+        hist.top_missing(1),
+        vec![(7026, 15)],
+        "top missing (false-negative) code; histogram:\n{}",
+        hist.report()
+    );
+}
+
 // `ParitySummary::report` renders deterministic per-case lines with the tally
 // header.
 #[test]
@@ -500,18 +684,21 @@ fn parity_summary_report_is_deterministic() {
         CaseResult {
             name: "a.ts".into(),
             outcome: ParityOutcome::Passed,
+            diff: None,
         },
         CaseResult {
             name: "b.ts".into(),
             outcome: ParityOutcome::Failed {
                 detail: "diff line".into(),
             },
+            diff: None,
         },
         CaseResult {
             name: "c.ts".into(),
             outcome: ParityOutcome::Errored {
                 message: "boom".into(),
             },
+            diff: None,
         },
     ]);
     let report = summary.report();

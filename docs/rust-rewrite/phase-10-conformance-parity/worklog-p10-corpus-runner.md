@@ -273,3 +273,178 @@ parity-tally pipeline now runs end-to-end over the real corpus. The curated smok
 test is a stable characterization of where the port stands today (15/30); bump
 its expected `passed` upward only as real parity improves. The failure-category
 breakdown above is the actionable backlog for the checker/parser/emit lanes.
+
+---
+
+# Round 2 — larger curated subset + failure categorization
+
+Round goal: expand the corpus runner from the curated **30** to a LARGER
+deterministic subset (the first **150** sorted `tests/cases/compiler` cases ≤ 25
+lines), and add **failure categorization** — classify each FAILED case's
+`.errors.txt` mismatch into per-code categories and aggregate a histogram of the
+TOP mismatched diagnostic codes, so the parity signal directly prioritizes the
+next checker/parser work. Strict TDD red→green. Tree clean at `ed8d4331`.
+Additive only; only `internal/testrunner/**` (+ this doc) edited. No root
+`Cargo.toml`, no `internal/ls`/`checker`/`compiler` edits; the existing 30-case
+smoke + every prior test was kept (this round only ADDS tests). No new crate
+dependency (`indexmap`/`regex`/`tsgo_testutil_baseline` already present).
+
+## Headline — measured parity on the LARGER subset
+
+```
+parity: 150 cases — passed 55, failed 95, errored 0
+category histogram: no_baseline_but_errors ×36, missing_all_errors ×29, divergent ×30
+  missing: TS7026 ×15, TS2874 ×7, TS2322 ×6, TS2309 ×4, TS7008 ×4, TS2339 ×3,
+           TS2488 ×3, TS1097 ×2, TS1202 ×2, TS1294 ×2, TS1506 ×2, TS2304 ×2,
+           TS2345 ×2, TS2353 ×2, TS2688 ×2, TS2875 ×2, TS2882 ×2, TS6424 ×2,
+           TS6425 ×2, TS7006 ×2, TS7010 ×2, TS7022 ×2, … (51 distinct codes)
+  extra:   TS2304 ×82, TS2339 ×76, TS2322 ×12, TS1005 ×9, TS1003 ×5,
+           TS2345 ×2, TS2495 ×2, TS1109 ×1, TS1155 ×1, TS1161 ×1, TS2344 ×1, TS5108 ×1
+  wrong_code:    TS2540 ×1, TS2552 ×1, TS2669 ×1, TS2729 ×1, TS7026 ×1
+  wrong_message: TS2339 ×2
+```
+
+**55 / 150 PASS, 95 FAIL, 0 ERROR** (deterministic across reruns). This is a
+MEASUREMENT: most real conformance cases are EXPECTED to diverge because the port
+is a reachable subset of tsc. The value is the categorized backlog, not a pass
+rate — byte comparison is unchanged (not weakened to inflate passes), and panics
+are still caught → `errored` (none on this subset).
+
+### The prioritized backlog (what to fix next, by impact)
+
+1. **Cascading FALSE POSITIVES dominate — fix unresolved-name resolution first.**
+   `extra TS2304 (Cannot find name) ×82` + `extra TS2339 (Property does not exist) ×76`
+   together are **158 of the spurious diagnostics**. These are downstream cascades:
+   when our binder/checker fails to resolve a symbol (expando functions/namespace
+   merging, JSDoc-declared values, `export =`/CommonJS, `this`-property typing), the
+   unresolved name then triggers a swarm of `TS2304`/`TS2339`. Knocking out a few
+   root resolution gaps should clear large blocks of these at once.
+2. **Parser error-recovery FALSE POSITIVES** — `extra TS1005 ×9` + `TS1003 ×5`
+   ("X expected" / "Identifier expected"): divergent recovery on malformed input
+   (we over-report grammar errors tsc recovers from).
+3. **Top FALSE NEGATIVE — JSX intrinsic-elements check** — `missing TS7026 ×15`
+   ("JSX element implicitly has type 'any' because no interface 'JSX.IntrinsicElements'
+   exists"): the `.tsx` cases in the subset expect this and we emit nothing
+   (JSX checking is a reachable gap). Next: `missing TS2874 ×7`, `TS2322 ×6`
+   (assignability false-negatives), `TS2309 ×4`, `TS7008 ×4`.
+4. **`missing_all_errors ×29`** — cases where a committed baseline exists but we
+   produced nothing at all (whole-feature gaps), vs **`divergent ×30`** (partial)
+   and **`no_baseline_but_errors ×36`** (clean-expected cases we wrongly error on —
+   these are the pure false-positive cases, mostly the TS2304/TS2339 cascades).
+
+## What landed (`tsgo_testrunner`)
+
+New module `internal/testrunner/failure_category.rs` (+ `_test.rs`), all additive:
+
+- **`BaselineDiag { file, line, col, code, message, span }`** + **`parse_error_baseline(text) -> Vec<BaselineDiag>`**
+  — parses an `.errors.txt`: the compact top-of-baseline lines yield each
+  diagnostic's `(file, line, col, code, message)` (a regex that matches ONLY the
+  compact lines, so `!!! …`/`==== ====`/source/squiggle/`!!! related` lines never
+  inflate the count); the per-file squiggle underlines yield a best-effort `span`
+  (tilde count, single-line proxy, symmetric across both sides).
+- **`MismatchKind`** (`Missing` / `Extra` / `WrongCode` / `WrongSpan` /
+  `WrongMessage`), **`CodeMismatch { kind, code, actual_code }`**,
+  **`CaseCategory`** (`NoBaselineButErrors` / `MissingAllErrors` / `Divergent`),
+  **`CaseDiff { category, mismatches }`**.
+- **`categorize_diags(expected, actual) -> Vec<CodeMismatch>`** — the pure core:
+  pass 1 removes byte-identical diagnostics; pass 2 pairs leftovers by location
+  (same-code partner preferred → `wrong_span`/`wrong_message`, else different-code
+  → `wrong_code`); the still-unpaired expected → `missing`, produced → `extra`.
+  **`categorize_failure(produced, committed: Option<&str>)`** parses both sides
+  (treating `<no content>` as empty) + derives the `CaseCategory`.
+- **`CategoryHistogram`** — per-code `IndexMap`s for each kind + the three
+  case-level scalars; `add_case_diff` / `from_case_diffs` / `top_missing(n)` /
+  `top_extra(n)` (sorted count-desc then code-asc) / `report()` (the
+  prioritized-backlog string).
+
+Wired into the runner (`compiler_runner.rs`, additive):
+
+- **`CaseResult` gains `diff: Option<CaseDiff>`** — populated by `run_case` only
+  for a `Failed` verdict (computed from the produced + committed text it already
+  has); `None` for passed/errored.
+- **`ParitySummary::histogram()`** aggregates the failed cases' `CaseDiff`s; the
+  prioritized-backlog histogram is now embedded at the top of
+  `ParitySummary::report()`.
+- **`CompilerBaselineRunner::curated_subset(max_lines, limit, denylist)`** — the
+  deterministic, reproducible subset selector (sorted `.ts`/`.tsx` basenames ≤
+  `max_lines` lines, minus `denylist`, capped at `limit`). A pure function of the
+  committed corpus.
+
+## RED→GREEN slices (this round)
+
+1. **Parser — compact line** → one `BaselineDiag` with `(file,line,col,code,msg)`.
+   RED (`parse_error_baseline` returned `[]`) → GREEN.
+2. **Parser — squiggle span + no over-count** (driven by the real
+   `destructuringEmptyBinding` 2-error baseline; spans `Some(1)`/`Some(1)`) and a
+   16-tilde span (`errored.ts` TS2322). RED (`span: None`) → GREEN (squiggle pass).
+3. **Categorizer — missing** (committed TS2304 we don't emit, co-located TS2322
+   matches) → single `missing{2304}`. RED → GREEN (pass 1 + missing/extra).
+4. **Categorizer — extra / no_baseline_but_errors / missing_all_errors**
+   (case-level kinds). GREEN on the same core.
+5. **Categorizer — wrong_code** (same loc, TS2304→TS2345). RED (leftover became
+   missing+extra) → GREEN (pass 2 wrong_code branch).
+6. **Categorizer — wrong_span / wrong_message** (synthetic `BaselineDiag` lists,
+   exact span control). RED (still missing+extra) → GREEN (pass 2 span+message
+   branches, same-code preference).
+7. **Histogram aggregation** — a few synthetic `CaseDiff`s → correct per-code
+   tally + `top_missing`/`top_extra` ranking + `report()`. RED (neutralized
+   `add_case_diff`) → GREEN.
+8. **Wiring** — a real runner batch (`wrongcode.ts` committed TS9999 vs produced
+   TS2322 + an extra-error `extra.ts`) populates `CaseResult.diff` and
+   `ParitySummary::histogram()` (`wrong_code 9999→2322`, `extra 2322`,
+   `no_baseline_but_errors`). RED (field absent) → GREEN.
+9. **`curated_subset` determinism** — temp dir of varied-length files, `≤10`
+   lines, denylist, cap → deterministic sorted selection.
+10. **Expanded smoke characterization** — the 150-case run asserts the measured
+    `{passed:55, failed:95, errored:0}` + `top_extra(2)==[(2304,82),(2339,76)]` +
+    `top_missing(1)==[(7026,15)]` + the case-level tally. RED (numbers/fns) →
+    GREEN (assert actuals). Stable across reruns.
+
+## Determinism + the stress-case denylist
+
+The subset is `curated_subset(25, 150, EXPANDED_DENYLIST)` — a pure function of
+the committed corpus (sorted name + on-disk line count). `EXPANDED_DENYLIST`
+excludes two unbounded stress cases tsc only survives via internal complexity
+limits we have not ported, so they can abort the harness with a stack overflow
+(`catch_unwind` cannot catch a stack-overflow abort) or hang/OOM:
+`noTypeToStringStackOverflow.ts` (self-referential `typeof f`) and
+`templateLiteralTypeTooComplex.ts` (a 49-fold combinatorial template-literal
+union tsc rejects with TS2590). Excluding exactly these two keeps the run
+deterministic AND non-aborting; the batch still runs on a 512 MiB-stack thread.
+
+## Test deltas
+
+- `tsgo_testrunner`: **33 → 47** unit tests (+14): 3 parser, 7 categorizer
+  (missing/extra/no-baseline/missing-all/wrong-code/wrong-span/wrong-message),
+  1 histogram, 1 runner wiring, 1 `curated_subset` determinism, 1 expanded
+  smoke characterization. Doctests **11 → 11** (the `ParitySummary::counts`
+  doctest updated for the new `CaseResult.diff` field). No existing test
+  weakened or deleted; the byte comparison is unchanged.
+
+## Gate results (crate-scoped only; concurrent `internal/ls` lane active)
+
+- `cargo test -p tsgo_testrunner` — GREEN (47 unit + 11 doctests; the 150-case
+  smoke runs ~35 s on the large-stack thread).
+- `cargo clippy -p tsgo_testrunner --all-targets -- -D warnings` — GREEN.
+- `cargo fmt -p tsgo_testrunner -- --check` — GREEN.
+- `cargo build -p tsgo_testrunner` — GREEN.
+
+Did not run `--workspace` (concurrent lane). `tsgo_testutil_harnessutil` not
+touched, so not gated separately. Public API ADDITIVE within `tsgo_testrunner`
+only (`CaseResult` gains a field; the new `failure_category` surface is all new).
+No `--no-verify`. Root `Cargo.toml` and `internal/testrunner/Cargo.toml`
+untouched (no new dependency). Did not edit `internal/ls`/`checker`/`compiler`/
+`harnessutil`.
+
+## DEFER list (unchanged + this round)
+
+- **`.js`/`.types`/`.symbols`/sourcemap baselines**, **module/target variation
+  matrix**, **in-test `tsconfig.json`/symlinks**, **fourslash**, and
+  **`local`-baseline writes** — all still deferred (see Round 1).
+- **Multi-line span fidelity** — the squiggle parser records only the first
+  line's tilde run for a multi-line span (a deterministic proxy used solely for
+  `wrong_span`). blocked-by: not needed for the code histogram; full span
+  reconstruction would re-derive the multi-line squiggle geometry.
+- **Full corpus run** — still a curated 150-case subset (the signal is
+  sufficient to prioritize). blocked-by: triaging more stress/recursion cases
+  beyond the two-entry denylist (some risk uncatchable stack-overflow aborts).

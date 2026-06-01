@@ -21,7 +21,10 @@ use tsgo_locale::Locale;
 use tsgo_testutil_harnessutil::{compile_files, HarnessDiagnostic, TestFile};
 use tsgo_tspath::{get_base_file_name, get_normalized_absolute_path, ComparePathsOptions};
 
-use crate::{extract_compiler_settings, make_units_from_test, Runner, SRC_FOLDER};
+use crate::{
+    categorize_failure, extract_compiler_settings, make_units_from_test, CaseDiff,
+    CategoryHistogram, Runner, SRC_FOLDER,
+};
 
 /// The harness newline sequence (`\r\n`) used throughout the baselines.
 // Go: internal/testutil/tsbaseline/error_baseline.go:harnessNewLine
@@ -396,6 +399,10 @@ pub struct CaseResult {
     pub name: String,
     /// The parity verdict for this case.
     pub outcome: ParityOutcome,
+    /// The categorized failure diff, present only for a
+    /// [`Failed`](ParityOutcome::Failed) case (the input to the parity
+    /// [`CategoryHistogram`]); `None` for passed/errored cases.
+    pub diff: Option<CaseDiff>,
 }
 
 /// The tallied counts of the three parity outcomes over a batch of cases.
@@ -452,8 +459,12 @@ impl ParitySummary {
     /// ```
     /// use tsgo_testrunner::{CaseResult, ParityOutcome, ParitySummary};
     /// let summary = ParitySummary::from_results(vec![
-    ///     CaseResult { name: "a.ts".into(), outcome: ParityOutcome::Passed },
-    ///     CaseResult { name: "b.ts".into(), outcome: ParityOutcome::Failed { detail: "x".into() } },
+    ///     CaseResult { name: "a.ts".into(), outcome: ParityOutcome::Passed, diff: None },
+    ///     CaseResult {
+    ///         name: "b.ts".into(),
+    ///         outcome: ParityOutcome::Failed { detail: "x".into() },
+    ///         diff: None,
+    ///     },
     /// ]);
     /// let counts = summary.counts();
     /// assert_eq!(counts.passed, 1);
@@ -482,9 +493,18 @@ impl ParitySummary {
         ParitySummary { results }
     }
 
+    /// Aggregates the per-case [`CaseDiff`]s of every failed case into the
+    /// prioritized-backlog [`CategoryHistogram`].
+    ///
+    /// Side effects: none (pure).
+    pub fn histogram(&self) -> CategoryHistogram {
+        CategoryHistogram::from_case_diffs(self.results.iter().filter_map(|r| r.diff.as_ref()))
+    }
+
     /// Renders a deterministic, human-readable parity report: a header with the
-    /// counts followed by one line per case (`PASS` / `FAIL` / `ERR`), with a
-    /// short indented detail under each failure / error.
+    /// counts, the prioritized-backlog category histogram, then one line per
+    /// case (`PASS` / `FAIL` / `ERR`) with a short indented detail under each
+    /// failure / error.
     ///
     /// Side effects: none (pure).
     pub fn report(&self) -> String {
@@ -496,6 +516,7 @@ impl ParitySummary {
             counts.failed,
             counts.errored,
         );
+        push_indented(&mut out, &self.histogram().report());
         for result in &self.results {
             match &result.outcome {
                 ParityOutcome::Passed => {
@@ -692,6 +713,52 @@ impl CompilerBaselineRunner {
         &self.base_path
     }
 
+    /// Selects a deterministic, reproducible curated subset of the suite's
+    /// top-level case files: the sorted `.ts`/`.tsx` basenames whose source is
+    /// at most `max_lines` lines, excluding any name in `denylist`, capped at
+    /// `limit`.
+    ///
+    /// The selection is a pure function of the committed corpus (sorted name +
+    /// on-disk line count), so it produces the same subset on every run — the
+    /// stable input to the parity characterization. The `denylist` excludes the
+    /// handful of unbounded-recursion stress cases that can abort the harness
+    /// with a stack overflow (which `catch_unwind` cannot catch) or hang.
+    ///
+    /// Side effects: reads the suite case directory and each candidate file's
+    /// length (no writes).
+    pub fn curated_subset(&self, max_lines: usize, limit: usize, denylist: &[&str]) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.base_path) else {
+            return names;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let is_ts = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e == "ts" || e == "tsx");
+            if !is_ts {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if denylist.contains(&name.as_str()) {
+                continue;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(content) if content.lines().count() <= max_lines => names.push(name),
+                _ => {}
+            }
+        }
+        names.sort();
+        names.truncate(limit);
+        names
+    }
+
     /// Runs a single case (a base file name like `simpleTest.ts`, or a
     /// suite-relative path, or an absolute path) and returns its parity result.
     ///
@@ -722,6 +789,7 @@ impl CompilerBaselineRunner {
                     outcome: ParityOutcome::Errored {
                         message: format!("could not read case file {}: {e}", case_path.display()),
                     },
+                    diff: None,
                 };
             }
         };
@@ -734,16 +802,31 @@ impl CompilerBaselineRunner {
             error_baseline_for_test(&content, &baseline_basename)
         }));
 
-        let outcome = match produced {
-            Ok(baseline) => compare_error_baseline(&baseline, committed.as_deref()),
-            Err(payload) => ParityOutcome::Errored {
-                message: panic_message(payload),
-            },
+        let (outcome, diff) = match produced {
+            Ok(baseline) => {
+                let outcome = compare_error_baseline(&baseline, committed.as_deref());
+                // Categorize only a true parity failure (the input to the
+                // prioritized-backlog histogram); a pass or panic has no diff.
+                let diff = match &outcome {
+                    ParityOutcome::Failed { .. } => {
+                        Some(categorize_failure(&baseline, committed.as_deref()))
+                    }
+                    _ => None,
+                };
+                (outcome, diff)
+            }
+            Err(payload) => (
+                ParityOutcome::Errored {
+                    message: panic_message(payload),
+                },
+                None,
+            ),
         };
 
         CaseResult {
             name: basename,
             outcome,
+            diff,
         }
     }
 

@@ -17,10 +17,12 @@
 //! emit, and the separate fourslash crate.
 
 mod compiler_runner;
+mod failure_category;
 mod runner;
 mod test_case_parser;
 
 pub use compiler_runner::*;
+pub use failure_category::*;
 pub use runner::*;
 pub use test_case_parser::*;
 
