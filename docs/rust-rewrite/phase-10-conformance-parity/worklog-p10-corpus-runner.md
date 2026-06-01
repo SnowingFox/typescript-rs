@@ -600,3 +600,211 @@ surgical round; the remaining 62 `extra TS2304` are dominated by these):
 No `--no-verify`; no test weakened or deleted; the byte comparison and the
 30-case smoke are unchanged. Public API additive only (no signature changes; the
 two checker fixes are internal to `check.rs`).
+
+---
+
+# Round 4 — CommonJS JS-file globals: the bind-and-check gate + `require(...)`
+
+Round goal: attack the largest remaining `extra TS2304` sub-cluster — bare
+references to the CommonJS ambient globals `module` (×~14), `require` (×~5),
+`exports` (×~5) inside JS files. SOLO lane. Strict TDD red→green. Tree clean.
+Edits limited to `internal/compiler/{program.rs,host.rs,program_test.rs}` +
+`internal/checker/core/{check.rs,check_test.rs,test_support.rs}` +
+`internal/testrunner/compiler_runner_test.rs` (re-measured characterization) +
+this worklog. No production `internal/binder`/`ast`/`parser` change.
+
+## ROOT-CAUSE CORRECTION (the prior round's diagnosis was wrong)
+
+Round 3 deferred this cluster as a "COMPILER-level gate": *"tsc does NOT
+type-check un-`checkJs` `.js`/`.cjs` files (`skipTypeChecking`), so it emits no
+semantic diagnostics for them at all."* **Verified against the Go source and the
+committed corpus baselines, that is FALSE for this repo.** The Go ground truth:
+
+```go
+// internal/compiler/program.go
+func (p *Program) canIncludeBindAndCheckDiagnostics(sourceFile *ast.SourceFile) bool {
+	if sourceFile.CheckJsDirective != nil && !sourceFile.CheckJsDirective.Enabled {
+		return false // @ts-nocheck
+	}
+	if sourceFile.ScriptKind == core.ScriptKindTS || ...TSX || ...External {
+		return true
+	}
+	isJS := ...JS || ...JSX
+	isCheckJS := isJS && ast.IsCheckJSEnabledForFile(sourceFile, p.Options())   // checkJs==true
+	isPlainJS := ast.IsPlainJSFile(sourceFile, p.Options().CheckJs)             // JS && checkJs UNSET
+	return isPlainJS || isCheckJS || sourceFile.ScriptKind == core.ScriptKindDeferred
+}
+```
+
+`isPlainJS` is **true** for a `.js` file with `checkJs` unset → Go *DOES*
+bind-and-check plain JS, and check-JS JS, by default. It skips a JS file ONLY
+when `checkJs` is explicitly `false` or there is a `// @ts-nocheck`. The
+committed baselines confirm tsc type-checks these JS files: it emits
+`TS2591` (`module`, the "do you need `@types/node`?" variant —
+`exportAssignmentMerging6`), `TS2339`/`TS7022` (`expandoNoInferredIndex`),
+`TS6424`/`TS6425` (`multipleModuleExportsAssignments`), `TS2306`
+(`nestedJSDocImportType`) located *inside* the `.js`/`.cjs` files. Every cited
+corpus case (`cjsExportGenericTypes`, `erasableSyntaxOnlyJS`,
+`exportAssignmentMerging5/6`, `expandoNoInferredIndex`) sets `// @checkJs: true`,
+so a "skip un-`checkJs` JS" gate would not touch them at all (and would *regress*
+the plain-JS cases that carry committed JS-file baselines).
+
+**Therefore the cluster's real root is checker/binder CommonJS resolution, not a
+compiler gate**: tsc resolves `module`/`exports`/`require` because (a) the binder
+recognizes the CommonJS module pattern and declares `module`/`exports`
+(`setCommonJSModuleIndicator` + `declareCommonJSVariable`), and (b) `resolveName`
+returns the synthetic `requireSymbol` for a `require(...)` callee.
+
+## What landed (two Go-faithful, surgical changes)
+
+### (1) `require(...)` resolution — clears the `require` sub-cluster (the parity win)
+
+`check_identifier`'s name-not-found branch now mirrors Go's `resolveName`: when a
+bare identifier is unresolved AND it is the callee of a `require(...)` call in a
+JS file, it resolves to the synthetic `require` symbol (type `any`) instead of
+reporting 2304. The reachable subset returns `any` directly (flow-narrowing a
+fresh `any` callee is a no-op), which is observationally identical to typing the
+require symbol.
+
+- Added two private helpers in `check.rs`: `is_in_js_file` (node carries
+  `NodeFlags::JAVA_SCRIPT_FILE`, set by the parser for `.js`/`.jsx`) and
+  `is_require_call` (call expression, callee identifier `require`, exactly one
+  argument).
+- Go: `internal/binder/nameresolver.go:Resolve` (RequireSymbol branch) +
+  `internal/ast/utilities.go:IsRequireCall` / `IsInJSFile` +
+  `internal/checker/checker.go:Checker.getTypeOfSymbol` (`requireSymbol` → `any`).
+
+### (2) Go-faithful `SkipTypeChecking` gate in `program.rs` (correctness; parity-neutral)
+
+Ported `Program::skip_type_checking` + `Program::can_include_bind_and_check_diagnostics`
+1:1 from Go and wired them into BOTH semantic-diagnostics collectors
+(`semantic_diagnostics` + `semantic_diagnostics_by_file`) via a shared
+`is_excluded_from_semantic_diagnostics` mask (alongside the existing default-lib
+exclusion). `.ts`/`.tsx`/external → always checked; `.js`/`.jsx` → checked iff
+plain JS (`checkJs` unset) or check-JS (`checkJs: true`); `checkJs: false` →
+skipped. `effective_script_kind` (host.rs) made `pub(crate)` so the gate reads
+the same script kind the file was parsed with. This is parity-neutral on the
+corpus (no case uses `checkJs: false`/`@ts-nocheck`) but corrects a real gap: we
+previously bind-and-checked a `checkJs: false` JS file and emitted spurious
+2304s.
+- DEFER: the `// @ts-check` / `// @ts-nocheck` directive
+  (`SourceFile.CheckJsDirective`) is not parsed yet, so the directive arms are
+  not modeled (matches Go exactly when no directive is present — all corpus
+  cases). blocked-by: the parser's check-js directive scan.
+- Go: `internal/compiler/program.go:Program.SkipTypeChecking` /
+  `canIncludeBindAndCheckDiagnostics` + `internal/ast/utilities.go:IsPlainJSFile`
+  / `IsCheckJSEnabledForFile`.
+
+## RED→GREEN slices
+
+1. **`require(...)` callee resolves (JS)** — `tsgo_checker`
+   `require_call_in_js_file_resolves_no_cannot_find_name`
+   (`const a = require("./x")` in `/a.js`). RED: `[TS2304 Cannot find name
+   'require']` → GREEN: none. Plus a real-lib `tsgo_compiler`
+   `require_call_in_js_file_resolves_no_2304_with_real_lib` (the path the parity
+   runner drives).
+2. **Guard — bare `require` (not a call) still 2304** —
+   `bare_require_reference_in_js_file_still_reports_2304` (`require;` in `/a.js`).
+   Green throughout (resolution conditioned on `IsRequireCall`).
+3. **Guard — `require(...)` in a TS file still 2304** —
+   `require_call_in_ts_file_still_reports_2304` (gated on `IsInJSFile`).
+4. **`checkJs: false` JS is skipped** — `tsgo_compiler`
+   `js_file_with_check_js_false_is_not_checked` (`module.exports = {}`). RED:
+   `[TS2304 Cannot find name 'module']` → GREEN: none.
+5. **Guard — plain JS (`checkJs` unset) is STILL checked** —
+   `plain_js_file_is_still_checked` (proves NOT over-suppression; matches Go's
+   `isPlainJS` branch → 2304 on `module`).
+6. **Guard — `checkJs: true` JS is checked** —
+   `js_file_with_check_js_true_is_checked` (gate conditioned on `checkJs`).
+7. **Guard — TS is always checked regardless of `checkJs`** —
+   `ts_file_is_checked_regardless_of_check_js` (`checkJs: false` + `/index.ts` →
+   2304).
+
+## Headline — measured parity BEFORE → AFTER (150-case subset)
+
+```
+BEFORE (Round 3):  150 cases — passed 60, failed 90, errored 0
+                   extra: TS2304 ×62, TS2339 ×18
+AFTER  (Round 4):  150 cases — passed 60, failed 90, errored 0
+                   extra: TS2304 ×57, TS2339 ×18
+```
+
+- **extra TS2304: 62 → 57 (−5)** — the entire `require` sub-cluster cleared
+  (`require(...)` callees across `exportAssignmentMerging5/6`,
+  `multipleModuleExportsAssignments`, `cjsExportGenericTypes`, the `main.js`
+  cases). No other extra/missing code changed (full histogram diffed
+  byte-for-byte BEFORE vs AFTER; `TS2345 ×8` etc. were already at those values —
+  the Round 3 worklog recorded only `top_extra(2)`, not the full histogram).
+- **passed 60 → 60, failed 90 → 90, errored 0** — no case flips to PASS because
+  the `module`/`exports` extras (the deferred CommonJS-binding root) remain.
+- Category shift: `divergent` 26 → 25, `missing_all_errors` 33 → 34 — one case
+  (a `require`-only-extra divergent case) lost its sole false positive and is now
+  a pure false-negative. `no_baseline_but_errors` 31 (unchanged),
+  `top_missing(1)` `TS7026 ×15` (unchanged).
+- Byte comparison unchanged; no diagnostic blanket-suppressed; no test weakened.
+
+## DEFERRED sub-roots (blocked-by) — the remaining `module`/`exports` 2304s
+
+- **CommonJS module binding (`module` / `exports`)** — the bulk of the remaining
+  sub-cluster. tsc resolves `module`/`exports` because the binder detects the
+  CommonJS module pattern (`module.exports = X`, `exports.x = Y`, `require()`)
+  and declares the `module` (+`exports` member) and `exports` file locals; the
+  checker then types the `SymbolFlagsModuleExports` symbols. The Rust binder has
+  a `common_js_module_indicator` field but never sets it ("bindDeferredExpando
+  Assignments is JS/CommonJS only and is deferred"). This is a multi-behavior
+  binder+checker feature (assignment-pattern classification, file-symbol
+  creation via `bindSourceFileAsExternalModule`, `SymbolFlagsModuleExports`
+  type-of-symbol, and the `TS2591` "@types/node" special-case for `module`/
+  `require`/`process`/`Buffer`/`NodeJS` in non-CJS contexts), not a surgical
+  round. blocked-by: `internal/binder/binder.go:setCommonJSModuleIndicator` /
+  `declareCommonJSVariable` / `bindModuleExportsAssignment` /
+  `bindExportsOrObjectDefineProperty` + `internal/checker/checker.go:
+  getTypeOfSymbol` (`SymbolFlagsModuleExports`) + `getCannotFindNameDiagnostic`
+  (TS2591). Cases: `exportAssignmentMerging5/6`, `cjsExportGenericTypes`,
+  `erasableSyntaxOnlyJS`, `expandoNoInferredIndex`, `multipleModuleExportsAssignments`,
+  `nestedJSDocImportType`, `numericExportNameDeclaration`,
+  `jsDeclarationExportDefaultAssignmentCrash`, `jsDeclarationsRequireImportForms`.
+- **`// @ts-check` / `// @ts-nocheck` directive parsing** — the gate's directive
+  arms are stubbed (DEFER). blocked-by: the parser's check-js directive scan +
+  `CheckJsDirective` on the source file. (No corpus case in the subset uses a
+  directive, so this does not affect the current parity.)
+- **TS `import x = require()` / `export =` alias resolution** (the `a`/`foo`/`C`
+  2304s in `exportAssignmentMerging1-4`) — unchanged from Round 3
+  (`resolveExternalModuleSymbol` / `resolveAlias`, the `skip_alias` DEFER).
+- **JSX intrinsic-elements (`TS7026 ×15`)** + **parser error-recovery
+  (`TS1005 ×9` / `TS1003 ×5`)** — unchanged from Round 2/3.
+
+## Test deltas
+
+- `tsgo_checker`: **741 → 744** unit (+3): `require_call_in_js_file_resolves_no_cannot_find_name`,
+  `bare_require_reference_in_js_file_still_reports_2304`,
+  `require_call_in_ts_file_still_reports_2304`. Doctests unchanged (177). New
+  test-support helper `StubProgram::parse_and_bind_js`. No existing test
+  weakened.
+- `tsgo_compiler`: **88 → 93** unit (+5): `require_call_in_js_file_resolves_no_2304_with_real_lib`
+  (real-lib require), `js_file_with_check_js_false_is_not_checked` (gate),
+  `plain_js_file_is_still_checked`, `js_file_with_check_js_true_is_checked`,
+  `ts_file_is_checked_regardless_of_check_js`. Doctests unchanged (11).
+- `tsgo_testrunner`: unit/doctest counts unchanged (47 / 11); the
+  `expanded_compiler_subset_parity_smoke` characterization re-measured to
+  `extra TS2304 ×62 → ×57`, category `missing_all 33→34`, `divergent 26→25`
+  (counts `{60,90,0}` and `top_missing TS7026 ×15` unchanged). The 30-case
+  `curated_compiler_subset_parity_smoke` is UNCHANGED (18/12/0).
+
+## Gate results (Round 4)
+
+- `cargo test -p tsgo_checker` — GREEN (744 unit + 177 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (93 unit + 11 doctests) [real-lib path].
+- `cargo test -p tsgo_testrunner` — GREEN (47 unit + 11 doctests; 150-case
+  re-measure).
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner --all-targets
+  -- -D warnings` — GREEN.
+- `cargo fmt -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner -- --check` —
+  GREEN.
+- `cargo build --workspace --all-targets` — GREEN.
+
+No `--no-verify`; no test weakened or deleted; the byte comparison and the
+30-case smoke are unchanged. Public API additive only (the two `program.rs` gate
+methods + the `is_excluded_from_semantic_diagnostics` mask are private; the
+`check.rs` require resolution is internal to `check_identifier`;
+`effective_script_kind` widened to `pub(crate)`).

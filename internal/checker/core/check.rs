@@ -1152,6 +1152,22 @@ impl Checker {
                 if name == "undefined" {
                     return self.undefined_type();
                 }
+                // Go's `resolveName` returns the synthetic `require` symbol when
+                // an unresolved name is the callee of a `require(...)` call in a
+                // JS file; that symbol's type is `any`. This is what lets
+                // CommonJS `const a = require("./x")` type-check without a
+                // spurious 2304 on the `require` identifier. The reachable subset
+                // returns `any` directly (equivalent to typing the require
+                // symbol), since flow-narrowing a freshly-`any` callee is a no-op.
+                // Go: internal/binder/nameresolver.go:Resolve (RequireSymbol branch)
+                let arena = program.arena();
+                if is_in_js_file(arena, node) {
+                    if let Some(parent) = arena.parent(node) {
+                        if is_require_call(arena, parent) {
+                            return self.any_type();
+                        }
+                    }
+                }
                 self.error(
                     program,
                     node,
@@ -5660,6 +5676,31 @@ fn is_class_like(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
         arena.kind(node),
         Kind::ClassDeclaration | Kind::ClassExpression
     )
+}
+
+// Reports whether `node` was parsed in a JavaScript file (the parser sets
+// `NodeFlags::JAVA_SCRIPT_FILE` on every node of a `.js`/`.jsx`/`.json` file).
+// Go: internal/ast/utilities.go:IsInJSFile
+fn is_in_js_file(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    arena
+        .flags(node)
+        .contains(tsgo_ast::NodeFlags::JAVA_SCRIPT_FILE)
+}
+
+// Reports whether `node` is a `require(...)` call: a call expression whose
+// callee is the identifier `require` and that has exactly one argument. Mirrors
+// Go's `ast.IsRequireCall(node, false /*requireStringLiteralLikeArgument*/)`,
+// so the argument is not required to be a string literal.
+// Go: internal/ast/utilities.go:IsRequireCall
+fn is_require_call(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    match arena.data(node) {
+        NodeData::CallExpression(d) => {
+            arena.kind(d.expression) == Kind::Identifier
+                && arena.text(d.expression) == "require"
+                && d.arguments.nodes.len() == 1
+        }
+        _ => false,
+    }
 }
 
 // Returns the modifier flags of `node` (its `modifiers` list union), or empty

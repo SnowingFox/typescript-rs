@@ -653,19 +653,29 @@ fn expanded_compiler_subset_parity_smoke() {
     // unresolved-name / missing-property errors (TS2304 / TS2339); the dominant
     // FALSE NEGATIVE is the JSX intrinsic-elements check (TS7026).
     //
-    // Two root symbol-resolution fixes this round drove the cascade down from
-    // the original `extra TS2304 ×82 + TS2339 ×76` (55 pass) to
-    // `extra TS2304 ×62 + TS2339 ×18` (60 pass):
-    //   (1) `checkIdentifier` now consults the program's merged globals, so bare
-    //       lib global VALUES (`Error`/`Object`/`Date`/...) resolve (−20 TS2304);
-    //   (2) `checkPropertyAccessExpressionOrQualifiedName` short-circuits an
-    //       any-like (`any`/`error`) receiver, so an unresolved name no longer
-    //       cascades a spurious "Property does not exist on type 'error'"
-    //       (−58 TS2339).
-    // The remaining `extra TS2304 ×62` is dominated by CommonJS JS-file globals
-    // (`module`/`require`/`exports`, which tsc skips because un-`checkJs` JS
-    // files are not type-checked) and TS `import x = require()`/`export =` alias
-    // resolution — both DEFERRED (see the worklog).
+    // Round 3 drove the cascade down from `extra TS2304 ×82 + TS2339 ×76`
+    // (55 pass) to `extra TS2304 ×62 + TS2339 ×18` (60 pass) via two checker
+    // root fixes (merged-globals lookup; any-like-receiver short-circuit).
+    //
+    // Round 4 (this round) clears the `require` sub-cluster: `checkIdentifier`
+    // now resolves a bare `require` that is the callee of a `require(...)` call
+    // in a JS file to the synthetic `require` symbol (type `any`), exactly as
+    // Go's `resolveName` does — so CommonJS `const a = require("./x")` no longer
+    // reports a spurious 2304. This drops `extra TS2304 ×62 -> ×57` (−5). One
+    // case lost its only extras and shifted divergent -> missing_all_errors.
+    //
+    // ROOT-CAUSE CORRECTION (verified against the Go source + committed
+    // baselines): the prior round's note that "tsc skips un-`checkJs` JS files"
+    // is WRONG for this repo. Go's `canIncludeBindAndCheckDiagnostics` returns
+    // true for plain JS (`checkJs` unset) AND checkJs JS; the committed
+    // baselines prove tsc type-checks these files (it emits TS2591/TS2339/
+    // TS6424/TS2306 in them). The remaining `extra TS2304 ×57` is dominated by
+    // `module`/`exports` (a deferred CommonJS-module-binding root:
+    // `setCommonJSModuleIndicator` + `declareCommonJSVariable`) and TS
+    // `import x = require()`/`export =` alias resolution — both DEFERRED (see
+    // the worklog). The program-level `SkipTypeChecking` gate this round ports
+    // (faithfully) only skips `checkJs: false` / `@ts-nocheck` JS, of which the
+    // corpus has none — so it is parity-neutral but corrects a real gap.
     let hist = summary.histogram();
     assert_eq!(
         hist.no_baseline_but_errors + hist.missing_all_errors + hist.divergent,
@@ -673,12 +683,12 @@ fn expanded_compiler_subset_parity_smoke() {
         "every failed case is categorized"
     );
     assert_eq!(hist.no_baseline_but_errors, 31);
-    assert_eq!(hist.missing_all_errors, 33);
-    assert_eq!(hist.divergent, 26);
+    assert_eq!(hist.missing_all_errors, 34);
+    assert_eq!(hist.divergent, 25);
 
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 62), (2339, 18)],
+        vec![(2304, 57), (2339, 18)],
         "top extra (false-positive) codes; histogram:\n{}",
         hist.report()
     );

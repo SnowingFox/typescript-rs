@@ -304,9 +304,13 @@ pub(crate) fn parse_file(opts: SourceFileParseOptions, text: String) -> ParsedFi
 /// the scanner does not recognize so parsing never panics on the foundation's
 /// reachable inputs.
 ///
+/// This is the script kind a file is actually parsed with, so the bind-and-check
+/// gate (`Program::can_include_bind_and_check_diagnostics`) keys off it just as
+/// Go reads `SourceFile.ScriptKind`.
+///
 /// Side effects: none (pure).
 // Go: internal/core/core.go:GetScriptKindFromFileName
-fn effective_script_kind(file_name: &str) -> ScriptKind {
+pub(crate) fn effective_script_kind(file_name: &str) -> ScriptKind {
     match get_script_kind_from_file_name(file_name) {
         ScriptKind::Unknown => ScriptKind::Ts,
         kind => kind,

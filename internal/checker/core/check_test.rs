@@ -8308,3 +8308,57 @@ fn exhaustive_switch_without_trailing_return_is_ok() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// CommonJS `require(...)`: a bare `require` that is the callee of a
+// `require(...)` call in a JS file resolves to the synthetic `require` symbol
+// (whose type is `any`), so `const a = require("./x")` does NOT report 2304 on
+// the `require` identifier. This mirrors Go's `resolveName`, which returns
+// `RequireSymbol` when the unresolved name's location is the callee of a
+// require call in a JS file.
+// Go: internal/binder/nameresolver.go:Resolve (RequireSymbol branch)
+#[test]
+fn require_call_in_js_file_resolves_no_cannot_find_name() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_js(
+        "/a.js",
+        "const a = require(\"./x\");",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "require(...) callee in a JS file must resolve (no 2304): {diags:?}"
+    );
+}
+
+// Guard: a bare `require` reference that is NOT the callee of a `require(...)`
+// call still reports 2304 — the resolution is conditioned on the parent being
+// a require call (Go gates the `RequireSymbol` branch on `IsRequireCall`).
+// Go: internal/binder/nameresolver.go:Resolve (RequireSymbol branch / IsRequireCall)
+#[test]
+fn bare_require_reference_in_js_file_still_reports_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_js("/a.js", "require;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "a bare `require` (not a call) is unresolved -> 2304: {diags:?}"
+    );
+}
+
+// Guard: a `require(...)` call in a TS file does NOT get the JS-only require
+// resolution, so the unresolved `require` still reports 2304 (Go gates the
+// `RequireSymbol` branch on `IsInJSFile`).
+// Go: internal/binder/nameresolver.go:Resolve (IsInJSFile gate)
+#[test]
+fn require_call_in_ts_file_still_reports_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "require(\"./x\");"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "require(...) in a TS file is unresolved -> 2304: {diags:?}"
+    );
+}

@@ -9,6 +9,8 @@
 use std::sync::Arc;
 
 use tsgo_core::compileroptions::{CompilerOptions, NewLineKind};
+use tsgo_core::scriptkind::ScriptKind;
+use tsgo_core::tristate::Tristate;
 use tsgo_outputpaths::{get_output_paths_for, get_source_map_file_path, OutputPathsHost};
 use tsgo_parser::Diagnostic;
 use tsgo_sourcemap::Generator;
@@ -21,7 +23,7 @@ use tsgo_tspath::{
 use crate::checkerpool::CompilerCheckerPool;
 use crate::emitter::{emit_js_text_with_source_map, EmitOnly};
 use crate::fileloader::{process_all_program_files, ProcessedFiles};
-use crate::host::{CompilerHost, ParsedFile};
+use crate::host::{effective_script_kind, CompilerHost, ParsedFile};
 use crate::projectreference::{
     resolve_project_references, BuildOrder, ProjectReferenceDiagnostic, ResolvedProjectReferences,
 };
@@ -336,10 +338,7 @@ impl Program {
             .files()
             .iter()
             .filter(|f| f.is_bound())
-            .map(|f| match &lib_dir {
-                Some(dir) if !dir.is_empty() => f.file_name().starts_with(dir.as_str()),
-                _ => false,
-            })
+            .map(|f| self.is_excluded_from_semantic_diagnostics(f, &lib_dir))
             .collect();
         self.checker_pool.collect_diagnostics_excluding(&exclude)
     }
@@ -376,10 +375,7 @@ impl Program {
             .files()
             .iter()
             .filter(|f| f.is_bound())
-            .map(|f| match &lib_dir {
-                Some(dir) if !dir.is_empty() => f.file_name().starts_with(dir.as_str()),
-                _ => false,
-            })
+            .map(|f| self.is_excluded_from_semantic_diagnostics(f, &lib_dir))
             .collect();
         let groups = self
             .checker_pool
@@ -405,6 +401,80 @@ impl Program {
             return false;
         };
         !lib_dir.is_empty() && file.file_name().starts_with(lib_dir.as_str())
+    }
+
+    /// Reports whether the bind-and-check (semantic) diagnostics of `file`
+    /// should be skipped, the reachable subset of Go's `Program.SkipTypeChecking`.
+    ///
+    /// This round ports the JS bind-and-check gate
+    /// ([`Self::can_include_bind_and_check_diagnostics`]); the `NoCheck` /
+    /// `SkipLibCheck` / `SkipDefaultLibCheck` / project-reference arms of Go's
+    /// `SkipTypeChecking` are handled elsewhere (the default-library exclusion in
+    /// the diagnostics collectors) or deferred.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/compiler/program.go:Program.SkipTypeChecking
+    fn skip_type_checking(&self, file: &ParsedFile) -> bool {
+        !self.can_include_bind_and_check_diagnostics(file)
+    }
+
+    /// Reports whether `file` is eligible for bind-and-check (semantic)
+    /// diagnostics, a 1:1 port of Go's `canIncludeBindAndCheckDiagnostics`.
+    ///
+    /// `.ts`/`.tsx`/external files are always checked. A `.js`/`.jsx` file is
+    /// checked only when it is *plain JS* (`checkJs` unset) or *check-JS*
+    /// (`checkJs: true`); with `checkJs: false` it is neither, so it is skipped.
+    /// A `Deferred` script kind is always checked. This is why a plain `.js`
+    /// file is still type-checked by default (matching `tsc`/Go) — only an
+    /// explicit `checkJs: false` (or, once parsed, a `// @ts-nocheck` directive)
+    /// suppresses it.
+    ///
+    /// DEFER(P10): the `// @ts-check` / `// @ts-nocheck` directive
+    /// (`SourceFile.CheckJsDirective`) is not parsed yet, so the directive arms
+    /// of Go's predicate — `@ts-nocheck` forces a skip, `@ts-check` forces a
+    /// check even when `checkJs` is off — are not modeled. With no directive,
+    /// this matches Go exactly (`IsCheckJSEnabledForFile` collapses to
+    /// `checkJs == true`, `IsPlainJSFile` to `checkJs` unset).
+    /// blocked-by: the parser's check-js directive scan + `CheckJsDirective` on
+    /// the source file.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/compiler/program.go:Program.canIncludeBindAndCheckDiagnostics
+    fn can_include_bind_and_check_diagnostics(&self, file: &ParsedFile) -> bool {
+        let kind = effective_script_kind(file.file_name());
+        if matches!(
+            kind,
+            ScriptKind::Ts | ScriptKind::Tsx | ScriptKind::External
+        ) {
+            return true;
+        }
+        let is_js = matches!(kind, ScriptKind::Js | ScriptKind::Jsx);
+        let check_js = self.options().check_js;
+        // `IsCheckJSEnabledForFile` with no `CheckJsDirective`: `checkJs == true`.
+        let is_check_js = is_js && check_js == Tristate::True;
+        // `IsPlainJSFile` with no `CheckJsDirective`: a `.js`/`.jsx` file whose
+        // `checkJs` is unset (`Tristate::Unknown`).
+        let is_plain_js = is_js && check_js == Tristate::Unknown;
+        is_plain_js || is_check_js || kind == ScriptKind::Deferred
+    }
+
+    /// Reports whether `file`'s semantic diagnostics are excluded from the
+    /// program's bind-and-check pass: it is a default-library file (`tsc` does
+    /// not report diagnostics located in `lib.*.d.ts`, given by `lib_dir`), or
+    /// the bind-and-check gate ([`Self::skip_type_checking`]) skips it (a JS file
+    /// without `checkJs`). The two diagnostics collectors share this mask.
+    ///
+    /// Side effects: none (pure).
+    fn is_excluded_from_semantic_diagnostics(
+        &self,
+        file: &ParsedFile,
+        lib_dir: &Option<String>,
+    ) -> bool {
+        let is_lib = match lib_dir {
+            Some(dir) if !dir.is_empty() => file.file_name().starts_with(dir.as_str()),
+            _ => false,
+        };
+        is_lib || self.skip_type_checking(file)
     }
 
     /// The directory (with trailing `/`) that the default-library files live in,

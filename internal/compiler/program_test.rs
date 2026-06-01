@@ -858,6 +858,136 @@ fn property_access_chain_on_any_reports_no_2339() {
     );
 }
 
+/// End to end with the REAL bundled lib (the path the P10 corpus parity runner
+/// exercises): a CommonJS `require(...)` call in a checked JS file resolves the
+/// bare `require` callee to the synthetic `require` symbol (type `any`), so
+/// `const a = require("./x")` produces NO `TS2304: Cannot find name 'require'`.
+/// This clears the `require` sub-cluster of the P10 `extra TS2304` false
+/// positives. (`module`/`exports` are a *separate* CommonJS-module-binding root
+/// that is still deferred — see the worklog; this slice covers only `require`.)
+// Go: internal/binder/nameresolver.go:Resolve (RequireSymbol branch)
+#[test]
+fn require_call_in_js_file_resolves_no_2304_with_real_lib() {
+    let options = CompilerOptions {
+        lib: vec!["es5".to_string()],
+        check_js: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.js", "const a = require(\"./x\");\n")],
+        "/src",
+        &["/src/index.js"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "require(...) callee resolves through the real-lib program (no 2304): {diags:?}"
+    );
+}
+
+/// `SkipTypeChecking`/`canIncludeBindAndCheckDiagnostics`: a JS file compiled
+/// with `checkJs: false` is NOT bind-and-checked, so it produces ZERO semantic
+/// diagnostics (the `module` reference is not even resolved). This mirrors Go's
+/// gate: with `checkJs == false` a `.js`/`.jsx` file is neither plain JS
+/// (`checkJs` would have to be unset) nor checked JS (`checkJs` would have to be
+/// true), so `canIncludeBindAndCheckDiagnostics` returns false.
+// Go: internal/compiler/program.go:Program.canIncludeBindAndCheckDiagnostics
+#[test]
+fn js_file_with_check_js_false_is_not_checked() {
+    let options = CompilerOptions {
+        no_lib: tsgo_core::tristate::Tristate::True,
+        check_js: tsgo_core::tristate::Tristate::False,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[("/index.js", "module.exports = {};")],
+        "/",
+        &["/index.js"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.is_empty(),
+        "checkJs:false JS file must be skipped (no semantic diagnostics): {diags:?}"
+    );
+}
+
+/// Guard (Go-faithful, NOT over-suppression): a *plain* JS file — `checkJs`
+/// unset and no `// @ts-check`/`@ts-nocheck` — IS bind-and-checked in Go
+/// (`IsPlainJSFile` -> the `isPlainJS` branch of
+/// `canIncludeBindAndCheckDiagnostics` is true), so an unresolved `module`
+/// still reports 2304. The gate skips a JS file ONLY when `checkJs` is
+/// explicitly false (or a `@ts-nocheck` directive is present); it must NOT
+/// blanket-mute plain JS.
+// Go: internal/ast/utilities.go:IsPlainJSFile + Program.canIncludeBindAndCheckDiagnostics
+#[test]
+fn plain_js_file_is_still_checked() {
+    let options = CompilerOptions {
+        no_lib: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[("/index.js", "module.exports = {};")],
+        "/",
+        &["/index.js"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "plain JS (checkJs unset) is checked in Go, so `module` reports 2304: {diags:?}"
+    );
+}
+
+/// Guard: a JS file compiled with `checkJs: true` IS bind-and-checked (the
+/// `isCheckJS` branch), so the gate is conditioned on the `checkJs` state and
+/// does not blanket-skip JS. (`module` is still a deferred CommonJS-binding
+/// root, so it reports 2304 here — see the worklog.)
+// Go: internal/ast/utilities.go:IsCheckJSEnabledForFile + Program.canIncludeBindAndCheckDiagnostics
+#[test]
+fn js_file_with_check_js_true_is_checked() {
+    let options = CompilerOptions {
+        no_lib: tsgo_core::tristate::Tristate::True,
+        check_js: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[("/index.js", "module.exports = {};")],
+        "/",
+        &["/index.js"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "checkJs:true JS is checked: {diags:?}"
+    );
+}
+
+/// Guard: a TS file is ALWAYS bind-and-checked, regardless of `checkJs` — the
+/// JS gate only applies to `.js`/`.jsx` script kinds. Even with `checkJs:
+/// false`, an unresolved name in a `.ts` file reports 2304.
+// Go: internal/compiler/program.go:Program.canIncludeBindAndCheckDiagnostics (ScriptKindTS -> true)
+#[test]
+fn ts_file_is_checked_regardless_of_check_js() {
+    let options = CompilerOptions {
+        no_lib: tsgo_core::tristate::Tristate::True,
+        check_js: tsgo_core::tristate::Tristate::False,
+        ..Default::default()
+    };
+    let mut program = program_with(&[("/index.ts", "y;")], "/", &["/index.ts"], options, true);
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "TS file is checked regardless of checkJs: {diags:?}"
+    );
+}
+
 /// A single-threaded program uses one checker and reports its host/command line.
 // Go: internal/compiler/program.go:Program.SingleThreaded / Host / CommandLine
 #[test]

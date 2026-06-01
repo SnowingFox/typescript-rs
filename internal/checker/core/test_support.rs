@@ -48,6 +48,18 @@ impl StubProgram {
         )
     }
 
+    /// Parses `text` as a `.js` file named `file_name` and binds it, so the
+    /// parser marks every node with `NodeFlags::JAVA_SCRIPT_FILE` (the
+    /// JS-file context the `require(...)` resolution path keys off).
+    pub(crate) fn parse_and_bind_js(file_name: &str, text: &str) -> StubProgram {
+        StubProgram::parse_and_bind_with(
+            file_name,
+            text,
+            ScriptKind::Js,
+            CompilerOptions::default(),
+        )
+    }
+
     /// Parses `text` as a `.ts` file named `file_name`, binds it, and carries
     /// `options` so option-gated checker behavior (e.g. `strictNullChecks`, the
     /// `--target`/`--downlevelIteration` iteration gating) can be driven from a
