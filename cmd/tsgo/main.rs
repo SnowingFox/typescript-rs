@@ -44,6 +44,11 @@ impl System for OsSystem {
         &self.current_directory
     }
 
+    // Go: cmd/tsgo/sys.go:osSys.Now (the real wall clock)
+    fn now(&self) -> std::time::SystemTime {
+        std::time::SystemTime::now()
+    }
+
     // Go: cmd/tsgo/sys.go:osSys.Writer (os.Stdout)
     fn write(&self, s: &str) {
         let mut out = std::io::stdout().lock();
