@@ -749,6 +749,115 @@ fn program_for_of_iterable_with_downlevel_iteration_no_2802() {
     );
 }
 
+/// End to end with the REAL bundled lib: a bare reference to a lib global
+/// VALUE (`Error`, `Object`, `Date` — each `declare var` in `lib.es5.d.ts`)
+/// resolves through `checkIdentifier` against the program's merged globals, so
+/// there is NO spurious `TS2304` ("Cannot find name"). Before the fix
+/// `checkIdentifier` passed `None` for the globals scope, so every global-value
+/// reference cascaded into a 2304 (and a follow-on 2339 on its `error`-typed
+/// members) — the dominant P10 corpus false-positive. tsc reports no error for
+/// these references (the `cmd/tsgo` ground truth).
+// Go: internal/checker/checker.go:Checker.checkIdentifier -> resolveName (consults c.globals)
+#[test]
+fn bare_lib_global_value_reference_resolves_no_2304() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es5,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "Error;\nObject;\nDate;\n")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "lib global values must resolve against the real lib (no 2304): {diags:?}"
+    );
+}
+
+/// Guard for the merged-globals identifier fix: a bare reference to a name that
+/// is NOT a lib global (and not declared anywhere) still reports `TS2304`,
+/// proving the fix resolves real globals rather than blanket-muting the
+/// "Cannot find name" diagnostic.
+// Go: internal/checker/checker.go:Checker.checkIdentifier (Cannot_find_name_0)
+#[test]
+fn bare_undefined_name_still_reports_2304_with_real_lib() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es5,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "thisGlobalDoesNotExist;\n")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2304 && d.message.contains("thisGlobalDoesNotExist")),
+        "a genuinely undefined name must still report 2304: {diags:?}"
+    );
+}
+
+/// End to end with the REAL bundled lib: an UNRESOLVED bare name accessed via
+/// property reports ONLY the single `TS2304` ("Cannot find name") — there is NO
+/// follow-on `TS2339` on its `error`-typed receiver. The receiver's `error`
+/// type carries the `Any` flag, so `checkPropertyAccessExpressionOrQualifiedName`
+/// short-circuits it. This is the cascade amplifier behind the dominant P10
+/// corpus `extra TS2339` (a property access on an `error`/`any` receiver).
+// Go: internal/checker/checker.go:Checker.checkPropertyAccessExpressionOrQualifiedName (isAnyLike on errorType)
+#[test]
+fn unresolved_name_property_access_reports_only_2304_no_cascade() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es5,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "notDefinedAtAll.member;\n")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert_eq!(diags.len(), 1, "only the 2304, no cascade: {diags:?}");
+    assert_eq!(diags[0].code, 2304);
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "no 2339 on the error-typed receiver: {diags:?}"
+    );
+}
+
+/// End to end with the REAL bundled lib: a chain of property accesses on a
+/// value typed `any` (`a.b.c.d`) produces NO diagnostics — each step yields
+/// `any`, never a 2339.
+// Go: internal/checker/checker.go:Checker.checkPropertyAccessExpressionOrQualifiedName (isAnyLike)
+#[test]
+fn property_access_chain_on_any_reports_no_2339() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es5,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "declare const a: any;\na.b.c.d;\n")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "property access chain on `any` must not report 2339: {diags:?}"
+    );
+}
+
 /// A single-threaded program uses one checker and reports its host/command line.
 // Go: internal/compiler/program.go:Program.SingleThreaded / Host / CommandLine
 #[test]

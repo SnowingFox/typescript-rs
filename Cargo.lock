@@ -571,6 +571,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo"
+version = "0.0.0"
+dependencies = [
+ "tsgo_bundled",
+ "tsgo_core",
+ "tsgo_diagnostics",
+ "tsgo_execute",
+ "tsgo_locale",
+ "tsgo_tsoptions",
+ "tsgo_tspath",
+ "tsgo_vfs",
+]
+
+[[package]]
 name = "tsgo_ast"
 version = "0.0.0"
 dependencies = [
@@ -748,6 +762,33 @@ dependencies = [
 [[package]]
 name = "tsgo_execute"
 version = "0.0.0"
+dependencies = [
+ "tsgo_checker",
+ "tsgo_compiler",
+ "tsgo_core",
+ "tsgo_diagnostics",
+ "tsgo_diagnosticwriter",
+ "tsgo_incremental",
+ "tsgo_locale",
+ "tsgo_outputpaths",
+ "tsgo_parser",
+ "tsgo_tsoptions",
+ "tsgo_tspath",
+ "tsgo_vfs",
+]
+
+[[package]]
+name = "tsgo_format"
+version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "tsgo_ast",
+ "tsgo_astnav",
+ "tsgo_core",
+ "tsgo_parser",
+ "tsgo_scanner",
+ "tsgo_stringutil",
+]
 
 [[package]]
 name = "tsgo_glob"
@@ -812,6 +853,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_ls"
+version = "0.0.0"
+dependencies = [
+ "tsgo_ast",
+ "tsgo_astnav",
+ "tsgo_checker",
+ "tsgo_compiler",
+ "tsgo_core",
+ "tsgo_diagnostics",
+ "tsgo_locale",
+ "tsgo_ls_lsconv",
+ "tsgo_ls_lsutil",
+ "tsgo_lsproto",
+ "tsgo_parser",
+ "tsgo_scanner",
+ "tsgo_tsoptions",
+ "tsgo_tspath",
+ "tsgo_vfs",
+]
+
+[[package]]
+name = "tsgo_ls_autoimport"
+version = "0.0.0"
+dependencies = [
+ "tsgo_ast",
+ "tsgo_core",
+ "tsgo_ls_lsutil",
+ "tsgo_modulespecifiers",
+ "tsgo_packagejson",
+ "tsgo_parser",
+ "tsgo_symlinks",
+ "tsgo_tspath",
+]
+
+[[package]]
+name = "tsgo_ls_change"
+version = "0.0.0"
+dependencies = [
+ "indexmap",
+ "tsgo_ast",
+ "tsgo_astnav",
+ "tsgo_core",
+ "tsgo_format",
+ "tsgo_parser",
+ "tsgo_scanner",
+ "tsgo_stringutil",
+]
+
+[[package]]
 name = "tsgo_ls_lsconv"
 version = "0.0.0"
 dependencies = [
@@ -826,6 +916,16 @@ dependencies = [
 [[package]]
 name = "tsgo_ls_lsutil"
 version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "tsgo_ast",
+ "tsgo_astnav",
+ "tsgo_core",
+ "tsgo_parser",
+ "tsgo_scanner",
+ "tsgo_stringutil",
+ "tsgo_tspath",
+]
 
 [[package]]
 name = "tsgo_lsproto"
@@ -1028,6 +1128,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_testrunner"
+version = "0.0.0"
+dependencies = [
+ "indexmap",
+ "regex",
+ "tempfile",
+ "tsgo_core",
+ "tsgo_diagnostics",
+ "tsgo_diagnosticwriter",
+ "tsgo_locale",
+ "tsgo_repo",
+ "tsgo_scanner",
+ "tsgo_testutil_baseline",
+ "tsgo_testutil_harnessutil",
+ "tsgo_tspath",
+]
+
+[[package]]
 name = "tsgo_testutil_baseline"
 version = "0.0.0"
 dependencies = [
@@ -1070,6 +1188,24 @@ version = "0.0.0"
 dependencies = [
  "regex",
  "tsgo_collections",
+ "tsgo_vfs",
+]
+
+[[package]]
+name = "tsgo_testutil_harnessutil"
+version = "0.0.0"
+dependencies = [
+ "indexmap",
+ "tsgo_bundled",
+ "tsgo_checker",
+ "tsgo_compiler",
+ "tsgo_core",
+ "tsgo_diagnostics",
+ "tsgo_diagnosticwriter",
+ "tsgo_locale",
+ "tsgo_parser",
+ "tsgo_tsoptions",
+ "tsgo_tspath",
  "tsgo_vfs",
 ]
 

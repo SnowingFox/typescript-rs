@@ -448,3 +448,155 @@ untouched (no new dependency). Did not edit `internal/ls`/`checker`/`compiler`/
 - **Full corpus run** — still a curated 150-case subset (the signal is
   sufficient to prioritize). blocked-by: triaging more stress/recursion cases
   beyond the two-entry denylist (some risk uncatchable stack-overflow aborts).
+
+---
+
+# Round 3 — checker-parity: knock out the cascading TS2304/TS2339 roots
+
+Round goal: attack the DOMINANT P10 false-positive diagnostics — `extra TS2304`
+(Cannot find name) ×82 + `extra TS2339` (Property does not exist) ×76 — by
+fixing the FEW root symbol-resolution gaps that cascade them. SOLO lane (deep
+chain editable). Strict TDD red→green. Tree clean at `a741514a`. Edits limited
+to `internal/checker/**` (the two root fixes) + `internal/compiler/**` test only
+(real-lib gate tests) + `internal/testrunner/**` (re-measured characterization)
++ this worklog. No production `internal/compiler`/`ast`/`parser`/`binder` change.
+
+## Headline — measured parity BEFORE → AFTER
+
+```
+BEFORE (Round 2):  150 cases — passed 55, failed 95, errored 0
+                   extra: TS2304 ×82, TS2339 ×76
+AFTER  (Round 3):  150 cases — passed 60, failed 90, errored 0
+                   extra: TS2304 ×62, TS2339 ×18
+```
+
+- **passed 55 → 60 (+5)**, failed 95 → 90 (−5), errored 0 (unchanged).
+- **extra TS2304: 82 → 62 (−20)** — all lib-global-VALUE 2304s cleared
+  (`console`/`Error`/`Object`/`Date`/`Promise` no longer appear).
+- **extra TS2339: 76 → 18 (−58)** — the `error`/`any`-receiver cascade is gone.
+- Category shift: `no_baseline_but_errors` 36→31, `divergent` 30→26,
+  `missing_all_errors` 29→33 (a few `divergent` cases lost their spurious extras
+  and are now pure false-negatives — i.e. we removed false positives, leaving
+  only the genuinely-missing errors). `top_missing(1)` unchanged: `TS7026 ×15`.
+- Byte comparison unchanged; no diagnostic blanket-suppressed; no test weakened.
+
+## Root causes diagnosed + fixed (2 of 4 candidate roots)
+
+The cascade was driven by TWO root gaps (the histogram receiver-type tally was
+decisive: **58 of the 76 `extra TS2339` had receiver type `'error'`** — a direct
+downstream cascade of the unresolved-name 2304s, not independent failures):
+
+1. **`checkIdentifier` dropped the globals scope** (`core/check.rs:check_identifier`).
+   It passed `None` for `resolveName`'s globals table, so a bare identifier
+   referencing a global VALUE (a lib global like `Error`/`Object`/`Date`, or any
+   cross-file global declaration) never consulted the program's merged globals
+   and cascaded into a spurious `TS2304` (and a follow-on `TS2339` on its
+   `error`-typed members). Go's `resolveName` ALWAYS consults `c.globals`.
+   **Fix (1 line + comment):** pass `program.globals()`. This was the only
+   `resolve_name` call site in `check.rs` passing `None`; every other call
+   (`new_expression_class_symbol`, the type-reference paths, the `Array` global)
+   already threaded `globals`.
+   - Repro / Go ground truth: `assertsPredicateParameterMismatch.ts` — tsc emits
+     ONE `TS1225` and resolves `new Error(...)` / `console.log(...)`; we emitted
+     `TS2304: Cannot find name 'Error'` + `'console'` + cascade. Even a bare
+     `throw new Error('x')` / `const e = Error;` reproduced it.
+   - RED→GREEN: `tsgo_checker` `bare_identifier_resolves_against_merged_globals`
+     (file A `declare var GlobalThing`, file B references it → was 2304, now
+     clean) + guard `bare_identifier_not_in_globals_still_reports_2304`.
+     `tsgo_compiler` real-lib `bare_lib_global_value_reference_resolves_no_2304`
+     (`Error;Object;Date;` → no 2304) + guard
+     `bare_undefined_name_still_reports_2304_with_real_lib`.
+   - Go: `internal/checker/checker.go:Checker.checkIdentifier` → `resolveName`
+     (consults `c.globals`).
+
+2. **`checkPropertyAccessExpression` did not short-circuit an any-like receiver**
+   (`core/check.rs:check_property_access`). Go's
+   `checkPropertyAccessExpressionOrQualifiedName` returns the apparent type
+   immediately when `isTypeAny(apparentType)` — and Go's `errorType` carries the
+   `Any` flag — so accessing any member of `any`/`error` yields that type with NO
+   `TS2339`. We ran the member lookup unconditionally, so (a) `any.<x>` wrongly
+   reported `Property does not exist on type 'any'`, and (b) every unresolved
+   name (typed `error`) added a spurious `Property does not exist on type
+   'error'` on top of its 2304 — **the cascade amplifier behind the dominant
+   `extra TS2339`**.
+   **Fix (3 lines + comment):** if the (narrowed) receiver type intersects
+   `TypeFlags::ANY`, return it directly. Both `any_type` and `error_type` are
+   intrinsics with the `ANY` flag, so one check covers both.
+   - Repro / Go ground truth: `checkInheritedProperty.ts` — tsc emits one
+     `TS2729`; we emitted `Property 'b' does not exist on type 'any'` TWICE
+     (`this` degraded to `any`). The CommonJS / export-assignment cases
+     (`exportAssignmentMerging*`, `cjsExportGenericTypes`, ...) emitted the
+     `'error'`-receiver cascade on every unresolved-name member access.
+   - RED→GREEN: `tsgo_checker` `property_access_on_any_reports_no_diagnostic`
+     (`declare const x: any; x.whatever;` → was 2339, now clean) +
+     `property_access_on_unresolved_name_reports_only_2304` (only the 2304, no
+     cascade). `tsgo_compiler` real-lib
+     `unresolved_name_property_access_reports_only_2304_no_cascade` +
+     `property_access_chain_on_any_reports_no_2339` (`a.b.c.d` on `any`).
+   - Guards proving we did NOT mute the diagnostic: the pre-existing
+     `missing_property_reports_diagnostic` /
+     `union_property_absent_from_one_constituent_reports_2339` still report 2339
+     on a REAL object missing a property (kept green, untouched).
+   - Go: `internal/checker/checker.go:Checker.checkPropertyAccessExpressionOrQualifiedName`
+     (`isAnyLike` early return).
+
+## DEFERRED roots (blocked-by) — the remaining `extra TS2304 ×62`
+
+Two of the four candidate roots were deferred (substantial features, out of a
+surgical round; the remaining 62 `extra TS2304` are dominated by these):
+
+- **CommonJS JS-file globals** (`module` ×14, `require` ×5, `exports` ×5 — the
+  single biggest remaining bucket). Root cause is a COMPILER-level gate, not a
+  checker gap: tsc does NOT type-check un-`checkJs` `.js`/`.cjs` files
+  (`skipTypeChecking`), so it emits no semantic diagnostics for them at all; we
+  run the checker over them and surface spurious `module`/`require`/`exports`
+  2304s. blocked-by: `Program.getBindAndCheckDiagnosticsForFile` /
+  `skipTypeChecking` (a `internal/compiler` change — OUT of this round's checker
+  edit scope). Cases: `cjsExportGenericTypes`, `erasableSyntaxOnlyJS`,
+  `exportAssignmentMerging5/6`, `expandoNoInferredIndex`.
+- **TS `import x = require()` / `export =` alias resolution** (`a` ×9, `foo`,
+  `C`, `A`, `Foo`, ...). `import a = require("./a")` does not bind/resolve `a` as
+  an alias value, so `a.<x>` reports `Cannot find name 'a'`. blocked-by: the full
+  module import/export + alias resolution (`resolveExternalModuleSymbol` /
+  `resolveAlias` — the `skip_alias` DEFER in `core/symbols.rs`), a later checker
+  round. Cases: `exportAssignmentMerging1/2/3/4`, `cjsExportGenericTypes` (b.ts),
+  `declarationEmitQualifiedName`.
+- **Expando functions / namespace-function merging** (`declarationEmitExpandoFunction`,
+  `expandoFunctionAsAssertion`, `expandoPropertyEmptyArrayWidening`, ...):
+  `function f(){}; f.a = …; f.a` — the function-symbol expando-property merge is
+  not modeled. blocked-by: binder/checker expando-property assignment + the
+  function-namespace merge.
+- **JSX intrinsic-elements (`TS7026 ×15`, top false-NEGATIVE)** and **parser
+  error-recovery false positives (`TS1005 ×9` / `TS1003 ×5`, `''` 2304s)** —
+  unchanged from Round 2; separate JSX-checking / parser-recovery lanes.
+
+## Test deltas
+
+- `tsgo_checker`: **737 → 741** unit tests (+4): `bare_identifier_resolves_against_merged_globals`,
+  `bare_identifier_not_in_globals_still_reports_2304`,
+  `property_access_on_any_reports_no_diagnostic`,
+  `property_access_on_unresolved_name_reports_only_2304`. Doctests unchanged
+  (177). No existing test weakened.
+- `tsgo_compiler`: **84 → 88** unit tests (+4, real-lib gate, two per root):
+  `bare_lib_global_value_reference_resolves_no_2304`,
+  `bare_undefined_name_still_reports_2304_with_real_lib`,
+  `unresolved_name_property_access_reports_only_2304_no_cascade`,
+  `property_access_chain_on_any_reports_no_2339`. Doctests unchanged (11).
+- `tsgo_testrunner`: unit/doctest counts unchanged (47 / 11); the
+  `expanded_compiler_subset_parity_smoke` characterization re-measured to
+  `{passed: 60, failed: 90, errored: 0}` + `top_extra == [(2304,62),(2339,18)]` +
+  category `{no_baseline 31, missing_all 33, divergent 26}`. The 30-case
+  `curated_compiler_subset_parity_smoke` is UNCHANGED (18/12/0) and stayed green.
+
+## Gate results (Round 3)
+
+- `cargo test -p tsgo_checker` — GREEN (741 unit + 177 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (88 unit + 11 doctests) [real-lib path].
+- `cargo test -p tsgo_testrunner` — GREEN (47 unit + 11 doctests; 150-case
+  re-measure).
+- `cargo clippy` + `cargo fmt --check` on the edited crates — GREEN.
+- `cargo build --workspace --all-targets` — GREEN.
+
+No `--no-verify`; no test weakened or deleted; the byte comparison and the
+30-case smoke are unchanged. Public API additive only (no signature changes; the
+two checker fixes are internal to `check.rs`).

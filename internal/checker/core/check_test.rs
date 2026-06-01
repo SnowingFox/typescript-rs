@@ -287,6 +287,50 @@ fn missing_property_reports_diagnostic() {
     );
 }
 
+// Property access on a value typed `any` yields `any` with NO 2339 — Go's
+// `checkPropertyAccessExpressionOrQualifiedName` short-circuits when the
+// apparent type `isTypeAny`, returning the any type before any member lookup.
+// Without this guard, `any.<anything>` cascaded into a spurious "Property does
+// not exist on type 'any'".
+// Go: internal/checker/checker.go:Checker.checkPropertyAccessExpressionOrQualifiedName (isAnyLike)
+#[test]
+fn property_access_on_any_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: any;\nx.whatever;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "property access on `any` must not report 2339, got {diags:?}"
+    );
+}
+
+// Cascade guard: an UNRESOLVED bare identifier (whose type is the `error` type,
+// which carries the `Any` flag) accessed via property must report ONLY the
+// single `TS2304` ("Cannot find name") — NOT a follow-on `TS2339` on the
+// `error`-typed receiver. Go's `checkPropertyAccessExpressionOrQualifiedName`
+// short-circuits the any-like (error) receiver, so the cascade stops at the
+// 2304. This is the amplifier behind the dominant P10 corpus `extra TS2339`.
+// Go: internal/checker/checker.go:Checker.checkPropertyAccessExpressionOrQualifiedName (isAnyLike on errorType)
+#[test]
+fn property_access_on_unresolved_name_reports_only_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "unresolvedThing.member;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected only the 2304, got {diags:?}");
+    assert_eq!(diags[0].code, 2304);
+    assert_eq!(diags[0].message, "Cannot find name 'unresolvedThing'.");
+}
+
 // Go: internal/checker/checker.go:Checker.getPropertyOfUnionOrIntersectionType
 // (union branch): a property present on every constituent of a union resolves,
 // with the union of the per-constituent property types.
@@ -2512,6 +2556,50 @@ fn cross_file_global_resolves_string_property_via_lib() {
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(file_b);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// A bare identifier reference in expression position resolves against the
+// program's MERGED GLOBALS, not just the reference's own scope chain: file A
+// (the "lib") declares a global value `GlobalThing`, file B references it as a
+// bare identifier. `checkIdentifier` must consult `c.globals` — Go's
+// `resolveName` always does — so there is NO 2304: file A's global is visible
+// in file B. This is the cross-file / lib global VALUE resolution that lib
+// globals (`Error`, `Object`, `Date`, ...) rely on; before the fix
+// `checkIdentifier` passed `None` for the globals table, so any name absent
+// from the reference's own scope chain cascaded into a spurious 2304 (and a
+// follow-on 2339 on its `error`-typed members).
+// Go: internal/checker/checker.go:Checker.checkIdentifier -> resolveName (consults c.globals)
+#[test]
+fn bare_identifier_resolves_against_merged_globals() {
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/lib.d.ts", "declare var GlobalThing: number;"),
+        ("/b.ts", "GlobalThing;"),
+    ]));
+    let file_b = p.source_files()[1];
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(file_b);
+    assert!(
+        diags.is_empty(),
+        "a global value must resolve cross-file (no 2304), got {diags:?}"
+    );
+}
+
+// Guard for the merged-globals fix: a bare identifier that is in NO file's
+// globals (and not in scope) still reports 2304. This proves the fix resolves
+// real globals rather than blanket-muting the "Cannot find name" diagnostic.
+// Go: internal/checker/checker.go:Checker.checkIdentifier (Cannot_find_name_0)
+#[test]
+fn bare_identifier_not_in_globals_still_reports_2304() {
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/lib.d.ts", "declare var GlobalThing: number;"),
+        ("/b.ts", "NotAGlobalAnywhere;"),
+    ]));
+    let file_b = p.source_files()[1];
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(file_b);
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, 2304);
+    assert_eq!(diags[0].message, "Cannot find name 'NotAGlobalAnywhere'.");
 }
 
 // Go: internal/checker/checker.go:Checker.getDiagnostics (GetDiagnosticsForFile filtering)

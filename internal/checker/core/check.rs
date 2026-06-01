@@ -1134,7 +1134,14 @@ impl Checker {
     // Go: internal/checker/checker.go:Checker.checkIdentifier(10999)
     fn check_identifier(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let name = program.arena().text(node).to_string();
-        match resolve_name(program, node, &name, SymbolFlags::VALUE, false, None) {
+        // Go's `resolveName` always consults the outermost `c.globals` scope, so
+        // a bare identifier referencing a global VALUE (a lib global like
+        // `Error`/`Object`/`Date`, or a cross-file global declaration) resolves.
+        // Passing `None` here previously dropped the globals scope, cascading
+        // every global-value reference into a spurious 2304 (and a follow-on
+        // 2339 on its `error`-typed members).
+        let globals = program.globals();
+        match resolve_name(program, node, &name, SymbolFlags::VALUE, false, globals) {
             None => {
                 // Go registers a global `undefinedSymbol` (type
                 // `undefinedWideningType`) in `NewChecker`, so the `undefined`
@@ -1154,7 +1161,6 @@ impl Checker {
                 self.error_type
             }
             Some(symbol) => {
-                let globals = program.globals();
                 let declared = get_type_of_symbol(self, program, symbol, globals);
                 self.get_flow_type_of_reference(program, node, declared)
             }
@@ -1322,6 +1328,19 @@ impl Checker {
         // `checkNonNullExpression`, reporting possibly-`null`/`undefined` and
         // narrowing the object to its non-null type before the member lookup.
         let object_type = self.check_non_null_expression(program, expr);
+        // Go's `checkPropertyAccessExpressionOrQualifiedName` short-circuits an
+        // any-like receiver (`isTypeAny(apparentType)`): accessing any member of
+        // `any` — or of the `error` type (which also carries the `Any` flag) —
+        // yields that same type with NO 2339. This stops the false-positive
+        // cascade where an unresolved name (typed `error`) would otherwise add a
+        // spurious "Property does not exist on type 'error'" on top of its 2304.
+        if self
+            .get_type(object_type)
+            .flags()
+            .intersects(TypeFlags::ANY)
+        {
+            return object_type;
+        }
         let name = program.arena().text(name_node).to_string();
         match get_type_of_property_of_type(self, program, object_type, &name) {
             Some(t) => t,

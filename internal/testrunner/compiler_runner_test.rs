@@ -640,8 +640,8 @@ fn expanded_compiler_subset_parity_smoke() {
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 55,
-            failed: 95,
+            passed: 60,
+            failed: 90,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -652,19 +652,33 @@ fn expanded_compiler_subset_parity_smoke() {
     // checker/parser work). The dominant FALSE POSITIVES are cascading
     // unresolved-name / missing-property errors (TS2304 / TS2339); the dominant
     // FALSE NEGATIVE is the JSX intrinsic-elements check (TS7026).
+    //
+    // Two root symbol-resolution fixes this round drove the cascade down from
+    // the original `extra TS2304 ×82 + TS2339 ×76` (55 pass) to
+    // `extra TS2304 ×62 + TS2339 ×18` (60 pass):
+    //   (1) `checkIdentifier` now consults the program's merged globals, so bare
+    //       lib global VALUES (`Error`/`Object`/`Date`/...) resolve (−20 TS2304);
+    //   (2) `checkPropertyAccessExpressionOrQualifiedName` short-circuits an
+    //       any-like (`any`/`error`) receiver, so an unresolved name no longer
+    //       cascades a spurious "Property does not exist on type 'error'"
+    //       (−58 TS2339).
+    // The remaining `extra TS2304 ×62` is dominated by CommonJS JS-file globals
+    // (`module`/`require`/`exports`, which tsc skips because un-`checkJs` JS
+    // files are not type-checked) and TS `import x = require()`/`export =` alias
+    // resolution — both DEFERRED (see the worklog).
     let hist = summary.histogram();
     assert_eq!(
         hist.no_baseline_but_errors + hist.missing_all_errors + hist.divergent,
         counts.failed,
         "every failed case is categorized"
     );
-    assert_eq!(hist.no_baseline_but_errors, 36);
-    assert_eq!(hist.missing_all_errors, 29);
-    assert_eq!(hist.divergent, 30);
+    assert_eq!(hist.no_baseline_but_errors, 31);
+    assert_eq!(hist.missing_all_errors, 33);
+    assert_eq!(hist.divergent, 26);
 
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 82), (2339, 76)],
+        vec![(2304, 62), (2339, 18)],
         "top extra (false-positive) codes; histogram:\n{}",
         hist.report()
     );
