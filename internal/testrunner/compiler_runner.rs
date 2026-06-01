@@ -11,6 +11,7 @@
 //! cases.
 
 use std::cmp::Ordering;
+use std::path::{Path, PathBuf};
 
 use tsgo_diagnosticwriter::{
     flatten_diagnostic_message, write_format_diagnostics, Diagnostic as DiagnosticTrait,
@@ -18,9 +19,9 @@ use tsgo_diagnosticwriter::{
 };
 use tsgo_locale::Locale;
 use tsgo_testutil_harnessutil::{compile_files, HarnessDiagnostic, TestFile};
-use tsgo_tspath::{get_normalized_absolute_path, ComparePathsOptions};
+use tsgo_tspath::{get_base_file_name, get_normalized_absolute_path, ComparePathsOptions};
 
-use crate::{extract_compiler_settings, make_units_from_test, SRC_FOLDER};
+use crate::{extract_compiler_settings, make_units_from_test, Runner, SRC_FOLDER};
 
 /// The harness newline sequence (`\r\n`) used throughout the baselines.
 // Go: internal/testutil/tsbaseline/error_baseline.go:harnessNewLine
@@ -354,6 +355,443 @@ fn replace_diagnostics_location_prefix(text: &str) -> String {
         regex::Regex::new(r"(?im)^(lib.*\.d\.ts)\(\d+,\d+\)").expect("valid regex")
     });
     re.replace_all(text, "$1(--,--)").into_owned()
+}
+
+/// The parity outcome of comparing one case's produced `.errors.txt` baseline
+/// against its committed reference.
+///
+/// This is the per-case verdict of the "identical-to-tsc" error-baseline gate:
+/// a case [`Passed`](Self::Passed) when the produced baseline matches the
+/// committed reference byte-for-byte (or both are empty), [`Failed`](Self::Failed)
+/// when it differs, and [`Errored`](Self::Errored) when the compile pipeline
+/// panicked.
+///
+/// Side effects: none (plain data).
+// Go: internal/testrunner/compiler_runner.go:compilerTest.verifyDiagnostics (verdict)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParityOutcome {
+    /// The produced baseline matched the committed reference (or both empty).
+    Passed,
+    /// The produced baseline differs from the committed reference; `detail`
+    /// holds a short, human-readable diff summary.
+    Failed {
+        /// A short diff summary (the first lines of the unified diff, or a note
+        /// when the case produced unexpected / missing errors).
+        detail: String,
+    },
+    /// The compile pipeline panicked; `message` holds the panic payload text.
+    Errored {
+        /// The panic message (downcast from the panic payload, when a string).
+        message: String,
+    },
+}
+
+/// The result of running one named compiler/conformance case.
+///
+/// Side effects: none (plain data).
+// Go: internal/testrunner/compiler_runner.go:compilerTest (per-case result)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseResult {
+    /// The case's base file name (e.g. `simpleTest.ts`).
+    pub name: String,
+    /// The parity verdict for this case.
+    pub outcome: ParityOutcome,
+}
+
+/// The tallied counts of the three parity outcomes over a batch of cases.
+///
+/// Side effects: none (plain data).
+// Go: internal/testrunner/compiler_runner.go:CompilerBaselineRunner.RunTests (tally)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ParityCounts {
+    /// Cases whose produced baseline matched the committed reference.
+    pub passed: usize,
+    /// Cases whose produced baseline differed from the committed reference.
+    pub failed: usize,
+    /// Cases whose compile pipeline panicked.
+    pub errored: usize,
+}
+
+impl ParityCounts {
+    /// The total number of cases tallied.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_testrunner::ParityCounts;
+    /// let c = ParityCounts { passed: 2, failed: 3, errored: 1 };
+    /// assert_eq!(c.total(), 6);
+    /// ```
+    ///
+    /// Side effects: none (pure).
+    pub fn total(self) -> usize {
+        self.passed + self.failed + self.errored
+    }
+}
+
+/// The summary of a corpus batch run: every [`CaseResult`] in run order, with
+/// tally + report helpers.
+///
+/// Side effects: none (owns the per-case results).
+// Go: internal/testrunner/compiler_runner.go:CompilerBaselineRunner.RunTests (summary)
+#[derive(Debug, Clone, Default)]
+pub struct ParitySummary {
+    results: Vec<CaseResult>,
+}
+
+impl ParitySummary {
+    /// The per-case results, in the order the cases were run.
+    ///
+    /// Side effects: none (pure).
+    pub fn results(&self) -> &[CaseResult] {
+        &self.results
+    }
+
+    /// The tallied `{passed, failed, errored}` counts.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_testrunner::{CaseResult, ParityOutcome, ParitySummary};
+    /// let summary = ParitySummary::from_results(vec![
+    ///     CaseResult { name: "a.ts".into(), outcome: ParityOutcome::Passed },
+    ///     CaseResult { name: "b.ts".into(), outcome: ParityOutcome::Failed { detail: "x".into() } },
+    /// ]);
+    /// let counts = summary.counts();
+    /// assert_eq!(counts.passed, 1);
+    /// assert_eq!(counts.failed, 1);
+    /// assert_eq!(counts.errored, 0);
+    /// ```
+    ///
+    /// Side effects: none (pure).
+    pub fn counts(&self) -> ParityCounts {
+        let mut counts = ParityCounts::default();
+        for result in &self.results {
+            match result.outcome {
+                ParityOutcome::Passed => counts.passed += 1,
+                ParityOutcome::Failed { .. } => counts.failed += 1,
+                ParityOutcome::Errored { .. } => counts.errored += 1,
+            }
+        }
+        counts
+    }
+
+    /// Builds a summary directly from a list of results (test/helper
+    /// constructor).
+    ///
+    /// Side effects: none (pure).
+    pub fn from_results(results: Vec<CaseResult>) -> ParitySummary {
+        ParitySummary { results }
+    }
+
+    /// Renders a deterministic, human-readable parity report: a header with the
+    /// counts followed by one line per case (`PASS` / `FAIL` / `ERR`), with a
+    /// short indented detail under each failure / error.
+    ///
+    /// Side effects: none (pure).
+    pub fn report(&self) -> String {
+        let counts = self.counts();
+        let mut out = format!(
+            "parity: {} cases — passed {}, failed {}, errored {}",
+            counts.total(),
+            counts.passed,
+            counts.failed,
+            counts.errored,
+        );
+        for result in &self.results {
+            match &result.outcome {
+                ParityOutcome::Passed => {
+                    out.push_str(&format!("\nPASS {}", result.name));
+                }
+                ParityOutcome::Failed { detail } => {
+                    out.push_str(&format!("\nFAIL {}", result.name));
+                    push_indented(&mut out, detail);
+                }
+                ParityOutcome::Errored { message } => {
+                    out.push_str(&format!("\nERR  {}", result.name));
+                    push_indented(&mut out, message);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Appends each line of `detail` to `out`, indented under a case header.
+fn push_indented(out: &mut String, detail: &str) {
+    for line in detail.split('\n') {
+        out.push_str("\n    ");
+        out.push_str(line);
+    }
+}
+
+/// Compares a case's `produced` `.errors.txt` baseline against its `committed`
+/// reference (`None` when no `.errors.txt` is committed, i.e. the case is
+/// expected to produce no errors).
+///
+/// The verdict mirrors the baseline framework's accept rule:
+/// - no committed baseline + produced [`NO_CONTENT`](tsgo_testutil_baseline::NO_CONTENT)
+///   → [`Passed`](ParityOutcome::Passed);
+/// - no committed baseline + produced errors → [`Failed`](ParityOutcome::Failed);
+/// - committed baseline + produced `NO_CONTENT` → `Failed` (errors went missing);
+/// - committed baseline + byte-equal produced → `Passed`;
+/// - committed baseline + differing produced → `Failed` with a short diff.
+///
+/// # Examples
+/// ```
+/// use tsgo_testrunner::{compare_error_baseline, ParityOutcome};
+/// assert_eq!(compare_error_baseline("<no content>", None), ParityOutcome::Passed);
+/// assert_eq!(compare_error_baseline("x", Some("x")), ParityOutcome::Passed);
+/// ```
+///
+/// Side effects: none (pure).
+// Go: internal/testutil/baseline/baseline.go:writeComparison (compare branch)
+pub fn compare_error_baseline(produced: &str, committed: Option<&str>) -> ParityOutcome {
+    let no_content = tsgo_testutil_baseline::NO_CONTENT;
+    match committed {
+        None => {
+            if produced == no_content {
+                ParityOutcome::Passed
+            } else {
+                ParityOutcome::Failed {
+                    detail: format!(
+                        "produced errors but no committed `.errors.txt` baseline exists:\n{}",
+                        head_lines(produced, 12),
+                    ),
+                }
+            }
+        }
+        Some(reference) => {
+            if produced == no_content {
+                ParityOutcome::Failed {
+                    detail: "a committed `.errors.txt` baseline exists but no errors were produced"
+                        .to_string(),
+                }
+            } else if produced == reference {
+                ParityOutcome::Passed
+            } else {
+                ParityOutcome::Failed {
+                    detail: short_baseline_diff(reference, produced),
+                }
+            }
+        }
+    }
+}
+
+/// Renders a short unified diff (first lines only) between the `committed`
+/// reference and the `produced` baseline.
+fn short_baseline_diff(committed: &str, produced: &str) -> String {
+    let full = tsgo_testutil_baseline::diff_text(
+        "committed.errors.txt",
+        "produced.errors.txt",
+        committed,
+        produced,
+    );
+    head_lines(&full, 16)
+}
+
+/// Returns the first `max_lines` lines of `text`, with a trailing
+/// `... (truncated)` marker when more lines were dropped.
+fn head_lines(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let shown = lines.len().min(max_lines);
+    let mut out = lines[..shown].join("\n");
+    if lines.len() > max_lines {
+        out.push_str("\n... (truncated)");
+    }
+    out
+}
+
+/// Replaces a `.ts` / `.tsx` extension on `basename` with `.errors.txt`
+/// (mirrors Go's `tsExtension.ReplaceAllString(name, ".errors.txt")`).
+// Go: internal/testutil/tsbaseline/util.go:tsExtension
+fn baseline_name_for(basename: &str) -> String {
+    if let Some(stem) = basename.strip_suffix(".tsx") {
+        format!("{stem}.errors.txt")
+    } else if let Some(stem) = basename.strip_suffix(".ts") {
+        format!("{stem}.errors.txt")
+    } else {
+        format!("{basename}.errors.txt")
+    }
+}
+
+/// Extracts a printable message from a caught panic payload.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic with non-string payload".to_string()
+    }
+}
+
+/// Drives the `.errors.txt` baseline over real `tests/cases` corpus cases and
+/// compares the produced baseline against the committed reference baseline.
+///
+/// This is the corpus-walking foundation of the "identical-to-tsc" acceptance
+/// gate: it locates a suite's case directory and reference-baseline directory
+/// under a `testdata` root, runs each case through
+/// [`error_baseline_for_test`], and reports a [`ParityOutcome`] per case. A
+/// panicking case is caught (counted [`Errored`](ParityOutcome::Errored)) so one
+/// bad case never aborts the run.
+///
+/// DEFER(P10): the `.js`/`.types`/`.symbols`/sourcemap baselines, the
+/// module/target variation matrix, and in-test `tsconfig.json`/symlinks; this
+/// round compares only `.errors.txt`. blocked-by: the language-service type
+/// writer (P7) + the JS/sourcemap baseline harness + VFS config-host wiring.
+///
+/// Side effects: reads case files and reference baselines under the configured
+/// `testdata` root (no writes).
+// Go: internal/testrunner/compiler_runner.go:CompilerBaselineRunner
+pub struct CompilerBaselineRunner {
+    test_type: CompilerTestType,
+    base_path: PathBuf,
+    reference_dir: PathBuf,
+}
+
+impl CompilerBaselineRunner {
+    /// Builds a runner for `test_type`, rooting the case directory at
+    /// `<testdata_root>/tests/cases/<suite>` and the committed reference
+    /// baselines at `<testdata_root>/baselines/reference/<suite>`.
+    ///
+    /// # Examples
+    /// ```
+    /// use std::path::Path;
+    /// use tsgo_testrunner::{CompilerBaselineRunner, CompilerTestType};
+    /// let runner = CompilerBaselineRunner::new(
+    ///     CompilerTestType::Conformance,
+    ///     Path::new("/tmp/testdata"),
+    /// );
+    /// assert_eq!(runner.test_type(), CompilerTestType::Conformance);
+    /// ```
+    ///
+    /// Side effects: none (pure; no file system access until a case is run).
+    // Go: internal/testrunner/compiler_runner.go:NewCompilerBaselineRunner
+    pub fn new(test_type: CompilerTestType, testdata_root: &Path) -> CompilerBaselineRunner {
+        let suite = test_type.name();
+        CompilerBaselineRunner {
+            test_type,
+            base_path: testdata_root.join("tests").join("cases").join(suite),
+            reference_dir: testdata_root
+                .join("baselines")
+                .join("reference")
+                .join(suite),
+        }
+    }
+
+    /// The suite this runner serves.
+    ///
+    /// Side effects: none (pure).
+    pub fn test_type(&self) -> CompilerTestType {
+        self.test_type
+    }
+
+    /// The directory the runner's case files live under.
+    ///
+    /// Side effects: none (pure).
+    pub fn base_path(&self) -> &Path {
+        &self.base_path
+    }
+
+    /// Runs a single case (a base file name like `simpleTest.ts`, or a
+    /// suite-relative path, or an absolute path) and returns its parity result.
+    ///
+    /// Reads the case source and (if present) the committed reference baseline,
+    /// then runs `error_baseline_for_test` under [`catch_unwind`](std::panic::catch_unwind)
+    /// so a parser/checker panic on advanced syntax is reported as
+    /// [`Errored`](ParityOutcome::Errored) rather than aborting the batch.
+    ///
+    /// Side effects: reads the case file and its reference baseline.
+    // Go: internal/testrunner/compiler_runner.go:CompilerBaselineRunner.runTest
+    pub fn run_case(&self, case_file: impl AsRef<Path>) -> CaseResult {
+        let case_file = case_file.as_ref();
+        let case_path = if case_file.is_absolute() {
+            case_file.to_path_buf()
+        } else {
+            self.base_path.join(case_file)
+        };
+        let basename = case_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let content = match std::fs::read_to_string(&case_path) {
+            Ok(content) => content,
+            Err(e) => {
+                return CaseResult {
+                    name: basename,
+                    outcome: ParityOutcome::Errored {
+                        message: format!("could not read case file {}: {e}", case_path.display()),
+                    },
+                };
+            }
+        };
+
+        let reference_path = self.reference_dir.join(baseline_name_for(&basename));
+        let committed = std::fs::read_to_string(&reference_path).ok();
+
+        let baseline_basename = get_base_file_name(&basename);
+        let produced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            error_baseline_for_test(&content, &baseline_basename)
+        }));
+
+        let outcome = match produced {
+            Ok(baseline) => compare_error_baseline(&baseline, committed.as_deref()),
+            Err(payload) => ParityOutcome::Errored {
+                message: panic_message(payload),
+            },
+        };
+
+        CaseResult {
+            name: basename,
+            outcome,
+        }
+    }
+
+    /// Runs each named case in order and tallies the outcomes into a
+    /// [`ParitySummary`].
+    ///
+    /// Side effects: reads each case file and its reference baseline.
+    // Go: internal/testrunner/compiler_runner.go:CompilerBaselineRunner.RunTests
+    pub fn run_cases<I>(&self, cases: I) -> ParitySummary
+    where
+        I: IntoIterator,
+        I::Item: AsRef<Path>,
+    {
+        let results = cases.into_iter().map(|c| self.run_case(c)).collect();
+        ParitySummary { results }
+    }
+}
+
+impl Runner for CompilerBaselineRunner {
+    // Go: internal/testrunner/compiler_runner.go:CompilerBaselineRunner.EnumerateTestFiles
+    fn enumerate_test_files(&self) -> Vec<String> {
+        let mut files: Vec<String> = Vec::new();
+        collect_ts_files(&self.base_path, &mut files);
+        files.sort();
+        files
+    }
+}
+
+/// Recursively collects `.ts` / `.tsx` file paths under `dir` into `out`
+/// (mirrors Go's `harnessutil.EnumerateFiles(dir, \.tsx?$, recursive)`).
+// Go: internal/testutil/harnessutil/harnessutil.go:EnumerateFiles
+fn collect_ts_files(dir: &Path, out: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_ts_files(&path, out);
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e == "ts" || e == "tsx")
+        {
+            out.push(path.to_string_lossy().into_owned());
+        }
+    }
 }
 
 #[cfg(test)]
