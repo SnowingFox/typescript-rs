@@ -408,6 +408,75 @@ fn get_global_type_resolves_global_interface_off_program() {
     assert_eq!(c.get_global_type("Missing"), None);
 }
 
+// C-E: the named global `Promise` *type* helper (Go's `getGlobalPromiseType`),
+// the building block async `design:returntype` metadata serialization reads. The
+// two-sided story: present in the program -> resolves; absent (no lib) -> a
+// graceful `None` (no panic). The real lib-backed resolution is P6-exercised.
+// Go: internal/checker/checker.go:Checker.getGlobalPromiseType (getGlobalTypeResolver("Promise", 1, false))
+#[test]
+fn get_global_promise_type_resolves_and_degrades() {
+    // A synthesized generic global `interface Promise<T> {}` resolves to its
+    // (object) declared type.
+    let p = std::rc::Rc::new(crate::core::test_support::StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> {\n  then: () => void;\n}",
+    ));
+    let mut c = Checker::new_checker(p);
+    let promise = c.get_global_promise_type().expect("global Promise type");
+    assert!(c.get_type(promise).as_object().is_some());
+    // Cached on a second lookup (same id).
+    assert_eq!(c.get_global_promise_type(), Some(promise));
+
+    // Graceful degrade: a program with no global `Promise` (lib not loaded)
+    // resolves to `None` without panicking.
+    let q = std::rc::Rc::new(crate::core::test_support::StubProgram::parse_and_bind(
+        "/b.ts",
+        "declare const y: number;",
+    ));
+    let mut d = Checker::new_checker(q);
+    assert_eq!(d.get_global_promise_type(), None);
+    // An intrinsic-only checker (no program at all) also degrades to `None`.
+    assert_eq!(Checker::new().get_global_promise_type(), None);
+}
+
+// C-E: the named global `Promise` *constructor value* symbol helper (Go's
+// `getGlobalPromiseConstructorSymbol`), the symbol
+// `GetTypeReferenceSerializationKind`'s Promise arm compares the resolved value
+// against. Two-sided: present -> resolves a value symbol; absent -> graceful
+// `None`. The real lib-backed resolution + the serialization-arm wiring are
+// P6-exercised.
+// Go: internal/checker/checker.go:Checker.getGlobalPromiseConstructorSymbol (getGlobalValueSymbolResolver("Promise"))
+#[test]
+fn get_global_promise_constructor_symbol_resolves_and_degrades() {
+    // A synthesized global *value* `declare var Promise: ...;` resolves to the
+    // Promise constructor symbol under VALUE meaning.
+    let p = std::rc::Rc::new(crate::core::test_support::StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare var Promise: { resolve(): void };",
+    ));
+    let c = Checker::new_checker(p);
+    let sym = c
+        .get_global_promise_constructor_symbol()
+        .expect("global Promise value symbol");
+    assert!(c
+        .program()
+        .unwrap()
+        .symbol(sym)
+        .flags
+        .intersects(SymbolFlags::VALUE));
+
+    // Graceful degrade: a program with no global `Promise` value resolves to
+    // `None` without panicking.
+    let q = std::rc::Rc::new(crate::core::test_support::StubProgram::parse_and_bind(
+        "/b.ts",
+        "declare const y: number;",
+    ));
+    let d = Checker::new_checker(q);
+    assert_eq!(d.get_global_promise_constructor_symbol(), None);
+    // An intrinsic-only checker (no program) also degrades to `None`.
+    assert_eq!(Checker::new().get_global_promise_constructor_symbol(), None);
+}
+
 // 4al S1: the checker reads its compiler options off the retained program (Go's
 // `c.compilerOptions = program.Options()`), so a target set on the program's
 // options is visible through `Checker::compiler_options`.

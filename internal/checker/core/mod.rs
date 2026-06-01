@@ -739,6 +739,59 @@ impl Checker {
         Some(t)
     }
 
+    /// Resolves the global `Promise` *type* (Go's `getGlobalPromiseType`), the
+    /// building block async-function `design:returntype` metadata serialization
+    /// reads to recognize a `Promise<T>` return.
+    ///
+    /// Degrades gracefully: when the program exposes no global `Promise` (the
+    /// lib is not loaded, or there is no program), it returns `None` rather than
+    /// panicking. The real lib-backed resolution is exercised by the compiler
+    /// tests (P6).
+    ///
+    /// blocked-by: lib.d.ts loading (P6). Go's `getGlobalPromiseType` resolves
+    /// `Promise` with arity 1 and falls back to `emptyGenericType` when absent;
+    /// this reachable form returns `None` until the empty-generic-type +
+    /// arity-checking + diagnostics wiring of the full checker lands.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// // An intrinsic-only checker has no program, hence no global `Promise`.
+    /// assert!(Checker::new().get_global_promise_type().is_none());
+    /// ```
+    ///
+    /// Side effects: may build a declared type and populate the global-type cache.
+    // Go: internal/checker/checker.go:Checker.getGlobalPromiseType
+    pub fn get_global_promise_type(&mut self) -> Option<TypeId> {
+        self.get_global_type("Promise")
+    }
+
+    /// Resolves the global `Promise` constructor *value* symbol (Go's
+    /// `getGlobalPromiseConstructorSymbol`, `getGlobalSymbol("Promise",
+    /// SymbolFlagsValue)`).
+    ///
+    /// This is the symbol the legacy-decorator `design:type` serialization
+    /// (`GetTypeReferenceSerializationKind`'s Promise arm) compares a resolved
+    /// reference's value symbol against. Degrades gracefully to `None` when the
+    /// program exposes no global `Promise` value (lib not loaded, or no program).
+    ///
+    /// blocked-by: lib.d.ts loading (P6) for the real `Promise` constructor;
+    /// wiring this into `get_type_reference_serialization_kind`'s Promise arm is
+    /// itself DEFER (needs `resolveEntityName` value/type symbol identity).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// // An intrinsic-only checker has no program, hence no global `Promise`.
+    /// assert!(Checker::new().get_global_promise_constructor_symbol().is_none());
+    /// ```
+    ///
+    /// Side effects: none (a read-only lookup over the bound program).
+    // Go: internal/checker/checker.go:Checker.getGlobalPromiseConstructorSymbol
+    pub fn get_global_promise_constructor_symbol(&self) -> Option<symbols::SymbolId> {
+        self.get_global_symbol("Promise", symbols::SymbolFlags::VALUE)
+    }
+
     /// Allocates a new type, clearing the cache-only object flags that Go's
     /// `newType` strips, and returns its [`TypeId`].
     ///

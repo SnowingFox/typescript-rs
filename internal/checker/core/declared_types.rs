@@ -996,6 +996,35 @@ fn compute_enum_member_values(
     result
 }
 
+// Returns the evaluated constant value of an enum member node (Go's
+// `getEnumMemberValue`): computes the parent enum's member values and reads back
+// this member's value. A node whose parent is not an enum declaration, or that
+// is absent from the computed members, yields the non-foldable `None` (Go's
+// `enumMemberLinks.Get(node).value` defaulting to a nil `Result.Value`).
+//
+// Reuses [`compute_enum_member_values`], so the same reachable subset applies
+// (auto-increment + constant-foldable initializers + intra-enum entity
+// references); the eager `enumMemberLinks` caching and the per-member
+// diagnostics are still DEFER (see `compute_enum_member_values`).
+// Go: internal/checker/checker.go:Checker.getEnumMemberValue
+pub(crate) fn get_enum_member_value(
+    program: &dyn BoundProgram,
+    member: NodeId,
+) -> tsgo_evaluator::EvalValue {
+    let Some(parent) = program.arena().parent(member) else {
+        return tsgo_evaluator::EvalValue::None;
+    };
+    if program.arena().kind(parent) != Kind::EnumDeclaration {
+        return tsgo_evaluator::EvalValue::None;
+    }
+    for (member_node, value) in compute_enum_member_values(program, parent) {
+        if member_node == member {
+            return value;
+        }
+    }
+    tsgo_evaluator::EvalValue::None
+}
+
 // Returns the textual name of an enum member (its identifier/string-literal
 // name), used to key prior members for entity-reference resolution.
 fn enum_member_name_text(program: &dyn BoundProgram, member: NodeId) -> Option<String> {

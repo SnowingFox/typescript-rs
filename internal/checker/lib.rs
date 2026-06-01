@@ -98,3 +98,4 @@ pub use core::types::{
 pub use core::Checker;
 pub use tracer::Tracer;
 pub use tsgo_diagnostics::Category;
+pub use tsgo_evaluator::EvalValue;

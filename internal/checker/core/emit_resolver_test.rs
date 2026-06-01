@@ -4,6 +4,7 @@ use crate::core::symbols_query::get_symbol_of_declaration;
 use crate::core::test_support::StubProgram;
 use crate::core::Checker;
 use tsgo_ast::{NodeData, NodeId};
+use tsgo_evaluator::EvalValue;
 
 // Returns the `idx`-th top-level statement node.
 fn statement(p: &StubProgram, idx: usize) -> NodeId {
@@ -37,6 +38,27 @@ fn var_decl_of_statement(p: &StubProgram, stmt: NodeId) -> NodeId {
         NodeData::VariableDeclarationList(l) => l.declarations.nodes[0],
         _ => panic!("variable declaration list"),
     }
+}
+
+// Go: internal/checker/emitresolver.go:EmitResolver.determineIfDeclarationIsVisible
+// (a `VariableDeclaration`'s visibility uses its COMBINED modifier flags, which
+// fold in the wrapping `VariableStatement`'s `export`, then recurses on the
+// declaration container — so `export const x = 1`'s declaration is visible).
+#[test]
+fn is_declaration_visible_for_exported_variable_declaration() {
+    // `export const x = 1;` (exported) vs `const y = 2;` (non-exported local).
+    let p = StubProgram::parse_and_bind("/a.ts", "export const x = 1;\nconst y = 2;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    // The `export` lives on the VariableStatement; the VariableDeclaration `x`
+    // inherits it via combined modifier flags, so the declaration is visible.
+    let x = first_var_declaration(&p, 0);
+    assert!(resolver.is_declaration_visible(&p, x));
+    // A non-exported local declaration is not visible (the reachable subset
+    // conservatively treats the file as a module; the global-script-file case is
+    // DEFER, blocked-by external-module detection).
+    let y = first_var_declaration(&p, 1);
+    assert!(!resolver.is_declaration_visible(&p, y));
 }
 
 // Go: internal/checker/emitresolver.go:EmitResolver.IsDeclarationVisible (tracer)
@@ -814,4 +836,86 @@ fn implementation_of_overload_is_detected() {
     // A plain (non-overloaded) function is not an overload implementation.
     let p2 = StubProgram::parse_and_bind("/b.ts", "function bar() {}");
     assert!(!resolver.is_implementation_of_overload(&p2, statement(&p2, 0)));
+}
+
+// Returns the `idx`-th member node of the `EnumDeclaration` at `stmt_idx`.
+fn enum_member_node(p: &StubProgram, stmt_idx: usize, idx: usize) -> NodeId {
+    match p.arena().data(statement(p, stmt_idx)) {
+        NodeData::EnumDeclaration(d) => d.members.nodes[idx],
+        _ => panic!("enum declaration"),
+    }
+}
+
+// Go: internal/checker/services.go:Checker.GetConstantValue (tracer: an EnumMember
+// node yields its constant value directly, regardless of const-ness — Go's first
+// `node.Kind == KindEnumMember` branch returns `getEnumMemberValue(node).Value`).
+#[test]
+fn get_constant_value_of_enum_member_node() {
+    // `const enum E { A = 10 }`: the member `A` evaluates to the number 10.
+    let p = StubProgram::parse_and_bind("/a.ts", "const enum E { A = 10 }");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let a = enum_member_node(&p, 0, 0);
+    assert_eq!(
+        resolver.get_constant_value(&p, a),
+        EvalValue::Num(10.0.into())
+    );
+}
+
+// Returns the initializer expression of the first variable declaration in the
+// statement at `stmt_idx` (e.g. the `E.A` of `var x = E.A;`).
+fn var_initializer(p: &StubProgram, stmt_idx: usize) -> NodeId {
+    let decl = var_decl_of_statement(p, statement(p, stmt_idx));
+    match p.arena().data(decl) {
+        NodeData::VariableDeclaration(d) => d.initializer.expect("variable initializer"),
+        _ => panic!("variable declaration"),
+    }
+}
+
+// Go: internal/checker/services.go:Checker.GetConstantValue (a const-enum member
+// reference `E.A` inlines to its value; a non-const member reference does not).
+// Verified against `cmd/tsgo --target esnext --module preserve`:
+//   `const enum E { A = 10, B = A + 5 } var x = E.A; var y = E.B;`
+//     -> `var x = 10 /* E.A */; var y = 15 /* E.B */;`
+//   non-const `enum E { A = 10 } var x = E.A;` keeps `var x = E.A;`.
+#[test]
+fn get_constant_value_of_const_enum_property_access() {
+    // `const enum E { A = 10, B = A + 5 }`: `E.A` -> 10, `E.B` -> 15 (A + 5).
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "const enum E { A = 10, B = A + 5 }\nvar x = E.A;\nvar y = E.B;",
+    );
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let use_ea = var_initializer(&p, 1);
+    let use_eb = var_initializer(&p, 2);
+    assert_eq!(
+        p.arena().kind(use_ea),
+        tsgo_ast::Kind::PropertyAccessExpression
+    );
+    assert_eq!(
+        resolver.get_constant_value(&p, use_ea),
+        EvalValue::Num(10.0.into())
+    );
+    assert_eq!(
+        resolver.get_constant_value(&p, use_eb),
+        EvalValue::Num(15.0.into())
+    );
+}
+
+// Go: internal/checker/services.go:Checker.GetConstantValue (a non-const enum
+// member reference is NOT inlined — Go's `ast.IsEnumConst(member.Parent)` guard
+// fails, so it returns nil and the runtime `E.A` access is preserved).
+#[test]
+fn get_constant_value_of_non_const_enum_property_access_is_none() {
+    // `enum E { A = 10 }` (not const): `E.A` is not inlined.
+    let p = StubProgram::parse_and_bind("/a.ts", "enum E { A = 10 }\nvar x = E.A;");
+    let c = Checker::new();
+    let resolver = c.get_emit_resolver();
+    let use_ea = var_initializer(&p, 1);
+    assert_eq!(
+        p.arena().kind(use_ea),
+        tsgo_ast::Kind::PropertyAccessExpression
+    );
+    assert_eq!(resolver.get_constant_value(&p, use_ea), EvalValue::None);
 }

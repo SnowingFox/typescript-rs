@@ -14,8 +14,12 @@
 //! `// blocked-by:` notes).
 
 use tsgo_ast::{Kind, ModifierFlags, NodeData, NodeId, SymbolFlags, SymbolId};
+use tsgo_evaluator::EvalValue;
 
-use super::declared_types::{get_declared_type_of_symbol, get_type_of_symbol};
+use super::declared_types::{
+    get_declared_type_of_symbol, get_enum_member_value as declared_enum_member_value,
+    get_type_of_symbol,
+};
 use super::nodebuilder::type_to_string;
 use super::program::BoundProgram;
 use super::symbols::resolve_name;
@@ -168,13 +172,23 @@ impl EmitResolver {
     /// Reports whether `node`'s declaration is visible to declaration emit
     /// (Go's `IsDeclarationVisible`).
     ///
-    /// 4k implements the module/declaration-emit rule: a top-level declaration
-    /// is visible iff it carries the `export` modifier.
+    /// 4k/C-E port the reachable subset of Go's
+    /// `determineIfDeclarationIsVisible` switch: a declaration kind (variable /
+    /// module / class / interface / type-alias / function / enum / `import =`)
+    /// is visible iff it is exported (by its **combined** modifier flags, which
+    /// fold a variable declaration's wrapping `VariableStatement`'s `export` in)
+    /// and its declaration container is visible (recursion). `SourceFile`,
+    /// `NamespaceExportDeclaration`, and `TypeParameter` are always visible;
+    /// import clauses/specifiers/namespace imports and `export =` are not.
     ///
     /// DEFER(phase-4-checker-post): the global-script-file case (a non-exported
-    /// declaration is visible in a non-module script), ambient modules, and
-    /// member/nested visibility (`isDeclarationVisible(parent)` recursion).
-    /// blocked-by: external-module detection + `compiler.Program` (P6).
+    /// declaration is visible in a non-module script) is approximated as "not
+    /// visible" (the file is conservatively treated as a module); ambient-module
+    /// augmentation, the empty-binding-pattern variable carve-out, JS typedef
+    /// tags, and the property/method/accessor arms (which need
+    /// `GetEffectiveDeclarationFlags`) are also deferred.
+    /// blocked-by: external-module detection + `compiler.Program` (P6) +
+    /// `GetEffectiveDeclarationFlags` (private/protected member visibility).
     ///
     /// # Examples
     /// ```
@@ -187,7 +201,7 @@ impl EmitResolver {
     /// Side effects: none (pure).
     // Go: internal/checker/emitresolver.go:EmitResolver.IsDeclarationVisible(104)
     pub fn is_declaration_visible(&self, program: &dyn BoundProgram, node: NodeId) -> bool {
-        modifier_flags(program.arena(), node).contains(ModifierFlags::EXPORT)
+        determine_if_declaration_is_visible(program.arena(), node)
     }
 
     /// Serializes the type of declaration `node` to its printed form (Go's
@@ -576,6 +590,142 @@ impl EmitResolver {
         }
     }
 
+    /// Returns the evaluated constant value of an enum member `node` (Go's
+    /// `GetEnumMemberValue` → `getEnumMemberValue`): the auto-incremented or
+    /// constant-folded value the parent enum assigns this member.
+    ///
+    /// A node that is not an enum member (or whose value is not foldable in the
+    /// reachable subset) yields [`EvalValue::None`] (Go's nil `Result.Value`).
+    ///
+    /// DEFER(phase-4-checker-post): Go's `GetEnumMemberValue` returns the full
+    /// `evaluator.Result` (value plus the `isSyntacticallyString`/
+    /// `resolvedOtherFiles` bookkeeping the `isolatedModules` checks read); the
+    /// reachable port returns only the value, and the per-member diagnostics and
+    /// cross-file resolution are deferred with [`EvalValue`]'s producer.
+    /// blocked-by: eager `enumMemberLinks` caching + enum diagnostics + cross-file.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, EmitResolver, EvalValue};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, p: &P, n: tsgo_ast::NodeId) -> EvalValue {
+    /// r.get_enum_member_value(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (computes the parent enum's member values on demand).
+    // Go: internal/checker/emitresolver.go:EmitResolver.GetEnumMemberValue(89)
+    pub fn get_enum_member_value(&self, program: &dyn BoundProgram, node: NodeId) -> EvalValue {
+        declared_enum_member_value(program, node)
+    }
+
+    /// Returns the constant value a node folds to for emit (Go's
+    /// `GetConstantValue`), or [`EvalValue::None`] when the node is not a
+    /// compile-time constant.
+    ///
+    /// An enum member node yields its value directly (Go's first
+    /// `node.Kind == KindEnumMember` branch). A reference whose target is a
+    /// **const** enum member — a property access `E.A` (or a bare identifier) —
+    /// is inlined to that member's value, which is exactly what lets the emitter
+    /// rewrite `E.A` to its literal (`var x = 10`); a reference to a *non-const*
+    /// enum member is not inlined (Go returns nil), so the runtime `E.A` access
+    /// is preserved.
+    ///
+    /// DEFER(phase-4-checker-post): Go resolves the reference via
+    /// `checkExpressionCached` + `symbolNodeLinks.resolvedSymbol` (falling back
+    /// to `resolveEntityName`); the reachable single-file port resolves the
+    /// entity name directly and handles the property-access and bare-identifier
+    /// forms only — element-access (`E["A"]`) and qualified/cross-module
+    /// references are deferred.
+    /// blocked-by: `checkExpression` symbol caching + `resolveEntityName`
+    /// (element access / qualified name) + cross-module (`compiler.Program`, P6).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, EmitResolver, EvalValue};
+    /// # fn demo<P: BoundProgram>(r: &EmitResolver, p: &P, n: tsgo_ast::NodeId) -> EvalValue {
+    /// r.get_constant_value(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: none (a read-only fold over the bound program).
+    // Go: internal/checker/services.go:Checker.GetConstantValue(819)
+    pub fn get_constant_value(&self, program: &dyn BoundProgram, node: NodeId) -> EvalValue {
+        let arena = program.arena();
+        // Go: if node.Kind == KindEnumMember { return getEnumMemberValue(node).Value }.
+        if arena.kind(node) == Kind::EnumMember {
+            return self.get_enum_member_value(program, node);
+        }
+        // Go: the resolved symbol is an enum member -> inline only for const
+        // enums (`ast.IsEnumConst(member.Parent)`).
+        let Some(member) = self.resolve_enum_member_reference(program, node) else {
+            return EvalValue::None;
+        };
+        let Some(value_declaration) = program.symbol(member).value_declaration else {
+            return EvalValue::None;
+        };
+        let Some(enum_decl) = arena.parent(value_declaration) else {
+            return EvalValue::None;
+        };
+        if !is_enum_const(arena, enum_decl) {
+            return EvalValue::None;
+        }
+        self.get_enum_member_value(program, value_declaration)
+    }
+
+    /// Resolves a value-position reference (`E.A` / a bare identifier) to the
+    /// enum-member symbol it names, the reachable single-file stand-in for the
+    /// symbol Go's `GetConstantValue` reads off `symbolNodeLinks.resolvedSymbol`.
+    /// Returns `None` for any node that does not resolve to an enum member.
+    // Go: internal/checker/services.go:Checker.GetConstantValue (resolved symbol)
+    fn resolve_enum_member_reference(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> Option<SymbolId> {
+        let arena = program.arena();
+        match arena.data(node) {
+            // `E.A`: resolve the object `E` as a value, then read member `A` off
+            // its exports.
+            NodeData::PropertyAccessExpression(d) => {
+                if arena.kind(d.expression) != Kind::Identifier {
+                    return None;
+                }
+                let enum_symbol = resolve_name(
+                    program,
+                    d.expression,
+                    arena.text(d.expression),
+                    SymbolFlags::VALUE,
+                    false,
+                    program.globals(),
+                )?;
+                let member_name = arena.text(d.name);
+                let &member = program.symbol(enum_symbol).exports.get(member_name)?;
+                program
+                    .symbol(member)
+                    .flags
+                    .contains(SymbolFlags::ENUM_MEMBER)
+                    .then_some(member)
+            }
+            // A bare identifier whose value resolution is itself an enum member.
+            NodeData::Identifier(_) => {
+                let symbol = resolve_name(
+                    program,
+                    node,
+                    arena.text(node),
+                    SymbolFlags::VALUE,
+                    false,
+                    program.globals(),
+                )?;
+                program
+                    .symbol(symbol)
+                    .flags
+                    .contains(SymbolFlags::ENUM_MEMBER)
+                    .then_some(symbol)
+            }
+            _ => None,
+        }
+    }
+
     /// Serializes a *type-annotation node* to the runtime-constructor descriptor
     /// the legacy-decorator transform emits for `__metadata("design:type", ..)`
     /// (Go's `serializeTypeNode`).
@@ -835,6 +985,133 @@ fn is_alias_symbol_declaration(arena: &tsgo_ast::NodeArena, node: NodeId) -> boo
         NodeData::ImportClause(d) => d.name.is_some(),
         _ => false,
     }
+}
+
+// Reachable subset of Go's `EmitResolver.determineIfDeclarationIsVisible`: a
+// declaration is visible iff it is exported (by combined modifier flags) and its
+// container is visible. See [`EmitResolver::is_declaration_visible`] for the
+// DEFER list.
+// Go: internal/checker/emitresolver.go:EmitResolver.determineIfDeclarationIsVisible(131)
+fn determine_if_declaration_is_visible(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    match arena.kind(node) {
+        // Go: the variable/module/class/interface/type-alias/function/enum/
+        // import-equals group. DEFER: the empty-binding-pattern variable
+        // carve-out and the ambient-module-augmentation/JS-typedef exceptions.
+        Kind::VariableDeclaration
+        | Kind::ModuleDeclaration
+        | Kind::ClassDeclaration
+        | Kind::InterfaceDeclaration
+        | Kind::TypeAliasDeclaration
+        | Kind::FunctionDeclaration
+        | Kind::EnumDeclaration
+        | Kind::ImportEqualsDeclaration => {
+            // Go: if combinedModifierFlags & Export == 0 && !(ambient module
+            // element exception) { return IsGlobalSourceFile(parent) }. The
+            // single-file reachable subset has no ambient modules, so a
+            // non-exported declaration falls to `IsGlobalSourceFile(parent)`,
+            // approximated as `false` (DEFER: external-module detection).
+            if !combined_modifier_flags(arena, node).contains(ModifierFlags::EXPORT) {
+                return false;
+            }
+            // Go: return isDeclarationVisible(GetDeclarationContainer(node)).
+            let container = get_declaration_container(arena, node);
+            determine_if_declaration_is_visible(arena, container)
+        }
+        // Go: source file + namespace-export declaration are always visible.
+        Kind::SourceFile | Kind::NamespaceExportDeclaration => true,
+        // Go: type parameters are always visible.
+        Kind::TypeParameter => true,
+        // Go: default-binding/import-specifier/namespace-import are visible only
+        // on demand (false by default); export assignment creates no outside
+        // binding.
+        Kind::ImportClause
+        | Kind::NamespaceImport
+        | Kind::ImportSpecifier
+        | Kind::ExportAssignment => false,
+        // Go's `default: return false` (plus the DEFERred property/method/
+        // accessor and structural-type arms).
+        _ => false,
+    }
+}
+
+// Returns the root declaration of `node`, walking up through binding elements
+// (Go's `GetRootDeclaration`: `for node.Kind == KindBindingElement { node =
+// node.Parent.Parent }`).
+// Go: internal/ast/utilities.go:GetRootDeclaration(1139)
+fn get_root_declaration(arena: &tsgo_ast::NodeArena, node: NodeId) -> NodeId {
+    let mut current = node;
+    while arena.kind(current) == Kind::BindingElement {
+        // `node.Parent.Parent`: a binding element's parent is the pattern, whose
+        // parent is the variable declaration / parameter.
+        let Some(pattern) = arena.parent(current) else {
+            break;
+        };
+        let Some(decl) = arena.parent(pattern) else {
+            break;
+        };
+        current = decl;
+    }
+    current
+}
+
+// Returns the declaration container of `node` (Go's `GetDeclarationContainer`):
+// the parent of the nearest ancestor that is not part of a variable-declaration
+// list / named-import grouping.
+// Go: internal/ast/utilities.go:GetDeclarationContainer(2556)
+fn get_declaration_container(arena: &tsgo_ast::NodeArena, node: NodeId) -> NodeId {
+    let mut current = get_root_declaration(arena, node);
+    loop {
+        match arena.kind(current) {
+            // Go's predicate returns `false` for these (keep walking up).
+            Kind::VariableDeclaration
+            | Kind::VariableDeclarationList
+            | Kind::ImportSpecifier
+            | Kind::NamedImports
+            | Kind::NamespaceImport
+            | Kind::ImportClause => match arena.parent(current) {
+                Some(parent) => current = parent,
+                None => return current,
+            },
+            // Go's predicate returns `true`: the container is this node's parent.
+            _ => return arena.parent(current).unwrap_or(current),
+        }
+    }
+}
+
+// Returns the combined modifier flags of `node` (Go's
+// `GetCombinedModifierFlags`): the node's own flags unioned with its wrapping
+// `VariableDeclarationList`/`VariableStatement` flags, so a variable
+// declaration inherits the `export` from its statement.
+// Go: internal/ast/utilities.go:GetCombinedModifierFlags(1162) / getCombinedFlags(1146)
+fn combined_modifier_flags(arena: &tsgo_ast::NodeArena, node: NodeId) -> ModifierFlags {
+    let node = get_root_declaration(arena, node);
+    let mut flags = modifier_flags(arena, node);
+    let mut current = node;
+    if arena.kind(current) == Kind::VariableDeclaration {
+        if let Some(parent) = arena.parent(current) {
+            current = parent;
+        }
+    }
+    if arena.kind(current) == Kind::VariableDeclarationList {
+        flags |= modifier_flags(arena, current);
+        if let Some(parent) = arena.parent(current) {
+            current = parent;
+        }
+    }
+    if arena.kind(current) == Kind::VariableStatement {
+        flags |= modifier_flags(arena, current);
+    }
+    flags
+}
+
+// Reports whether `node` is a `const enum` declaration (Go's `IsEnumConst`:
+// `GetCombinedModifierFlags(node) & ModifierFlagsConst != 0`). For an enum
+// declaration the combined modifier flags equal its own (no variable-list/
+// statement wrapping), so the own-modifier read suffices.
+// Go: internal/ast/utilities.go:IsEnumConst(1834)
+fn is_enum_const(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    arena.kind(node) == Kind::EnumDeclaration
+        && modifier_flags(arena, node).contains(ModifierFlags::CONST)
 }
 
 // Returns the aggregated modifier flags of `node`, if it bears modifiers.
