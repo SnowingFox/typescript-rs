@@ -6,3 +6,13 @@ edition = "2021"
 [[bin]]
 name = "tsgo"
 path = "main.rs"
+
+[dependencies]
+tsgo_bundled = { path = "../../internal/bundled" }
+tsgo_core = { path = "../../internal/core" }
+tsgo_diagnostics = { path = "../../internal/diagnostics" }
+tsgo_execute = { path = "../../internal/execute" }
+tsgo_locale = { path = "../../internal/locale" }
+tsgo_tsoptions = { path = "../../internal/tsoptions" }
+tsgo_tspath = { path = "../../internal/tspath" }
+tsgo_vfs = { path = "../../internal/vfs" }
