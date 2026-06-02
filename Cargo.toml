@@ -53,6 +53,7 @@ members = [
     "internal/testutil/baseline",
     "internal/testutil/harnessutil",
     "internal/testrunner",
+    "internal/fourslash",
     "internal/testutil/stringtestutil",
     "internal/testutil/race",
     "internal/testutil/parsetestutil",
