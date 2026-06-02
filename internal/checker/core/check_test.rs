@@ -9481,3 +9481,122 @@ fn unreachable_const_after_return_reports_ts7027() {
         "span covers the unreachable statement"
     );
 }
+
+// Round 29 (RED->GREEN headline): a function declaration whose return-type
+// annotation is a type predicate (`value is TypeA`) naming a parameter the
+// declaration does NOT have reports `TS1225: Cannot find parameter 'value'.`,
+// spanning exactly the predicate parameter-name identifier. Mirrors the corpus
+// case `typePredicateParameterMismatch`.
+// Go: internal/checker/checker.go:Checker.checkTypePredicate(3037)
+#[test]
+fn type_predicate_naming_unknown_parameter_reports_ts1225() {
+    let text = "function isA(_value: object): value is object { return true; }";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts1225: Vec<_> = diags.iter().filter(|d| d.code == 1225).collect();
+    assert_eq!(
+        ts1225.len(),
+        1,
+        "expected exactly one TS1225, got {diags:?}"
+    );
+    let d = ts1225[0];
+    assert_eq!(d.message, "Cannot find parameter 'value'.");
+    let start = text.find("value is").unwrap() as i32;
+    assert_eq!(
+        d.start, start,
+        "span starts at the predicate parameter name"
+    );
+    assert_eq!(d.length, "value".len() as i32, "span covers the name only");
+}
+
+// Round 29 (RED->GREEN): the `asserts <name>` predicate variant (no `is T`
+// type) is checked the same way — an assertion predicate naming an unknown
+// parameter reports `TS1225` at the asserted name. Mirrors the corpus case
+// `assertsPredicateParameterMismatch`.
+// Go: internal/checker/checker.go:Checker.checkTypePredicate(3037)
+#[test]
+fn asserts_predicate_naming_unknown_parameter_reports_ts1225() {
+    let text = "function assertC(_condition: boolean): asserts condition { }";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts1225: Vec<_> = diags.iter().filter(|d| d.code == 1225).collect();
+    assert_eq!(
+        ts1225.len(),
+        1,
+        "expected exactly one TS1225, got {diags:?}"
+    );
+    let d = ts1225[0];
+    assert_eq!(d.message, "Cannot find parameter 'condition'.");
+    let start = text.find("condition {").unwrap() as i32;
+    assert_eq!(d.start, start, "span starts at the asserted name");
+    assert_eq!(
+        d.length,
+        "condition".len() as i32,
+        "span covers the name only"
+    );
+}
+
+// Round 29 (GUARD, no over-fire): a CORRECT predicate whose name matches a
+// real parameter must NOT report `TS1225` — the parameter index is found.
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (parameterIndex >= 0)
+#[test]
+fn type_predicate_matching_parameter_reports_no_ts1225() {
+    let text = "function isA(value: object): value is object { return true; }";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 1225),
+        "a correct predicate must not report TS1225: {diags:?}"
+    );
+}
+
+// Round 29 (GUARD, `this` predicate skipped): a `this`-typed predicate
+// (`this is T`) has no parameter-name identifier to resolve, so the TS1225
+// path is skipped (Go skips `TypePredicateKindThis`).
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (kind != This)
+#[test]
+fn this_type_predicate_reports_no_ts1225() {
+    let text = "function f(): this is object { return true; }";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 1225),
+        "a `this` predicate must not report TS1225: {diags:?}"
+    );
+}
+
+// Round 29 (GUARD, binding-pattern element -> TS1230 not TS1225): when the
+// predicate name is an element of a destructured (binding-pattern) parameter,
+// Go reports `TS1230` ("cannot reference element ... in a binding pattern"),
+// NOT `TS1225` — so the binding-pattern guard suppresses the cannot-find.
+// Go: internal/checker/checker.go:Checker.checkIfTypePredicateVariableIsDeclaredInBindingPattern(3091)
+#[test]
+fn type_predicate_naming_binding_element_reports_ts1230_not_ts1225() {
+    let text = "function isA({ value }: { value: object }): value is object { return true; }";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 1225),
+        "a binding-pattern element predicate must not report TS1225: {diags:?}"
+    );
+    let ts1230: Vec<_> = diags.iter().filter(|d| d.code == 1230).collect();
+    assert_eq!(
+        ts1230.len(),
+        1,
+        "expected exactly one TS1230 instead, got {diags:?}"
+    );
+    assert_eq!(
+        ts1230[0].message,
+        "A type predicate cannot reference element 'value' in a binding pattern."
+    );
+}

@@ -801,11 +801,24 @@ fn expanded_compiler_subset_parity_smoke() {
     // class value, so the subset's `extra TS2339 ×5` (object-literal expando /
     // require-this members) is UNCHANGED. The flip (`extra TS2339 ×19 -> ×16`,
     // full-corpus passed 122 -> 125) shows only in the full-corpus measurement.
+    //
+    // Round 29 (type-predicate parameter-name check, TS1225): a function whose
+    // return-type annotation is a type predicate naming a parameter the function
+    // does NOT have now reports `TS1225 Cannot find parameter '{0}'.` (Go's
+    // `checkTypePredicate`, the `parameterIndex < 0` arm). The corpus has two
+    // such cases; exactly ONE — `assertsPredicateParameterMismatch.ts` (19 lines,
+    // an "a"-prefixed name within the 150-case alphabetical cap) — is in THIS
+    // <=25-line subset, flipping from `missing_all_errors` to PASS (93 -> 94).
+    // The other, `typePredicateParameterMismatch.ts` (21 lines but a "t"-prefixed
+    // name beyond the 150 cap), shows only in the full-corpus measurement
+    // (full-corpus passed 125 -> 127, `missing TS1225 ×2 -> ×0`). No `extra` pin
+    // moves (the flipped case was a pure `missing TS1225`), and the binding-
+    // pattern guard prevents over-firing.
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 93,
-            failed: 57,
+            passed: 94,
+            failed: 56,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -884,7 +897,10 @@ fn expanded_compiler_subset_parity_smoke() {
     assert_eq!(hist.no_baseline_but_errors, 7);
     // Round 22: `reachabilityChecks10.ts` flips out of missing_all_errors (44 ->
     // 43) as its `throw`-run TS7027 now matches the committed baseline.
-    assert_eq!(hist.missing_all_errors, 43);
+    // Round 29: `assertsPredicateParameterMismatch.ts` flips out of
+    // missing_all_errors (43 -> 42) as its type-predicate parameter-name check
+    // now emits the committed `TS1225`.
+    assert_eq!(hist.missing_all_errors, 42);
     assert_eq!(hist.divergent, 7);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier

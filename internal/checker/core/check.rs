@@ -4215,7 +4215,12 @@ impl Checker {
         // blocked-by: signature checking + flow implicit-return + expression-body
         // descent.
         if let NodeData::FunctionDeclaration(d) = program.arena().data(node) {
-            if let Some(body) = d.body {
+            let (params, return_type, body) = (d.parameters.nodes.clone(), d.type_node, d.body);
+            // The return-type annotation's type-predicate parameter-name check
+            // (Go's `checkSignatureDeclaration` -> `checkTypePredicate`) runs for
+            // an overload/ambient signature too (no body required).
+            self.check_return_type_predicate(program, &params, return_type);
+            if let Some(body) = body {
                 self.check_statement(program, body);
             }
         }
@@ -4313,6 +4318,169 @@ impl Checker {
             }
         }
         self.error_type
+    }
+
+    // Checks a function-like declaration's return-type annotation when it is a
+    // type predicate (`x is T` / `asserts x`): the reachable slice of Go's
+    // `checkSignatureDeclaration` -> `checkSourceElement(node.Type())` ->
+    // `checkTypePredicate`. The predicate is reached constructively from the
+    // declaration whose return type it is (the declaration IS Go's
+    // `getTypePredicateParent(node)`), so this does not depend on the node's
+    // parent pointer.
+    //
+    // Go: internal/checker/checker.go:Checker.checkSignatureDeclaration (Type())
+    fn check_return_type_predicate(
+        &mut self,
+        program: &dyn BoundProgram,
+        params: &[NodeId],
+        return_type: Option<NodeId>,
+    ) {
+        let Some(return_type) = return_type else {
+            return;
+        };
+        if program.arena().kind(return_type) != Kind::TypePredicate {
+            return;
+        }
+        self.check_type_predicate(program, params, return_type);
+    }
+
+    // Reports `TS1225: Cannot find parameter '{0}'.` when a (non-`this`) type
+    // predicate names a parameter the enclosing signature does not have (Go's
+    // `checkTypePredicate`, the `parameterIndex < 0` arm).
+    //
+    // The predicate parameter index is the position of the first parameter whose
+    // top-level identifier name equals the predicate name (Go computes the same
+    // index over `signature.parameters` in `createTypePredicateFromTypePredicate
+    // Node`; a `this` parameter and binding-pattern parameters carry names that
+    // never equal a written predicate name, so a name-text scan over the
+    // declaration's parameter nodes yields the same found/not-found verdict).
+    // When the index is found (`>= 0`) nothing is reported here. When it is not
+    // found, the binding-pattern guard (`checkIfTypePredicateVariableIsDeclared
+    // InBindingPattern`, which reports `TS1230` instead) runs first; only if it
+    // reports nothing does `TS1225` fire.
+    //
+    // DEFER(phase-4-checker): the `parameterIndex >= 0` arm — the rest-parameter
+    // reference (`TS1229`) and the predicate-type-assignable-to-its-parameter-
+    // type chain (`TS1226`) — needs resolved signature parameter types; and the
+    // `getTypePredicateParent == nil` arm (`TS1228`, a predicate outside return-
+    // type position) is unreachable here because the predicate is always the
+    // return type of the declaration it is checked from. blocked-by: signature
+    // parameter-type resolution + a generic type-node `checkSourceElement`
+    // dispatch.
+    // Go: internal/checker/checker.go:Checker.checkTypePredicate(3037)
+    fn check_type_predicate(
+        &mut self,
+        program: &dyn BoundProgram,
+        params: &[NodeId],
+        node: NodeId,
+    ) {
+        let NodeData::TypePredicate(d) = program.arena().data(node) else {
+            return;
+        };
+        let parameter_name = d.parameter_name;
+        // A `this`-typed predicate (`this is T` / `asserts this`) has no
+        // parameter-name identifier to resolve (Go skips both `TypePredicateKind
+        // This` and `TypePredicateKindAssertsThis`).
+        if program.arena().kind(parameter_name) == Kind::ThisType {
+            return;
+        }
+        let predicate_name = program.arena().text(parameter_name).to_string();
+        // The predicate parameter index: found when some parameter's top-level
+        // identifier name equals the predicate name (Go's `FindIndex(signature
+        // .parameters, p.Name == name) >= 0`).
+        let found = params.iter().any(|&param| {
+            matches!(program.arena().data(param), NodeData::ParameterDeclaration(p)
+                if program.arena().kind(p.name) == Kind::Identifier
+                    && program.arena().text(p.name) == predicate_name)
+        });
+        if found {
+            return;
+        }
+        // The name does not match a plain parameter; before reporting it as
+        // missing, Go checks whether it names an element of a binding-pattern
+        // parameter (reporting `TS1230` instead).
+        let mut has_reported_error = false;
+        for &param in params {
+            let pattern = match program.arena().data(param) {
+                NodeData::ParameterDeclaration(p) => p.name,
+                _ => continue,
+            };
+            if matches!(
+                program.arena().kind(pattern),
+                Kind::ObjectBindingPattern | Kind::ArrayBindingPattern
+            ) && self.check_if_type_predicate_variable_is_declared_in_binding_pattern(
+                program,
+                pattern,
+                parameter_name,
+                &predicate_name,
+            ) {
+                has_reported_error = true;
+                break;
+            }
+        }
+        if !has_reported_error {
+            // Go's `c.error(parameterName, ...)` spans the name via
+            // `GetErrorRangeForNode` (skips the leading trivia between the
+            // preceding `:`/`asserts` and the name identifier).
+            self.error_skipping_leading_trivia(
+                program,
+                parameter_name,
+                &tsgo_diagnostics::CANNOT_FIND_PARAMETER_0,
+                &[&predicate_name],
+            );
+        }
+    }
+
+    // Reports `TS1230: A type predicate cannot reference element '{0}' in a
+    // binding pattern.` when the predicate name is declared as an element of the
+    // binding pattern `pattern` (recursing into nested patterns). Returns whether
+    // an error was reported, so the caller suppresses `TS1225`.
+    // Go: internal/checker/checker.go:Checker.checkIfTypePredicateVariableIsDeclaredInBindingPattern(3091)
+    fn check_if_type_predicate_variable_is_declared_in_binding_pattern(
+        &mut self,
+        program: &dyn BoundProgram,
+        pattern: NodeId,
+        predicate_variable_node: NodeId,
+        predicate_variable_name: &str,
+    ) -> bool {
+        let elements = match program.arena().data(pattern) {
+            NodeData::ObjectBindingPattern(d) | NodeData::ArrayBindingPattern(d) => {
+                d.elements.nodes.clone()
+            }
+            _ => return false,
+        };
+        for element in elements {
+            let name = match program.arena().data(element) {
+                NodeData::BindingElement(d) => d.name,
+                _ => None,
+            };
+            let Some(name) = name else {
+                continue;
+            };
+            if program.arena().kind(name) == Kind::Identifier
+                && program.arena().text(name) == predicate_variable_name
+            {
+                self.error_skipping_leading_trivia(
+                    program,
+                    predicate_variable_node,
+                    &tsgo_diagnostics::A_TYPE_PREDICATE_CANNOT_REFERENCE_ELEMENT_0_IN_A_BINDING_PATTERN,
+                    &[predicate_variable_name],
+                );
+                return true;
+            }
+            if matches!(
+                program.arena().kind(name),
+                Kind::ArrayBindingPattern | Kind::ObjectBindingPattern
+            ) && self.check_if_type_predicate_variable_is_declared_in_binding_pattern(
+                program,
+                name,
+                predicate_variable_node,
+                predicate_variable_name,
+            ) {
+                return true;
+            }
+        }
+        false
     }
 
     // Checks a `return <expr>` (Go's `checkReturnStatement`): the returned

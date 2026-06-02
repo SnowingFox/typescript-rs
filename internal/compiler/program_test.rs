@@ -2296,3 +2296,70 @@ fn discriminated_union_object_literal_incompatible_still_reports_2322_with_real_
         "an object literal matching no constituent must still report 2322: {diags:?}"
     );
 }
+
+/// End to end with the REAL bundled lib (Round 29, mirroring the corpus
+/// `typePredicateParameterMismatch`): a function whose return-type annotation is
+/// a type predicate naming a parameter the function does NOT have (`value is
+/// TypeA` over a `_value` parameter) reports exactly one `TS1225: Cannot find
+/// parameter 'value'.` on the predicate name. Before Round 29 the port did not
+/// check a signature's return-type predicate at all, so this was a
+/// `missing TS1225` false negative in the full-corpus map.
+// Go: internal/checker/checker.go:Checker.checkTypePredicate(3037)
+#[test]
+fn type_predicate_unknown_parameter_reports_ts1225_with_real_lib() {
+    let options = CompilerOptions {
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let src = "type TypeA = { kind: \"a\" };\n\
+               type TypeB = { kind: \"b\" };\n\
+               type UnionType = TypeA | TypeB;\n\
+               function isTypeA(_value: UnionType): value is TypeA {\n\
+               \x20\x20return true;\n\
+               }\n";
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", src)],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    let ts1225: Vec<_> = diags.iter().filter(|d| d.code == 1225).collect();
+    assert_eq!(
+        ts1225.len(),
+        1,
+        "the predicate names an unknown parameter -> exactly one TS1225: {diags:?}"
+    );
+    assert_eq!(ts1225[0].message, "Cannot find parameter 'value'.");
+}
+
+/// GUARD with the REAL bundled lib (no over-fire): a CORRECT type predicate
+/// whose name matches a real parameter (`value is TypeA` over a `value`
+/// parameter) reports NO `TS1225` — the parameter index is found.
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (parameterIndex >= 0)
+#[test]
+fn correct_type_predicate_no_ts1225_with_real_lib() {
+    let options = CompilerOptions {
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let src = "type TypeA = { kind: \"a\" };\n\
+               type TypeB = { kind: \"b\" };\n\
+               type UnionType = TypeA | TypeB;\n\
+               function isTypeA(value: UnionType): value is TypeA {\n\
+               \x20\x20return true;\n\
+               }\n";
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", src)],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 1225),
+        "a correct predicate (name matches a parameter) must not report TS1225: {diags:?}"
+    );
+}

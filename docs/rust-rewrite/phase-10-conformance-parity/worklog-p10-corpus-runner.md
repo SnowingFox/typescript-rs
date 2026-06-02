@@ -4135,3 +4135,201 @@ only the 4 intended modifications). Not committed (left to the parent).
 - **Root C — JS `@type {Record<...>}` expando** (`nonExpandoDeclarations`,
   `extra TS2339 ×2`). blocked-by: the JSDoc `@type` annotation applied to a `let`/
   function-property + the `Record<K,V>` index signature.
+
+# Round 29 — type-predicate parameter-name check (missing TS1225)
+
+Round goal: push full-compiler-corpus parity up by fixing the single highest
+flip-per-effort remaining gap. MEASURE first (sole-cluster flip count = cases
+whose ONLY remaining diff is that cluster), then implement ONE coherent
+Go-faithful checker fix. SOLO lane, strict `/tdd` red->green vertical slices.
+
+## Step-0 — sole-flip table (temporary `#[ignore]`d dump, REMOVED)
+
+A throwaway helper (`temp_round29_sole_flip_dump`, since REMOVED from
+`compiler_runner_test.rs`) walked the full corpus and, for each FAILED case,
+computed the set of DISTINCT `(kind,code)` clusters in its mismatch multiset. A
+case is a SOLE-cluster flip for `(kind,code)` when its ENTIRE mismatch set is
+that one cluster (possibly with multiple occurrences) — i.e. it flips to
+byte-exact PASS if ONLY that cluster is fixed alone. The prompt's candidate
+clusters are OCCURRENCE-based (×N over the corpus), which over-states their
+CASE-flip leverage; the SOLE-cluster count is the real metric:
+
+| cluster (kind+code) | sole-flip | occ ×N | note / verdict |
+|---|---|---|---|
+| missing TS2688 | 4 | ×4 | type-directive / `typeRoots` / in-test `tsconfig.json` — config-host infra, **giant subsystem, DEFER** (prompt excludes) |
+| extra TS2345 | 3 | ×8 | Round-16-deferred false positive — 3 DISTINCT roots (expando-arrow / fresh-object-literal / never-source), over-suppress risk, **not one coherent fix** |
+| missing TS2322 | 3 | ×5 | deeply-nested array/tuple + enum-NaN — distinct hard roots |
+| missing TS2345 | 3 | ×3 | missing-argument errors — distinct complex roots |
+| missing TS2874 | 3 | ×7 | React-in-scope JSX — **jsx-pragma infra, DEFER** |
+| missing TS7006 | 3 | ×4 | implicit-any parameter — broad **over-fire risk** |
+| extra TS2304 | 2 | ×10 | `export =`-namespace / cross-package — **DEFERRED** |
+| extra TS2339 | 2 | ×16 | Root B `this.#private` + Root C JS `@type {Record}` — **TWO distinct roots** (private-field modeling + JSDoc `@type` expando), not one fix |
+| extra TS7026 | 2 | ×12 | JSX intrinsic over-fire — entangled |
+| **missing TS1225** | **2** | **×2** | `typePredicateParameterMismatch` + `assertsPredicateParameterMismatch` — **ONE coherent checker fix (`checkTypePredicate`), clear Go ground truth, lowest regression risk** ✅ CHOSEN |
+| missing TS2309 | 2 | ×5 | `export =` merging — needs cross-module export-equals + ambient module handling, higher regression surface |
+| missing TS2339 | 2 | ×6 | JSDoc-callback + nolib-indexed-access — two distinct roots |
+| missing TS2882 | 2 | ×2 | side-effect import — needs module-resolution config |
+| missing {TS1110, TS6133, TS2321} | 1 each | ×11 / ×9 / ×8 | the prompt's "×11 / ×9 / ×8" are each concentrated in ONE multi-error case — only 1 flip each |
+
+**Chosen cluster: missing TS1225 "Cannot find parameter '{0}'." (2 flips).**
+Why: among the tractable clusters it is the LARGEST single-coherent-root checker
+fix with exact, singular Go ground truth (`checkTypePredicate`, the
+`parameterIndex < 0` arm) and the LOWEST regression risk — it fires only when a
+(non-`this`) type predicate names a parameter the enclosing signature does not
+have, a narrow malformed-input condition; every other tractable cluster at >=2
+flips is either a giant subsystem / infra DEFER (M2688, M2874), an over-suppress
+/ over-fire risk (E2345, M7006), or splits into multiple distinct roots (E2339,
+M2322, M2345, M2339). Expected: +2 flips, `missing TS1225 ×2 -> ×0`.
+
+## Go ground truth ported (`// Go:`-anchored)
+
+- **`internal/checker/checker.go:checkTypePredicate(3037)`** — reached via
+  `checkSignatureDeclaration` -> `checkSourceElement(node.Type())`. For a
+  non-`this` predicate with `parameterIndex < 0` and a non-nil parameter name:
+  walk `parent.Parameters()`, and if the name is declared as an element of a
+  binding-pattern parameter report `TS1230` via
+  `checkIfTypePredicateVariableIsDeclaredInBindingPattern`; otherwise report
+  `c.error(parameterName, Cannot_find_parameter_0, typePredicate.parameterName)`
+  (TS1225).
+- **`checker.go:checkIfTypePredicateVariableIsDeclaredInBindingPattern(3091)`** —
+  recurses a binding pattern's elements; an element identifier matching the
+  predicate name reports `TS1230` (and suppresses TS1225).
+- **`internal/checker/relater.go:createTypePredicateFromTypePredicateNode(2081)`**
+  — the predicate `parameterIndex` is `FindIndex(signature.parameters, p.Name ==
+  name)`; a `this`-typed predicate name yields a `this`-kind predicate (skipped).
+
+## Rust landing (`internal/checker/core/check.rs`)
+
+The port does not yet run a generic `checkSourceElement`/`checkSignature
+Declaration` over every signature's return-type node, so the predicate is
+reached CONSTRUCTIVELY from the declaration whose return type it is (that
+declaration IS Go's `getTypePredicateParent(node)`), an allowed structural
+deviation that does not depend on parent pointers:
+
+- `check_statement`'s `FunctionDeclaration` arm now extracts the parameter list +
+  return-type node and calls `check_return_type_predicate` (runs for an
+  overload/ambient signature too, no body required), then descends the body as
+  before. The two corpus flips are both top-level function declarations.
+- `check_return_type_predicate` short-circuits unless the return type is a
+  `TypePredicate`, then calls `check_type_predicate`.
+- `check_type_predicate` ports the `parameterIndex < 0` arm: skip a `this`-typed
+  predicate name; compute "found" by scanning the parameter nodes for a top-level
+  identifier whose text equals the predicate name (a faithful proxy for Go's
+  `FindIndex` over `signature.parameters`, since a `this` parameter and
+  binding-pattern parameters carry names that never equal a written predicate
+  name); when not found, run the binding-pattern guard, and only if it reports
+  nothing emit `TS1225` at the predicate name.
+- `check_if_type_predicate_variable_is_declared_in_binding_pattern` ports the
+  recursive binding-pattern walk emitting `TS1230` (the over-fire guard).
+- Both emissions use `error_skipping_leading_trivia` (Go's `GetErrorRangeForNode`
+  skips the leading trivia between the preceding `:`/`asserts` and the name), so
+  the span byte-matches `tsc` — `(10,4)`/5 tildes for `value`, `(7,12)`/9 tildes
+  for `condition`.
+- DEFER-noted: the `parameterIndex >= 0` arm (rest-parameter reference `TS1229`
+  + predicate-type-assignable `TS1226`, needs resolved signature parameter
+  types) and the `getTypePredicateParent == nil` arm (`TS1228`, a predicate
+  outside return-type position — unreachable here). The check is currently wired
+  to function DECLARATIONS only (the two corpus flips); method/arrow/function-
+  expression predicates are a follow-up.
+
+## RED->GREEN + guard tests
+
+Checker (`internal/checker/core/check_test.rs`, +5):
+- `type_predicate_naming_unknown_parameter_reports_ts1225` (RED->GREEN headline)
+  — `function isA(_value: object): value is object` -> exactly one TS1225 at the
+  name span (RED: no diagnostic — return-type predicates were never checked).
+- `asserts_predicate_naming_unknown_parameter_reports_ts1225` (RED->GREEN) — the
+  `asserts <name>` variant (no `is T`) reports TS1225 at the asserted name.
+- `type_predicate_matching_parameter_reports_no_ts1225` (GUARD, no over-fire) — a
+  CORRECT predicate (`value is object` over a `value` parameter) reports no TS1225.
+- `this_type_predicate_reports_no_ts1225` (GUARD) — a `this is T` predicate is
+  skipped (no TS1225).
+- `type_predicate_naming_binding_element_reports_ts1230_not_ts1225` (GUARD,
+  no over-fire) — a predicate naming a destructured binding element reports
+  `TS1230`, NOT `TS1225`.
+
+Compiler real-lib (`internal/compiler/program_test.rs`, +2):
+- `type_predicate_unknown_parameter_reports_ts1225_with_real_lib` (mirrors the
+  corpus `typePredicateParameterMismatch` shape over the bundled libs: exactly
+  one TS1225 "Cannot find parameter 'value'.").
+- `correct_type_predicate_no_ts1225_with_real_lib` (GUARD: the matching-name
+  predicate reports no TS1225 through the real pipeline).
+
+## Measurement — full corpus BEFORE->AFTER (`tests/cases/compiler`, 222 ran)
+
+| metric | BEFORE (R24) | AFTER (R29) | Δ |
+|---|---|---|---|
+| **passed** | 125 (56.3%) | **127 (57.2%)** | **+2** |
+| failed | 96 | 94 | −2 |
+| errored | 1 | 1 | 0 |
+| no_baseline_but_errors | 16 | 16 | 0 |
+| missing_all_errors | 65 | 63 | −2 (the 2 TS1225 cases) |
+| divergent | 15 | 15 | 0 |
+| **missing TS1225** | **×2** | **×0** | **−2** |
+| every other extra/missing code | — | — | UNCHANGED |
+
+`tests/cases/conformance` (19 ran): passed 13 -> 13 (no regression).
+
+**Honest flip count: +2 cases to byte-exact PASS** —
+`typePredicateParameterMismatch`, `assertsPredicateParameterMismatch` (each
+cleared its lone `missing TS1225`). NO PASS->FAIL regression: a per-case
+before/after diff of the full-corpus sole-flip dump showed EXACTLY these 2 cases
+left the FAILED set and ZERO cases entered it; `passed` rose monotonically
+(125 -> 127); `no_baseline_but_errors`/`divergent`/`errored` UNCHANGED;
+`missing_all_errors` dropped by exactly the 2 flipped cases (65 -> 63); and the
+full extra histogram (`TS2339 ×16`, `TS7026 ×12`, `TS2304 ×10`, `TS2345 ×8`, ...)
+is UNCHANGED — no over-firing of `TS1225`/`TS1230` anywhere in the corpus (the
+guards prove a correct/`this`/binding-pattern predicate does not fire). The lone
+`errored` case is the pre-existing non-UTF-8 file-read on
+`regexInvalidUtf8WithUnicodeFlag.ts`, unrelated to this round.
+
+## 150-subset + 30-case characterization BEFORE->AFTER
+
+`expanded_compiler_subset_parity_smoke`: **93/57/0 -> 94/56/0**. Both flipped
+cases are <=25 lines (21 / 19), but the subset is the first 150 sorted ≤25-line
+cases, so only `assertsPredicateParameterMismatch.ts` (an "a"-prefixed name
+within the 150 cap) is in the subset — it flips from `missing_all_errors` to
+PASS (`missing_all_errors 43 -> 42`); `typePredicateParameterMismatch.ts` (a
+"t"-prefixed name beyond the cap) shows only in the full corpus. All `extra`
+pins (`top_extra(2)=[(2339,5),(2304,4)]`, `extra TS2339==5`, `TS2583==None`,
+`TS2769==1`, `TS1005/1003/1155==None`, `top_missing(1)=[(2874,7)]`,
+`missing TS2300==None`) are re-asserted UNCHANGED (the flipped case was a pure
+`missing TS1225`, which is not pinned). A Round-29 note was added. The 30-case
+`curated_compiler_subset_parity_smoke` (21/9/0) is UNCHANGED — neither flipped
+case is in the fixed 30-case list.
+
+## Gate results (Round 29)
+
+- `cargo test -p tsgo_checker` — GREEN (820 lib [+5] + 179 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (134 lib [+2 real-lib] + 11 doctests).
+- `cargo test -p tsgo_testrunner --lib` — GREEN (51 lib + 1 ignored [full-corpus
+  measurement]; 150-subset re-pinned 94/56/0, 30-case 21/9/0; temp dump REMOVED).
+- `cargo test -p tsgo_ls` (39 + 4 doctests) / `cargo test -p tsgo_execute` (124 +
+  1 doctest) — GREEN (no diagnostic-snapshot churn; the change touched no
+  ls/execute snapshot). `tsgo_binder`/`tsgo_parser` NOT touched (no run needed).
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner --all-targets
+  -- -D warnings` — clean. `cargo fmt` then `cargo fmt -- --check` — clean.
+  `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; additive/surgical vertical slice (one new arm in
+`check_statement` + three new helper functions); no test weakened/deleted; no new
+dependency (`Cargo.lock` untouched). The temporary dump helper
+(`temp_round29_sole_flip_dump`) was REMOVED (the tree has only the 4 intended
+code modifications — `check.rs`, `check_test.rs`, `program_test.rs`,
+`compiler_runner_test.rs` — plus this worklog). Not committed (left to the parent).
+
+## DEFER list (blocked-by) — Round 29
+
+- **The `parameterIndex >= 0` arm of `checkTypePredicate`** — the rest-parameter
+  reference (`TS1229 A type predicate cannot reference a rest parameter.`) and
+  the predicate-type-assignable-to-its-parameter-type chain (`TS1226`). blocked-by:
+  resolved signature parameter types (`get_type_of_symbol(signature.parameters[i])`).
+- **`TS1228` (a type predicate outside return-type position)** — unreachable from
+  the constructive wiring (the predicate is always the checked declaration's
+  return type). blocked-by: a generic type-node `checkSourceElement` dispatch that
+  visits predicates in arbitrary positions.
+- **Method / arrow / function-expression / call-signature / function-type
+  return-type predicates** — the check is wired to function DECLARATIONS only
+  (the two corpus flips). blocked-by: wiring `check_return_type_predicate` into
+  `check_class_member` (methods) / `check_function_expression` /
+  `check_arrow_function`; no current corpus case needs it.
