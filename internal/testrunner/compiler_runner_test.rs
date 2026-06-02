@@ -491,6 +491,34 @@ fn curated_subset_is_deterministic_and_filtered() {
     assert_eq!(subset, runner.curated_subset(10, 2, &["skip.ts"]));
 }
 
+// `full_corpus` selects EVERY sorted `.ts`/`.tsx` case (no line cap, no count
+// limit), excluding only the denylist — deterministically.
+#[test]
+fn full_corpus_returns_all_sorted_minus_denylist() {
+    let tmp = TempDir::new().expect("temp dir");
+    // A mix of short and very long cases: `full_corpus` has NO line cap, so the
+    // 500-line `big.ts` is included where `curated_subset(25, ..)` would drop it.
+    write_case(tmp.path(), "compiler", "a.ts", "1\n2\n3");
+    write_case(tmp.path(), "compiler", "big.ts", &"x\n".repeat(500));
+    write_case(tmp.path(), "compiler", "c.tsx", "1\n2");
+    write_case(tmp.path(), "compiler", "skip.ts", "1");
+    write_case(tmp.path(), "compiler", "note.txt", "ignored");
+
+    let runner = CompilerBaselineRunner::new(CompilerTestType::Regression, tmp.path());
+    let corpus = runner.full_corpus(&["skip.ts"]);
+    assert_eq!(
+        corpus,
+        vec![
+            "a.ts".to_string(),
+            "big.ts".to_string(),
+            "c.tsx".to_string()
+        ],
+        "every ts/tsx case (any length) minus the denylist, sorted"
+    );
+    // Stable across calls (pure function of the committed corpus).
+    assert_eq!(corpus, runner.full_corpus(&["skip.ts"]));
+}
+
 // === curated smoke subset (characterization) ================================
 
 /// A deterministic, reproducible subset of the `tests/cases/compiler` corpus:
@@ -595,6 +623,28 @@ const EXPANDED_DENYLIST: &[&str] = &[
     // 49-fold template literal: a combinatorial union explosion tsc rejects with
     // TS2590; without the complexity guard the union is materialized (hang/OOM).
     "templateLiteralTypeTooComplex.ts",
+];
+
+/// The full-corpus denylist: the [`EXPANDED_DENYLIST`] stress cases PLUS the
+/// LONGER (uncapped) cases whose deep checker recursion overflows the harness
+/// thread stack even at 1 GiB. A true stack overflow aborts the process (it is
+/// NOT an unwinding panic, so [`catch_unwind`](std::panic::catch_unwind) cannot
+/// turn it into an `errored` verdict), so these few cases must be excluded to
+/// keep the full-corpus run from aborting. Each is a recursion/complexity-limit
+/// gap tsc bounds internally; they are tracked as the recursion-robustness
+/// backlog in the worklog, NOT silently dropped parity work. Deterministic and
+/// documented.
+const FULL_CORPUS_DENYLIST: &[&str] = &[
+    // === inherited from EXPANDED_DENYLIST ===
+    "noTypeToStringStackOverflow.ts",
+    "templateLiteralTypeTooComplex.ts",
+    // === uncapped cases that overflow the 1 GiB harness stack (uncatchable) ===
+    // Circular control-flow narrowing: the flow analyzer recurses without the
+    // tsc shared-flow / depth guard, overflowing the stack.
+    "circularControlFlowNarrowingWithCurrentElement01.ts",
+    // Recursive variance computation: variance measurement recurses without the
+    // tsc variance/relation cache guard, overflowing the stack.
+    "varianceComputationNoCrash.ts",
 ];
 
 // Expanded characterization (RED->GREEN): the parity SMOKE over the LARGER
@@ -871,4 +921,276 @@ fn parity_summary_report_is_deterministic() {
     assert!(report.contains("\nPASS a.ts"));
     assert!(report.contains("\nFAIL b.ts\n    diff line"));
     assert!(report.contains("\nERR  c.ts\n    boom"));
+}
+
+// `top_wrong_code_pairs` ranks `(expected -> produced)` code pairs by frequency
+// (the histogram's `wrong_code` map keys only the expected code; this keeps the
+// pair so the report can show which code we emit in tsc's place).
+#[test]
+fn top_wrong_code_pairs_ranks_expected_to_produced() {
+    use crate::{CaseDiff, CodeMismatch};
+    let wrong = |code, actual| CodeMismatch {
+        kind: MismatchKind::WrongCode,
+        code,
+        actual_code: Some(actual),
+    };
+    let summary = ParitySummary::from_results(vec![
+        CaseResult {
+            name: "a.ts".into(),
+            outcome: ParityOutcome::Failed { detail: "x".into() },
+            diff: Some(CaseDiff {
+                category: CaseCategory::Divergent,
+                mismatches: vec![wrong(2304, 2580), wrong(2304, 2580)],
+            }),
+        },
+        CaseResult {
+            name: "b.ts".into(),
+            outcome: ParityOutcome::Failed { detail: "x".into() },
+            diff: Some(CaseDiff {
+                category: CaseCategory::Divergent,
+                // A `missing` mismatch must not be counted as a wrong-code pair.
+                mismatches: vec![
+                    wrong(2304, 2580),
+                    wrong(1005, 1109),
+                    CodeMismatch {
+                        kind: MismatchKind::Missing,
+                        code: 2322,
+                        actual_code: None,
+                    },
+                ],
+            }),
+        },
+    ]);
+    assert_eq!(
+        summary.top_wrong_code_pairs(25),
+        vec![((2304, 2580), 3), ((1005, 1109), 1)],
+        "sorted by count desc then pair asc; only WrongCode counted"
+    );
+}
+
+// `panic_groups` groups `errored` cases by their panic SITE (the captured
+// `file:line:col`, or the whole message when no location was captured), ranks
+// by count, and keeps a representative case + message.
+#[test]
+fn panic_groups_ranks_by_site_with_representative() {
+    let summary = ParitySummary::from_results(vec![
+        CaseResult {
+            name: "a.ts".into(),
+            outcome: ParityOutcome::Errored {
+                message: "boom  [panic at internal/checker/x.rs:10:5]".into(),
+            },
+            diff: None,
+        },
+        CaseResult {
+            name: "b.ts".into(),
+            outcome: ParityOutcome::Errored {
+                message: "kaboom  [panic at internal/checker/x.rs:10:5]".into(),
+            },
+            diff: None,
+        },
+        CaseResult {
+            name: "c.ts".into(),
+            outcome: ParityOutcome::Errored {
+                message: "no location captured".into(),
+            },
+            diff: None,
+        },
+        CaseResult {
+            name: "ok.ts".into(),
+            outcome: ParityOutcome::Passed,
+            diff: None,
+        },
+    ]);
+    let groups = summary.panic_groups();
+    assert_eq!(groups.len(), 2, "two distinct panic sites");
+    assert_eq!(groups[0].location, "internal/checker/x.rs:10:5");
+    assert_eq!(groups[0].count, 2);
+    assert_eq!(
+        groups[0].representative_case, "a.ts",
+        "first run-order case for the site"
+    );
+    assert_eq!(groups[1].location, "no location captured");
+    assert_eq!(groups[1].count, 1);
+    assert_eq!(groups[1].representative_case, "c.ts");
+}
+
+// With a `PanicLocationCapture` installed, a caught corpus panic carries its
+// source SITE (`file:line:col`) in the `Errored` message; without one the
+// message is unchanged (covered by the other panic tests).
+#[test]
+fn panic_location_capture_records_panic_site() {
+    let _hook_guard = PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new().expect("temp dir");
+    // Non-comment content before the first `// @filename` directive panics the
+    // test-file parser (a deterministic, catchable panic).
+    write_case(
+        tmp.path(),
+        "compiler",
+        "boom.ts",
+        "const x = 1;\n// @filename: a.ts\nexport {};",
+    );
+    let runner = CompilerBaselineRunner::new(CompilerTestType::Regression, tmp.path());
+
+    let capture = PanicLocationCapture::install();
+    let result = runner.run_case("boom.ts");
+    drop(capture);
+
+    match result.outcome {
+        ParityOutcome::Errored { message } => {
+            assert!(
+                message.contains("  [panic at "),
+                "errored message should carry the panic site: {message}"
+            );
+            assert!(
+                message.contains("test_case_parser.rs"),
+                "the location should name the panicking source file: {message}"
+            );
+        }
+        other => panic!("expected Errored, got {other:?}"),
+    }
+}
+
+// FULL compiler-corpus parity MEASUREMENT (opt-in / `#[ignore]`d so it does not
+// slow the default `cargo test`). Run explicitly:
+//
+//   cargo test -p tsgo_testrunner -- --ignored --nocapture full_compiler_corpus_measurement
+//
+// It walks EVERY `tests/cases/compiler` case (no line cap) through the real
+// `Program` with the bundled libs and the case's own `// @target` directive (a
+// per-case `catch_unwind` turns any panic into an `Errored` verdict so one bad
+// case never aborts the batch), then prints the prioritization map: counts +
+// percentages, the category breakdown, the TOP-25 extra / missing code tables,
+// the top `wrong_code` pairs, and the TOP panic groups (site + count +
+// representative case). It asserts only COARSE invariants (every case ran; the
+// known passing floor holds) — never brittle exact corpus-level counts, which
+// churn as parity improves. The committed fast characterizations
+// (`curated_compiler_subset_parity_smoke`, `expanded_compiler_subset_parity_smoke`)
+// stay the pinned-count signal.
+// Go: internal/testrunner/compiler_runner.go:CompilerBaselineRunner.RunTests
+#[test]
+#[ignore = "full compiler-corpus measurement; run with `-- --ignored --nocapture`"]
+fn full_compiler_corpus_measurement() {
+    let testdata = Path::new(tsgo_repo::test_data_path());
+    let runner = CompilerBaselineRunner::new(CompilerTestType::Regression, testdata);
+    let cases = runner.full_corpus(FULL_CORPUS_DENYLIST);
+    let total_selected = cases.len();
+
+    // Also measure the (much smaller) conformance suite, walked recursively
+    // (its cases live in subdirectories), excluding the shared stress denylist.
+    let conformance = CompilerBaselineRunner::new(CompilerTestType::Conformance, testdata);
+    let conformance_cases: Vec<String> = conformance
+        .enumerate_test_files()
+        .into_iter()
+        .filter(|p| {
+            Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_none_or(|n| !FULL_CORPUS_DENYLIST.contains(&n))
+        })
+        .collect();
+
+    // Large-stack thread so a deep checker recursion does not overflow the small
+    // default test-thread stack; the location-capturing panic hook records each
+    // caught panic's site for the robustness report.
+    let (summary, conformance_summary) = std::thread::Builder::new()
+        .stack_size(1024 * 1024 * 1024)
+        .spawn(move || {
+            let _capture = PanicLocationCapture::install();
+            let compiler = runner.run_cases(cases);
+            let conf = conformance.run_cases(conformance_cases);
+            (compiler, conf)
+        })
+        .expect("spawn measurement thread")
+        .join()
+        .expect("measurement thread panicked");
+
+    let counts = summary.counts();
+    let total = counts.total();
+    let pct = |n: usize| -> f64 {
+        if total == 0 {
+            0.0
+        } else {
+            (n as f64) * 100.0 / (total as f64)
+        }
+    };
+    let hist = summary.histogram();
+
+    println!("=== FULL tests/cases/compiler parity measurement ===");
+    println!(
+        "selected {total_selected} cases ({} stress cases denylisted)",
+        FULL_CORPUS_DENYLIST.len()
+    );
+    println!(
+        "total {total} | passed {} ({:.1}%) | failed {} ({:.1}%) | errored {} ({:.1}%)",
+        counts.passed,
+        pct(counts.passed),
+        counts.failed,
+        pct(counts.failed),
+        counts.errored,
+        pct(counts.errored),
+    );
+    println!(
+        "category: no_baseline_but_errors ×{}, missing_all_errors ×{}, divergent ×{}",
+        hist.no_baseline_but_errors, hist.missing_all_errors, hist.divergent,
+    );
+
+    println!("--- TOP 25 extra (false-positive) codes by frequency ---");
+    for (code, n) in hist.top_extra(25) {
+        println!("  TS{code} ×{n}");
+    }
+    println!("--- TOP 25 missing (false-negative) codes by frequency ---");
+    for (code, n) in hist.top_missing(25) {
+        println!("  TS{code} ×{n}");
+    }
+    println!("--- TOP wrong_code pairs (expected -> produced) ---");
+    for ((expected, produced), n) in summary.top_wrong_code_pairs(25) {
+        println!("  TS{expected} -> TS{produced} ×{n}");
+    }
+    println!("--- TOP panic groups (site ×count : representative case) ---");
+    for group in summary.panic_groups() {
+        println!(
+            "  {} ×{} : {}",
+            group.location, group.count, group.representative_case
+        );
+        println!("      msg: {}", group.representative_message);
+    }
+
+    // Secondary: the conformance suite (small; nested cases walked recursively).
+    let conf_counts = conformance_summary.counts();
+    let conf_total = conf_counts.total();
+    let conf_hist = conformance_summary.histogram();
+    println!("=== conformance suite (secondary) ===");
+    println!(
+        "total {conf_total} | passed {} | failed {} | errored {}",
+        conf_counts.passed, conf_counts.failed, conf_counts.errored,
+    );
+    println!(
+        "category: no_baseline_but_errors ×{}, missing_all_errors ×{}, divergent ×{}",
+        conf_hist.no_baseline_but_errors, conf_hist.missing_all_errors, conf_hist.divergent,
+    );
+    println!("conformance top extra: {:?}", conf_hist.top_extra(10));
+    println!("conformance top missing: {:?}", conf_hist.top_missing(10));
+    for group in conformance_summary.panic_groups() {
+        println!(
+            "conformance panic {} ×{} : {}",
+            group.location, group.count, group.representative_case
+        );
+    }
+
+    // COARSE invariants only — do NOT pin exact corpus-level counts here (they
+    // churn as parity improves; the curated subsets are the pinned signal).
+    assert_eq!(
+        total, total_selected,
+        "every selected case ran — the per-case catch_unwind kept the batch alive"
+    );
+    assert!(
+        counts.passed >= 1,
+        "at least one case reaches parity; report:\n{}",
+        summary.report()
+    );
+    assert_eq!(
+        conf_total,
+        conformance_summary.results().len(),
+        "every conformance case ran"
+    );
 }

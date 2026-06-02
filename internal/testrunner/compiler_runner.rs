@@ -534,6 +534,97 @@ impl ParitySummary {
         }
         out
     }
+
+    /// The top `n` `wrong_code` PAIRS — `(expected_code, produced_code)` — by
+    /// frequency across every failed case, sorted by count descending then the
+    /// pair ascending.
+    ///
+    /// The [`CategoryHistogram`]'s `wrong_code` map keys only the EXPECTED code;
+    /// this preserves the produced code too, so the report can show which code
+    /// we emit in tsc's place (e.g. `TS2304 -> TS2580 ×7`).
+    ///
+    /// Side effects: none (pure).
+    pub fn top_wrong_code_pairs(&self, n: usize) -> Vec<((u32, u32), usize)> {
+        let mut counts: indexmap::IndexMap<(u32, u32), usize> = indexmap::IndexMap::new();
+        for diff in self.results.iter().filter_map(|r| r.diff.as_ref()) {
+            for m in &diff.mismatches {
+                if m.kind == crate::MismatchKind::WrongCode {
+                    let pair = (m.code, m.actual_code.unwrap_or(0));
+                    *counts.entry(pair).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut entries: Vec<((u32, u32), usize)> = counts.into_iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        entries.truncate(n);
+        entries
+    }
+
+    /// Groups every [`Errored`](ParityOutcome::Errored) case by its panic SITE —
+    /// the `file:line:col` location recorded by an installed
+    /// [`PanicLocationCapture`], or the whole panic message when no location was
+    /// captured — into the robustness backlog: the dominant panic locations
+    /// with a count and one representative case each.
+    ///
+    /// The groups are sorted by count descending then location ascending. The
+    /// representative case / message is the first one encountered in run order.
+    ///
+    /// Side effects: none (pure).
+    pub fn panic_groups(&self) -> Vec<PanicGroup> {
+        let mut groups: indexmap::IndexMap<String, PanicGroup> = indexmap::IndexMap::new();
+        for result in &self.results {
+            let ParityOutcome::Errored { message } = &result.outcome else {
+                continue;
+            };
+            let key = panic_site_key(message).to_string();
+            groups
+                .entry(key.clone())
+                .and_modify(|g| g.count += 1)
+                .or_insert_with(|| PanicGroup {
+                    location: key,
+                    count: 1,
+                    representative_case: result.name.clone(),
+                    representative_message: message.clone(),
+                });
+        }
+        let mut out: Vec<PanicGroup> = groups.into_values().collect();
+        out.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.location.cmp(&b.location))
+        });
+        out
+    }
+}
+
+/// One panic-site group from [`ParitySummary::panic_groups`]: the grouping
+/// `location` (panic site, or the message when no location was captured), how
+/// many `errored` cases share it, and one representative case + message.
+///
+/// Side effects: none (plain data).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanicGroup {
+    /// The panic site (`file:line:col`) the group is keyed on, or the whole
+    /// panic message when no [`PanicLocationCapture`] location was recorded.
+    pub location: String,
+    /// How many `errored` cases panicked at this site.
+    pub count: usize,
+    /// The first (run-order) case name that panicked at this site.
+    pub representative_case: String,
+    /// That representative case's full panic message.
+    pub representative_message: String,
+}
+
+/// Extracts the panic SITE used to group an `errored` message: the
+/// `file:line:col` inside the `  [panic at <…>]` suffix appended when a
+/// [`PanicLocationCapture`] is active, else the whole message.
+fn panic_site_key(message: &str) -> &str {
+    if let Some(idx) = message.rfind("  [panic at ") {
+        let after = &message[idx + "  [panic at ".len()..];
+        after.strip_suffix(']').unwrap_or(after)
+    } else {
+        message
+    }
 }
 
 /// Appends each line of `detail` to `out`, indented under a case header.
@@ -642,6 +733,68 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         s.clone()
     } else {
         "panic with non-string payload".to_string()
+    }
+}
+
+thread_local! {
+    /// The source location (`file:line:col`) of the most recent panic observed
+    /// by an installed [`PanicLocationCapture`], recorded on the panicking
+    /// thread and consumed by [`CompilerBaselineRunner::run_case`].
+    static PANIC_LOCATION: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// An RAII guard that installs a SILENT panic hook recording each panic's
+/// source location (`file:line:col`) into a thread-local, so a caught panic in
+/// [`CompilerBaselineRunner::run_case`] can be grouped by its panic SITE (the
+/// robustness backlog) and not just its message. The previous hook is restored
+/// when the guard is dropped.
+///
+/// This is the opt-in instrumentation behind the full-corpus measurement: when
+/// no guard is installed, `run_case` records only the panic message (the
+/// default behavior is unchanged). When a guard is active, the caught
+/// [`Errored`](ParityOutcome::Errored) message is suffixed with
+/// `  [panic at <file:line:col>]`, which [`ParitySummary::panic_groups`] then
+/// groups on.
+///
+/// # Concurrency
+/// Like any panic-hook swap, this mutates the PROCESS-GLOBAL panic hook, so a
+/// caller must serialize it against every other hook user and is expected to
+/// run it in isolation (it backs the `#[ignore]`d full-corpus measurement, not
+/// the parallel default test suite). The hook itself is silent, so it does not
+/// spam the log with the (intentionally) caught corpus panics.
+///
+/// Side effects: replaces the global panic hook for the guard's lifetime.
+pub struct PanicLocationCapture {
+    prev: Option<BoxedPanicHook>,
+}
+
+/// The boxed panic hook type `std::panic::take_hook` returns / `set_hook`
+/// accepts, factored out for [`PanicLocationCapture`].
+type BoxedPanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+impl PanicLocationCapture {
+    /// Installs the location-capturing panic hook, returning the guard that
+    /// restores the previous hook on drop.
+    ///
+    /// Side effects: replaces the global panic hook.
+    pub fn install() -> PanicLocationCapture {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
+            PANIC_LOCATION.with(|cell| *cell.borrow_mut() = location);
+        }));
+        PanicLocationCapture { prev: Some(prev) }
+    }
+}
+
+impl Drop for PanicLocationCapture {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            std::panic::set_hook(prev);
+        }
     }
 }
 
@@ -759,6 +912,55 @@ impl CompilerBaselineRunner {
         names
     }
 
+    /// Selects the FULL suite corpus: every top-level `.ts`/`.tsx` case
+    /// basename (sorted, deterministic), with NO line cap and NO count limit,
+    /// excluding any name in `denylist`.
+    ///
+    /// This is the input to the full-corpus parity MEASUREMENT (vs.
+    /// [`curated_subset`](Self::curated_subset)'s bounded characterization). The
+    /// selection is a pure function of the committed corpus (the sorted set of
+    /// case file names minus the denylist), so it produces the same list on
+    /// every run. The `denylist` excludes the handful of unbounded-recursion /
+    /// combinatorial stress cases whose deep recursion can abort the harness
+    /// with a true stack overflow (which [`catch_unwind`](std::panic::catch_unwind)
+    /// cannot catch) or hang — every OTHER failure mode (including an ordinary
+    /// unwinding panic) is caught per-case and reported as
+    /// [`Errored`](ParityOutcome::Errored), so the run never aborts.
+    ///
+    /// Unlike `curated_subset`, this does not read each file's contents (there
+    /// is no line cap to apply), so it is a cheap directory listing.
+    ///
+    /// Side effects: reads the suite case directory (no file contents, no
+    /// writes).
+    pub fn full_corpus(&self, denylist: &[&str]) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.base_path) else {
+            return names;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let is_ts = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e == "ts" || e == "tsx");
+            if !is_ts {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if denylist.contains(&name.as_str()) {
+                continue;
+            }
+            names.push(name);
+        }
+        names.sort();
+        names
+    }
+
     /// Runs a single case (a base file name like `simpleTest.ts`, or a
     /// suite-relative path, or an absolute path) and returns its parity result.
     ///
@@ -815,12 +1017,18 @@ impl CompilerBaselineRunner {
                 };
                 (outcome, diff)
             }
-            Err(payload) => (
-                ParityOutcome::Errored {
-                    message: panic_message(payload),
-                },
-                None,
-            ),
+            Err(payload) => {
+                // When a `PanicLocationCapture` guard is active, append the
+                // panic SITE (file:line:col) the silent hook recorded on this
+                // thread, so the robustness report can group by location; with
+                // no guard installed the take is `None` and the message is just
+                // the downcast payload (the default behavior).
+                let message = match PANIC_LOCATION.with(|cell| cell.borrow_mut().take()) {
+                    Some(location) => format!("{}  [panic at {location}]", panic_message(payload)),
+                    None => panic_message(payload),
+                };
+                (ParityOutcome::Errored { message }, None)
+            }
         };
 
         CaseResult {

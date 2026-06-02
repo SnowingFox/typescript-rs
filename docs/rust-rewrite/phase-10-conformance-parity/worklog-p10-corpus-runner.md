@@ -2029,3 +2029,265 @@ No `--no-verify`; no test weakened/deleted; no new dependency; `Cargo.toml`/
   `lib` toward the full default lib; left as-is here to keep the 150-case parity
   snapshot stable (per scope). blocked-by: a dedicated re-measurement round that
   re-baselines the extra/missing histogram against the wider lib.
+
+---
+
+# Round 12 — full compiler corpus measurement
+
+Goal: a TRUE, FULL-corpus parity measurement (not the curated 150-subset) to
+drive prioritization, now that the esnext/DOM binder panic is fixed (Round 11)
+and the runner can use the real/full bundled libs via each case's own
+`// @target` directive. **Measurement + reporting only** — NO checker / parser /
+binder / compiler production code was touched; the changes are surgical and
+testrunner-only. Tree had the Round-11 edits staged.
+
+## Scope of the local corpus (important)
+
+The vendored `_submodules/TypeScript` is **absent** in this checkout, so the
+"full corpus" is the committed `testdata/` sample, not the upstream ~7 000-case
+suite:
+
+- `testdata/tests/cases/compiler`: **226** top-level `.ts`/`.tsx` cases (104
+  committed `.errors.txt` references).
+- `testdata/tests/cases/conformance`: **19** `.ts` cases nested under 6
+  subdirectories (7 committed references; no basename collisions).
+
+So "full" here = all 226 compiler cases (uncapped, vs. the 150-subset's ≤25-line
+/ ×150 cap) + all 19 conformance cases. This is tractable in one run (~8 s in
+`--release`).
+
+## What landed (testrunner-only, additive)
+
+`internal/testrunner/compiler_runner.rs` (+ `compiler_runner_test.rs`):
+
+- **`CompilerBaselineRunner::full_corpus(denylist) -> Vec<String>`** — the full
+  selector: every top-level `.ts`/`.tsx` case basename, sorted, deterministic,
+  NO line cap / NO count limit, minus the denylist. A cheap directory listing
+  (no per-file content read, unlike `curated_subset`). TDD'd by
+  `full_corpus_returns_all_sorted_minus_denylist`.
+- **`PanicLocationCapture`** — an RAII guard that installs a SILENT panic hook
+  recording each panic's source SITE (`file:line:col`) into a thread-local,
+  consumed by `run_case` so a caught `Errored` message is suffixed with
+  `  [panic at <file:line:col>]`. With no guard installed the behavior is
+  unchanged (message = downcast payload), so the existing panic tests stay
+  green. It mutates the process-global hook, so it is documented as opt-in /
+  isolation-only and backs only the `#[ignore]`d measurement (never the parallel
+  default suite). TDD'd by `panic_location_capture_records_panic_site`.
+- **`ParitySummary::top_wrong_code_pairs(n)`** — ranks `(expected -> produced)`
+  code pairs by frequency (the histogram's `wrong_code` map keys only the
+  expected code; this keeps the pair). TDD'd by
+  `top_wrong_code_pairs_ranks_expected_to_produced`.
+- **`ParitySummary::panic_groups() -> Vec<PanicGroup>`** — groups `errored`
+  cases by panic SITE (count + representative case + message), the robustness
+  backlog. TDD'd by `panic_groups_ranks_by_site_with_representative`.
+- **`#[ignore]`d `full_compiler_corpus_measurement`** — the opt-in heavy run:
+  `cargo test -p tsgo_testrunner -- --ignored --nocapture full_compiler_corpus_measurement`.
+  Runs the full compiler corpus (+ conformance, walked recursively) on a 1 GiB
+  stack thread with the panic-location hook, prints the full prioritization map,
+  and asserts only COARSE invariants (every selected case ran; `passed ≥ 1`).
+  It does NOT pin exact corpus-level counts (those churn); the curated subsets
+  remain the pinned-count signal.
+
+The fast `curated_compiler_subset_parity_smoke` (18/12/0) and
+`expanded_compiler_subset_parity_smoke` (69/81/0) characterizations are
+UNCHANGED and stay the default `cargo test` signal.
+
+### Lib handling decision
+
+The runner already feeds each case's own `// @target` directive through
+`error_baseline_for_test` → `compile_files` → `set_options_from_test_config`
+(an `Enum` option), and the program then loads the target-default lib graph
+(full DOM + `es20xx` when `@target: esnext`, etc.). This is exactly tsc's "use
+the case directives with a sensible default" behavior, and it does NOT
+blanket-panic after the Round-11 esnext/DOM fix (only 3 `errored` of 222 — see
+below). `// @lib` LIST directives remain a deferred harness gap
+(`option_value_for` returns `None` for list kinds), but honoring them would
+touch shared `harnessutil` and churn the 150-subset snapshot, so it is left as a
+documented DEFER rather than changed in this measurement round.
+
+## Measurement — `tests/cases/compiler` (FULL, 226 cases)
+
+After excluding **4** stress cases (see the recursion-robustness backlog),
+**222** cases ran:
+
+| outcome | count | % |
+|---|---|---|
+| **passed** | **85** | **38.3 %** |
+| **failed** | **134** | **60.4 %** |
+| **errored** (caught panic) | **3** | **1.4 %** |
+
+Category breakdown of the 134 failures:
+
+| category | count |
+|---|---|
+| `no_baseline_but_errors` (expected clean, we report errors) | 45 |
+| `missing_all_errors` (committed errors, we report none) | 57 |
+| `divergent` (both sides error, but differ) | 32 |
+
+### TOP-25 `extra` (FALSE-POSITIVE) codes by frequency
+
+| rank | code | ×  | meaning |
+|---|---|---|---|
+| 1 | **TS2304** | **96** | Cannot find name |
+| 2 | **TS2339** | **63** | Property does not exist on type |
+| 3 | TS2345 | 23 | Argument not assignable to parameter |
+| 4 | TS2322 | 18 | Type not assignable |
+| 5 | TS1005 | 17 | `';'` / `','` expected (parser recovery) |
+| 6 | TS1003 | 7 | Identifier expected (parser) |
+| 7 | TS1109 | 7 | Expression expected (parser) |
+| 8 | TS1128 | 6 | Declaration or statement expected (parser) |
+| 9 | TS7026 | 6 | JSX element implicitly has type `any` (no `JSX.IntrinsicElements`) |
+| 10 | TS2554 | 4 | Expected N arguments |
+| 11 | TS2495 | 2 | Type is not an array/string |
+| 12 | TS1161 | 1 | Unterminated regex |
+| 12 | TS1381 | 1 | Unexpected token (`}`) |
+| 12 | TS2344 | 1 | Type does not satisfy constraint |
+| 12 | TS2591 | 1 | Cannot find `module`/`require` (no @types/node) |
+| 12 | TS2769 | 1 | No overload matches |
+| 12 | TS5108 | 1 | Deprecated/removed option |
+| 12 | TS18048 | 1 | Value is possibly `undefined` |
+
+### TOP-25 `missing` (FALSE-NEGATIVE) codes by frequency
+
+| rank | code | ×  | meaning |
+|---|---|---|---|
+| 1 | **TS2300** | **94** | Duplicate identifier |
+| 2 | TS1110 | 11 | Type expected (parser) |
+| 3 | TS2322 | 10 | Type not assignable |
+| 4 | TS6133 | 9 | Declared but never read |
+| 5 | TS7027 | 9 | Unreachable code detected |
+| 6 | TS2321 | 8 | Cannot assign — property types incompatible |
+| 7 | TS2874 | 7 | `JSX.<X>` must be in scope (React jsx-runtime) |
+| 8 | TS2339 | 6 | Property does not exist |
+| 9 | TS2309 | 5 | Export assignment cannot be used in a module |
+| 10 | TS7008 | 5 | Member implicitly has `any` type |
+| 11 | TS1118 | 4 | Class member cannot have `;` |
+| 11 | TS1119 | 4 | Property name cannot be `__proto__` etc. |
+| 11 | TS2353 | 4 | Object literal may only specify known properties |
+| 11 | TS2688 | 4 | Cannot find type-definition file |
+| 11 | TS7006 | 4 | Parameter implicitly has `any` type |
+| 11 | TS7022 | 4 | Variable implicitly `any` (no type annotation, used before init) |
+| 17 | TS2304 | 3 | Cannot find name |
+| 17 | TS2343 | 3 | `this` of type X is not a valid `this` |
+| 17 | TS2345 | 3 | Argument not assignable |
+| 17 | TS2488 | 3 | Type must have `[Symbol.iterator]()` |
+| 17 | TS7026 | 3 | JSX implicitly `any` |
+| 17 | TS7053 | 3 | Element implicitly `any` (index signature) |
+| 23 | TS1097 | 2 | `'in'` expression error |
+| 23 | TS1202 | 2 | `import =` cannot be used in ES module |
+| 23 | TS1225 | 2 | catch clause variable type annotation |
+
+### TOP `wrong_code` pairs (expected → produced)
+
+| expected → produced | ×  | reading |
+|---|---|---|
+| **TS7026 → TS1128** | 3 | JSX intrinsic-element check vs. a parser "statement expected" over-report on `.tsx` |
+| TS2552 → TS2304 | 1 | "Did you mean…" suggestion vs. plain "cannot find name" |
+| TS7026 → TS1005 | 1 | JSX implicit-any vs. a parser `';' expected` over-report |
+
+### TOP panic groups (errored = 3) — the robustness backlog
+
+| panic site | ×  | representative case | note |
+|---|---|---|---|
+| `internal/scanner/lib.rs:3020:38` | 2 | `jsxUnicodeEscapeSequence.tsx` | **Real bug**: `byte index N is not a char boundary; it is inside '⚠'` — the scanner slices on a byte offset that lands inside a multi-byte UTF-8 character while scanning JSX text containing non-ASCII content. |
+| (file read) `regexInvalidUtf8WithUnicodeFlag.ts` | 1 | `regexInvalidUtf8WithUnicodeFlag.ts` | The case file is intentionally **not valid UTF-8**, so `std::fs::read_to_string` fails (`stream did not contain valid UTF-8`). A runner I/O limitation (lossy read / byte handling), not a compiler panic. |
+
+### Recursion-robustness backlog (denylisted — uncatchable stack overflow)
+
+These cases overflow even a **1 GiB** harness stack. A true stack overflow is a
+process abort (SIGABRT), NOT an unwinding panic, so `catch_unwind` cannot
+convert it to an `errored` verdict — the whole run would abort. They are
+denylisted (deterministic + documented) and tracked here as
+recursion/complexity-limit gaps tsc bounds internally:
+
+| case | suspected root |
+|---|---|
+| `circularControlFlowNarrowingWithCurrentElement01.ts` | flow analyzer recurses without tsc's shared-flow / depth guard |
+| `varianceComputationNoCrash.ts` | variance measurement recurses without the variance/relation cache guard |
+| `noTypeToStringStackOverflow.ts` (pre-existing) | self-referential `typeof` type-to-string |
+| `templateLiteralTypeTooComplex.ts` (pre-existing) | 49-fold template-literal union explosion (tsc rejects with TS2590) |
+
+## Measurement — `tests/cases/conformance` (secondary, 19 cases)
+
+| outcome | count |
+|---|---|
+| passed | 10 |
+| failed | 9 |
+| errored | 0 |
+
+Categories: `no_baseline_but_errors ×4`, `missing_all_errors ×5`, `divergent ×0`.
+Top extra: `TS2304 ×20`, `TS2339 ×1`, `TS5108 ×1`. Top missing: `TS8024 ×2`
+(JSDoc `@param`), then `TS2322 / TS2345 / TS2454 / TS5055 / TS7006 / TS7053`
+×1 each. Same shape as the compiler suite: the unresolved-name cascade
+dominates the false positives.
+
+## Prioritization — highest-LEVERAGE next features (by frequency)
+
+1. **Unresolved-name cascade — `extra TS2304 ×96` + `extra TS2339 ×63`
+   (+ conformance `TS2304 ×20`).** By far the largest false-positive cluster and
+   almost certainly a small set of resolution ROOTS (globals / lib members /
+   module + alias resolution / JS CommonJS) cascading into hundreds of downstream
+   `cannot find name` / `property does not exist` reports. Prior rounds (3–10)
+   chipped at it on the 150-subset; the full corpus shows it is still #1. Highest
+   leverage: each resolution root fix likely clears many cases at once.
+2. **Duplicate-identifier detection — `missing TS2300 ×94`.** The single largest
+   FALSE-NEGATIVE bucket, and a COHERENT binder/checker feature (duplicate-symbol
+   diagnostics across declaration merging). We emit it essentially never. One
+   feature ⇒ the entire ×94 bucket.
+3. **Assignability / relation false positives — `extra TS2345 ×23` +
+   `extra TS2322 ×18`** (and the symmetric `missing TS2322 ×10`). A
+   relation/assignability accuracy cluster — we both over- and under-report
+   assignability, so the comparison/relation logic is the lever.
+4. **Parser recovery over-reporting — `extra TS1005 ×17` + `TS1003 ×7` +
+   `TS1109 ×7` + `TS1128 ×6`** (~37 combined, plus the `TS7026→TS1128/1005`
+   wrong_code pairs). Syntax errors tsc never emits on valid input, exposed by
+   the larger uncapped cases (especially `.tsx`). Round 9 fixed several on the
+   small subset; the full corpus reveals more, concentrated in JSX/`.tsx`
+   recovery.
+5. **Scanner UTF-8 char-boundary panic — `internal/scanner/lib.rs:3020:38`
+   (errored ×2).** A real, cheap-to-fix robustness bug: the scanner indexes a
+   byte offset inside a multi-byte UTF-8 character on JSX text with non-ASCII
+   content. Fixing it removes 2 `errored` cases and de-risks any non-ASCII JSX
+   input. (Bonus runner hardening: read corpus files as bytes / lossily so an
+   intentionally non-UTF-8 fixture like `regexInvalidUtf8WithUnicodeFlag.ts`
+   does not surface as `errored`.)
+
+## Gate results (Round 12)
+
+- `cargo test -p tsgo_testrunner` — GREEN (**51** unit passed + **1** ignored
+  [the heavy full-corpus test] + **11** doctests; the 150-subset 69/81/0 and the
+  30-case 18/12/0 characterizations UNCHANGED).
+- full-corpus run — completes: compiler **222 → 85/134/3**, conformance
+  **19 → 10/9/0**; the per-case `catch_unwind` keeps the batch alive (only the 4
+  denylisted stack-overflow cases are excluded up front).
+- `cargo clippy -p tsgo_testrunner --all-targets -- -D warnings` — GREEN.
+- `cargo fmt -p tsgo_testrunner -- --check` — GREEN.
+- `cargo build --workspace --all-targets` — GREEN.
+
+No `--no-verify`; no test weakened/deleted; no new dependency; no production
+(checker/parser/binder/compiler) code touched; `harnessutil` untouched. The
+temporary per-case progress instrumentation used to locate the stack-overflow
+cases was REMOVED; the committed `PanicLocationCapture` + `panic_groups`
+location capture is the intended measurement design.
+
+## Test deltas
+
+- `tsgo_testrunner`: **47 → 51** unit (+4: `full_corpus`, `top_wrong_code_pairs`,
+  `panic_groups`, `panic_location_capture`) + **1** new `#[ignore]`d heavy test;
+  doctests unchanged (11). No sibling crate touched.
+
+## DEFER list (blocked-by) — Round 12
+
+- **`// @lib` list directives in the harness** — `option_value_for` returns
+  `None` for `CommandLineOptionKind::List`, so a case's explicit `// @lib` is
+  dropped (only `// @target`'s default lib graph applies). blocked-by: wiring
+  `tsoptions` list-option parsing through `set_options_from_test_config`; left
+  deferred to avoid touching shared `harnessutil` + churning the 150-subset.
+- **Recursion/complexity depth guards** — the 4 denylisted cases need tsc's
+  shared-flow / variance-cache / type-to-string / union-complexity (TS2590)
+  bounds before they can run without aborting. blocked-by: porting those guards
+  (production checker work, out of scope for a measurement round).
+- **Non-UTF-8 corpus files** — `run_case` reads via `read_to_string`; a
+  deliberately invalid-UTF-8 fixture surfaces as `errored`. blocked-by: a lossy
+  / byte-oriented case read (a small runner change, deferred to keep this round
+  measurement-only).
