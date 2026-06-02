@@ -159,6 +159,160 @@ fn variable_type_hint_matches_name_suppression() {
     assert_eq!(result[0].label.string.as_deref(), Some(": Foo"));
 }
 
+/// Preferences with parameter-name hints in `all` mode.
+fn parameter_name_all_prefs() -> InlayHintsPreferences {
+    InlayHintsPreferences {
+        include_inlay_parameter_name_hints: IncludeInlayParameterNameHints::All,
+        ..Default::default()
+    }
+}
+
+/// Joins a hint's structured label parts into one string (Go's parameter hints
+/// render `[{name-or-...name}, {":"}]`, so this yields e.g. `"a:"` / `"...xs:"`).
+fn parts_label(hint: &tsgo_lsproto::InlayHint) -> String {
+    hint.label
+        .inlay_hint_label_parts
+        .as_ref()
+        .expect("structured label parts")
+        .iter()
+        .map(|p| p.value.clone())
+        .collect()
+}
+
+// Go: internal/ls/inlay_hints.go:visitCallOrNewExpression / addParameterHints —
+// in `all` mode every argument gets a `name:` hint before it (structured parts
+// `[{name}, {":"}]`), anchored at the argument's start, with `Parameter` kind
+// and right padding (no left padding).
+#[test]
+fn parameter_name_hint_for_call_argument() {
+    let result = hints(
+        "function f(a: number) {}\nf(1)",
+        &parameter_name_all_prefs(),
+    );
+    assert_eq!(result.len(), 1);
+    let hint = &result[0];
+    assert_eq!(parts_label(hint), "a:");
+    assert_eq!(hint.kind, Some(tsgo_lsproto::InlayHintKind::PARAMETER));
+    assert_eq!(hint.padding_right, Some(true));
+    assert_eq!(hint.padding_left, None);
+    // `f(1)` is on line 1; the argument `1` starts at character 2.
+    assert_eq!(
+        hint.position,
+        Position {
+            line: 1,
+            character: 2
+        }
+    );
+}
+
+/// Preferences with parameter-name hints in `literals` mode.
+fn parameter_name_literals_prefs() -> InlayHintsPreferences {
+    InlayHintsPreferences {
+        include_inlay_parameter_name_hints: IncludeInlayParameterNameHints::Literals,
+        ..Default::default()
+    }
+}
+
+/// The structured-part labels of every hint, in walk (source) order.
+fn part_labels(result: &[tsgo_lsproto::InlayHint]) -> Vec<String> {
+    result.iter().map(parts_label).collect()
+}
+
+// Go: internal/ls/inlay_hints.go:visitCallOrNewExpression — each argument maps
+// to its parameter in order, so a two-argument call shows both names.
+#[test]
+fn parameter_name_hints_for_multiple_arguments() {
+    let result = hints(
+        "function f(a: number, b: string) {}\nf(1, \"x\")",
+        &parameter_name_all_prefs(),
+    );
+    assert_eq!(part_labels(&result), vec!["a:", "b:"]);
+}
+
+// Go: internal/ls/inlay_hints.go:identifierOrAccessExpressionPostfixMatchesParameterName —
+// when the argument's identifier name matches the parameter name (`f(a)` for a
+// parameter `a`), the hint is suppressed by default, and shown only when the
+// `…WhenArgumentMatchesName` toggle is on.
+#[test]
+fn parameter_name_hint_suppressed_when_argument_matches_name() {
+    let src = "function f(a: number) {}\nconst a = 1;\nf(a)";
+
+    // Default (toggle off): the argument `a` matches the parameter `a` -> none.
+    assert!(hints(src, &parameter_name_all_prefs()).is_empty());
+
+    // Toggle on: the matching hint is shown.
+    let prefs = InlayHintsPreferences {
+        include_inlay_parameter_name_hints: IncludeInlayParameterNameHints::All,
+        include_inlay_parameter_name_hints_when_argument_matches_name: Tristate::True,
+        ..Default::default()
+    };
+    let result = hints(src, &prefs);
+    assert_eq!(result.len(), 1);
+    assert_eq!(parts_label(&result[0]), "a:");
+}
+
+// Go: internal/ls/inlay_hints.go:visitCallOrNewExpression (literals-only mode) —
+// in `literals` mode a literal argument (`1`) gets a hint, but a non-literal
+// argument (`x`) is skipped while still advancing the parameter position (so
+// the later parameter `b` is not shown against a different argument).
+#[test]
+fn parameter_name_hints_literals_only_mode() {
+    let src = "function f(a: number, b: number) {}\nconst x = 1;\nf(1, x)";
+    let result = hints(src, &parameter_name_literals_prefs());
+    assert_eq!(part_labels(&result), vec!["a:"]);
+}
+
+// Go: internal/ls/inlay_hints.go:getParameterIdentifierInfoAtPosition (rest) +
+// addParameterHints (`...` prefix) — the first argument at a non-tuple rest
+// parameter labels it `...xs`; positions past a non-tuple rest yield no further
+// hint (Go's trailing `return nil` stops the walk), so `g(1, 2)` shows only one.
+#[test]
+fn parameter_name_hint_for_rest_parameter() {
+    let src = "function g(...xs: number[]) {}\ng(1, 2)";
+    let result = hints(src, &parameter_name_all_prefs());
+    assert_eq!(part_labels(&result), vec!["...xs:"]);
+}
+
+// Go: internal/ls/inlay_hints.go:getParameterIdentifierInfoAtPosition (fixed) —
+// an optional parameter (`a?: number`) is a fixed parameter; its hint is `a:`
+// (the `?` is not part of the parameter-name hint text).
+#[test]
+fn parameter_name_hint_for_optional_parameter() {
+    let result = hints(
+        "function h(a?: number) {}\nh(1)",
+        &parameter_name_all_prefs(),
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(parts_label(&result[0]), "a:");
+}
+
+// GUARD Go: internal/ls/inlay_hints.go:visit (shouldShowParameterNameHints gate)
+// — with parameter-name hints off (`None`), a call gets no parameter hint even
+// when another hint kind is enabled.
+#[test]
+fn parameter_name_hints_off_yields_no_call_hint() {
+    let result = hints("function f(a: number) {}\nf(1)", &enum_member_prefs());
+    assert!(result.is_empty());
+}
+
+// GUARD Go: internal/ls/inlay_hints.go:visitCallOrNewExpression (signature == nil)
+// — an unresolved (undefined) callee resolves to no signature, so the call gets
+// no hint and does not panic.
+#[test]
+fn parameter_name_hint_unresolved_call_no_panic() {
+    assert!(hints("g(1)", &parameter_name_all_prefs()).is_empty());
+}
+
+// GUARD: a `new` expression whose construct signature is not yet reachable
+// (construct signatures are DEFERRED in the resolution path) yields no
+// parameter hint and does not panic.
+// Go: internal/ls/inlay_hints.go:visitCallOrNewExpression (new resolution)
+#[test]
+fn parameter_name_hint_new_expression_construct_signature_deferred() {
+    let src = "class C { constructor(a: number) {} }\nnew C(1)";
+    assert!(hints(src, &parameter_name_all_prefs()).is_empty());
+}
+
 /// Preferences with only property-declaration-type hints enabled.
 fn property_type_prefs() -> InlayHintsPreferences {
     InlayHintsPreferences {

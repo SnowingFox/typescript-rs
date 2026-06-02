@@ -92,7 +92,7 @@ pub use core::symbols::{
     ModuleSymbolLinks, SymbolLinks, SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
 };
 pub use core::symbols_query::{
-    get_symbol_at_location, get_symbol_of_declaration, get_type_at_location,
+    get_resolved_signature, get_symbol_at_location, get_symbol_of_declaration, get_type_at_location,
 };
 pub use core::type_facts::TypeFacts;
 pub use core::types::{

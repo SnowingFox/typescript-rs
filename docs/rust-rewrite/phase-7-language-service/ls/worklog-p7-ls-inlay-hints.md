@@ -248,3 +248,142 @@ rule, the annotation skip, `isModuleReferenceType`, and the
 - `cargo clippy -p tsgo_checker -p tsgo_ls --all-targets -- -D warnings`: clean.
 - `cargo fmt -p tsgo_checker -p tsgo_ls -- --check`: clean.
 - `cargo build --workspace --all-targets`: success.
+
+---
+
+# P7 — getResolvedSignature query + inlay parameter-name hints
+
+> This round added the checker-query keystone **`get_resolved_signature`** (a
+> faithful subset of Go's `GetResolvedSignature`, mapping a call / `new`
+> expression to its resolved `Signature`) and re-enabled the previously-DEFERRED
+> **parameter-name** inlay hint kind on top of it. Strict TDD (red→green vertical
+> slices) verified against `internal/checker/checker.go:getResolvedSignature` and
+> `internal/ls/inlay_hints.go:visitCallOrNewExpression` /
+> `getParameterIdentifierInfoAtPosition` / `addParameterHints`.
+> Touched: `internal/checker/core/contextual.rs` (promote the existing call
+> resolver), `internal/checker/core/symbols_query.rs` (+ `symbols_query_test.rs`),
+> `internal/checker/lib.rs` (one additive re-export), `internal/ls/inlay_hints.rs`
+> (+ `inlay_hints_test.rs`). No Cargo manifest / `Cargo.lock` edit; no external
+> dep; no sibling test weakened or deleted.
+
+## Step 0 — diagnosis: an on-demand resolution exposure, NOT a cache accessor
+
+`check_call_expression` (`check.rs`) resolves the call's signature, but only
+**memoizes** it on the node (`resolved_signatures`) for the
+generic-inferred-type-argument branch (`resolve_inferred_type_argument_signature`).
+A plain `f(1)` is *not* cached on the node, so a pure reachable-accessor (read
+the cache) would miss the common case.
+
+But the checker already had a **private, recursion-safe, reachable subset of
+`getResolvedSignature`**: `get_resolved_signature_for_contextual_argument`
+(`contextual.rs`), which (a) returns the node's memoized instantiated signature
+when present, else (b) types *only* the callee (rolling its diagnostics back) and
+returns its single call signature, deferring overloaded / non-callable callees.
+This is exactly the on-demand resolution the LS needs.
+
+The minimal faithful fix is therefore an **exposure**, reusing that path (no
+re-implemented overload resolution): promote the private method to a shared
+`pub(crate) Checker::get_resolved_signature` (the contextual typer now calls it
+too, mirroring Go where both `getContextualTypeForArgumentAtIndex` and the
+inlay-hint walk call the one `getResolvedSignature`), and add a free
+`pub fn get_resolved_signature(checker, program, node) -> Option<SignatureId>`
+next to `get_type_at_location`. The signature's parameters
+(`checker.signature(sig).parameters` — already `pub`), its `HAS_REST_PARAMETER`
+flag, and each parameter symbol's name / value declaration give the LS everything
+it needs; no new low-level checker API.
+
+## What landed
+
+| File | Go source | What |
+|---|---|---|
+| `checker/core/contextual.rs` | `checker.go:getResolvedSignature` | rename `get_resolved_signature_for_contextual_argument` → `pub(crate) get_resolved_signature` (shared by contextual typing + the LS query); body unchanged (cache hit → type callee w/ diagnostic rollback → single call signature) |
+| `checker/core/symbols_query.rs` | `checker.go:GetResolvedSignature` | `pub fn get_resolved_signature(checker, program, node) -> Option<SignatureId>` wrapping the method |
+| `checker/lib.rs` | — | additive `pub use … get_resolved_signature` |
+| `ls/inlay_hints.rs` | `inlay_hints.go:visitCallOrNewExpression` + helpers | re-enabled the parameter-name dispatch in `visit`; `visit_call_or_new_expression`, `get_parameter_identifier_info_at_position`, `get_parameter_declaration_identifier`, `identifier_or_access_expression_postfix_matches_parameter_name`, `leading_comments_contains_parameter_name`, `add_parameter_hints`, `should_show_parameter_name_hints`, `should_show_literal_parameter_name_hints_only` |
+| `checker/core/symbols_query_test.rs` | — | +4 checker tests |
+| `ls/inlay_hints_test.rs` | — | +9 LS tests |
+
+### Divergences (noted in code)
+
+- **Parameter-name label parts without the `Location` link.** Go's
+  `addParameterHints` builds `[{name}, {":"}]` with a clickable `Location` on the
+  name part (`getNodeDisplayPart`). This round produces the same two-part
+  structure and text but defers the link (the `Converters` are not available
+  inside the checking-context walk — same shape as the type-hint link deferral).
+- **Tuple paths deferred.** A fixed-tuple `...spread` argument's multi-position
+  expansion and a rest-tuple's per-element labels (`...args: [a, b]`) are
+  deferred (blocked-by tuple `ElementFlags` / `FixedLength` / labeled
+  declarations). A non-tuple spread advances one position (Go's fall-through) and
+  a tuple rest yields no hint rather than a wrong one. `new` construct signatures
+  and overloaded-call disambiguation remain deferred in the resolution path.
+
+## RED → GREEN slices (one behavior at a time)
+
+Checker (`get_resolved_signature`):
+1. **`function f(a: number) {}; f(1)` → resolves to a signature whose first
+   parameter symbol is named `a`** (headline; the keystone). RED: function
+   absent. GREEN: the exposure.
+2. GUARD `g(1)` (undefined `g`) → `None`, no panic.
+3. GUARD a non-call node (the source file) → `None`.
+4. `function g(...xs: number[]) {}; g(1)` → signature flagged
+   `HAS_REST_PARAMETER`, first parameter symbol `xs`.
+
+LS (parameter-name, `all` then `literals`):
+5. **`f(1)` (mode `all`) → `a:` before `1`** (structured parts `[{a}, {:}]`,
+   `Parameter` kind, right padding, anchored at the argument start) (headline).
+   RED: 0 hints (kind DEFERRED). GREEN: the dispatch + walk.
+6. `f(1, "x")` → `a:`, `b:` (each argument maps to its parameter in order).
+7. suppression: `const a = 1; f(a)` → none (the argument `a` matches the
+   parameter `a`); with `…WhenArgumentMatchesName` on → `a:` shown.
+8. literals-only: `f(1, x)` → only `a:` (the non-literal `x` is skipped but still
+   advances the parameter position).
+9. rest: `function g(...xs: number[]){}; g(1, 2)` → only `...xs:` (the leading
+   variadic position is labeled; positions past a non-tuple rest stop the walk).
+10. optional: `function h(a?: number){}; h(1)` → `a:` (a fixed parameter; `?` is
+    not part of the hint text).
+11. GUARDs: parameter-name off (enum pref only) → no call hint; unresolved `g(1)`
+    → none, no panic; `new C(1)` (construct signature deferred) → none, no panic.
+
+## Ported vs still DEFERRED
+
+**Newly ported (faithful):** `get_resolved_signature` (the cache-hit / single
+call-signature reachable subset); the **parameter-name** hint kind with Go's
+rules — `shouldShowParameterNameHints` / `shouldShowLiteralParameterNameHintsOnly`,
+`isHintableLiteral` literals filter, `getParameterIdentifierInfoAtPosition`
+(fixed + non-tuple rest), `getParameterDeclarationIdentifier`, the
+argument-name-matches-parameter suppression (with `…WhenArgumentMatchesName`),
+`leadingCommentsContainsParameterName`, and `addParameterHints` (`...` rest
+prefix, `Parameter` kind, right padding).
+
+**Still DEFERRED (with `blocked-by`):**
+- The parameter-name `Location` link (`getNodeDisplayPart`) — converters not in
+  the walk.
+- The fixed-tuple `...spread` expansion + the rest-tuple labeled-element path —
+  blocked-by tuple `ElementFlags` / `FixedLength` / labeled declarations.
+- `new` construct signatures + overloaded-call disambiguation in the resolution
+  path — blocked-by construct signatures + overload resolution.
+- **Function parameter-type / return-type hints** — still blocked-by a public
+  `getSignatureFromDeclaration` / `getReturnTypeOfSignature` /
+  `getTypePredicateOfSignature` + the type-node → label-parts renderer.
+
+## Reuse for future rounds
+
+`get_resolved_signature` + `checker.signature(sig)` is the shared call-resolution
+surface signature help (`signatureHelp.go` completeness) and completion detail
+(`getCompletionEntryDetails`) will reuse — both need "the signature at this call
+site" and its parameters. No new checker API should be needed for those beyond
+the construct-signature / overload-disambiguation DEFERs noted above.
+
+## Gate results (all GREEN, never `--no-verify`)
+
+- `cargo test -p tsgo_checker`: **824 lib + 180 doctests pass** (+4 query tests).
+- `cargo test -p tsgo_ls`: **133 lib + 1 doctest pass** (+9; hover / quick-info /
+  variable-type / enum tests unchanged — no regression).
+- `cargo test -p tsgo_ls_lsutil`: **59 lib + 32 doctests pass**.
+- `cargo test -p tsgo_compiler`: **134 lib + 11 doctests pass** (downstream of the
+  checker public-surface change, per the README gate — no checker regression).
+- `cargo test -p tsgo_fourslash`: **51 lib + 1 doctest pass** (quick-info /
+  signature commands stay green).
+- `cargo clippy -p tsgo_checker -p tsgo_ls -p tsgo_ls_lsutil --all-targets -- -D warnings`: clean.
+- `cargo fmt` then `cargo fmt -- --check`: clean.
+- `cargo build --workspace --all-targets`: success.

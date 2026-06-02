@@ -12,6 +12,7 @@ use tsgo_ast::{Kind, NodeArena, NodeData, NodeFlags, NodeId, SymbolFlags, Symbol
 
 use super::declared_types::{get_property_of_type, get_type_of_symbol};
 use super::program::BoundProgram;
+use super::signatures::SignatureId;
 use super::symbols::resolve_name;
 use super::types::TypeId;
 use super::Checker;
@@ -159,6 +160,49 @@ pub fn get_type_at_location(
     }
 
     checker.error_type()
+}
+
+/// Resolves the signature called at a call / `new` expression `node` for
+/// tooling queries (Go's `GetResolvedSignature`), returning the chosen
+/// [`SignatureId`] or `None`.
+///
+/// This is the call-side analogue of [`get_type_at_location`]: the language
+/// service asks "which signature does this call resolve to?" and gets the
+/// signature whose parameters (names / types / rest / `this`) drive the
+/// parameter-name inlay hints and signature help. It reuses the checker's
+/// existing call-resolution path
+/// ([`Checker::get_resolved_signature`]) — it does **not** re-implement overload
+/// resolution: the callee is typed (never the arguments, so the query cannot
+/// recurse into argument checking) and its single call signature is returned; a
+/// generic call whose type arguments were inferred returns the instantiated
+/// signature memoized on the node.
+///
+/// Returns `None` (Go's `nil`) for a non-call/`new` node, an unresolved /
+/// non-callable callee (no call signatures), or an overloaded callee (deferred).
+///
+/// DEFER(phase-4-checker-4bm+): overloaded-call disambiguation, construct
+/// signatures for `new` (the underlying path returns only call signatures), and
+/// the `import(...)`/JSX/decorator/tagged-template call targets. blocked-by:
+/// overload resolution + construct signatures + those call targets.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{get_resolved_signature, BoundProgram, Checker, SignatureId};
+/// use tsgo_ast::NodeId;
+/// fn resolved<P: BoundProgram>(c: &mut Checker, p: &P, call: NodeId) -> Option<SignatureId> {
+///     get_resolved_signature(c, p, call)
+/// }
+/// ```
+///
+/// Side effects: may allocate types while resolving the callee; any diagnostics
+/// it would emit are rolled back.
+// Go: internal/checker/checker.go:Checker.GetResolvedSignature
+pub fn get_resolved_signature(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Option<SignatureId> {
+    checker.get_resolved_signature(program, node)
 }
 
 /// Reports whether `node` is a declaration whose type is its symbol's type, for

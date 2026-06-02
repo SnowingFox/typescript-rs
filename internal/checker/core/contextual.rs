@@ -269,7 +269,7 @@ impl Checker {
     /// Recursion safety: the applicable signature is resolved by typing only the
     /// callee expression (never the arguments) and selecting the single call
     /// signature, so this contextual lookup can never re-enter argument
-    /// checking. See [`Checker::get_resolved_signature_for_contextual_argument`].
+    /// checking. See [`Checker::get_resolved_signature`].
     ///
     /// DEFER(phase-4-checker-4bm+): the `import(...)` call argument types
     /// (`string`/`ImportCallOptions`/`any`), the JSX first-argument signature,
@@ -283,8 +283,7 @@ impl Checker {
         call_target: NodeId,
         arg_index: usize,
     ) -> Option<TypeId> {
-        let signature =
-            self.get_resolved_signature_for_contextual_argument(program, call_target)?;
+        let signature = self.get_resolved_signature(program, call_target)?;
         // Go's `getTypeAtPosition` returns `anyType` for an out-of-range
         // (non-rest) position; mirror that here so an extra argument still has a
         // contextual type.
@@ -294,24 +293,32 @@ impl Checker {
         )
     }
 
-    /// Resolves the signature applicable to `call_target` for the purpose of
-    /// contextually typing its arguments, *without* re-checking the arguments —
-    /// the reachable, recursion-safe subset of Go's `getResolvedSignature`.
+    /// Resolves the signature applicable to a call / `new` expression
+    /// `call_target` *without* re-checking the arguments — the reachable,
+    /// recursion-safe subset of Go's `getResolvedSignature`.
+    ///
+    /// This is the shared call-resolution entry: contextual argument typing
+    /// ([`Checker::get_contextual_type_for_argument_at_index`]) and the
+    /// language-service [`get_resolved_signature`](super::symbols_query::get_resolved_signature)
+    /// query both go through it, mirroring Go where both
+    /// `getContextualTypeForArgumentAtIndex` and the inlay-hint
+    /// `visitCallOrNewExpression` call the one `getResolvedSignature`.
     ///
     /// The callee is typed (cheap and idempotent — for an identifier it is just
     /// a symbol-type lookup), then its single call signature is the resolved
-    /// one. Because selecting it never consults the arguments, the contextual
-    /// pass cannot recurse back into argument checking (Go guards the same
-    /// cycle with the `resolvingSignature` sentinel on `signatureLinks`). An
-    /// overloaded callee (more than one signature, which Go would disambiguate
-    /// from the argument types) and a non-callable one (no signatures) are
-    /// deferred and yield `None`.
+    /// one. Because selecting it never consults the arguments, the resolution
+    /// cannot recurse back into argument checking (Go guards the same cycle with
+    /// the `resolvingSignature` sentinel on `signatureLinks`). A generic call
+    /// whose type arguments were inferred returns the instantiated signature
+    /// memoized on the node. An overloaded callee (more than one signature,
+    /// which Go would disambiguate from the argument types) and a non-callable
+    /// one (no signatures) are deferred and yield `None`.
     ///
     /// Any diagnostics produced while typing the callee here are discarded: the
-    /// call-checking pass reports them once on its own, so the contextual lookup
-    /// must not duplicate them (Go's `getResolvedSignature` is memoized on
-    /// `signatureLinks`, so the second, contextual resolution is a cache hit
-    /// that re-emits nothing).
+    /// call-checking pass reports them once on its own, so this lookup must not
+    /// duplicate them (Go's `getResolvedSignature` is memoized on
+    /// `signatureLinks`, so a second resolution is a cache hit that re-emits
+    /// nothing).
     ///
     /// DEFER(phase-4-checker-4bm+): the overloaded-target case — Go resolves the
     /// chosen overload via `getResolvedSignature` and (during inference) unions
@@ -324,7 +331,7 @@ impl Checker {
     /// Side effects: may allocate types while resolving the callee; any
     /// diagnostics it would emit are rolled back.
     // Go: internal/checker/checker.go:Checker.getResolvedSignature (reachable subset)
-    fn get_resolved_signature_for_contextual_argument(
+    pub(crate) fn get_resolved_signature(
         &mut self,
         program: &dyn BoundProgram,
         call_target: NodeId,

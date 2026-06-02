@@ -188,6 +188,80 @@ fn get_type_at_location_source_file_is_error_type() {
     assert_eq!(t, c.error_type());
 }
 
+// Navigates to the call expression that is the expression of statement
+// `stmt_idx` (an `ExpressionStatement` whose expression is a `CallExpression`).
+fn call_expression(p: &StubProgram, stmt_idx: usize) -> NodeId {
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("expected a source file"),
+    };
+    match arena.data(stmts[stmt_idx]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expected an expression statement"),
+    }
+}
+
+// Go: internal/checker/checker.go:Checker.GetResolvedSignature — resolving a
+// call expression returns the chosen signature, whose first parameter symbol is
+// the declared parameter `a`. This is the keystone the language-service
+// parameter-name inlay hints stand on (it maps a call site to its signature's
+// parameters).
+#[test]
+fn get_resolved_signature_returns_signature_with_named_parameter() {
+    let p = StubProgram::parse_and_bind("/a.ts", "function f(a: number) {}\nf(1);");
+    let mut c = Checker::new();
+    let call = call_expression(&p, 1);
+    let sig = get_resolved_signature(&mut c, &p, call).expect("a resolved signature");
+    let params = c.signature(sig).parameters.clone();
+    assert_eq!(params.len(), 1);
+    assert_eq!(p.symbol(params[0]).name, "a");
+}
+
+// GUARD Go: internal/checker/checker.go:Checker.GetResolvedSignature — an
+// unresolved (undefined) callee has no call signatures, so resolution yields
+// `None` (and does not panic): the language-service hint guard relies on this.
+#[test]
+fn get_resolved_signature_none_for_unresolved_call() {
+    let p = StubProgram::parse_and_bind("/a.ts", "g(1);");
+    let mut c = Checker::new();
+    let call = call_expression(&p, 0);
+    assert!(get_resolved_signature(&mut c, &p, call).is_none());
+}
+
+// GUARD: a node that is not a call / `new` expression resolves to no signature.
+// Go: internal/checker/checker.go:Checker.getResolvedSignature (non-call node)
+#[test]
+fn get_resolved_signature_none_for_non_call_node() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const x = 1;");
+    let mut c = Checker::new();
+    assert!(get_resolved_signature(&mut c, &p, p.root()).is_none());
+}
+
+// Go: internal/checker/checker.go:Checker.GetResolvedSignature — a call to a
+// rest-parameter function resolves to a signature flagged
+// `HAS_REST_PARAMETER`, whose first parameter symbol is the rest parameter
+// `xs`. The language-service hint maps the rest position via this flag.
+#[test]
+fn get_resolved_signature_exposes_rest_parameter() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         function g(...xs: number[]) {}\n\
+         g(1);",
+    );
+    let mut c = Checker::new();
+    let call = call_expression(&p, 2);
+    let sig = get_resolved_signature(&mut c, &p, call).expect("a resolved signature");
+    assert!(c
+        .signature(sig)
+        .flags
+        .contains(crate::core::signatures::SignatureFlags::HAS_REST_PARAMETER));
+    let params = c.signature(sig).parameters.clone();
+    assert_eq!(params.len(), 1);
+    assert_eq!(p.symbol(params[0]).name, "xs");
+}
+
 // Go: internal/checker/checker.go:Checker.resolveName (meaning + scope)
 #[test]
 fn resolve_name_respects_meaning_and_scope() {
