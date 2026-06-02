@@ -23,6 +23,7 @@ pub mod folding;
 pub mod hover;
 pub mod references;
 pub mod rename;
+pub mod semantictokens;
 pub mod signaturehelp;
 pub mod symbols;
 
