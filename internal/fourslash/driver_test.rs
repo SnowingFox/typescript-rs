@@ -1,5 +1,5 @@
 use super::*;
-use tsgo_lsproto::Position;
+use tsgo_lsproto::{Location, Position};
 
 // `new_fourslash` parses the markup and builds a service exposing the markers
 // and the first file as active.
@@ -128,4 +128,211 @@ fn driver_exposes_ranges() {
     let f = new_fourslash("const x = [|1|];");
     assert_eq!(f.ranges().len(), 1);
     assert_eq!(f.test_data().files.len(), 1);
+}
+
+// === Quick-info variants (current-position form) ===========================
+
+// `verify_quick_info_is` passes when the LS type at the current caret matches.
+// Go: internal/fourslash/fourslash.go:FourslashTest.VerifyQuickInfoIs
+#[test]
+fn verify_quick_info_is_passes_for_correct_type() {
+    let mut f = new_fourslash("const x: number = 1; /*x*/x");
+    f.go_to_marker("x").unwrap();
+    f.verify_quick_info_is("number")
+        .expect("quick info matches `number` at the current caret");
+}
+
+// Negative guard: a wrong expectation makes `verify_quick_info_is` fail.
+// Go: internal/fourslash/fourslash.go:FourslashTest.verifyHoverMarkdown (mismatch)
+#[test]
+fn verify_quick_info_is_fails_for_wrong_type() {
+    let mut f = new_fourslash("const x: number = 1; /*x*/x");
+    f.go_to_marker("x").unwrap();
+    let err = f.verify_quick_info_is("string").unwrap_err();
+    assert!(err.0.contains("Quick info mismatch"), "got: {}", err.0);
+    assert!(err.0.contains("At marker 'x'"), "got: {}", err.0);
+}
+
+// `verify_quick_info_exists` passes when there is quick info at the caret.
+// Go: internal/fourslash/fourslash.go:FourslashTest.VerifyQuickInfoExists
+#[test]
+fn verify_quick_info_exists_passes_when_present() {
+    let mut f = new_fourslash("const x: number = 1; /*x*/x");
+    f.go_to_marker("x").unwrap();
+    f.verify_quick_info_exists()
+        .expect("quick info exists at `x`");
+}
+
+// Negative guard: at a token with no resolvable symbol (the `const` keyword)
+// there is no quick info, so `verify_quick_info_exists` fails.
+// Go: internal/fourslash/fourslash.go:FourslashTest.VerifyQuickInfoExists (empty)
+#[test]
+fn verify_quick_info_exists_fails_on_keyword() {
+    let mut f = new_fourslash("/*k*/const x: number = 1;");
+    f.go_to_marker("k").unwrap();
+    let err = f.verify_quick_info_exists().unwrap_err();
+    assert!(err.0.contains("got none"), "got: {}", err.0);
+}
+
+// === Completions ===========================================================
+
+// `verify_completions_include` passes when every expected label is present.
+// Go: internal/fourslash/fourslash.go:FourslashTest.verifyCompletionsItems (Includes)
+#[test]
+fn verify_completions_include_passes() {
+    let mut f = new_fourslash("const o = { a: 1 }; o./*1*/");
+    f.verify_completions_include("1", &["a"])
+        .expect("`a` is a member completion of `o`");
+}
+
+// Negative guard: a missing label fails `verify_completions_include`.
+// Go: internal/fourslash/fourslash.go:FourslashTest.verifyCompletionsItems (Includes not found)
+#[test]
+fn verify_completions_include_fails_for_missing_label() {
+    let mut f = new_fourslash("const o = { a: 1 }; o./*1*/");
+    let err = f.verify_completions_include("1", &["zzz"]).unwrap_err();
+    assert!(err.0.contains("Label 'zzz' not found"), "got: {}", err.0);
+}
+
+// `verify_completions_exact` passes when the labels equal the expected set (in
+// label order).
+// Go: internal/fourslash/fourslash.go:FourslashTest.verifyCompletionsAreExactly
+#[test]
+fn verify_completions_exact_passes() {
+    let mut f = new_fourslash("const o = { a: 1, b: 2 }; o./*m*/");
+    f.verify_completions_exact("m", &["a", "b"])
+        .expect("`o`'s members are exactly `a`, `b`");
+}
+
+// Negative guard: a wrong (too small) expected set fails `verify_completions_exact`.
+// Go: internal/fourslash/fourslash.go:FourslashTest.verifyCompletionsAreExactly (mismatch)
+#[test]
+fn verify_completions_exact_fails_for_wrong_set() {
+    let mut f = new_fourslash("const o = { a: 1, b: 2 }; o./*m*/");
+    let err = f.verify_completions_exact("m", &["a"]).unwrap_err();
+    assert!(err.0.contains("Labels mismatch"), "got: {}", err.0);
+}
+
+// `verify_completions_excludes` passes when none of the labels are present.
+// Go: internal/fourslash/fourslash.go:FourslashTest.verifyCompletionsItems (Excludes)
+#[test]
+fn verify_completions_excludes_passes() {
+    let mut f = new_fourslash("const o = { a: 1 }; o./*1*/");
+    f.verify_completions_excludes("1", &["b"])
+        .expect("`b` is not a member completion of `o`");
+}
+
+// Negative guard: a present label fails `verify_completions_excludes`.
+// Go: internal/fourslash/fourslash.go:FourslashTest.verifyCompletionsItems (Excludes found)
+#[test]
+fn verify_completions_excludes_fails_when_present() {
+    let mut f = new_fourslash("const o = { a: 1 }; o./*1*/");
+    let err = f.verify_completions_excludes("1", &["a"]).unwrap_err();
+    assert!(
+        err.0.contains("should not be in actual items"),
+        "got: {}",
+        err.0
+    );
+}
+
+// === Go-to-definition ======================================================
+
+// `verify_go_to_definition` resolves a use to its declaration-name marker.
+// Go: internal/fourslash/fourslash.go:FourslashTest.VerifyBaselineGoToDefinition
+#[test]
+fn verify_go_to_definition_resolves_to_declaration() {
+    let mut f = new_fourslash("const /*def*/x = 1; /*use*/x;");
+    f.verify_go_to_definition("use", &["def"])
+        .expect("definition of `x` use is the `x` declaration name");
+}
+
+// `verify_definition_at` is the single-target convenience form.
+// Go: internal/fourslash/fourslash.go:FourslashTest.VerifyBaselineGoToDefinition (single)
+#[test]
+fn verify_definition_at_single_target() {
+    let mut f = new_fourslash("const /*def*/x = 1; /*use*/x;");
+    f.verify_definition_at("use", "def")
+        .expect("definition of `x` use is the `x` declaration name");
+}
+
+// Negative guard: a wrong target marker fails `verify_go_to_definition`.
+// Go: internal/fourslash/fourslash.go:FourslashTest.verifyBaselineDefinitions (mismatch)
+#[test]
+fn verify_go_to_definition_fails_for_wrong_target() {
+    let mut f = new_fourslash("const /*def*/x = 1; /*use*/x;");
+    let err = f.verify_go_to_definition("use", &["use"]).unwrap_err();
+    assert!(
+        err.0.contains("Go-to-definition mismatch"),
+        "got: {}",
+        err.0
+    );
+}
+
+// === Find-all-references ===================================================
+
+// `verify_references_at` matches the symbol's references against the `[|ranges|]`
+// (declaration + both uses).
+// Go: internal/fourslash/fourslash.go:FourslashTest.VerifyBaselineFindAllReferences
+#[test]
+fn verify_references_at_matches_ranges() {
+    let mut f = new_fourslash("const [|/*r*/x|] = 1; [|x|]; [|x|];");
+    let expected: Vec<Location> = f.ranges().iter().map(|r| r.ls_location()).collect();
+    assert_eq!(expected.len(), 3);
+    f.verify_references_at("r", &expected)
+        .expect("references of `x` are the three ranges");
+}
+
+// Negative guard: a missing expected range fails `verify_references_at`.
+// Go: internal/fourslash/fourslash.go:FourslashTest.VerifyBaselineFindAllReferences (mismatch)
+#[test]
+fn verify_references_at_fails_for_wrong_ranges() {
+    let mut f = new_fourslash("const [|/*r*/x|] = 1; [|x|]; [|x|];");
+    let expected: Vec<Location> = f.ranges().iter().map(|r| r.ls_location()).collect();
+    let err = f.verify_references_at("r", &expected[..2]).unwrap_err();
+    assert!(
+        err.0.contains("Find-all-references mismatch"),
+        "got: {}",
+        err.0
+    );
+}
+
+// === Diagnostics ===========================================================
+
+// `verify_number_of_errors_in_current_file` counts the semantic error (TS2322).
+// Go: internal/fourslash/fourslash.go:FourslashTest.VerifyNumberOfErrorsInCurrentFile
+#[test]
+fn verify_number_of_errors_counts_semantic_error() {
+    let mut f = new_fourslash("const x: number = \"s\";");
+    f.verify_number_of_errors_in_current_file(1)
+        .expect("one semantic error in the current file");
+}
+
+// Negative guard: a wrong expected count fails.
+// Go: internal/fourslash/fourslash.go:FourslashTest.VerifyNumberOfErrorsInCurrentFile (mismatch)
+#[test]
+fn verify_number_of_errors_fails_for_wrong_count() {
+    let mut f = new_fourslash("const x: number = \"s\";");
+    let err = f.verify_number_of_errors_in_current_file(0).unwrap_err();
+    assert!(
+        err.0.contains("Expected 0 errors") && err.0.contains("got 1"),
+        "got: {}",
+        err.0
+    );
+}
+
+// `verify_no_errors` passes for a clean file.
+// Go: internal/fourslash/fourslash.go:FourslashTest.VerifyNoErrors
+#[test]
+fn verify_no_errors_passes_for_clean_file() {
+    let mut f = new_fourslash("const x: number = 1;");
+    f.verify_no_errors().expect("a clean file has no errors");
+}
+
+// Negative guard: an error file fails `verify_no_errors`.
+// Go: internal/fourslash/fourslash.go:FourslashTest.VerifyNoErrors (errors found)
+#[test]
+fn verify_no_errors_fails_for_error_file() {
+    let mut f = new_fourslash("const x: number = \"s\";");
+    let err = f.verify_no_errors().unwrap_err();
+    assert!(err.0.contains("Expected no errors"), "got: {}", err.0);
 }

@@ -201,3 +201,156 @@ NotExists`) since the LS surface already exists — then **D1 completions** (dri
 `tsgo_ls::completions` + port the `tests/util` constant tables) and **D1
 go-to-definition / find-all-references** (inline form). Defer D2 baseline +
 D5 transport + D6 corpus until a few inline command families are green.
+
+# Round 25 — fourslash command surface (completions/definition/references/quickinfo)
+
+Round goal: expand the verify/navigation command surface so the harness can
+drive more real LS behaviors, building toward the 4386-case corpus. This round
+ports the **most-used inline command families**, each driving an already-ported
+`tsgo_ls` provider directly (the in-process LS, per R23 — the LSP-server
+transport and `VerifyBaseline*` machinery stay deferred). Strict TDD red→green
+vertical slices; every command got a positive smoke test + a negative guard.
+Tree was clean at `ca7900a6`. **No `tsgo_ls` changes** (it stayed green); all
+additions are surgical/additive in `tsgo_fourslash` (`driver.rs` +
+`driver_test.rs` + this worklog).
+
+## Commands ported (with the LS provider each drives)
+
+All added to `driver.rs`'s `impl FourslashTest`, with Rustdoc + `// Go:` anchors:
+
+1. **Quick-info variants** (drive `LanguageService::get_quick_info_at_position`,
+   rounding out R23's marker-form `verify_quick_info_at`):
+   - `quick_info_at_current_position()` — primitive reading the **current** caret
+     (Go: `getQuickInfoAtCurrentPosition`).
+   - `verify_quick_info_is(expected_text)` — Go: `VerifyQuickInfoIs` (compares at
+     the current caret; reachable type-string compare, not the markdown body).
+   - `verify_quick_info_exists()` — Go: `VerifyQuickInfoExists` (`Some` ⇒ exists).
+2. **Completions** (drive `LanguageService::provide_completions`):
+   - `completions_at_current_position()` — primitive (Go: `getCompletions`; list
+     already label-sorted, matching Go's `CompareCompletionEntries` re-sort).
+   - `verify_completions_include(marker, &[names])` — Go: `verifyCompletionsItems`
+     `Includes` (each expected label present).
+   - `verify_completions_exact(marker, &[names])` — Go: `verifyCompletionsAreExactly`
+     (labels equal, in label order).
+   - `verify_completions_excludes(marker, &[names])` — Go: `verifyCompletionsItems`
+     `Excludes` (none present).
+   - All three: a `None` list (non-completion location) is an error unless the
+     expected/excluded slice is empty (Go's `verifyCompletionsResult` nil guard).
+3. **Go-to-definition** (drive `LanguageService::provide_definition`):
+   - `verify_go_to_definition(from_marker, &[to_markers])` — Go:
+     `VerifyBaselineGoToDefinition`/`verifyBaselineDefinitions`, adapted to the
+     classic inline form: resolve definitions at `from`, assert the multiset of
+     definition `(uri, range.start)` equals the target markers'
+     `(uri, ls_position)` (each `/*def*/` marker sits at a declaration-name start).
+   - `verify_definition_at(from_marker, to_marker)` — single-target convenience.
+4. **Find-all-references** (drive `LanguageService::provide_references`):
+   - `verify_references_at(marker, &[Location])` — Go:
+     `VerifyBaselineFindAllReferences` semantics (resolve symbol, collect every
+     reference incl. the declaration), adapted to compare order-independently
+     against the test's explicit `[|ranges|]` (mapped via
+     `RangeMarker::ls_location`) instead of recording a baseline.
+5. **Diagnostics** (drive `LanguageService::get_syntactic_diagnostics` +
+   `get_semantic_diagnostics`):
+   - `diagnostics_for_file(file)` — private combine (Go: `getDiagnostics`).
+   - `verify_number_of_errors_in_current_file(n)` — Go:
+     `VerifyNumberOfErrorsInCurrentFile` (count non-suggestion diagnostics).
+   - `verify_no_errors()` — Go: `VerifyNoErrors` (iterate every test file).
+   - free helper `is_suggestion_diagnostic` (Go: `isSuggestionDiagnostic`,
+     severity == Hint) + free `sort_uri_positions` / `sort_locations` (the
+     `lsproto` objects derive no `Ord`, so sort on scalar position fields).
+
+### Deferred this round (+ why)
+
+- **Completion item kinds / `isMemberCompletion`-style filtering / item
+  details / `CompletionItemDefaults` / unsorted form / auto-import code actions**
+  (Go's `verifyCompletionItem`, `verifyCompletionsItemDefaults`, `Unsorted`,
+  `AndApplyCodeAction`). The reachable commands compare **labels** only;
+  blocked-by the `lsproto.CompletionList`/`CompletionItemData` surface +
+  `tsgo_ls_autoimport` + completion resolve, all unported/out-of-lane.
+- **`VerifyQuickInfoIs/Exists` documentation + markdown-fence body** — `tsgo_ls`
+  hover ports only the type string (its own DEFER); the doc/markdown compare
+  stays with it. `VerifyNotQuickInfoExists` not needed by a smoke case yet.
+- **`MarkerInput` variants** (`[]string` / `*Marker` / `[]*Marker`) for
+  `VerifyCompletions`, and the user-preferences / completion-context params —
+  the ported commands take a single marker name (the common case).
+- **Cross-file / `LocationLink` go-to-definition, read/write reference
+  classification, `IncludeDeclaration == false`** — blocked-by the `tsgo_ls`
+  definition/references DEFER (multi-file resolver, link-support capability).
+- **Per-file semantic-diagnostic partition** — `get_semantic_diagnostics` is
+  program-wide, so `verify_no_errors` is exact for single-user-file cases and
+  over-broad for multi-file ones (blocked-by the same `tsgo_compiler` partition
+  `tsgo_ls::get_semantic_diagnostics` notes).
+
+## RED→GREEN slices + guard tests (driver_test.rs)
+
+Each command: one positive smoke test (real, drives the LS) + one negative guard
+(wrong expectation fails). 19 new tests:
+
+- Quick-info (4): `verify_quick_info_is_passes_for_correct_type`,
+  `verify_quick_info_is_fails_for_wrong_type`,
+  `verify_quick_info_exists_passes_when_present`,
+  `verify_quick_info_exists_fails_on_keyword`.
+- Completions (6): include passes/fails-missing, exact passes/fails-wrong-set,
+  excludes passes/fails-when-present
+  (`const o = { a: 1[, b: 2] }; o./*m*/`).
+- Go-to-definition (3): `verify_go_to_definition_resolves_to_declaration`,
+  `verify_definition_at_single_target`,
+  `verify_go_to_definition_fails_for_wrong_target`
+  (`const /*def*/x = 1; /*use*/x;`).
+- Find-all-references (2): `verify_references_at_matches_ranges`,
+  `verify_references_at_fails_for_wrong_ranges`
+  (`const [|/*r*/x|] = 1; [|x|]; [|x|];`).
+- Diagnostics (4): number-of-errors counts/fails
+  (`const x: number = "s";` ⇒ TS2322), no-errors passes-clean/fails-error-file.
+
+Driver tests: **11 → 30** (+19). Crate total this round: **51 unit tests + 1
+doctest** (21 parser + 30 driver), all green.
+
+## Gate results (all GREEN; never `--no-verify`)
+
+- `cargo test -p tsgo_fourslash` — **51 passed + 1 doctest passed**.
+- `cargo test -p tsgo_ls` — **80 passed** (unmodified, stays green).
+- `cargo clippy -p tsgo_fourslash --all-targets -- -D warnings` — **clean**.
+- `cargo fmt` then `cargo fmt -- --check` — **clean**.
+- `cargo build --workspace --all-targets` — **OK**.
+
+Tree change: only `internal/fourslash/{driver.rs,driver_test.rs}` + this worklog.
+No existing crate modified; no sibling test touched.
+
+## Updated DEFER list
+
+R23's **D1–D6** stand, with D1 now **partially landed** (quick-info-is/exists,
+completions include/exact/excludes, go-to-definition, find-all-references inline
+forms). Remaining under each:
+
+- **D1 (rest)** — completion **item-kind/detail/defaults/unsorted/code-action**
+  comparisons + `MarkerInput` variants; `VerifyQuickInfo` doc/markdown body +
+  `VerifyNotQuickInfoExists`; `VerifySignatureHelp*`, `VerifyRename*`,
+  `VerifyCodeFix*`, `VerifyDiagnostics*` (range/code/message forms,
+  `VerifyErrorExistsAtRange`), the editing commands
+  (`Insert`/`Replace`/`Backspace` via `scriptInfo.editContent`), and the
+  remaining `GoTo*` (`EOF`/`BOF`/`Position`/`EachMarker`/`EachRange`/`Select`/
+  `File*`). blocked-by: the respective `tsgo_ls` surfaces (signaturehelp/rename/
+  symbols/folding/documenthighlights exist — wire them next) + the
+  `lsproto.CompletionList`/`CompletionItemData` surface + editable `scriptInfo`.
+- **D2 — `baselineutil.go`** + the `VerifyBaseline*` family. blocked-by:
+  `tsgo_testutil_baseline::run` wiring + committed
+  `testdata/baselines/reference/fourslash/**` byte-compare.
+- **D3 — `statebaseline.go`** (`@statebaseline`). blocked-by: D1/D2 +
+  project-state recording.
+- **D4 — `semantictokens.go`**. blocked-by: the `tsgo_ls` semantic-tokens feature.
+- **D5 — the real LSP-server transport** (`NewLSPClient`/`initialize`/
+  capabilities/`didOpen`/`didChange`). blocked-by: `internal/lsp` (`tsgo_lsp`) +
+  `internal/project` (`tsgo_project`) — P8, unported.
+- **D6 — the 4386-case corpus runner.** blocked-by: D1+D2 (enough inline
+  commands + baseline surface first).
+
+Suggested next slice: round out **D1 completions** (port the `tests/util`
+completion-globals constant tables + the `MarkerInput` `[]string` form so a real
+generated case's `verify.completions({ marker: [...], includes/exact })` drives
+unchanged) and **inline diagnostics** (`VerifyErrorExistsAtRange` /
+`VerifyErrorExistsBetweenMarkers`, comparing `[|ranges|]` + codes) — both reuse
+providers that are already green. That gets the inline command vocabulary close
+to what the simplest generated corpus cases need, after which **D6**'s
+generator + `failingTests.txt`-style skip list becomes the gating next step
+(with **D2** baseline as the parallel track for the baseline-style cases).
