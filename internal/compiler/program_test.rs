@@ -1026,6 +1026,61 @@ fn object_keys_es5_base_member_still_resolves_after_merge() {
     );
 }
 
+/// End to end with the REAL bundled lib (Round 16): the es5
+/// `StringConstructor.fromCharCode(...codes: number[]): string` has a
+/// (non-generic) REST parameter, so it accepts any number of `number` arguments
+/// — each relating to the rest ELEMENT type `number`, not the whole `number[]`
+/// rest array. Before the rest-parameter expansion fix the call related `65`
+/// against the whole `number[]`, producing the P10 corpus `extra TS2345` /
+/// `extra TS2554` false positives (the `reachabilityChecks*` / `removeComments`
+/// `console.log(...data: any[])` cluster has exactly this shape).
+// Go: internal/checker/relater.go:Checker.tryGetTypeAtPosition (rest indexed access)
+#[test]
+fn rest_parameter_lib_call_accepts_elements_with_real_lib() {
+    let options = CompilerOptions {
+        lib: vec!["es5".to_string()],
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "String.fromCharCode(65, 66, 67);\n")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2345 && d.code != 2554),
+        "String.fromCharCode must accept many `number` arguments through its rest \
+         parameter (no 2345/2554): {diags:?}"
+    );
+}
+
+/// Guard for the rest-parameter fix (no over-relaxation): a `string` argument to
+/// `String.fromCharCode(...codes: number[])` still reports `2345` — the fix
+/// narrows the target to the rest element type (`number`) without muting a
+/// genuine incompatibility.
+// Go: internal/checker/checker.go:Checker.isSignatureApplicable (2345 at rest element)
+#[test]
+fn rest_parameter_lib_call_rejects_incompatible_with_real_lib() {
+    let options = CompilerOptions {
+        lib: vec!["es5".to_string()],
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "String.fromCharCode(\"bad\");\n")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().any(|d| d.code == 2345),
+        "a `string` argument to `String.fromCharCode` must still report 2345: {diags:?}"
+    );
+}
+
 /// End to end with the REAL bundled lib (the path the P10 corpus parity runner
 /// exercises): a CommonJS `require(...)` call in a checked JS file resolves the
 /// bare `require` callee to the synthetic `require` symbol (type `any`), so

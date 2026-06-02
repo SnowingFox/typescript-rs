@@ -16,8 +16,8 @@
 use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags};
 
 use super::declared_types::{
-    get_applicable_index_info_for_name, get_property_of_type, get_type_from_type_node,
-    get_type_of_symbol,
+    get_applicable_index_info_for_name, get_indexed_access_type, get_property_of_type,
+    get_type_from_type_node, get_type_of_symbol,
 };
 use super::program::BoundProgram;
 use super::signatures::SignatureId;
@@ -619,29 +619,63 @@ impl Checker {
     }
 
     /// Returns the parameter type at position `pos` of `signature`, or `None`
-    /// when `pos` is past the (non-rest) parameter list (Go's
+    /// when `pos` is past the parameter list of a NON-rest signature (Go's
     /// `tryGetTypeAtPosition`).
     ///
-    /// DEFER(phase-4-checker-4bk+): the rest-parameter indexed access
-    /// (`getIndexedAccessType` over the rest tuple). blocked-by: rest/tuple
-    /// types.
-    // Go: internal/checker/checker.go:Checker.tryGetTypeAtPosition
+    /// A position at or past the last fixed parameter of a signature WITH a rest
+    /// parameter (`...args: T[]`) reads the rest ELEMENT type via an indexed
+    /// access (`(T[])[index]` == `T`), so each spread argument relates to the
+    /// element type rather than to the whole rest array — this is why
+    /// `console.log("x")` / `f(1, 2, 3)` over `(...a: any[])` is well-typed.
+    ///
+    /// DEFER(phase-4-checker-later): the tuple-rest path (a `...args:
+    /// [number, string]` rest reads fixed tuple elements / a variadic tail).
+    /// blocked-by: tuple types.
+    // Go: internal/checker/relater.go:Checker.tryGetTypeAtPosition(1762)
     pub(crate) fn try_get_type_at_position(
         &mut self,
         program: &dyn BoundProgram,
         signature: SignatureId,
         pos: usize,
     ) -> Option<TypeId> {
-        let symbol = self.signature(signature).parameters.get(pos).copied()?;
+        let has_rest = self.signature_has_rest_parameter(signature);
+        let param_count = self.signature(signature).parameters.len() - usize::from(has_rest);
+        if pos < param_count {
+            let symbol = self.signature(signature).parameters[pos];
+            return Some(self.parameter_type_with_mapper(program, signature, symbol));
+        }
+        if has_rest {
+            let symbol = self.signature(signature).parameters[param_count];
+            let rest_type = self.parameter_type_with_mapper(program, signature, symbol);
+            let index = (pos - param_count) as f64;
+            let index_type = self.get_number_literal_type(tsgo_jsnum::Number::from(index));
+            // The reachable rest type is a (non-tuple) array `T[]`; its
+            // number-keyed index access resolves to the element type `T`.
+            return get_indexed_access_type(self, program, rest_type, index_type);
+        }
+        None
+    }
+
+    /// Reads a parameter symbol's type, substituting it through an instantiated
+    /// signature's mapper (Go re-instantiates the parameter symbols in
+    /// `instantiateSignature`; the port maps the base type on read, which is
+    /// observationally equivalent), deep-instantiating an anonymous
+    /// object/function-type parameter so a callback argument is contextually
+    /// typed by the substituted parameter type.
+    ///
+    /// Side effects: may allocate instantiated types.
+    // Go: internal/checker/checker.go:Checker.getTypeOfParameter (instantiated)
+    pub(crate) fn parameter_type_with_mapper(
+        &mut self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+        symbol: tsgo_ast::SymbolId,
+    ) -> TypeId {
         let base = get_type_of_symbol(self, program, symbol, None);
-        // An instantiated signature substitutes its parameter types through its
-        // mapper (matching `get_type_at_position`), deep-instantiating an
-        // anonymous object/function-type parameter so a callback argument is
-        // contextually typed by the substituted parameter type.
-        Some(match self.signature(signature).mapper.clone() {
+        match self.signature(signature).mapper.clone() {
             Some(mapper) => self.instantiate_param_type(program, base, &mapper),
             None => base,
-        })
+        }
     }
 
     /// Widens a literal value type for a mutable location, *unless* its

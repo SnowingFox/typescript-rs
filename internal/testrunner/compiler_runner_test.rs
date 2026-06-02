@@ -713,11 +713,23 @@ fn expanded_compiler_subset_parity_smoke() {
     //     `wrong_code TS7026 -> TS1128` + `extra TS1109` + empty-name `TS2304`.
     // (`jsxTernaryWithObjectInAttribute.tsx` is 40 lines, outside this ≤25-line
     // subset; its full clear shows in the full-corpus measurement.)
+    //
+    // Round 16 (rest-parameter expansion): a signature whose last parameter is a
+    // rest parameter (`...args: T[]`) now expands the rest ELEMENT type per
+    // argument position (Go's `tryGetTypeAtPosition` indexed access) and lifts
+    // the arity cap (Go's `hasEffectiveRestParameter`), so a call like
+    // `f(...args: any[])` no longer reports a spurious `extra TS2345`
+    // (`X not assignable to Array<any>`) / `extra TS2554`. This flips one clean
+    // no-baseline subset case to PASS (80 -> 81) and shifts two divergent cases
+    // (whose only extra was the cleared TS2345) to missing_all_errors. The full
+    // corpus drops `extra TS2345 ×23 -> ×8` and `extra TS2554 ×3 -> ×1` with NO
+    // new MISSING TS2345/TS2322 (the guard tests prove invalid arguments still
+    // report 2345).
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 80,
-            failed: 70,
+            passed: 81,
+            failed: 69,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -778,9 +790,13 @@ fn expanded_compiler_subset_parity_smoke() {
     // errors) shifts divergent 19 -> 15 and missing_all_errors 37 -> 41.
     // Round 15: `awaitObjectLiteral.ts` flips no_baseline -> PASS (16 -> 15) and
     // `jsxAttributeValueBinaryExpression.tsx` flips divergent -> PASS (15 -> 14).
-    assert_eq!(hist.no_baseline_but_errors, 15);
-    assert_eq!(hist.missing_all_errors, 41);
-    assert_eq!(hist.divergent, 14);
+    // Round 16: the rest-parameter expansion flips one clean no_baseline case to
+    // PASS (15 -> 14) and shifts two divergent cases — whose only `extra` was the
+    // cleared rest-parameter TS2345 — to missing_all_errors (divergent 14 -> 12,
+    // missing_all_errors 41 -> 43).
+    assert_eq!(hist.no_baseline_but_errors, 14);
+    assert_eq!(hist.missing_all_errors, 43);
+    assert_eq!(hist.divergent, 12);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare

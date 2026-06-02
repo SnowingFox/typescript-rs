@@ -1744,6 +1744,105 @@ fn call_result_type_is_signature_return_type() {
     assert_eq!(c.check_expression(&p, call), string);
 }
 
+// Round 16 (rest-parameter expansion): an argument at a rest-parameter position
+// relates to the rest ELEMENT type (`number`), not the whole rest array
+// (`number[]`). `f(1)` is therefore well-typed and reports nothing.
+// Go: internal/checker/relater.go:Checker.tryGetTypeAtPosition (rest indexed access)
+#[test]
+fn rest_parameter_call_accepts_assignable_argument() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         function f(...args: number[]): void {}\n\
+         f(1);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Round 16: a rest parameter (`...args`) lifts the arity cap, so MANY trailing
+// arguments are accepted without a `2554` (Go's `hasEffectiveRestParameter`
+// short-circuits the "too many arguments" check). Each argument still relates
+// to the element type `number`, so all-assignable arguments report nothing.
+// Go: internal/checker/checker.go:Checker.hasCorrectArity (effective rest cap)
+#[test]
+fn rest_parameter_call_accepts_many_assignable_arguments() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         function f(...args: number[]): void {}\n\
+         f(1, 2, 3, 4);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Round 16 GUARD (no over-relaxation): a rest argument that is NOT assignable to
+// the rest ELEMENT type still reports `2345`, and the parameter type in the
+// message is the element type (`number`), not the rest array (`number[]`) — so
+// the fix narrows the target without muting genuine incompatibilities.
+// Go: internal/checker/checker.go:Checker.isSignatureApplicable (2345 at rest element)
+#[test]
+fn rest_parameter_call_incompatible_argument_still_reports_2345() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         function f(...args: number[]): void {}\n\
+         f(\"x\");",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, 2345);
+    assert_eq!(
+        diags[0].message,
+        "Argument of type 'string' is not assignable to parameter of type 'number'."
+    );
+}
+
+// Round 16: a fixed parameter before a rest parameter keeps its own type, while
+// trailing arguments relate to the rest element type. `f("a", 1, 2)` is
+// well-typed; a wrong-typed trailing argument still reports `2345` on the rest
+// element.
+// Go: internal/checker/relater.go:Checker.tryGetTypeAtPosition (fixed + rest)
+#[test]
+fn rest_parameter_after_fixed_parameter_relates_each_position() {
+    let ok = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         function f(first: string, ...rest: number[]): void {}\n\
+         f(\"a\", 1, 2);",
+    ));
+    let root = ok.root();
+    let mut c = Checker::new_checker(ok);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "{:?}",
+        c.get_diagnostics(root)
+    );
+
+    let bad = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         function f(first: string, ...rest: number[]): void {}\n\
+         f(\"a\", \"b\");",
+    ));
+    let root = bad.root();
+    let mut c = Checker::new_checker(bad);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, 2345);
+    assert_eq!(
+        diags[0].message,
+        "Argument of type 'string' is not assignable to parameter of type 'number'."
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.checkCallExpression (well-typed call -> ok)
 #[test]
 fn call_well_typed_reports_no_diagnostic() {

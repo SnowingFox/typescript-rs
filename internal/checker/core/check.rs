@@ -3177,19 +3177,24 @@ impl Checker {
     }
 
     // Reports whether the argument count matches the signature's arity (the
-    // arity portion of Go's `hasCorrectArity`, 4q subset for a non-rest,
-    // non-spread, complete call): the count must be at least the minimum
-    // argument count.
+    // arity portion of Go's `hasCorrectArity`, 4q subset for a non-spread,
+    // complete call): the count must be at least the minimum argument count, and
+    // — UNLESS the signature has an effective rest parameter (`...args`), which
+    // accepts unboundedly many trailing arguments — at most the parameter count.
     //
-    // DEFER(phase-4-checker-4q+): rest parameters, spread arguments, incomplete
-    // calls (missing close paren), and the `void`-accepting trailing-parameter
-    // relaxation. blocked-by: rest/tuple types + spread detection + grammar end
-    // positions.
+    // DEFER(phase-4-checker-4q+): spread arguments, incomplete calls (missing
+    // close paren), and the `void`-accepting trailing-parameter relaxation.
+    // blocked-by: spread detection + grammar end positions + `void` filtering.
     // Go: internal/checker/checker.go:Checker.hasCorrectArity(9070)
     fn has_correct_arity(&self, signature: SignatureId, arg_count: usize) -> bool {
         let arg_count = arg_count as i32;
-        arg_count >= self.get_min_argument_count(signature)
-            && arg_count <= self.get_parameter_count(signature) as i32
+        if arg_count < self.get_min_argument_count(signature) {
+            return false;
+        }
+        // Go: `!hasEffectiveRestParameter && argCount > effectiveParameterCount`
+        // is the only "too many" rejection — a rest parameter lifts the cap.
+        self.has_effective_rest_parameter(signature)
+            || arg_count <= self.get_parameter_count(signature) as i32
     }
 
     // Reports a wrong-argument-count error (`2554`) for the call (the relevant
@@ -3594,10 +3599,8 @@ impl Checker {
     }
 
     // Returns the parameter type at position `pos` of a signature (Go's
-    // `getTypeAtPosition` -> `getTypeOfParameter`), or `any` when out of range.
-    //
-    // DEFER(phase-4-checker-4q+): rest-parameter indexed access. blocked-by:
-    // tuple/indexed-access types.
+    // `getTypeAtPosition` -> `tryGetTypeAtPosition`), or `any` when no type
+    // applies (an out-of-range position on a non-rest signature).
     // Go: internal/checker/relater.go:Checker.getTypeAtPosition(1754)
     pub(crate) fn get_type_at_position(
         &mut self,
@@ -3605,19 +3608,31 @@ impl Checker {
         signature: SignatureId,
         pos: usize,
     ) -> TypeId {
-        match self.signature(signature).parameters.get(pos).copied() {
-            Some(symbol) => {
-                let base = get_type_of_symbol(self, program, symbol, None);
-                // For an instantiated signature, the base parameter type is
-                // substituted through the signature's mapper (Go re-instantiates
-                // the parameter symbols in `instantiateSignature`).
-                match self.signature(signature).mapper.clone() {
-                    Some(mapper) => self.instantiate_param_type(program, base, &mapper),
-                    None => base,
-                }
-            }
-            None => self.any_type,
-        }
+        self.try_get_type_at_position(program, signature, pos)
+            .unwrap_or(self.any_type)
+    }
+
+    // Reports whether a signature's last parameter is a rest parameter
+    // (`...args`), keyed off the `HAS_REST_PARAMETER` flag set when the
+    // signature was built (Go's `signatureHasRestParameter`).
+    // Go: internal/checker/checker.go:signatureHasRestParameter(16897)
+    pub(crate) fn signature_has_rest_parameter(&self, signature: SignatureId) -> bool {
+        self.signature(signature)
+            .flags
+            .contains(SignatureFlags::HAS_REST_PARAMETER)
+    }
+
+    // Reports whether a signature has an EFFECTIVE rest parameter — one that
+    // accepts any number of trailing arguments (Go's
+    // `hasEffectiveRestParameter`). For the reachable subset a rest type is
+    // always a non-tuple array, so this coincides with
+    // `signatureHasRestParameter`.
+    //
+    // DEFER(phase-4-checker-later): a tuple rest with no variadic element is NOT
+    // an effective rest (its arity is fixed). blocked-by: tuple types.
+    // Go: internal/checker/relater.go:Checker.hasEffectiveRestParameter(1746)
+    pub(crate) fn has_effective_rest_parameter(&self, signature: SignatureId) -> bool {
+        self.signature_has_rest_parameter(signature)
     }
 
     // Instantiates a parameter type through `mapper`, deep-instantiating an

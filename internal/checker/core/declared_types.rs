@@ -1799,7 +1799,7 @@ fn get_signature_from_declaration(
     // signature (Go's `getSignatureFromDeclaration` sets `SignatureFlagsConstruct`
     // via `isConstructSignatureDeclaration`), which selects the construct-signature
     // relation and the `new (...)` printed form.
-    let flags = if matches!(
+    let mut flags = if matches!(
         program.arena().kind(declaration),
         Kind::ConstructorType | Kind::ConstructSignature
     ) {
@@ -1807,6 +1807,15 @@ fn get_signature_from_declaration(
     } else {
         SignatureFlags::NONE
     };
+    // A trailing rest parameter (`...args`) marks the signature so the
+    // call/argument path expands the rest element type per position and the
+    // arity check accepts any number of trailing arguments (Go's
+    // `getSignatureFromDeclaration` sets `SignatureFlagsHasRestParameter` via
+    // `hasRestParameter`).
+    // Go: internal/checker/checker.go:getSignatureFromDeclaration (hasRestParameter)
+    if has_rest_parameter(program, &param_nodes) {
+        flags |= SignatureFlags::HAS_REST_PARAMETER;
+    }
     let mut signature = Signature::new(flags);
     signature.declaration = Some(declaration);
     signature.type_parameters = get_signature_type_parameters(checker, program, declaration);
@@ -1865,6 +1874,21 @@ fn is_optional_parameter(program: &dyn BoundProgram, param: NodeId) -> bool {
             d.question_token.is_some() || d.initializer.is_some() || d.dot_dot_dot_token.is_some()
         }
         _ => false,
+    }
+}
+
+// Reports whether a signature declaration's LAST parameter is a rest parameter
+// (`...args`), the predicate Go's `getSignatureFromDeclaration` uses to set
+// `SignatureFlagsHasRestParameter` (Go's `hasRestParameter` + `isRestParameter`:
+// the last parameter carries a `...` token).
+// Go: internal/checker/checker.go:hasRestParameter / isRestParameter
+fn has_rest_parameter(program: &dyn BoundProgram, param_nodes: &[NodeId]) -> bool {
+    match param_nodes.last() {
+        Some(&last) => matches!(
+            program.arena().data(last),
+            NodeData::ParameterDeclaration(d) if d.dot_dot_dot_token.is_some()
+        ),
+        None => false,
     }
 }
 

@@ -2732,3 +2732,200 @@ No `--no-verify`; additive; no new deps; not committed by the subagent (the
 round aborted on a network error after completing the implementation + tests +
 snapshot; the parent finished verification, added this worklog section, and
 committed).
+
+# Round 16 — assignability false positives (TS2345/TS2322): rest-parameter expansion
+
+Round goal: act on Round 12's prioritization #3 — the assignability/relation
+FALSE POSITIVES `extra TS2345 ×23` + `extra TS2322 ×18` (we REJECT code tsc
+ACCEPTS). These drive `no_baseline_but_errors` cases, so each fix is a clean
+case-flip. This round fixes the LARGEST tractable root.
+
+## Step-0 categorization (full corpus + conformance) — root → count
+
+A TEMPORARY `#[ignore]`d dump (`dump_extra_assignability`, since REMOVED) ran the
+full corpus through `error_baseline_for_test` + the real `parse_error_baseline`
+diff, printing every extra `+TS2345`/`+TS2322` with its FULL message (source +
+target types) and case file. The 23 TS2345 + 18 TS2322 group by ROOT:
+
+| root | TS2345 | TS2322 | tractable? |
+|---|---|---|---|
+| **R1 — REST PARAMETER not expanded in call checking** (`f(...a: any[])` / `console.log(...data: any[])`: each arg related to the whole rest array `Array<any>` instead of its element type) | **~15** | 0 | **YES — fixed** |
+|   · `reachabilityChecks9/10`, `reachabilityChecksIgnored`, `removeComments`, `assertsPredicateParameterMismatch`, `typePredicateParameterMismatch` (`console.log("…")`) | 14 | | |
+|   · `keyofUnresolvedBaseMembers` (`new () => …` arg vs `Array<any>` rest) | 1 | | |
+| R2 — union target with object/discriminant constituents (`missingDiscriminants`/`missingDiscriminants2`: `{str;num}` vs `{str:"a";num:0} \| …`, and `string` vs `"a"\|"b"`) | 0 | 10 | DEFER (discriminant/literal narrowing) |
+| R3 — generic-method rest instantiation (`freshObjectLiteralSubtype`: `.push({…})` rest `Array<T>` not instantiated to element) | 2 | 0 | DEFER (generic member instantiation — see below) |
+| R4 — conditional / never / inference gaps (`inferenceWithNeverSource1` ×3, `switchExhaustiveNarrowing` `… -> never`, `conditionalContextualReturnSubstitutionCache` `T -> conditional`) | 4 | 1 | DEFER (conditional types / narrowing) |
+| R5 — `error`-typed member / intersection (`jsxFunctionTypeChildren`, `declarationEmitExpandoArrowFunctionParameter`) | 2 | 1 | DEFER (cascade from an upstream `error` type) |
+| R6 — `undefined -> string` / construct-signature (`settingsSimpleTest`, `keyofUnresolvedBaseMembers` `_Foo -> new () => …`) | 0 | 2 | DEFER |
+
+The DOMINANT TRACTABLE root is **R1 — rest-parameter expansion** (~15 of 23
+TS2345 + the symmetric `extra TS2554 ×3` multi-arg arity over-reports). This is
+NOT a structural-relation gap in `relations.rs`: the relation `string`/`number`
+↔ `Array<any>` correctly FAILS — the bug is UPSTREAM in the call/argument path,
+which fed the WHOLE rest array (`...data: any[]` → `Array<any>`) as the target
+type for each argument instead of the rest ELEMENT type (`any`). Fixing the
+argument→parameter relation's TARGET is the precise port.
+
+## Go ground truth ported (→ Rust locations)
+
+```go
+// Go: internal/checker/relater.go:Checker.tryGetTypeAtPosition(1762)
+paramCount := len(signature.parameters) - core.IfElse(signatureHasRestParameter(signature), 1, 0)
+if pos < paramCount { return c.getTypeOfParameter(signature.parameters[pos]) }
+if signatureHasRestParameter(signature) {
+    restType := c.getTypeOfSymbol(signature.parameters[paramCount])
+    index := pos - paramCount
+    if !isTupleType(restType) || ... { return c.getIndexedAccessType(restType, c.getNumberLiteralType(jsnum.Number(index))) }
+}
+return nil
+// Go: internal/checker/checker.go:hasRestParameter / isRestParameter / getSignatureFromDeclaration
+if hasRestParameter(declaration) { flags |= SignatureFlagsHasRestParameter }
+// Go: internal/checker/checker.go:Checker.hasCorrectArity(9070)
+if !c.hasEffectiveRestParameter(signature) && argCount > effectiveParameterCount { return false }
+```
+
+Rust landing (all `// Go:`-anchored):
+- **`internal/checker/core/declared_types.rs`** — `get_signature_from_declaration`
+  now sets `SignatureFlags::HAS_REST_PARAMETER` when its last parameter carries a
+  `...` token (new `has_rest_parameter(program, param_nodes)` ←
+  `hasRestParameter`/`isRestParameter`). The flag propagates to instantiated
+  signatures (`SignatureFlags::PROPAGATING_FLAGS` already includes it).
+- **`internal/checker/core/contextual.rs`** — `try_get_type_at_position` (the
+  canonical `tryGetTypeAtPosition`, already shared by contextual callback typing
+  AND the call path) gains the rest arm: a position at/past the last fixed
+  parameter of a rest signature reads `getIndexedAccessType(restType,
+  numberLiteral(index))`, which for the reachable non-tuple array `T[]` resolves
+  to the element type `T` via Array's numeric index signature. Factored the
+  mapper application into `parameter_type_with_mapper` (so an instantiated
+  signature's rest type is substituted before the element access).
+- **`internal/checker/core/check.rs`** — `get_type_at_position` now delegates to
+  `try_get_type_at_position` (`.unwrap_or(any)`). `has_correct_arity` ports the
+  `!hasEffectiveRestParameter && argCount > parameterCount` rejection so a rest
+  parameter lifts the "too many arguments" cap. New `signature_has_rest_parameter`
+  (← `signatureHasRestParameter`) + `has_effective_rest_parameter` (←
+  `hasEffectiveRestParameter`, non-tuple-array subset) helpers.
+
+This is a CALL/argument-path fix (not `relations.rs` structural relation) — the
+relation engine was already correct; the bug was the wrong TARGET fed into it.
+`relations.rs`'s own signature-relation `try_signature_type_at_position` is left
+as-is (a separate function-type-assignability path, not this bucket); setting the
+flag is behavior-neutral for it (it does not read `HAS_REST_PARAMETER`).
+
+## RED→GREEN + guard tests
+
+Checker (`internal/checker/core/check_test.rs`, +4):
+- `rest_parameter_call_accepts_assignable_argument` (RED→GREEN headline) —
+  `function f(...args: number[]){}; f(1)` → ZERO diagnostics (was `2345: number
+  not assignable to Array<number>`).
+- `rest_parameter_call_accepts_many_assignable_arguments` (RED→GREEN) —
+  `f(1, 2, 3, 4)` → no `2554` (the effective-rest arity cap).
+- `rest_parameter_call_incompatible_argument_still_reports_2345` (GUARD) —
+  `f("x")` STILL reports `2345` with the ELEMENT type `number` (not `number[]`),
+  proving the target narrowed without muting.
+- `rest_parameter_after_fixed_parameter_relates_each_position` (GUARD) —
+  `f(first: string, ...rest: number[])`: `f("a",1,2)` clean; `f("a","b")` → `2345`
+  on the rest element.
+
+Compiler real-lib (`internal/compiler/program_test.rs`, +2):
+- `rest_parameter_lib_call_accepts_elements_with_real_lib` (RED→GREEN) —
+  `String.fromCharCode(65, 66, 67)` over the es5 lib's
+  `fromCharCode(...codes: number[])` → no `2345`/`2554`.
+- `rest_parameter_lib_call_rejects_incompatible_with_real_lib` (GUARD) —
+  `String.fromCharCode("bad")` STILL reports `2345`.
+
+(`Array<T>.push` was tried first but exposed an ORTHOGONAL deferred gap —
+generic-method rest types are not instantiated through the receiver's
+`Array<T> -> Array<number>` mapper, so `push`'s rest stays `T[]`; a non-generic
+lib rest signature (`fromCharCode`) is the faithful real-lib probe of THIS
+bucket, matching the corpus's all-concrete `Array<any>` false positives.)
+
+## Measurement — full corpus BEFORE→AFTER
+
+`tests/cases/compiler` (222 ran):
+
+| metric | BEFORE (R15) | AFTER (R16) | Δ |
+|---|---|---|---|
+| **passed** | **102** | **104** | **+2** |
+| failed | 117 | 115 | −2 |
+| errored | 3 | 3 | 0 |
+| no_baseline_but_errors | 29 | 27 | −2 (2 clean cases now PASS) |
+| missing_all_errors | 62 | 66 | +4 (divergent→missing as the lone extra TS2345 is removed) |
+| divergent | 26 | 22 | −4 |
+| **extra TS2345** | **×23** | **×8** | **−15** |
+| **extra TS2554** | **×3** | **×1** | **−2** |
+| extra TS2322 | ×18 | ×18 | 0 (R2/R4/R6 buckets — DEFERRED) |
+| missing TS2345 | ×3 | ×3 | **0 (NO over-relaxation)** |
+| missing TS2322 | ×10 | ×10 | **0 (NO over-relaxation)** |
+
+No other extra/missing code changed; no new code appeared. `conformance`
+(19 ran): **11/8/0 → 11/8/0** (its extra TS2345/TS2554 set is empty — the rest
+cases live in the compiler suite).
+
+**Honest flip count: +2 compiler cases to byte-exact PASS** (both were
+`no_baseline_but_errors` — clean files we wrongly errored on with a rest-param
+TS2345). The other ~13 cleared TS2345 sit in cases that ALSO miss a committed
+error (e.g. `reachabilityChecks*` expects `TS7027` "unreachable code", a deferred
+false-negative), so removing the false positive shifts them divergent→missing
+(failed unchanged, but the over-report is gone). NO PASS→FAIL regression: a
+removed false positive can only help, and `missing TS2345/TS2322` are UNCHANGED
+(the relation still fires for genuinely-incompatible rest arguments — proven by
+the four GUARD tests).
+
+## 150-subset characterization BEFORE→AFTER
+
+`expanded_compiler_subset_parity_smoke`: **passed 80 → 81 (+1)**, failed 70 → 69;
+categories `no_baseline 15→14, missing_all 41→43, divergent 14→12` (one clean
+no-baseline case flips to PASS; two divergent cases — whose only extra was the
+cleared rest TS2345 — shift to missing_all_errors). The pinned guards
+(`top_extra(2)=[(2339,16),(2304,14)]`, `extra TS2451/1005/1003/1155==None`,
+`missing TS2300==None`, `top_missing(1)=[(2874,7)]`, no `extra/missing TS7026`)
+are UNCHANGED and re-asserted; `extra TS2345 ×3` (the deferred R4 never/inference
+cases `inferenceWithNeverSource1`) stays out of the top-2. The 30-case smoke
+(`19/11/0`) is unaffected.
+
+## Gate results (Round 16)
+
+- `cargo test -p tsgo_checker` — GREEN (**775** lib [+4 rest tests] + 178
+  doctests).
+- `cargo test -p tsgo_compiler` — GREEN (**119** lib [+2 real-lib rest tests] +
+  doctests).
+- `cargo test -p tsgo_testrunner` — GREEN (51 unit + **1** ignored
+  [full-corpus measurement] + 11 doctests; 150-subset 81/69/0 + 30-case 19/11/0
+  re-pinned).
+- `cargo test -p tsgo_binder` (60) / `-p tsgo_execute` (39) / `-p tsgo_ls` (80) /
+  `-p tsgo_testutil_harnessutil` (11) — GREEN (no sibling regression).
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner --all-targets
+  -- -D warnings` — clean. `cargo fmt … -- --check` — clean.
+  `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; additive/surgical; no test weakened/deleted; no new dependency;
+the relation was NOT broadly relaxed (the precise rest-element TARGET was ported,
+invalid rest arguments still report 2345); the temporary `dump_extra_assignability`
+categorization test was REMOVED (tree clean — only the 6 intended files modified,
+`Cargo.lock` untouched). Not committed by the subagent (left to the parent).
+
+## DEFER list (blocked-by) — Round 16
+
+- **Tuple-rest parameters** (`...args: [number, string]`) — `getParameterCount` /
+  `getMinArgumentCount` / `hasEffectiveRestParameter` / `tryGetTypeAtPosition`
+  all have the non-tuple-array subset; the fixed/variadic tuple-element arms are
+  DEFERRED. blocked-by: tuple types.
+- **Generic-method rest instantiation (R3, `freshObjectLiteralSubtype` ×2)** —
+  `xs.push(x)` over `Array<number>` reads `push`'s rest as `T[]` (not
+  `number[]`), because a method signature accessed through a generic receiver is
+  not instantiated with the receiver's `T -> number` mapper on the CALL path.
+  blocked-by: instantiating member call signatures through the receiver's type
+  mapper (the relation engine's `instantiated_property_type` does this for
+  property RELATION but the call path resolves the bare signature).
+- **Union-target discriminant relation (R2, `missingDiscriminants*` `extra
+  TS2322 ×10`)** — a source object related to a union of object/discriminant
+  constituents: needs discriminant-property matching + literal-property narrowing
+  in `typeRelatedToSomeType`. blocked-by: discriminant matching + the literal
+  source→`"a"|"b"` union relate elaboration.
+- **Conditional / never / inference (R4, `extra TS2345 ×4` + `TS2322 ×1`)** —
+  `inferenceWithNeverSource1` / `switchExhaustiveNarrowing` (`… -> never`) /
+  `conditionalContextualReturnSubstitutionCache` (`T -> conditional`).
+  blocked-by: conditional-type relation + exhaustive-narrowing-to-`never`.
+- **`error`-typed cascade (R5) / `undefined -> string` + construct-signature
+  (R6)** — downstream of an upstream `error` type or a deferred construct-sig /
+  non-strict-null path. blocked-by: those upstream roots.
