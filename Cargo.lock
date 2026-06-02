@@ -881,6 +881,7 @@ dependencies = [
  "tsgo_compiler",
  "tsgo_core",
  "tsgo_diagnostics",
+ "tsgo_evaluator",
  "tsgo_locale",
  "tsgo_ls_lsconv",
  "tsgo_ls_lsutil",

@@ -13,6 +13,7 @@ tsgo_checker = { path = "../checker" }
 tsgo_compiler = { path = "../compiler" }
 tsgo_core = { path = "../core" }
 tsgo_diagnostics = { path = "../diagnostics" }
+tsgo_evaluator = { path = "../evaluator" }
 tsgo_locale = { path = "../locale" }
 tsgo_lsproto = { path = "../lsp/lsproto" }
 tsgo_ls_lsconv = { path = "lsconv" }

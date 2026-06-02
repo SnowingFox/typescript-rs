@@ -61,7 +61,7 @@ pub use completednode::{is_completed_node, position_belongs_to_node};
 pub use symbol_display::{
     ScriptElementKind, ScriptElementKindModifier, FILE_EXTENSION_KIND_MODIFIERS,
 };
-pub use userpreferences::QuotePreference;
+pub use userpreferences::{IncludeInlayParameterNameHints, InlayHintsPreferences, QuotePreference};
 pub use utilities::{
     is_non_contextual_keyword, module_specifier_to_valid_identifier,
     module_symbol_to_valid_identifier, quote_preference_from_string,
