@@ -725,11 +725,24 @@ fn expanded_compiler_subset_parity_smoke() {
     // corpus drops `extra TS2345 ×23 -> ×8` and `extra TS2554 ×3 -> ×1` with NO
     // new MISSING TS2345/TS2322 (the guard tests prove invalid arguments still
     // report 2345).
+    //
+    // Round 17 (JS expando / this-property member synthesis): a function-expando
+    // (`function f(){}; f.x = v`) and a JS `this.x = v` assignment now synthesize
+    // a member symbol (binder's `bindDeferredExpandoAssignment` /
+    // `bindThisPropertyAssignment`) that the function/class value type exposes as
+    // a property (Go's `getTypeOfFuncClassEnumModuleWorker`), so `f.x` / `this.x`
+    // resolve instead of reporting a spurious `extra TS2339`. This flips THREE
+    // clean no-baseline subset cases to PASS (81 -> 84) and drops the subset's
+    // `extra TS2339 ×16 -> ×5` (the residual ×5 are object-literal-expando
+    // `obj.x = v on {}` + cross-module-require this-members, DEFERRED). No
+    // regression: `extra TS2345` is unchanged (the empty-array expando widens to
+    // `any`, so a later `this.x.push(v)` does not spuriously TS2345), and the
+    // `missing` histogram (TS7008/TS7022/TS2339) is unchanged (no masked error).
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 81,
-            failed: 69,
+            passed: 84,
+            failed: 66,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -794,9 +807,13 @@ fn expanded_compiler_subset_parity_smoke() {
     // PASS (15 -> 14) and shifts two divergent cases — whose only `extra` was the
     // cleared rest-parameter TS2345 — to missing_all_errors (divergent 14 -> 12,
     // missing_all_errors 41 -> 43).
-    assert_eq!(hist.no_baseline_but_errors, 14);
-    assert_eq!(hist.missing_all_errors, 43);
-    assert_eq!(hist.divergent, 12);
+    // Round 17: the expando / this-property member synthesis flips THREE clean
+    // no_baseline_but_errors cases to PASS (14 -> 11); one divergent case whose
+    // only extra was the cleared TS2339 shifts to missing_all_errors
+    // (divergent 12 -> 11, missing_all_errors 43 -> 44).
+    assert_eq!(hist.no_baseline_but_errors, 11);
+    assert_eq!(hist.missing_all_errors, 44);
+    assert_eq!(hist.divergent, 11);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare
@@ -868,9 +885,13 @@ fn expanded_compiler_subset_parity_smoke() {
     // Round 15: top-level await + JSX-adjacent recovery clear `awaitObjectLiteral`'s
     // 2 empty-name TS2304 and `jsxAttributeValueBinaryExpression`'s empty-name
     // TS2304, so `extra TS2304` drops 17 -> 14, making TS2339 ×16 the top extra.
+    // Round 17: with `extra TS2339` dropping 16 -> 5 (expando / this-property
+    // members now resolve), the top extras are now `TS2304 ×14` (the deferred
+    // namespace/enum/export= VALUE-access cascade) and `TS2322 ×12` (the deferred
+    // discriminant/literal union-relate bucket).
     assert_eq!(
         hist.top_extra(2),
-        vec![(2339, 16), (2304, 14)],
+        vec![(2304, 14), (2322, 12)],
         "top extra (false-positive) codes; histogram:\n{}",
         hist.report()
     );
@@ -879,10 +900,13 @@ fn expanded_compiler_subset_parity_smoke() {
     // and the newly-exposed downstream `object -> {}` overload gap is the lone
     // new extra (DEFERRED — a relations/union-reduction bucket, not property
     // resolution).
+    // Round 17: expando / this-property member synthesis drops the subset's
+    // `extra TS2339` 16 -> 5; the residual ×5 are the DEFERRED object-literal
+    // expando (`obj.x = v` on a plain `{}`) + cross-module-require this-members.
     assert_eq!(
         hist.extra.get(&2339),
-        Some(&16),
-        "cross-file lib-interface merge clears the 2 ObjectConstructor TS2339; histogram:\n{}",
+        Some(&5),
+        "expando / this-property member synthesis drops extra TS2339 16 -> 5; histogram:\n{}",
         hist.report()
     );
     assert_eq!(
@@ -976,12 +1000,12 @@ fn expanded_compiler_subset_parity_smoke() {
          signal (missing 94 -> 52) lives in the FULL corpus; histogram:\n{}",
         hist.report()
     );
-    // `top_extra(2)` after Round 15: `extra TS2339 ×16` is now the top extra,
-    // `extra TS2304 ×14` (down from 17 as the parser-recovery empty-name 2304s
-    // clear).
+    // `top_extra(2)` after Round 17: expando / this-property member synthesis
+    // drops `extra TS2339` 16 -> 5, so the top extras are now `TS2304 ×14` (the
+    // deferred namespace/enum/export= value-access cascade) and `TS2322 ×12`.
     assert_eq!(
         hist.top_extra(2),
-        vec![(2339, 16), (2304, 14)],
+        vec![(2304, 14), (2322, 12)],
         "the import-resolution round drops the dominant unresolved-name cascade; \
          histogram:\n{}",
         hist.report()

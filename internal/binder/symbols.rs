@@ -46,7 +46,7 @@ impl Binder<'_> {
 
     // Go: internal/binder/binder.go:declareSymbolEx
     #[allow(clippy::too_many_arguments)]
-    fn declare_symbol_ex(
+    pub(crate) fn declare_symbol_ex(
         &mut self,
         table: TableLoc,
         parent: Option<SymbolId>,

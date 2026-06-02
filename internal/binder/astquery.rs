@@ -108,8 +108,23 @@ pub(crate) fn name_of_declaration(arena: &NodeArena, id: NodeId) -> Option<NodeI
                 None
             }
         }
-        // JS assignment declarations (`a.b = ...`) name resolution.
-        NodeData::BinaryExpression(_) | NodeData::CallExpression(_) => None,
+        // JS/TS assignment declarations (`a.b = ...`, `this.b = ...`): the
+        // declaration name is the access-expression member name (the `b` of
+        // `a.b`, or the literal of `a["b"]`), falling back to the whole LHS.
+        // Go: internal/ast/utilities.go:GetNonAssignedNameOfDeclaration (KindBinaryExpression)
+        NodeData::BinaryExpression(d) => {
+            let left = d.left;
+            match get_assignment_declaration_kind(arena, id) {
+                JsDeclarationKind::Property
+                | JsDeclarationKind::ThisProperty
+                | JsDeclarationKind::ExportsProperty => {
+                    Some(get_element_or_property_access_name(arena, left).unwrap_or(left))
+                }
+                _ => None,
+            }
+        }
+        // The `Object.defineProperty(...)` call form is deferred.
+        NodeData::CallExpression(_) => None,
         _ => declaration_name(arena, id),
     }
 }

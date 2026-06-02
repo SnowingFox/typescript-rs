@@ -1001,6 +1001,73 @@ fn absent_object_constructor_property_still_reports_2339_after_merge() {
     );
 }
 
+/// End to end with the REAL bundled lib, mirroring the corpus
+/// `expandoFunctionAsAssertion` shape (Round 17): a function-expando assignment
+/// (`function example(){}; example.isFoo = …; example.isFoo(…)`) synthesizes an
+/// expando member on the function symbol's exports (binder), exposed as a
+/// property of the function's value type (checker), so the member access + call
+/// resolve with NO `TS2339`. Before Round 17 this was a spurious
+/// `extra TS2339` in the full-corpus map.
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModuleWorker
+//     + internal/binder/binder.go:bindDeferredExpandoAssignment
+#[test]
+fn function_expando_member_resolves_with_real_lib_no_2339() {
+    let options = CompilerOptions {
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[(
+            "/src/index.ts",
+            "function example() {}\n\
+             example.isFoo = function (value: string): boolean { return value === 'foo'; };\n\
+             example.isFoo('test');\n",
+        )],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "the function-expando member `example.isFoo` must resolve (no 2339): {diags:?}"
+    );
+}
+
+/// GUARD (no over-resolution) with the REAL bundled lib: only the ASSIGNED
+/// expando name resolves — a genuinely-absent property on the same function
+/// still reports `TS2339`.
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty (TS2339)
+#[test]
+fn function_expando_absent_member_still_reports_2339_with_real_lib() {
+    let options = CompilerOptions {
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[(
+            "/src/index.ts",
+            "function example() {}\nexample.isFoo = 1;\nexample.notThere;\n",
+        )],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2339 && d.message.contains("notThere")),
+        "a genuinely-absent function property must still report 2339: {diags:?}"
+    );
+    assert!(
+        diags.iter().all(|d| !d.message.contains("isFoo")),
+        "the synthesized expando member `isFoo` must NOT report 2339: {diags:?}"
+    );
+}
+
 /// GUARD (no regression of base members): a BASE (`lib.es5.d.ts`)
 /// `ObjectConstructor` member (`keys`) still resolves after the cross-file merge
 /// — the merge ADDS later-lib members without dropping the first declaration's.

@@ -1667,8 +1667,18 @@ fn get_type_of_func_class_enum_module(
     }
     let declarations = program.symbol(symbol).declarations.clone();
     let call_signatures = get_signatures_of_symbol(checker, program, &declarations);
+    // Expando members (`function f(){}; f.x = v`) live in the function symbol's
+    // `exports` table (the binder's `bindDeferredExpandoAssignment`), and a
+    // function/class/enum/module value type resolves its members from that table
+    // (Go's `getTypeOfFuncClassEnumModuleWorker` -> anonymous object type whose
+    // members are the symbol's exports). Exposing them as properties is what lets
+    // `f.x` resolve instead of reporting a spurious TS2339.
+    let members = program.symbol(symbol).exports.clone();
+    let properties: Vec<SymbolId> = members.values().copied().collect();
     let object = ObjectType {
         call_signatures,
+        members,
+        properties,
         ..Default::default()
     };
     let t = checker.new_object_type(ObjectFlags::ANONYMOUS, Some(symbol), object);
@@ -1980,6 +1990,15 @@ fn get_type_of_variable_or_property(
     let declaration = sym
         .value_declaration
         .or_else(|| sym.declarations.first().copied());
+    // An assignment-declaration symbol (`f.x = v` / `this.x = v`, a binary
+    // expression value declaration) takes its type from the assigned value(s)
+    // (Go's `getTypeOfVariableOrParameterOrPropertyWorker` KindBinaryExpression
+    // arm -> `getWidenedTypeForAssignmentDeclaration`), not a type annotation.
+    if declaration.is_some_and(|decl| program.arena().kind(decl) == Kind::BinaryExpression) {
+        let t = get_widened_type_for_assignment_declaration(checker, program, symbol);
+        checker.value_symbol_links.get(symbol).resolved_type = Some(t);
+        return t;
+    }
     let type_node = declaration.and_then(|decl| match program.arena().data(decl) {
         NodeData::VariableDeclaration(d) => d.type_node,
         NodeData::PropertySignature(d) | NodeData::PropertyDeclaration(d) => d.type_node,
@@ -2050,6 +2069,85 @@ fn get_type_of_variable_or_property(
     let t = checker.get_widened_type(t);
     checker.value_symbol_links.get(symbol).resolved_type = Some(t);
     t
+}
+
+// Computes the widened type of an expando / `this`-property assignment
+// declaration symbol from its assigned value(s) (the reachable subset of Go's
+// `getWidenedTypeForAssignmentDeclaration`): the union of the widened (mutable-
+// location) types of every `F.x = <rhs>` / `this.x = <rhs>` right-hand side,
+// widened, defaulting to `any` when nothing is assignable.
+//
+// A self-referential assignment (`this.x = f(this.x)`) is broken by a resolving
+// guard that returns `any` on re-entry (Go uses `pushTypeResolution` +
+// `containsSameNamedThisProperty`).
+//
+// DEFER(phase-4): the constructor-`this` CFA typing
+// (`isConstructorDeclaredThisProperty` / `getFlowTypeInConstructor`), the
+// type-annotated binary expression (`f.x = v as T`), the empty-array / all-
+// nullable implicit-any reports (TS7008 `Member '{0}' implicitly has an
+// '{1}' type` / TS7022), and the `containsSameNamedThisProperty` self-ref
+// filtering. blocked-by: constructor CFA + the implicit-any reporting surface +
+// `noImplicitAny` gating.
+// Go: internal/checker/checker.go:Checker.getWidenedTypeForAssignmentDeclaration
+fn get_widened_type_for_assignment_declaration(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> TypeId {
+    // Re-entry guard: a self-referential assignment yields `any` rather than
+    // recursing forever.
+    if !checker.assignment_declaration_resolving.insert(symbol) {
+        return checker.any_type();
+    }
+    let declarations = program.symbol(symbol).declarations.clone();
+    let mut types: Vec<TypeId> = Vec::new();
+    for decl in declarations {
+        let rhs = match program.arena().data(decl) {
+            NodeData::BinaryExpression(d) => Some(d.right),
+            _ => None,
+        };
+        if let Some(rhs) = rhs {
+            // An empty-array RHS (`f.x = []` / `this.x = []`) widens to `any[]`
+            // in Go (`getAssignmentDeclarationInitializerType` empty-array
+            // branch), not the strict `never[]` an empty array literal types to.
+            // We contribute `any` here (deferring the precise `any[]` shape + the
+            // TS7008 implicit-any report) so a later `this.x.push(v)` does not
+            // produce a spurious TS2345 against a `never` element type.
+            let contributed = if is_empty_array_literal_rhs(program, rhs) {
+                checker.any_type()
+            } else {
+                // `checkExpressionForMutableLocation` widens a fresh literal to
+                // its base primitive (the target is a mutable property).
+                let assigned = checker.check_expression(program, rhs);
+                checker.get_widened_literal_type(assigned)
+            };
+            if !types.contains(&contributed) {
+                types.push(contributed);
+            }
+        }
+    }
+    let t = if types.is_empty() {
+        checker.any_type()
+    } else {
+        checker.get_union_type(&types)
+    };
+    let t = checker.get_widened_type(t);
+    checker.assignment_declaration_resolving.remove(&symbol);
+    t
+}
+
+// Reports whether `node` (after unwrapping parentheses) is an empty array
+// literal (`[]`), the assigned value Go's
+// `getAssignmentDeclarationInitializerType` widens to `any[]`.
+fn is_empty_array_literal_rhs(program: &dyn BoundProgram, node: NodeId) -> bool {
+    let mut n = node;
+    while let NodeData::ParenthesizedExpression(d) = program.arena().data(n) {
+        n = d.expression;
+    }
+    matches!(
+        program.arena().data(n),
+        NodeData::ArrayLiteralExpression(d) if d.list.nodes.is_empty()
+    )
 }
 
 // Returns the initializer node of a variable or class-property declaration, if

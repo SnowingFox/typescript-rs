@@ -385,6 +385,94 @@ fn property_access_on_unresolved_name_reports_only_2304() {
     assert_eq!(diags[0].message, "Cannot find name 'unresolvedThing'.");
 }
 
+// Round 17 (function-expando, headline): `function f(){}; f.x = 1; f.x;` adds
+// an expando member `x` to the function symbol's exports (binder), which the
+// function's anonymous object type exposes as a property, so `f.x` resolves with
+// NO TS2339.
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModuleWorker
+//     + bindDeferredExpandoAssignment
+#[test]
+fn function_expando_property_resolves_no_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() {}\nf.x = 1;\nf.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "f.x should resolve as a synthesized expando member, got {diags:?}"
+    );
+}
+
+// Round 17 (faithful expando member type): `function f(){}; f.x = 1; f.x;`
+// types `f.x` as the WIDENED assigned value `number` (Go's
+// `getWidenedTypeForAssignmentDeclaration` -> widened union of the assigned
+// right-hand sides), not a bare `any`.
+// Go: internal/checker/checker.go:Checker.getWidenedTypeForAssignmentDeclaration
+#[test]
+fn function_expando_property_yields_assigned_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "function f() {}\nf.x = 1;\nf.x;");
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let number = c.number_type();
+    assert_eq!(
+        c.check_expression(&p, access),
+        number,
+        "f.x should have the widened assigned type `number`"
+    );
+}
+
+// Round 17 GUARD (no over-resolution): an expando member is synthesized ONLY
+// for the assigned name. A genuinely-absent property on the same function still
+// reports TS2339 — populating the function type's members must not blanket-mute
+// member access.
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty
+#[test]
+fn function_expando_absent_property_still_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() {}\nf.x = 1;\nf.y;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2339 && d.message.contains("'y'")),
+        "the non-expando property `f.y` must still report TS2339, got {diags:?}"
+    );
+    assert!(
+        diags.iter().all(|d| !d.message.contains("'x'")),
+        "the expando property `f.x` must NOT report TS2339, got {diags:?}"
+    );
+}
+
+// Round 17 (this-property, JS): `this.x = 1` in a JS class constructor adds an
+// instance member `x` (binder), so reading `this.x` in a method resolves with NO
+// TS2339.
+// Go: internal/checker/checker.go (this-type property resolution) +
+//     bindThisPropertyAssignment
+#[test]
+fn this_property_assignment_resolves_no_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_js(
+        "/a.js",
+        "class C {\n  constructor() { this.x = 1; }\n  m() { return this.x; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "this.x should resolve as a synthesized member, got {diags:?}"
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.getPropertyOfUnionOrIntersectionType
 // (union branch): a property present on every constituent of a union resolves,
 // with the union of the per-constituent property types.

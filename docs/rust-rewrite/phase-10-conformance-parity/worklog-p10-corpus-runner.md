@@ -2929,3 +2929,221 @@ categorization test was REMOVED (tree clean — only the 6 intended files modifi
 - **`error`-typed cascade (R5) / `undefined -> string` + construct-signature
   (R6)** — downstream of an upstream `error` type or a deferred construct-sig /
   non-strict-null path. blocked-by: those upstream roots.
+
+# Round 17 — JS expando / this-property member synthesis
+
+Round goal: attack the #1 false-positive root in the full compiler corpus —
+`extra TS2339 ×63` ("Property does not exist") — driven by JS/TS EXPANDO
+assignments (`function f(){}; f.x = v`) and `this.x = v` whose synthesized
+members we did not resolve. tsc treats these as adding a member to the target's
+symbol, so `f.x` / `this.x` resolve; we did not, so member access reported a
+spurious TS2339. Fix the LARGEST TRACTABLE shapes: (a) function-expando and
+(b) `this`-property.
+
+## Step-0 categorization (full corpus, temporary `#[ignore]`d dump, REMOVED)
+
+A throwaway dump (`dump_extra_2339_2304`, since REMOVED) ran the full corpus
+through `error_baseline_for_test` + `categorize_diags`, printing every case with
+an `extra TS2339`/`extra TS2304`, its produced messages, the committed-baseline
+codes (so tsc's `TS7008`/`TS7022` are visible), and the case source. The
+`extra TS2339 ×63` group by ROOT shape:
+
+| shape | cases (TS2339 count) | root Go fn | flip needs |
+|---|---|---|---|
+| **(a) function-expando** (`function f(){}; f.x=v`) | `expandoFunctionAsAssertion`(2, clean), `expandoPropertyEmptyArrayWidening`(1, baseline TS7008), `nonExpandoDeclarations`(3 fn + 1 obj, clean) | `bindDeferredExpandoAssignment` + `getTypeOfFuncClassEnumModuleWorker` | resolution (clean cases); +TS7008 for the empty-array one |
+| **(b) `this`-property (JS)** | `jsDeclarationEmitThisAssignment`(3, clean), `widenedThisPropertyAssignment`(2, clean), `jsDeclarationsRequireImportForms`(3, clean+require), `thisPropertyAssignmentTyping`(28, baseline TS2532/2322/7008) | `bindThisPropertyAssignment` + class member resolution | resolution (clean); +CFA/TS7008/TS2322 for the big divergent one |
+| (c) namespace/enum/export= VALUE access (`extra TS2304`) | `esDecorators…SameNameAsClass`, `legacyDecorators…`, `exportAssignmentMerging2/3`, `globalArray…` | `getExpandoSymbol`/enum-value/export= alias | DEFER (separate roots) |
+| (d) object-literal-in-JS expando (`obj.x=v` on `{}`) | `expandoNoInferredIndex`(3, TS7022), `expandoObjectIndexSignatures`(6, TS7022) | empty-object expando initializer + circular TS7022 | DEFER (obj-literal expando + circularity) |
+| (e) `Object.defineProperty` | (none in corpus) | `bindExportsOrObjectDefineProperty` | DEFER |
+
+**Flip analysis.** The clean-baseline cases of shapes (a)+(b) flip with
+RESOLUTION ALONE (no implicit-any needed, since the assigned values are typed
+and the baselines are empty). The cases that ALSO need `TS7008`/`TS7022`
+(`expandoPropertyEmptyArrayWidening`, `thisPropertyAssignmentTyping`,
+`expandoNoInferredIndex`, `expandoObjectIndexSignatures`) ALSO need
+object-literal-expando typing and/or constructor CFA, so emitting TS7008/TS7022
+ALONE would not flip them — they are DEFERRED as a coherent block. This round
+ships shapes (a)+(b) RESOLUTION, which clears the bulk of `extra TS2339` and
+flips the clean cases.
+
+## Go ground truth ported (→ Rust locations)
+
+Binder (`internal/binder/`, all `// Go:`-anchored to `internal/binder/binder.go`):
+- **`bind_expando_property_assignment`** ← `bindExpandoPropertyAssignment` —
+  defers the `F.x = v` assignment (capturing the active container /
+  block-scope-container) into a new `expando_assignments` collection.
+- **`bind_deferred_expando_assignments`** / **`bind_deferred_expando_assignment`**
+  ← `bindDeferredExpandoAssignments` / `bindDeferredExpandoAssignment` — after
+  the main walk, looks up the target (`F`), resolves its initializer symbol, and
+  declares a `Property | Assignment` member into its `exports` (unless a
+  non-assignment member already shadows the name). Wired into
+  `bind_source_file_inner` (Go's `bindSourceFile`).
+- **`get_parent_of_property_assignment`** / **`lookup_entity`** /
+  **`lookup_name`** / **`get_initializer_symbol`** / **`is_expando_initializer`**
+  ← the matching Go helpers (`getParentOfPropertyAssignment` / `lookupEntity` /
+  `lookupName` / `getInitializerSymbol` / `IsExpandoInitializer`). The initializer
+  symbol resolves for a `FunctionDeclaration`, a JS `ClassDeclaration`, and a
+  `const`/JS variable or JS binary expr whose initializer is a
+  function/arrow/JS-class-expression or empty JS object literal.
+- **`bind_this_property_assignment`** / **`get_this_class_and_symbol_table`** ←
+  `bindThisPropertyAssignment` / `getThisClassAndSymbolTable` — JS-only; declares
+  a `Property | Assignment` member into the enclosing class's `members` (instance
+  `this` container) or `exports` (static container) table. The private-identifier
+  and computed-name guards match Go (computed `addLateBoundAssignment…` DEFERRED).
+- **`name_of_declaration`** (`astquery.rs`) ← `GetNonAssignedNameOfDeclaration`'s
+  `KindBinaryExpression` arm — an assignment declaration's name is its access
+  member (`x` of `f.x`), so `get_declaration_name` names the synthesized member.
+
+Checker (`internal/checker/core/`, all `// Go:`-anchored to
+`internal/checker/checker.go`):
+- **`get_type_of_func_class_enum_module`** (`declared_types.rs`) ←
+  `getTypeOfFuncClassEnumModuleWorker` — the function/class value object type now
+  carries `members`/`properties` from the symbol's `exports` (the expando
+  members), so `get_property_of_type` resolves `f.x`. (`this.x` resolves through
+  the class instance type, whose `members` table the binder populated.)
+- **`get_widened_type_for_assignment_declaration`** (`declared_types.rs`) ←
+  `getWidenedTypeForAssignmentDeclaration` (reachable subset) — routed from
+  `get_type_of_variable_or_property` for a binary-expression value declaration
+  (Go's `getTypeOfVariableOrParameterOrPropertyWorker` `KindBinaryExpression`
+  arm). Computes the widened union of the assigned right-hand sides
+  (`checkExpressionForMutableLocation` widening), with an empty-array RHS widened
+  to `any` (Go's empty-array branch yields `any[]`; we use `any`, deferring the
+  precise `any[]` shape + the TS7008 report) and a re-entrancy guard
+  (`assignment_declaration_resolving`) returning `any` on a self-referential
+  `this.x = f(this.x)` (Go's `pushTypeResolution` + `containsSameNamedThisProperty`).
+
+## RED→GREEN + guard tests
+
+Binder (`internal/binder/symbols_test.rs`, +3):
+- `bind_function_expando_property_assignment` (RED→GREEN headline) —
+  `function f(){}; f.x = 1;` synthesizes `x` (Property|Assignment) into `f`'s
+  exports.
+- `bind_this_property_assignment_js_class_member` (RED→GREEN) — a JS class
+  `constructor(){ this.x = 1; }` synthesizes instance member `x`.
+- `bind_this_property_assignment_ts_class_does_not_synthesize` (GUARD) — a TS
+  class does NOT synthesize (Go's JS-only guard).
+
+Checker (`internal/checker/core/check_test.rs`, +4):
+- `function_expando_property_resolves_no_2339` (RED→GREEN headline) —
+  `function f(){}; f.x = 1; f.x;` → ZERO TS2339.
+- `function_expando_property_yields_assigned_type` — `f.x` types as the widened
+  assigned value `number` (faithful, not bare `any`).
+- `function_expando_absent_property_still_reports_2339` (GUARD) — `f.y` (a
+  non-expando property) STILL reports TS2339; `f.x` does not.
+- `this_property_assignment_resolves_no_2339` (RED→GREEN) — a JS class reading
+  `this.x` after `this.x = 1` → ZERO TS2339.
+
+Compiler real-lib (`internal/compiler/program_test.rs`, +2):
+- `function_expando_member_resolves_with_real_lib_no_2339` (RED→GREEN, mirrors
+  the corpus `expandoFunctionAsAssertion`) — `function example(){}; example.isFoo
+  = …; example.isFoo('test');` over the bundled lib → no TS2339.
+- `function_expando_absent_member_still_reports_2339_with_real_lib` (GUARD) — a
+  genuinely-absent function property still reports TS2339.
+
+## Measurement — full corpus BEFORE→AFTER
+
+`tests/cases/compiler` (222 ran):
+
+| metric | BEFORE (R16) | AFTER (R17) | Δ |
+|---|---|---|---|
+| **passed** | **105** | **109** | **+4** |
+| failed | 116 | 112 | −4 |
+| errored | 1 | 1 | 0 |
+| no_baseline_but_errors | 28 | 24 | −4 (4 clean cases now PASS) |
+| missing_all_errors | 66 | 68 | +2 (divergent→missing as the cleared TS2339 was the only extra) |
+| divergent | 22 | 20 | −2 |
+| **extra TS2339** | **×63** | **×22** | **−41** |
+| extra TS2345 | ×8 | ×8 | **0 (NO regression)** |
+| extra TS2304 | ×43 | ×43 | 0 (the namespace/enum/export= value-access cascade — DEFERRED) |
+| missing TS7008 | ×5 | ×5 | **0 (no over-resolution masked a real error)** |
+| missing TS7022 | ×4 | ×4 | **0** |
+| missing TS2339 | ×6 | ×6 | **0** |
+
+`conformance` (19 ran): **11/8/0 → 11/8/0**; its lone `extra TS2339 ×1`
+(`esDecoratorsPropertyAccessSameNameAsClass`'s static-member access) clears
+(`top extra [(2304,2),(2339,1),(5108,1)] → [(2304,2),(5108,1)]`), but the case
+keeps a deferred `TS2304` (enum-as-value), so it does not flip.
+
+**Honest flip count: +4 compiler cases to byte-exact PASS** — the four
+clean-baseline expando/this-property cases (`expandoFunctionAsAssertion`,
+`jsDeclarationEmitThisAssignment`, `widenedThisPropertyAssignment`,
+`nonExpandoDeclarations`), all formerly `no_baseline_but_errors` we wrongly
+errored on with an expando/this TS2339. NO PASS→FAIL regression: a removed false
+positive can only help, `passed` rose monotonically, and the two divergent cases
+that shifted to missing_all_errors (their only extra was the cleared TS2339) stay
+failing on a DEFERRED committed error.
+
+**No over-resolution proven:** `missing TS7008/TS7022/TS2339` are UNCHANGED (no
+masked real diagnostic), and the genuinely-absent-property GUARDs (checker +
+real-lib) keep TS2339 firing. The empty-array→`any` widening keeps
+`extra TS2345` at ×8 (an early attempt that left the empty-array element as
+`never[]` produced +2 spurious TS2345 in `thisPropertyAssignmentTyping`'s
+`this.bar.push("baz")`; faithfully widening the empty array removed it).
+
+## 150-subset characterization BEFORE→AFTER
+
+`expanded_compiler_subset_parity_smoke`: **passed 81 → 84 (+3)**, failed 69 → 66,
+errored 0; categories `no_baseline 14→11, missing_all 43→44, divergent 12→11`;
+**`top_extra(2) = [(2339,16),(2304,14)] → [(2304,14),(2322,12)]`** and
+`extra TS2339 ×16 → ×5` (the residual ×5 are the DEFERRED object-literal expando
++ cross-module-require this-members). The pinned guards (`extra TS2769==1`,
+`extra TS2583/1005/1003/1155==None`, `top_missing(1)=[(2874,7)]`,
+`missing TS2300==None`, no `extra/missing TS7026`, `extra TS2451==None`) are
+UNCHANGED and re-asserted. The curated 30-case smoke (`19/11/0`) is unaffected.
+
+## Gate results (Round 17)
+
+- `cargo test -p tsgo_binder` — GREEN (**63** unit [+3 expando] + 10 doctests).
+- `cargo test -p tsgo_checker` — GREEN (**779** lib [+4 expando] + 178 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (**121** lib [+2 real-lib expando] +
+  doctests).
+- `cargo test -p tsgo_testrunner` — GREEN (51 unit + 1 ignored [full-corpus
+  measurement]; 150-subset 84/66/0 + 30-case 19/11/0 re-pinned).
+- `cargo test -p tsgo_ls` (39) / `-p tsgo_execute` (80) /
+  `-p tsgo_transformers` (11) / `-p tsgo_testutil_harnessutil` (311) — GREEN
+  (no sibling regression; the binder is upstream).
+- `cargo clippy -p tsgo_binder -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner
+  --all-targets -- -D warnings` — clean. `cargo fmt … -- --check` — clean.
+  `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; additive/surgical vertical slice; no test weakened/deleted; no
+new dependency (`Cargo.lock` untouched); member access is NOT broadly resolved
+(only the binder-synthesized expando/this members resolve — proven by the GUARD
+tests); the temporary `dump_extra_2339_2304` categorization test was REMOVED
+(tree clean — only the 9 intended files modified). Not committed by the subagent
+(left to the parent).
+
+## DEFER list (blocked-by) — Round 17
+
+- **TS7008 / TS7022 implicit-any reports** — `reportImplicitAny`
+  (`Member '{0}' implicitly has an '{1}' type` / `'{0}' implicitly has type
+  'any' …`) gated by `noImplicitAny` + `IsCheckJSEnabledForFile`, plus the
+  empty-array (`any[]`) / all-nullable widening and the circular-initializer
+  TS7022. blocked-by: the implicit-any reporting surface + the precise
+  `getAssignmentDeclarationInitializerType` widening branches. (These alone would
+  not flip the cases that need them — see below — so they are deferred together.)
+- **Object-literal-in-JS expando** (`const obj = {}; obj.x = v` on a plain `{}`;
+  `expandoNoInferredIndex` ×3, `expandoObjectIndexSignatures` ×6) — needs the
+  empty-object-literal expando initializer typing + the circular-`Object.values`
+  TS7022. blocked-by: object-literal expando member typing + circularity.
+- **Constructor-`this` CFA typing** (`thisPropertyAssignmentTyping`'s
+  `this.foo = [3]; this.foo = [this.foo[0]*2]` → `number[]`; the union-of-methods
+  + `undefined` typing) — `isConstructorDeclaredThisProperty` /
+  `getFlowTypeInConstructor` / `getTypeOfPropertyInBaseClass`. blocked-by:
+  constructor control-flow analysis. (Resolution clears its TS2339s; the
+  committed TS2532/TS2322/TS7008 stay missing.)
+- **Namespace/function-merge & enum/export= VALUE access (`extra TS2304`)** —
+  `Foo`/`MyEnum`/`A` used as a value where the binder did not merge the
+  function/namespace/enum/export= declaration into a value symbol
+  (`esDecorators…`, `legacyDecorators…`, `exportAssignmentMerging2/3`). blocked-by:
+  `getExpandoSymbol` value-merge + enum-as-value + export= alias resolution.
+- **`Object.defineProperty(obj, "x", …)` (shape e)** — the call-expression
+  expando form (`bindExpandoPropertyAssignment` CallExpression arm +
+  `getParentOfPropertyAssignment` args[0] + `getTypeFromPropertyDescriptor`).
+  blocked-by: bindable `Object.defineProperty` calls. (None in the corpus.)
+- **Computed expando names** (`F[expr] = v` / `this[expr] = v`) — the
+  `HasDynamicName` branch + `addLateBoundAssignmentDeclarationToSymbol`.
+  blocked-by: late-bound computed member declaration.
+- **Constructor-function `this`** (`function F(){ this.x = … }`) — Go's `this`
+  container is the function; not yet typed as a class. blocked-by:
+  constructor-function expando typing.

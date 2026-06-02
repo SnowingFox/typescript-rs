@@ -204,6 +204,22 @@ enum TableLoc {
     Exports(SymbolId),
 }
 
+/// A deferred expando-property assignment (`F.x = v` / `this.x = v`) captured
+/// during the main bind walk, replayed by [`Binder::bind_deferred_expando_assignments`]
+/// after every container symbol exists.
+///
+/// Go captures the active `container`/`blockScopeContainer` alongside the node
+/// so the deferred pass resolves the assignment target (`F`/`this`) in the same
+/// scope it appeared in.
+///
+/// Side effects: none (plain data).
+// Go: internal/binder/binder.go:ExpandoAssignmentInfo
+struct ExpandoAssignmentInfo {
+    node: NodeId,
+    container: Option<NodeId>,
+    block_scope_container: Option<NodeId>,
+}
+
 /// One entry on the active labeled-statement chain.
 ///
 /// Side effects: none (pure value type).
@@ -262,6 +278,7 @@ struct Binder<'a> {
     has_explicit_return: bool,
     has_flow_effects: bool,
     in_assignment_pattern: bool,
+    expando_assignments: Vec<ExpandoAssignmentInfo>,
 }
 
 /// Binds a parsed source file, returning the symbol and flow graphs.
@@ -565,6 +582,7 @@ impl<'a> Binder<'a> {
             has_explicit_return: false,
             has_flow_effects: false,
             in_assignment_pattern: false,
+            expando_assignments: Vec::new(),
         };
         b.unreachable_flow = b.new_flow_node(FlowFlags::UNREACHABLE);
         b.current_flow = b.unreachable_flow;
@@ -599,7 +617,7 @@ impl<'a> Binder<'a> {
             self.external_module_indicator = d.external_module_indicator;
         }
         self.bind(file);
-        // bindDeferredExpandoAssignments is JS/CommonJS only and is deferred.
+        self.bind_deferred_expando_assignments();
     }
 
     // ── Symbol-table location helpers ────────────────────────────────────────
@@ -728,11 +746,12 @@ impl<'a> Binder<'a> {
                 }
             }
             Kind::BinaryExpression => {
-                // CommonJS assignment-declaration recognition. Only the patterns
-                // that set the module indicator are handled here; the expando
-                // (`F.x = Y`) and `this.x = Y` cases declare nothing in this
-                // port (their symbol creation is deferred), and the strict-mode
-                // binary-expression check is also deferred.
+                // CommonJS / expando assignment-declaration recognition. The
+                // `module.exports`/`exports.x` patterns set the CommonJS module
+                // indicator; the `F.x = Y` (expando) and `this.x = Y` cases
+                // synthesize a member symbol (the expando member feeds the
+                // checker's `F.x` / `this.x` resolution). The strict-mode
+                // binary-expression check is deferred.
                 match astquery::get_assignment_declaration_kind(self.arena, node) {
                     astquery::JsDeclarationKind::ModuleExports => {
                         self.bind_module_exports_assignment(node)
@@ -740,7 +759,13 @@ impl<'a> Binder<'a> {
                     astquery::JsDeclarationKind::ExportsProperty => {
                         self.bind_exports_or_object_define_property(node)
                     }
-                    _ => {}
+                    astquery::JsDeclarationKind::Property => {
+                        self.bind_expando_property_assignment(node)
+                    }
+                    astquery::JsDeclarationKind::ThisProperty => {
+                        self.bind_this_property_assignment(node)
+                    }
+                    astquery::JsDeclarationKind::None => {}
                 }
             }
             Kind::CallExpression => {
@@ -957,6 +982,280 @@ impl<'a> Binder<'a> {
         // symbol; only the module indicator is set here.
         // blocked-by: CommonJS export-symbol shape.
         self.set_common_js_module_indicator(node);
+    }
+
+    /// Defers an expando property assignment (`F.x = v`) so the member is
+    /// synthesized after the target symbol (`F`) exists. The active scope is
+    /// captured so the deferred pass resolves `F` in the right container.
+    // Go: internal/binder/binder.go:bindExpandoPropertyAssignment
+    fn bind_expando_property_assignment(&mut self, node: NodeId) {
+        self.expando_assignments.push(ExpandoAssignmentInfo {
+            node,
+            container: self.container,
+            block_scope_container: self.block_scope_container,
+        });
+    }
+
+    /// Replays every deferred expando assignment after the main bind walk, in
+    /// the scope it was captured in.
+    // Go: internal/binder/binder.go:bindDeferredExpandoAssignments
+    fn bind_deferred_expando_assignments(&mut self) {
+        let infos = std::mem::take(&mut self.expando_assignments);
+        for info in infos {
+            self.container = info.container;
+            self.block_scope_container = info.block_scope_container;
+            self.bind_deferred_expando_assignment(info.node);
+        }
+    }
+
+    /// Synthesizes the expando member symbol for one deferred assignment: looks
+    /// up the assignment target (`F` of `F.x = v`), resolves it to its initializer
+    /// symbol (the function/class/expando-initialized variable), and declares a
+    /// `Property | Assignment` member into that symbol's `exports` table (unless
+    /// a non-assignment member already shadows the name).
+    // Go: internal/binder/binder.go:bindDeferredExpandoAssignment
+    fn bind_deferred_expando_assignment(&mut self, node: NodeId) {
+        let Some(parent) = self.get_parent_of_property_assignment(node) else {
+            return;
+        };
+        let symbol = self
+            .lookup_entity(parent, self.block_scope_container)
+            .or_else(|| self.lookup_entity(parent, self.container));
+        let Some(symbol) = self.get_initializer_symbol(symbol) else {
+            return;
+        };
+        // DEFER(phase-4): the `HasDynamicName` computed-expando branch
+        // (`F[expr] = v`) + `addLateBoundAssignmentDeclarationToSymbol`.
+        // blocked-by: late-bound computed member declaration.
+        if astquery::has_dynamic_name(self.arena, node) {
+            return;
+        }
+        // We declare expandos only when there are no non-expando declarations
+        // for that name (Go: `existing == nil || existing.Flags&Assignment != 0`).
+        let name = self.get_declaration_name(node);
+        let existing = self.symbols[symbol.index()].exports.get(&name).copied();
+        let should_declare = match existing {
+            None => true,
+            Some(e) => self.symbols[e.index()]
+                .flags
+                .contains(SymbolFlags::ASSIGNMENT),
+        };
+        if should_declare {
+            self.declare_symbol(
+                TableLoc::Exports(symbol),
+                Some(symbol),
+                node,
+                SymbolFlags::PROPERTY | SymbolFlags::ASSIGNMENT,
+                SymbolFlags::PROPERTY_EXCLUDES,
+            );
+        }
+    }
+
+    /// The assignment target of an expando assignment: the `F` of `F.x = v`
+    /// (the access-expression's target).
+    // Go: internal/binder/binder.go:getParentOfPropertyAssignment
+    fn get_parent_of_property_assignment(&self, node: NodeId) -> Option<NodeId> {
+        match self.arena.data(node) {
+            NodeData::BinaryExpression(d) => astquery::access_expression_target(self.arena, d.left),
+            // DEFER(phase-4): `Object.defineProperty(obj, "x", ...)` → args[0].
+            // blocked-by: bindable Object.defineProperty calls.
+            _ => None,
+        }
+    }
+
+    /// Resolves an entity-name expression to its binder symbol within `container`
+    /// (the reachable subset of Go's `lookupEntity`): a bare identifier looks up
+    /// the scope; a `this.x` access reads the enclosing class table; a nested
+    /// `a.b` access reads `a`'s initializer-symbol exports.
+    // Go: internal/binder/binder.go:lookupEntity
+    fn lookup_entity(&self, node: NodeId, container: Option<NodeId>) -> Option<SymbolId> {
+        if astquery::is_identifier(self.arena, node) {
+            return self.lookup_name(self.arena.text(node), container);
+        }
+        let expression = astquery::access_expression_target(self.arena, node)?;
+        if self.arena.kind(expression) == Kind::ThisKeyword {
+            let (_, table) = self.get_this_class_and_symbol_table();
+            let table = table?;
+            let name = astquery::get_element_or_property_access_name(self.arena, node)?;
+            return self.table_get(table, self.arena.text(name));
+        }
+        let target = self.get_initializer_symbol(self.lookup_entity(expression, container))?;
+        let name = astquery::get_element_or_property_access_name(self.arena, node)?;
+        self.symbols[target.index()]
+            .exports
+            .get(self.arena.text(name))
+            .copied()
+    }
+
+    /// Looks up `name` in `container`'s `locals` (preferring an `export_symbol`),
+    /// else in the container declaration symbol's `exports`.
+    // Go: internal/binder/binder.go:lookupName
+    fn lookup_name(&self, name: &str, container: Option<NodeId>) -> Option<SymbolId> {
+        let container = container?;
+        if let Some(local) = self
+            .locals
+            .get(&container)
+            .and_then(|t| t.get(name).copied())
+        {
+            return Some(self.symbols[local.index()].export_symbol.unwrap_or(local));
+        }
+        let container_symbol = self.symbol_of(container)?;
+        self.symbols[container_symbol.index()]
+            .exports
+            .get(name)
+            .copied()
+    }
+
+    /// Resolves the symbol whose `exports` table an expando member should be
+    /// declared into: a function (or JS class) declaration's own symbol, or the
+    /// initializer symbol of an expando-initialized `const`/JS variable or JS
+    /// assignment.
+    // Go: internal/binder/binder.go:getInitializerSymbol
+    fn get_initializer_symbol(&self, symbol: Option<SymbolId>) -> Option<SymbolId> {
+        let symbol = symbol?;
+        let declaration = self.symbols[symbol.index()].value_declaration?;
+        match self.arena.kind(declaration) {
+            Kind::FunctionDeclaration => Some(symbol),
+            Kind::ClassDeclaration if astquery::is_in_js_file(self.arena, declaration) => {
+                Some(symbol)
+            }
+            Kind::VariableDeclaration => {
+                let is_const = self
+                    .arena
+                    .parent(declaration)
+                    .is_some_and(|p| self.arena.flags(p).contains(NodeFlags::CONST));
+                if !is_const && !astquery::is_in_js_file(self.arena, declaration) {
+                    return None;
+                }
+                let initializer = match self.arena.data(declaration) {
+                    NodeData::VariableDeclaration(d) => d.initializer,
+                    _ => None,
+                }?;
+                if self.is_expando_initializer(declaration, initializer) {
+                    self.symbol_of(initializer)
+                } else {
+                    None
+                }
+            }
+            Kind::BinaryExpression if astquery::is_in_js_file(self.arena, declaration) => {
+                let initializer = match self.arena.data(declaration) {
+                    NodeData::BinaryExpression(d) => Some(d.right),
+                    _ => None,
+                }?;
+                if self.is_expando_initializer(declaration, initializer) {
+                    self.symbol_of(initializer)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Reports whether `initializer` is an expando initializer of `declaration`:
+    /// a function/arrow expression always, or (in a JS file) a class expression
+    /// or an empty, un-annotated object literal.
+    // Go: internal/ast/utilities.go:IsExpandoInitializer
+    fn is_expando_initializer(&self, declaration: NodeId, initializer: NodeId) -> bool {
+        if matches!(
+            self.arena.kind(initializer),
+            Kind::FunctionExpression | Kind::ArrowFunction
+        ) {
+            return true;
+        }
+        if astquery::is_in_js_file(self.arena, initializer) {
+            if self.arena.kind(initializer) == Kind::ClassExpression {
+                return true;
+            }
+            if let NodeData::ObjectLiteralExpression(d) = self.arena.data(initializer) {
+                let no_type = match self.arena.data(declaration) {
+                    NodeData::VariableDeclaration(v) => v.type_node.is_none(),
+                    NodeData::BinaryExpression(_) => true,
+                    _ => true,
+                };
+                return d.list.nodes.is_empty() && no_type;
+            }
+        }
+        false
+    }
+
+    /// Synthesizes a `this.x = v` member into the enclosing class's member (or,
+    /// for a static `this` container, export) table — JS files only.
+    // Go: internal/binder/binder.go:bindThisPropertyAssignment
+    fn bind_this_property_assignment(&mut self, node: NodeId) {
+        if !astquery::is_in_js_file(self.arena, node) {
+            return;
+        }
+        let left = match self.arena.data(node) {
+            NodeData::BinaryExpression(d) => d.left,
+            _ => return,
+        };
+        // A private-identifier `this.#x` is not an expando member.
+        if let NodeData::PropertyAccessExpression(d) = self.arena.data(left) {
+            if astquery::is_private_identifier(self.arena, d.name) {
+                return;
+            }
+        }
+        if self.this_container.is_none() {
+            return;
+        }
+        let (class_symbol, table) = self.get_this_class_and_symbol_table();
+        let Some(table) = table else {
+            // DEFER(phase-4): constructor-function `this` (a `function F(){
+            // this.x = … }` whose `this` container is the function itself).
+            // blocked-by: constructor-function expando typing. Go panics on any
+            // other `this` container; we no-op to keep the corpus run alive.
+            return;
+        };
+        // DEFER(phase-4): the `HasDynamicName` computed branch
+        // (`this[expr] = v`) + `addLateBoundAssignmentDeclarationToSymbol`.
+        if astquery::has_dynamic_name(self.arena, node) {
+            return;
+        }
+        self.declare_symbol_ex(
+            table,
+            class_symbol,
+            node,
+            SymbolFlags::PROPERTY | SymbolFlags::ASSIGNMENT,
+            SymbolFlags::NONE,
+            true,  // is_replaceable_by_method
+            false, // is_computed_name
+        );
+    }
+
+    /// The enclosing class symbol + the member/export table a `this.x` member
+    /// declares into: a class member table for an instance `this` container, the
+    /// export table for a static one. Returns `(None, None)` for a function /
+    /// non-class `this` container.
+    // Go: internal/binder/binder.go:getThisClassAndSymbolTable
+    fn get_this_class_and_symbol_table(&self) -> (Option<SymbolId>, Option<TableLoc>) {
+        let Some(this_container) = self.this_container else {
+            return (None, None);
+        };
+        match self.arena.kind(this_container) {
+            // DEFER(phase-4): constructor-function `this` containers.
+            Kind::FunctionDeclaration | Kind::FunctionExpression => (None, None),
+            Kind::Constructor
+            | Kind::PropertyDeclaration
+            | Kind::MethodDeclaration
+            | Kind::GetAccessor
+            | Kind::SetAccessor
+            | Kind::ClassStaticBlockDeclaration => {
+                let Some(class) = self.arena.parent(this_container) else {
+                    return (None, None);
+                };
+                let Some(class_symbol) = self.symbol_of(class) else {
+                    return (None, None);
+                };
+                let table = if astquery::is_static(self.arena, this_container) {
+                    TableLoc::Exports(class_symbol)
+                } else {
+                    TableLoc::Members(class_symbol)
+                };
+                (Some(class_symbol), Some(table))
+            }
+            _ => (None, None),
+        }
     }
 
     // Go: internal/binder/binder.go:setExportContextFlag

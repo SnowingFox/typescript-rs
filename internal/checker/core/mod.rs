@@ -211,6 +211,12 @@ pub struct Checker {
     /// `pushTypeResolution(AliasTarget)` does.
     // Go: internal/checker/checker.go:Checker.resolveAlias (pushTypeResolution)
     aliases_resolving: rustc_hash::FxHashSet<SymbolId>,
+    /// Assignment-declaration (expando / `this`-property) symbols whose widened
+    /// type is currently being computed, breaking the self-referential cycle in
+    /// `this.x = [this.x[0] * 2]` (Go guards this with `pushTypeResolution` +
+    /// `containsSameNamedThisProperty`; we return `any` on re-entry).
+    // Go: internal/checker/checker.go:Checker.getWidenedTypeForAssignmentDeclaration
+    assignment_declaration_resolving: rustc_hash::FxHashSet<SymbolId>,
     /// Checker-owned arena of synthesized (transient) symbols minted during
     /// union/intersection property synthesis (Go's `symbolArena` + `newSymbol`).
     /// Wrapped in `RefCell` so the `&Checker` `get_property_of_type` entry point
@@ -479,6 +485,7 @@ impl Checker {
             value_symbol_links: SymbolLinks::default(),
             alias_targets: FxHashMap::default(),
             aliases_resolving: rustc_hash::FxHashSet::default(),
+            assignment_declaration_resolving: rustc_hash::FxHashSet::default(),
             synthesized_symbols: RefCell::new(Vec::new()),
             synthesized_property_cache: RefCell::new(FxHashMap::default()),
             signatures: SignatureArena::new(),

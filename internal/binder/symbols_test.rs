@@ -73,6 +73,71 @@ fn bind_class_members() {
         .contains(SymbolFlags::PROPERTY));
 }
 
+// Round 17 (function-expando): `function f(){}; f.x = 1;` synthesizes an
+// expando member `x` (Property|Assignment) into the function symbol's exports,
+// so the checker can resolve `f.x`.
+// Go: internal/binder/binder.go:bindDeferredExpandoAssignment (Property arm)
+#[test]
+fn bind_function_expando_property_assignment() {
+    let (_arena, sf, result) = bind("function f() {}\nf.x = 1;");
+    let f = result.local(sf, "f").expect("f present");
+    let x = result.export(f, "x").expect("expando member x synthesized");
+    assert!(
+        result.symbols[x.index()]
+            .flags
+            .contains(SymbolFlags::PROPERTY),
+        "expando member carries Property"
+    );
+    assert!(
+        result.symbols[x.index()]
+            .flags
+            .contains(SymbolFlags::ASSIGNMENT),
+        "expando member carries Assignment"
+    );
+}
+
+// Round 17 (this-property, JS): `this.x = 1` in a JS class constructor
+// synthesizes an instance member `x` (Property|Assignment) on the class symbol's
+// members table, so the checker can resolve `this.x` / `c.x`.
+// Go: internal/binder/binder.go:bindThisPropertyAssignment
+#[test]
+fn bind_this_property_assignment_js_class_member() {
+    let r = parse_source_file(
+        SourceFileParseOptions {
+            file_name: "/a.js".to_string(),
+        },
+        "class C { constructor() { this.x = 1; } }",
+        ScriptKind::Js,
+    );
+    let mut arena = r.arena;
+    let sf = r.source_file;
+    let result = bind_source_file(&mut arena, sf);
+    let c = result.local(sf, "C").expect("C present");
+    let x = result
+        .member(c, "x")
+        .expect("this-property member x synthesized into class members");
+    assert!(
+        result.symbols[x.index()]
+            .flags
+            .contains(SymbolFlags::PROPERTY),
+        "this-property member carries Property"
+    );
+}
+
+// Round 17 (this-property is JS-only): a `this.x = 1` in a TS class does NOT
+// synthesize an expando member (TS classes use explicit property declarations);
+// Go's `bindThisPropertyAssignment` returns early for non-JS files.
+// Go: internal/binder/binder.go:bindThisPropertyAssignment (IsInJSFile guard)
+#[test]
+fn bind_this_property_assignment_ts_class_does_not_synthesize() {
+    let (_arena, sf, result) = bind("class C { constructor() { this.x = 1; } }");
+    let c = result.local(sf, "C").expect("C present");
+    assert!(
+        result.member(c, "x").is_none(),
+        "a TS class must not synthesize a this-property expando member"
+    );
+}
+
 // Go: internal/binder/binder.go:bindBlockScopedDeclaration (interface merge)
 #[test]
 fn bind_interface_merge() {
