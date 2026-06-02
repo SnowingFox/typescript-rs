@@ -1220,7 +1220,34 @@ pub fn get_type_of_symbol(
     if flags.intersects(SymbolFlags::ENUM) {
         return get_type_of_enum_object(checker, program, symbol);
     }
-    if flags.intersects(SymbolFlags::CLASS | SymbolFlags::INTERFACE) {
+    // A class referenced as a VALUE has the static (constructor) side type: an
+    // anonymous object type whose members are the class's STATIC members (the
+    // binder's `exports` table). The INSTANCE type (the declared type, used at
+    // type-reference positions via `get_declared_type_of_symbol`) is a SEPARATE
+    // type, so `Other.Baz` (a static member access on the class value) reads off
+    // the static side while `x: Other` (a type reference) reads the instance
+    // type. `get_type_of_func_class_enum_module` builds the anonymous object from
+    // `symbol.exports` (no call signatures, since a `ClassDeclaration` is not a
+    // signature-bearing declaration), exactly Go's class arm.
+    //
+    // DEFER(phase-4-checker-later): construct signatures (so the class value's
+    // `new`-applicability and the `instanceof` Function-subtype path read the
+    // class's signatures), static-member inheritance from a base class's static
+    // side, and the `extends <type-parameter>` static-side intersection
+    // (`getBaseTypeVariableOfClass`). blocked-by: construct-signature collection
+    // + base-class static merge. `new C(...)` reads the constructed INSTANCE type
+    // via `get_declared_type_of_symbol` directly (see `check_new_expression`), so
+    // it is unaffected by this static-side routing.
+    // Go: internal/checker/checker.go:Checker.getTypeOfSymbol (SymbolFlagsClass)
+    //     -> getTypeOfFuncClassEnumModuleWorker
+    if flags.intersects(SymbolFlags::CLASS) {
+        return get_type_of_func_class_enum_module(checker, program, symbol);
+    }
+    // A pure interface symbol has no value type; the reachable subset keeps the
+    // declared (instance) type here (Go falls through to `errorType`, but the
+    // declared type is the closest reachable behavior for the rare value-position
+    // reference of an interface-only symbol).
+    if flags.intersects(SymbolFlags::INTERFACE) {
         return get_declared_type_of_symbol(checker, program, symbol, globals);
     }
     // A function or method symbol's type is an anonymous object type carrying
@@ -1251,9 +1278,9 @@ pub fn get_type_of_symbol(
             None => checker.error_type(),
         };
     }
-    // DEFER(phase-4-checker-C-D2+): accessor/class-value types.
-    // blocked-by: accessor signature collection + the constructor/static-side
-    // type of a class value symbol.
+    // DEFER(phase-4-checker-C-D2+): accessor value types (the class-value /
+    // static-side type is handled above via `get_type_of_func_class_enum_module`).
+    // blocked-by: accessor signature collection.
     checker.error_type()
 }
 

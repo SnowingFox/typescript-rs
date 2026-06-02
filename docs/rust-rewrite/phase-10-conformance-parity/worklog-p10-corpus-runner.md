@@ -3944,3 +3944,194 @@ one less than Go" comments removed (the column now MATCHES Go).
   line-leading suppression half of `getDiagnosticsWithPrecedingDirectives` is
   ported. blocked-by: the scanner's comment-directive capture threaded onto the
   source file + the TS2578 emission.
+
+# Round 24 — static-side type of a class value symbol (`getTypeOfFuncClassEnumModule`, class arm)
+
+Round goal: stop the dominant residual `extra TS2339` false positive where a STATIC
+member access on a class VALUE (`Other.Baz`, `Other` declares `static Baz`) is
+reported as "Property 'Baz' does not exist on type 'Other'." — because the class
+value was wrongly typed with its INSTANCE type (which has no static members) instead
+of the static (constructor) side type. This is the Round-20-deferred "static/
+constructor-side type of a class value symbol" root. SOLO lane, strict TDD red->green.
+
+## Step-0 — flip table (temporary `#[ignore]`d dump, REMOVED)
+
+Two throwaway helpers (`temp_round24_flip_dump` + `temp_round24_probe`, both since
+REMOVED from `compiler_runner_test.rs`) walked the full corpus and printed, for each
+FAILED case, its full `CaseDiff` mismatch multiset plus the SOLE-cluster flip count —
+the number of cases whose ENTIRE mismatch set is one `(kind,code)`, i.e. the cases
+that flip to byte-exact PASS if ONLY that cluster is fixed alone. The prompt's
+candidate clusters were OCCURRENCE-based (×N over the corpus), which over-states
+their CASE-flip leverage; the SOLE-cluster table is the real metric:
+
+| cluster (kind+code) | cases that flip if fixed ALONE | note |
+|---|---|---|
+| **extra TS2339** | **5** | splits into 3 ROOTS (below) |
+| missing TS2688 | 4 | type-directive / `typeRoots` / in-test `tsconfig.json` — needs config-host wiring (DEFER infra), giant subsystem |
+| extra TS2345 | 3 | Round-16-deferred false positive (over-suppress risk) |
+| missing TS2322 | 3 | deep recursive type cases (hard) |
+| missing TS2345 | 3 | missing-argument errors (complex) |
+| missing TS2874 | 3 | React-in-scope JSX — DEFERRED (jsx-pragma infra) |
+| missing TS7006 | 3 | implicit-any parameter (broad over-fire risk) |
+| extra TS2304 | 2 | `export =`-namespace / cross-package (DEFERRED) |
+| extra TS7026 | 2 | JSX intrinsic over-fire (entangled) |
+| missing {TS1110, TS6133, TS2321} | **1 each** | the prompt's "×11 / ×9 / ×8" are ALL concentrated in ONE case each (`jsdocTypesWithPrefixesAndUnionTypes1` has 10×TS1110 but also needs TS1005+TS1354; `unusedLocalsInForInOrOf1` has 9×TS6133; `excessivelyDeepConditionalTypes` has 8×TS2321) — only 1 case flips each |
+| missing TS7027 (namespace) | **0** | `reachabilityChecks11` ALSO misses TS7006 — never flips on TS7027 alone (Round-22 DEFER confirmed) |
+
+The top SOLE-cluster `extra TS2339 ×5` (per `temp_round24_probe`) decomposes into THREE
+distinct roots — NOT one coherent fix:
+- **Root A — static member access on a class VALUE (3 cases):**
+  `classFieldsPropertyAccessSameNameAsClass`(`Other.Baz`),
+  `esDecoratorsPropertyAccessSameNameAsClass`(`Other.Baz`),
+  `legacyDecoratorsEnumAccessSameNameAsClass`(`Other.Qux`). Each produces exactly ONE
+  TS2339 on `Other.<staticMember>`; committed baseline is absent (expected clean).
+- Root B — `this.#private` private-identifier access (1 case,
+  `classFieldsPrivatePropertyAccessSameNameAsClass`) — needs private-field modeling.
+- Root C — JS `@type {Record<string, boolean>}` expando on `{}` (1 case,
+  `nonExpandoDeclarations`) — needs the JSDoc `@type` annotation + `Record` index sig.
+
+**Chosen cluster: Root A — the static-side type of a class value symbol (3 flips).**
+Why: it is the LARGEST coherent, bounded checker fix among the tractable clusters
+(M2688 needs config-host infra; M2874 needs jsx-pragma infra; E2345/M7006 are
+over-suppress/over-fire risks); the Go ground truth is exact and singular
+(`getTypeOfSymbol` -> class arm -> `getTypeOfFuncClassEnumModule`); and the regression
+surface is SMALL and well-understood (see "Regression analysis"). Expected: +3 flips,
+`extra TS2339 ×19 -> ×16`.
+
+## Regression analysis (before implementing)
+
+The fix changes `get_type_of_symbol` for a CLASS symbol (the VALUE-position type)
+from the INSTANCE type to the static side. Audited every consumer of a class value
+type:
+- **Type references** (`x: Other`) use `get_declared_type_of_symbol` (instance), a
+  SEPARATE path — UNAFFECTED.
+- **`new Other()`** (`check_new_expression`) reads the constructed INSTANCE type via
+  `get_declared_type_of_symbol` DIRECTLY (not `get_type_of_symbol`) — UNAFFECTED.
+- **`try_get_this_type_at`** static-member branch ALREADY calls `get_type_of_symbol`
+  and documents it wants "the static side: the class value type" — so the fix
+  CORRECTS a latent gap there (improvement, not regression).
+- **`instanceof`** checks only CALL signatures + `Function`-subtype; a class value
+  (instance OR static side) has neither, so the verdict is UNCHANGED.
+
+## Go ground truth ported (`// Go:`-anchored)
+
+- **`internal/checker/checker.go:getTypeOfSymbol(16352)`** — `SymbolFlagsClass` is in
+  the `Function|Method|Class|Enum|ValueModule` arm that routes to
+  `getTypeOfFuncClassEnumModule`, NOT to a declared/instance-type path.
+- **`checker.go:getTypeOfFuncClassEnumModuleWorker(16771)`** — for a class, returns
+  `c.newObjectType(ObjectFlagsAnonymous, symbol)` (the `extends <type-parameter>`
+  intersection via `getBaseTypeVariableOfClass` is the only branch; absent here). The
+  anonymous type's members are resolved lazily from `getExportsOfSymbol(symbol)` =
+  the class's STATIC members.
+- **`internal/binder/symbols.rs:declare_class_member`** (mirrors Go
+  `binder.go:declareClassMember`) confirms static members are declared into the class
+  symbol's `Exports` table, instance members into `Members`.
+
+## Rust landing (`internal/checker/core/declared_types.rs`)
+
+- `get_type_of_symbol`: the `SymbolFlags::CLASS | INTERFACE -> get_declared_type_of_symbol`
+  arm is SPLIT — `CLASS` now routes to the pre-existing
+  `get_type_of_func_class_enum_module` (which builds the anonymous object type from
+  `symbol.exports`, with no call signatures since a `ClassDeclaration` is not a
+  signature-bearing declaration), exactly Go's class arm; `INTERFACE` keeps the
+  declared type (its rare value-position reference is unchanged). The stale fall-
+  through DEFER note ("the constructor/static-side type of a class value symbol") was
+  updated — only accessor value types remain deferred there.
+- Construct signatures, base-class static inheritance, and the `extends
+  <type-parameter>` static-side intersection are DEFER-noted (none needed for static
+  data-member access; `new`/`instanceof` are unaffected per the audit above).
+
+## RED->GREEN + guard tests
+
+Checker (`internal/checker/core/check_test.rs`, +4):
+- `class_static_member_access_resolves_no_2339` (RED->GREEN headline) —
+  `class Other { static Baz = 42 } const x = Other.Baz;` -> NO TS2339 (RED: TS2339
+  "Property 'Baz' does not exist on type 'Other'.").
+- `class_static_member_access_yields_member_type` (RED->GREEN type) — `Other.Baz`
+  has the widened static-member type `number` (RED: error type).
+- `class_value_absent_static_member_still_reports_2339` (GUARD, no over-suppress) —
+  `Other.nope` still TS2339.
+- `class_value_instance_member_reports_2339` (GUARD, instance NOT on static side) —
+  `class Other { inst = 1 } Other.inst;` -> TS2339 (RED: NO diagnostic — the buggy
+  instance-typed class value wrongly exposed the instance member `inst`).
+
+Compiler real-lib (`internal/compiler/program_test.rs`, +2):
+- `class_static_member_access_resolves_with_real_lib_no_2339` (mirrors the corpus
+  `SameNameAsClass` shape over the bundled libs: `Other.Baz` resolves, no TS2339).
+- `class_value_non_static_member_still_reports_2339_with_real_lib` (GUARD: instance
+  `Other.inst` + absent `Other.nope` both still TS2339; the static `Other.Baz` does
+  not).
+
+## Measurement — full corpus BEFORE->AFTER (`tests/cases/compiler`, 222 ran)
+
+| metric | BEFORE (R22) | AFTER (R24) | Δ |
+|---|---|---|---|
+| **passed** | 122 (55.0%) | **125 (56.3%)** | **+3** |
+| failed | 99 | 96 | −3 |
+| errored | 1 | 1 | 0 |
+| no_baseline_but_errors | 19 | 16 | −3 (3 clean cases now PASS) |
+| missing_all_errors | 65 | 65 | 0 |
+| divergent | 15 | 15 | 0 |
+| **extra TS2339** | **×19** | **×16** | **−3** |
+| every other extra/missing code | — | — | UNCHANGED |
+
+`tests/cases/conformance` (19 ran): passed 13 -> 13 (no regression).
+
+**Honest flip count: +3 cases to byte-exact PASS** — `classFieldsPropertyAccessSameNameAsClass`,
+`esDecoratorsPropertyAccessSameNameAsClass`, `legacyDecoratorsEnumAccessSameNameAsClass`
+(each cleared its lone `Other.<static>` TS2339). NO PASS->FAIL regression: a per-case
+before/after diff of the full-corpus failure set (the temp dump) showed EXACTLY these
+3 cases left the FAILED set and ZERO cases entered it; `passed` rose monotonically
+(122->125); `missing_all_errors`/`divergent` UNCHANGED; every `missing` code UNCHANGED
+(no over-resolution masked a real diagnostic — `missing TS2339` stays ×6); only
+`extra TS2339` dropped, by exactly the 3 flipped diagnostics, with NO other extra/
+missing count changed. Guards prove the static side carries ONLY static members
+(instance member `Other.inst` and absent `Other.nope` still TS2339).
+
+## 150-subset + 30-case characterization BEFORE->AFTER
+
+`expanded_compiler_subset_parity_smoke`: **93/57/0 UNCHANGED**. The 3 flips are all
+>25-line files (55/57/62 lines), OUTSIDE the <=25-line subset, and no subset case
+exercises a static-member access on a class value, so the subset's `extra TS2339 ×5`
+(object-literal expando / require-this members) and all pinned guards
+(`top_extra(2)=[(2339,5),(2304,4)]`, `extra TS2339==5`, `TS2583==None`, `TS2769==1`,
+`TS1005/1003/1155==None`, `top_missing(1)=[(2874,7)]`, `missing TS2300==None`) are
+re-asserted UNCHANGED. A Round-24 note was added to the test documenting the parity-
+neutrality. `curated_compiler_subset_parity_smoke`: 21/9/0 UNCHANGED.
+
+## Gate results (Round 24)
+
+- `cargo test -p tsgo_checker` — GREEN (**810** lib [+4] + 178 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (**132** lib [+2 real-lib] + 11 doctests).
+- `cargo test -p tsgo_testrunner --lib` — GREEN (51 lib + 3 ignored [full-corpus
+  measurement + 0 temp]; 150-subset re-pinned 93/57/0, 30-case 21/9/0).
+- `cargo test -p tsgo_ls` (39 + 4 doctests) / `cargo test -p tsgo_execute` (80) —
+  GREEN (no diagnostic-snapshot churn; the static-side change touched no ls/execute
+  snapshot). `tsgo_binder`/`tsgo_parser` NOT touched (no run needed).
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner --all-targets
+  -- -D warnings` — clean. `cargo fmt` then `cargo fmt -- --check` — clean.
+  `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; additive/surgical vertical slice (one arm of `get_type_of_symbol`);
+no test weakened/deleted; no new dependency (`Cargo.lock` untouched). The two temporary
+dump helpers (`temp_round24_flip_dump`, `temp_round24_probe`) were REMOVED (tree has
+only the 4 intended modifications). Not committed (left to the parent).
+
+## DEFER list (blocked-by) — Round 24
+
+- **Construct signatures on the class static-side type** — the static side has no
+  construct signatures yet, so `new`-applicability/overload selection and the
+  `instanceof` `Function`-subtype path do not read the class's construct signatures
+  (`new C(...)` reads the INSTANCE type directly, so it works for the reachable
+  subset). blocked-by: construct-signature collection from the class constructors +
+  the default/implicit constructor.
+- **Static-member inheritance from a base class's static side** (`class D extends C`
+  reading `D.staticOfC`) + the **`extends <type-parameter>` static-side intersection**
+  (`getBaseTypeVariableOfClass`). blocked-by: base-class static merge + the base
+  constructor type.
+- **Root B — `this.#private` private-identifier member access**
+  (`classFieldsPrivatePropertyAccessSameNameAsClass`, `extra TS2339 ×1`). blocked-by:
+  private-identifier (`#name`) member modeling on the class type.
+- **Root C — JS `@type {Record<...>}` expando** (`nonExpandoDeclarations`,
+  `extra TS2339 ×2`). blocked-by: the JSDoc `@type` annotation applied to a `let`/
+  function-property + the `Record<K,V>` index signature.

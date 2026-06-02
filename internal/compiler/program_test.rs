@@ -1142,6 +1142,80 @@ fn function_expando_absent_member_still_reports_2339_with_real_lib() {
 }
 
 /// End to end with the REAL bundled lib, mirroring the corpus
+/// `legacyDecoratorsEnumAccessSameNameAsClass` /
+/// `esDecoratorsPropertyAccessSameNameAsClass` /
+/// `classFieldsPropertyAccessSameNameAsClass` shape (Round 24): a STATIC member
+/// of a class accessed through the class VALUE (`Other.Baz`) resolves off the
+/// class's static (constructor) side type with NO spurious `TS2339`. Before
+/// Round 24 the class value wrongly used the INSTANCE type (which has no static
+/// members), so `Other.Baz` was the dominant residual `extra TS2339` cluster.
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModuleWorker
+#[test]
+fn class_static_member_access_resolves_with_real_lib_no_2339() {
+    let options = CompilerOptions {
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[(
+            "/src/index.ts",
+            "class Other {\n    static Baz = 42;\n}\n\
+             export class Baz {\n    prop = Other.Baz;\n}\n",
+        )],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "the static member access `Other.Baz` on the class value must resolve (no 2339): {diags:?}"
+    );
+}
+
+/// GUARD (no over-resolution) with the REAL bundled lib: the class static-side
+/// type exposes ONLY static members. A genuinely-absent static member still
+/// reports `TS2339`, and an INSTANCE member accessed off the class VALUE
+/// (`Other.inst`) is NOT on the static side, so it also reports `TS2339`.
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty (TS2339)
+#[test]
+fn class_value_non_static_member_still_reports_2339_with_real_lib() {
+    let options = CompilerOptions {
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[(
+            "/src/index.ts",
+            "class Other {\n    static Baz = 42;\n    inst = 1;\n}\n\
+             Other.inst;\nOther.nope;\n",
+        )],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2339 && d.message.contains("inst")),
+        "the INSTANCE member `Other.inst` accessed on the class value must report 2339: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2339 && d.message.contains("nope")),
+        "the absent static member `Other.nope` must still report 2339: {diags:?}"
+    );
+    assert!(
+        diags.iter().all(|d| !d.message.contains("'Baz'")),
+        "the static member `Other.Baz` must NOT report 2339: {diags:?}"
+    );
+}
+
+/// End to end with the REAL bundled lib, mirroring the corpus
 /// `legacyDecoratorsEnumAccessSameNameAsClass` / `classFieldsPropertyAccessSameNameAsClass`
 /// shape (Round 20): a top-level EXPORTED enum referenced as a value
 /// (`MyEnum.Foo`) and an EXPORTED class self-reference in a static initializer

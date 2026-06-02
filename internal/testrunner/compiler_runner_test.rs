@@ -788,6 +788,19 @@ fn expanded_compiler_subset_parity_smoke() {
     // NOT over-fire; that filter is parity-neutral in THIS subset (its other
     // beneficiary `jsExportsImportedIntoTsxLosesTypeInfo.tsx` is 121 lines,
     // outside the <=25-line subset — its flip shows only in the full corpus).
+    //
+    // Round 24 (static-side type of a class value): a class referenced as a VALUE
+    // now has its static (constructor) side type, so a STATIC member access on the
+    // class value (`Other.Baz`) resolves off the class's `exports` table instead of
+    // reporting a spurious `extra TS2339`. This is PARITY-NEUTRAL on THIS <=25-line
+    // subset: the three full-corpus flips
+    // (`classFieldsPropertyAccessSameNameAsClass` 55 lines,
+    // `esDecoratorsPropertyAccessSameNameAsClass` 57 lines,
+    // `legacyDecoratorsEnumAccessSameNameAsClass` 62 lines) are all OUTSIDE the
+    // subset, and no <=25-line subset case exercises a static-member access on a
+    // class value, so the subset's `extra TS2339 ×5` (object-literal expando /
+    // require-this members) is UNCHANGED. The flip (`extra TS2339 ×19 -> ×16`,
+    // full-corpus passed 122 -> 125) shows only in the full-corpus measurement.
     assert_eq!(
         counts,
         ParityCounts {

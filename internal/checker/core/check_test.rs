@@ -664,6 +664,92 @@ fn this_property_assignment_resolves_no_2339() {
     );
 }
 
+// Round 24 (static-side type of a class value): a class referenced as a VALUE
+// has the static (constructor) side type, whose members are the class's STATIC
+// members (the binder's `exports` table). So a static member access on the
+// class value — `Other.Baz` where `Other` declares `static Baz` — resolves with
+// NO spurious TS2339 (Go's `getTypeOfSymbol` -> class arm ->
+// `getTypeOfFuncClassEnumModuleWorker`).
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModuleWorker
+#[test]
+fn class_static_member_access_resolves_no_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class Other {\n  static Baz = 42;\n}\nconst x = Other.Baz;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "Other.Baz (static member on a class value) should resolve, got {diags:?}"
+    );
+}
+
+// Round 24 (static-side member type): `Other.Baz` for `static Baz = 42` yields
+// the widened initializer type `number` (the static member resolved off the
+// class value's static-side object type).
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModuleWorker
+#[test]
+fn class_static_member_access_yields_member_type() {
+    let p =
+        StubProgram::parse_and_bind("/a.ts", "class Other {\n  static Baz = 42;\n}\nOther.Baz;");
+    let access = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let number = c.number_type();
+    assert_eq!(
+        c.check_expression(&p, access),
+        number,
+        "Other.Baz should have the widened static-member type `number`"
+    );
+}
+
+// Round 24 GUARD (no over-suppress): a genuinely-absent static member on a class
+// value still reports TS2339. Exposing the static members must not blanket-mute
+// member access on the class value.
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty
+#[test]
+fn class_value_absent_static_member_still_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class Other {\n  static Baz = 42;\n}\nOther.nope;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2339 && d.message.contains("'nope'")),
+        "the absent static member `Other.nope` must still report TS2339, got {diags:?}"
+    );
+}
+
+// Round 24 GUARD (instance member is NOT on the static side): an INSTANCE member
+// accessed off the class VALUE (`Other.inst` where `inst` is a non-static
+// member) still reports TS2339 — the static-side type carries only the static
+// members, never the instance members.
+// Go: internal/checker/checker.go:Checker.getTypeOfFuncClassEnumModuleWorker
+#[test]
+fn class_value_instance_member_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class Other {\n  inst = 1;\n}\nOther.inst;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2339 && d.message.contains("'inst'")),
+        "the instance member `Other.inst` accessed on the class value must report TS2339, got {diags:?}"
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.getPropertyOfUnionOrIntersectionType
 // (union branch): a property present on every constituent of a union resolves,
 // with the union of the per-constituent property types.
