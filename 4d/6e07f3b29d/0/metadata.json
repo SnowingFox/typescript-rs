@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "4d6e07f3b29d",
+  "session_id": "9d9591a0-525b-4a9d-9c03-5c51aa2c33ef",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-02T09:29:20.008283Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "internal/testrunner/compiler_runner_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "composer-2.5-fast",
+  "turn_id": "f7056e09cc83",
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-02T09:29:19.999171Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 560,
+    "human_modified": 10,
+    "human_removed": 0,
+    "total_committed": 560,
+    "total_lines_changed": 593,
+    "agent_percentage": 0,
+    "metric_version": 2
+  }
+}
