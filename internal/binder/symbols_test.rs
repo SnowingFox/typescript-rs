@@ -156,6 +156,70 @@ fn bind_enum_namespace_merge() {
     ));
 }
 
+/// The distinct full-start positions of every `Duplicate_identifier` diagnostic.
+fn duplicate_identifier_positions(result: &BindResult) -> std::collections::BTreeSet<i32> {
+    result
+        .diagnostics
+        .iter()
+        .filter(|d| std::ptr::eq(d.message, &tsgo_diagnostics::DUPLICATE_IDENTIFIER_0))
+        .map(|d| d.loc.pos())
+        .collect()
+}
+
+/// The full-start position of an interface/class member's name node.
+fn member_name_pos(arena: &NodeArena, member: NodeId) -> i32 {
+    let name = match arena.data(member) {
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => d.name,
+        NodeData::MethodSignature(d) => d.name,
+        NodeData::PropertySignature(d) => d.name,
+        _ => unreachable!("unexpected member kind"),
+    };
+    arena.loc(name).pos()
+}
+
+// Round 18 (accessor "mark full accessor"): when a get/set accessor conflicts
+// with a member of a DIFFERENT kind, the surviving symbol is marked a FULL
+// accessor (`GetAccessor|SetAccessor`) so a SUBSEQUENT accessor of the
+// complementary kind also conflicts. `get x; x(); set x;` must flag ALL THREE
+// `x` members — without the marking the trailing `set x` legally merges with the
+// lone surviving getter and goes unreported (the corpus's
+// `duplicateIdentifierChecks.ts` I7/I8/C3/C4/C7/C8/o7/o8 third-member gap).
+// Go: internal/binder/binder.go:declareSymbolEx (symbol.Flags |= Accessor, 286-292)
+#[test]
+fn bind_accessor_conflict_marks_full_accessor_get_method_set() {
+    let (arena, sf, result) =
+        bind("interface I { get x(): number; x(): number; set x(value: number); }");
+    let members = interface_members(&arena, first_statement(&arena, sf));
+    let dup_positions = duplicate_identifier_positions(&result);
+    for m in &members {
+        assert!(
+            dup_positions.contains(&member_name_pos(&arena, *m)),
+            "member name at {} should be flagged TS2300; got positions {:?}",
+            member_name_pos(&arena, *m),
+            dup_positions
+        );
+    }
+    assert_eq!(
+        dup_positions.len(),
+        3,
+        "all three `x` members are duplicates; positions {dup_positions:?}"
+    );
+}
+
+// Round 18 GUARD (no over-fire): a LEGAL get/set accessor PAIR (`get x; set x;`)
+// merges into one accessor symbol and must produce NO duplicate-identifier
+// diagnostic. The full-accessor marking only runs on a conflict, so a clean
+// get+set pair never reaches it.
+// Go: internal/binder/binder.go:declareSymbolEx (GetAccessorExcludes / SetAccessorExcludes)
+#[test]
+fn bind_legal_get_set_accessor_pair_no_duplicate() {
+    let (_arena, _sf, result) = bind("interface I { get x(): number; set x(value: number); }");
+    assert!(
+        duplicate_identifier_positions(&result).is_empty(),
+        "a legal get/set accessor pair must not be flagged as a duplicate"
+    );
+}
+
 /// Returns the members of an interface declaration node.
 fn interface_members(arena: &NodeArena, node: NodeId) -> Vec<NodeId> {
     match arena.data(node) {

@@ -1558,6 +1558,115 @@ fn legal_merges_produce_no_duplicate_identifier() {
     }
 }
 
+/// Round 18 (checker `checkObjectTypeForDuplicateDeclarations`): a property that
+/// shares a name with an accessor inside ONE interface is a duplicate identifier
+/// the BINDER's excludes intentionally let merge (a property does not exclude an
+/// accessor), so the CHECKER reports it. `get x; x: number; set x;` flags all
+/// three `x` members — the corpus `duplicateIdentifierChecks.ts` I5/I6 gap. This
+/// drives the diagnostic through the real `Program` (multi-file checker pool),
+/// not just the StubProgram checker unit path. The three single-character `x`
+/// name spans byte-match `tsc`.
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3122)
+#[test]
+fn interface_property_accessor_duplicate_surfaces_ts2300() {
+    let src = "interface I { get x(): number; x: number; set x(value: number); }";
+    let mut program = program_with(
+        &[("/index.ts", src)],
+        "/",
+        &["/index.ts"],
+        CompilerOptions {
+            no_lib: tsgo_core::tristate::Tristate::True,
+            ..Default::default()
+        },
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    let mut dup: Vec<(i32, i32)> = diags
+        .iter()
+        .filter(|d| d.code == 2300)
+        .map(|d| (d.start, d.length))
+        .collect();
+    dup.sort();
+    // The three `x` member names are the only `x` characters in the source.
+    let expected: Vec<(i32, i32)> = src.match_indices('x').map(|(i, _)| (i as i32, 1)).collect();
+    assert_eq!(expected.len(), 3, "exactly three `x` member names");
+    assert_eq!(
+        dup, expected,
+        "property/accessor duplicate must flag all three `x` names with single-char spans: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .filter(|d| d.code == 2300)
+            .all(|d| d.message == "Duplicate identifier 'x'."),
+        "TS2300 message carries the duplicate name: {diags:?}"
+    );
+}
+
+/// Round 18 (binder accessor "mark full accessor"): when a get accessor conflicts
+/// with a method of the same name, the surviving symbol is marked a FULL accessor
+/// so the trailing `set x` ALSO conflicts. `get x; x(); set x;` flags all three
+/// `x` members through the real `Program` — the corpus I7/I8/C7/C8/o7/o8 gap.
+// Go: internal/binder/binder.go:declareSymbolEx (symbol.Flags |= Accessor)
+#[test]
+fn accessor_marking_third_member_surfaces_ts2300() {
+    let src = "interface I { get x(): number; x(): number; set x(value: number); }";
+    let mut program = program_with(
+        &[("/index.ts", src)],
+        "/",
+        &["/index.ts"],
+        CompilerOptions {
+            no_lib: tsgo_core::tristate::Tristate::True,
+            ..Default::default()
+        },
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    let dup: std::collections::BTreeSet<(i32, i32)> = diags
+        .iter()
+        .filter(|d| d.code == 2300)
+        .map(|d| (d.start, d.length))
+        .collect();
+    let expected: std::collections::BTreeSet<(i32, i32)> =
+        src.match_indices('x').map(|(i, _)| (i as i32, 1)).collect();
+    assert_eq!(expected.len(), 3, "exactly three `x` member names");
+    assert_eq!(
+        dup, expected,
+        "the trailing `set x` must also be flagged (full-accessor marking): {diags:?}"
+    );
+}
+
+/// Round 18 GUARD (no over-fire): a LEGAL interface get/set accessor PAIR and a
+/// LEGAL method overload set must NOT report any duplicate identifier — the
+/// checker's duplicate-member check only fires for property/property and
+/// property/accessor merges, never for a complementary get/set pair or for
+/// method declarations (which it does not classify).
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations (state==2 && kind==2 / methods skipped)
+#[test]
+fn legal_accessor_pair_and_overloads_no_duplicate() {
+    for src in [
+        "interface I { get x(): number; set x(value: number); }",
+        "interface I { f(a: number): void; f(a: string): void; }",
+        "interface I { a: number; b: string; }",
+    ] {
+        let mut program = program_with(
+            &[("/index.ts", src)],
+            "/",
+            &["/index.ts"],
+            CompilerOptions {
+                no_lib: tsgo_core::tristate::Tristate::True,
+                ..Default::default()
+            },
+            true,
+        );
+        let diags = program.semantic_diagnostics();
+        assert!(
+            diags.iter().all(|d| d.code != 2300),
+            "legal members `{src}` must not report TS2300: {diags:?}"
+        );
+    }
+}
+
 /// Round 13 GATE (default-library exclusion preserved): a program built over the
 /// REAL bundled libs must never attribute ANY semantic diagnostic — checker OR
 /// binder — to a `lib.*.d.ts` file. Bind diagnostics flow through the SAME

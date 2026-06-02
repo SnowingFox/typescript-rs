@@ -186,7 +186,15 @@ impl Binder<'_> {
             self.add_diagnostic(d);
         }
         self.add_diagnostic(diag);
-        if existing_flags.contains(SymbolFlags::ACCESSOR)
+        // When a get/set accessor conflicts with a non-accessor (or an accessor
+        // of a DIFFERENT kind), mark the surviving symbol as a FULL accessor so
+        // every subsequent declaration is also considered conflicting (e.g. a
+        // `get x`, then a non-accessor, then a `set x` all flagged as duplicates).
+        // Go tests `symbol.Flags & Accessor != 0` (EITHER bit), so this must be
+        // `intersects`, not `contains` (which would require BOTH get+set bits and
+        // never fire for a lone getter/setter — the I7/I8/C3/C4/C7/C8/o7/o8 gap).
+        // Go: internal/binder/binder.go:declareSymbolEx (lines 286-292)
+        if existing_flags.intersects(SymbolFlags::ACCESSOR)
             && existing_flags & SymbolFlags::ACCESSOR != includes & SymbolFlags::ACCESSOR
         {
             self.symbols[existing_sym.index()].flags |= SymbolFlags::ACCESSOR;

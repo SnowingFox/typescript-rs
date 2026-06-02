@@ -3147,3 +3147,211 @@ tests); the temporary `dump_extra_2339_2304` categorization test was REMOVED
 - **Constructor-function `this`** (`function F(){ this.x = … }`) — Go's `this`
   container is the function; not yet typed as a class. blocked-by:
   constructor-function expando typing.
+
+# Round 18 — duplicate-identifier TS2300 (missing)
+
+Round goal: reduce Round 12's **#1 FALSE-NEGATIVE — `missing TS2300 ×52`**
+("Duplicate identifier '{0}'"), the residual after Round 13 wired binder
+duplicate diagnostics through and Round 10 ported the member-MERGE half of
+`mergeSymbol`. SOLO lane, strict TDD red→green. Edits: `internal/binder/
+symbols.rs` (the accessor-marking fix) + `symbols_test.rs`; `internal/checker/
+core/check.rs` (the `checkObjectTypeForDuplicateDeclarations` port) +
+`check_test.rs`; `internal/compiler/program.rs` (the per-file diagnostic
+sort+dedup) + `program_test.rs`; `internal/testrunner/compiler_runner_test.rs`
+(re-measured) + this worklog.
+
+## Step-0 categorization — root → count (the 52 are ALL in ONE case)
+
+A temporary `#[ignore]`d dump (`dump_missing_ts2300`, since REMOVED) ran the full
+compiler corpus and extracted every `missing TS2300`. **All 52 are in a SINGLE
+case, `duplicateIdentifierChecks.ts`** (214 lines, `@strict @target esnext
+@noEmit`), which exercises every get/set/property/method/computed-name duplicate
+combination inside one interface / `declare class` / object-literal. We already
+emit 42 of the 94 committed TS2300 (the binder's `declareSymbol` excludes); the
+52 missing split by ROOT:
+
+| bucket | root | shapes | count |
+|---|---|---|---|
+| **B1** | binder **accessor "mark full accessor"** (`declareSymbolEx` 286-292) | `get x; <other>; set x;` — the THIRD member (I7/I8/C3/C4/C7/C8/o7/o8) | **8** |
+| **B2** | checker **`checkObjectTypeForDuplicateDeclarations`** | property-vs-accessor (`get x; x; set x;` — I5/I6/C5/C6) + property-vs-property (I14's `foo; foo`) | **14** |
+| **A** | checker **late-binding** (`getLateBoundSymbol`) | computed `[foo]`/`[sym]` (I10/C10/C11/C12/I20/C20) + cross-name `[foo]` vs literal `foo` (I11–I15) | **30** |
+
+`8 + 14 + 30 = 52`. The case will **NOT FLIP** to PASS regardless — it also
+misses `TS1118 ×4` (object-literal multiple accessors) + `TS1119 ×4` (object-literal
+property+accessor) grammar diagnostics, and the 30 Bucket-A computed/late-bound
+TS2300. So the honest **flip count is 0**; the win is the headline
+`missing TS2300 ×52 → ×30` (−22) with **no over-fire** (`extra TS2300` stays 0).
+
+Chosen root: **single-container duplicate-member detection** = B1 (binder) + B2
+(checker `checkObjectTypeForDuplicateDeclarations`), the two halves the task's Go
+ground-truth section calls out. **DEFER Bucket A** (late-binding) — see below.
+
+## Go ground truth ported
+
+**B1 — binder accessor marking.** `internal/binder/binder.go:declareSymbolEx`
+after reporting a merge conflict:
+
+```go
+// Go: internal/binder/binder.go:declareSymbolEx (286-292)
+// When get or set accessor conflicts with a non-accessor or an accessor of a
+// different kind, we mark the symbol as a full accessor such that all subsequent
+// declarations are considered conflicting.
+if symbol.Flags&ast.SymbolFlagsAccessor != 0 && symbol.Flags&ast.SymbolFlagsAccessor != includes&ast.SymbolFlagsAccessor {
+    symbol.Flags |= ast.SymbolFlagsAccessor
+}
+```
+
+The Rust port used `existing_flags.contains(SymbolFlags::ACCESSOR)` — but
+`ACCESSOR = GetAccessor|SetAccessor`, so `contains` requires BOTH bits and never
+fired for a lone getter/setter. Go tests `& Accessor != 0` (EITHER bit), i.e.
+`intersects`. **Fix:** `.contains(ACCESSOR)` → `.intersects(ACCESSOR)`. After a
+`get x` conflicts with a method, the symbol becomes a full accessor so the
+trailing `set x` (which would otherwise legally merge with the lone getter)
+ALSO conflicts.
+
+**B2 — checker duplicate-member detection.**
+`internal/checker/checker.go:checkObjectTypeForDuplicateDeclarations(3122)`: a
+per-name state machine over the merged member symbols. Only a member that MERGED
+into a symbol with `len(Declarations) > 1` is a candidate; state `0` records the
+kind (`1`=property, `2`=accessor); a second property, or a property-after-accessor
+/ accessor-after-property (`state==1 || state==2 && kind!=2`), reports
+`Duplicate_identifier_0` on EVERY same-named member (`reportDuplicateMemberErrors`,
+3193) and records state `3`. A LEGAL get/set pair stays `state==2, kind==2` → no
+error; same-kind accessors / methods colliding with anything are flagged by the
+binder's excludes (which don't let them merge), so this checker half fires ONLY
+for the property/property and property/accessor merges the binder intentionally
+allows. Called from `checkClassLikeDeclaration` (4279, classes) and
+`checkInterfaceDeclaration` (4990, interfaces).
+
+## What landed (Rust locations, surgical/additive)
+
+- `internal/binder/symbols.rs:report_merge_conflict` — `.contains(ACCESSOR)` →
+  `.intersects(ACCESSOR)` (B1, the 1:1 Go-fidelity bug fix).
+- `internal/checker/core/check.rs` — `check_object_type_for_duplicate_declarations`
+  + `report_duplicate_member_errors` (1:1 port of the two Go functions), wired
+  into the `InterfaceDeclaration` arm of `check_statement` and into
+  `check_class_like_declaration`. Plus free helpers `object_type_member_nodes`
+  / `classify_property_or_accessor` / `has_accessor_modifier` /
+  `member_name_node_for_duplicate`. The error span is the member NAME node with
+  leading trivia skipped (`error_skipping_leading_trivia`), byte-matching Go's
+  `c.error(member.Name(), …)` → `GetErrorRangeForNode`.
+- `internal/compiler/program.rs:bind_and_check_diagnostics_grouped` — each file's
+  combined bind+check list is now passed through
+  `sort_and_deduplicate_diagnostics` (+ `compare_checker_diagnostics` /
+  `equal_diagnostics_no_related_info`), the per-file reachable subset of Go's
+  `GetSemanticDiagnosticsWithoutNoEmitFiltering` → `SortAndDeduplicateDiagnostics`
+  (`compactAndMergeRelatedInfos`). **This was a pre-existing pipeline gap** exposed
+  by B1: a binder merge conflict re-emits the SAME prior declaration's diagnostic
+  on EACH later conflict (a `get x` flagged once when a method collides and again
+  when `set x` collides), and Go relies on the program-level dedup to collapse the
+  identical pair. Without it B1 produced `extra TS2300 ×8` (8 double-emitted first
+  members); the dedup removes them faithfully.
+
+## RED→GREEN + guard tests (one behavior at a time)
+
+`tsgo_binder` (`symbols_test.rs`):
+- `bind_accessor_conflict_marks_full_accessor_get_method_set` (RED→GREEN) —
+  `interface I { get x; x(); set x; }` flags ALL THREE `x` names (RED: only get +
+  method; the trailing set merged silently).
+- `bind_legal_get_set_accessor_pair_no_duplicate` (GUARD) — `get x; set x;` → no
+  TS2300 (the marking runs only on a conflict).
+
+`tsgo_checker` (`check_test.rs`, StubProgram):
+- `interface_property_accessor_duplicate_reports_2300` (RED→GREEN) — `interface
+  I { get x; x; set x; }` → 3 TS2300.
+- `class_property_accessor_duplicate_reports_2300` — the `declare class` form.
+- `interface_duplicate_property_reports_2300` — `x: number; x: string;` (prop+prop).
+- GUARDS `interface_legal_get_set_pair_no_duplicate`,
+  `interface_distinct_members_no_duplicate`,
+  `class_static_and_instance_same_name_no_duplicate`,
+  `merged_empty_interfaces_no_duplicate` — all 0 TS2300.
+
+`tsgo_compiler` (`program_test.rs`, real `Program`):
+- `interface_property_accessor_duplicate_surfaces_ts2300` — the B2 case through
+  the multi-file checker pool, asserting the three single-char `x` spans
+  byte-match (the only `x` chars in the source).
+- `accessor_marking_third_member_surfaces_ts2300` — the B1 case end-to-end.
+- `legal_accessor_pair_and_overloads_no_duplicate` (GUARD) — a get/set pair, a
+  method overload set, and distinct members → 0 TS2300.
+
+The Round-13 guards (`legal_merges_produce_no_duplicate_identifier`,
+`binder_duplicate_identifier_surfaces_ts2300`, …) stay GREEN.
+
+## Measurement — full corpus BEFORE→AFTER
+
+`tests/cases/compiler` (222 cases ran):
+
+| metric | BEFORE | AFTER | Δ |
+|---|---|---|---|
+| passed | 109 | 109 | 0 |
+| failed | 112 | 112 | 0 |
+| errored | 1 | 1 | 0 |
+| **missing TS2300** | **×52** | **×30** | **−22** |
+| extra TS2300 | 0 | 0 | 0 (no over-fire) |
+| extra TS2304 | ×43 | ×37 | −6 (dedup bonus) |
+| extra TS2339 | ×22 | ×19 | −3 (dedup bonus) |
+
+The `−22` = B1 (8) + B2 property/accessor (12: I5/I6/C5/C6) + B2 property/property
+(2: I14's `foo; foo`). The **30 remaining missing are ALL Bucket A** (computed
+`[foo]`/`[sym]` + cross-name late-bound `foo`), verified by the dump — DEFERRED.
+**No PASS→FAIL** (passed/failed/errored verdict counts identical 109/112/1); the
+case `duplicateIdentifierChecks.ts` stays FAILED (still missing the 30 Bucket-A
+TS2300 + TS1118 ×4 + TS1119 ×4). **No over-fire**: `extra TS2300` is 0 — the
+binder double-emission is collapsed by the Go-faithful per-file dedup, proven by
+the legal-merge guards (get/set pair, overloads, empty merged interfaces). The
+`extra TS2304/TS2339` drop is a BONUS of the same dedup (identical re-emitted
+diagnostics across the corpus), faithful to Go's `SortAndDeduplicateDiagnostics`.
+
+`tests/cases/conformance` (19 cases): **11/8/0** BEFORE and AFTER (unchanged; no
+TS2300 there).
+
+## 150-subset / 30-subset characterization BEFORE→AFTER
+
+`expanded_compiler_subset_parity_smoke` (150) and `curated_compiler_subset_parity_smoke`
+(30) are **UNCHANGED** (`84/66/0` and `19/11/0`, all pinned guards intact): the
+≤25-line subset has no missing-TS2300 case and none of its cases double-emit, so
+neither the new checks nor the dedup move its numbers. No snapshot update needed.
+
+## Gate results (Round 18)
+
+- `cargo test -p tsgo_binder` — GREEN (**65** unit [+2] + doctests).
+- `cargo test -p tsgo_checker` — GREEN (**786** lib [+7]).
+- `cargo test -p tsgo_compiler` — GREEN (**124** lib [+3 real-lib]).
+- `cargo test -p tsgo_testrunner` — GREEN (51 unit + 1 ignored [full-corpus
+  measurement]; 150-subset 84/66/0 + 30-case 19/11/0 unchanged).
+- Sibling suites GREEN: `tsgo_ast` (54), `tsgo_printer` (194), `tsgo_transformers`
+  (311), `tsgo_testutil_harnessutil` (11).
+- `cargo clippy -p tsgo_binder -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner
+  --all-targets -- -D warnings` — clean. `cargo fmt … -- --check` — clean.
+  `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; additive/surgical vertical slices; no test weakened/deleted; no
+new dependency (`Cargo.lock` untouched); duplicate detection is NOT broadly
+emitted (legal merges proven clean by the guards); the temporary
+`dump_missing_ts2300` categorization test was REMOVED (tree clean). Not committed
+by the subagent (left to the parent).
+
+## DEFER list (blocked-by) — Round 18
+
+- **Bucket A — computed / late-bound name duplicates (`missing TS2300 ×30`)** —
+  `[foo]`/`[sym]` (I10/C10/C11/C12/I20/C20) and cross-name `[foo]` vs literal
+  `foo` (I11–I15). The binder binds a non-literal computed name ANONYMOUSLY under
+  `__computed` (a fresh symbol per member, 1 declaration each), so they never
+  merge at bind time and `checkObjectTypeForDuplicateDeclarations` (which needs
+  `len(Declarations) > 1`) skips them; tsc detects them after LATE-BINDING the
+  computed name to its literal / unique-symbol property name and re-grouping the
+  member symbols. blocked-by: checker late-binding (`getLateBoundSymbol` /
+  `lateBindMember` resolving a computed name's `getLiteralTypeFromPropertyName` →
+  property key) + the late-bound `getSymbolOfDeclaration`.
+- **`duplicateIdentifierChecks.ts` FLIP** — even with Bucket A it would still miss
+  `TS1118 ×4` ("An object literal cannot have multiple get/set accessors with the
+  same name") + `TS1119 ×4` ("…property and accessor with the same name"), the
+  object-literal GRAMMAR checks. blocked-by:
+  `checkGrammarObjectLiteralExpression` (the seen-name flags for object-literal
+  property/accessor) — a separate grammar root.
+- **`checkObjectTypeForDuplicateDeclarations` remainder** — the `checkPrivateNames`
+  static/instance private-name conflict (TS2300 variant), the static `prototype`
+  name conflict, constructor parameter-property declarations, and TYPE-LITERAL
+  members (`checkTypeLiteral` at 3119). blocked-by: private-identifier symbol
+  naming + parameter-property binding + type-literal traversal in
+  `check_type_node` (no corpus case needs them this round).

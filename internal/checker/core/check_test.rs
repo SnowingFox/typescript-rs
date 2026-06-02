@@ -133,6 +133,100 @@ fn get_diagnostics_drives_property_does_not_exist() {
     );
 }
 
+/// Counts the `TS2300` (`Duplicate identifier`) diagnostics produced for `src`.
+fn duplicate_identifier_count(src: &str) -> usize {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.get_diagnostics(root)
+        .iter()
+        .filter(|d| d.code == 2300)
+        .count()
+}
+
+// Round 18 (checkObjectTypeForDuplicateDeclarations): within ONE interface, a
+// property that shares a name with an accessor (or another property) is a
+// duplicate identifier. `get x; x: number; set x;` merges into a single symbol
+// with three declarations (a getter, a property, a setter), so the checker's
+// duplicate-member state machine reports all three `x` members (property +
+// accessor combination). This is the corpus's `duplicateIdentifierChecks.ts`
+// I5/I6 gap (the binder's excludes do NOT flag property-vs-accessor).
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3122)
+#[test]
+fn interface_property_accessor_duplicate_reports_2300() {
+    let count = duplicate_identifier_count(
+        "interface I {\n    get x(): number;\n    x: number;\n    set x(value: number);\n}",
+    );
+    assert_eq!(count, 3, "all three `x` members are duplicate identifiers");
+}
+
+// Round 18 (class members): a `declare class` with `get x; x: number; set x;`
+// reports the same property/accessor duplicate (the corpus C5/C6 gap). The
+// checker runs `checkObjectTypeForDuplicateDeclarations` from
+// `checkClassLikeDeclaration` for classes too.
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4279)
+#[test]
+fn class_property_accessor_duplicate_reports_2300() {
+    let count = duplicate_identifier_count(
+        "declare class C {\n    get x(): number;\n    x: number;\n    set x(value: number);\n}",
+    );
+    assert_eq!(count, 3, "all three `x` members are duplicate identifiers");
+}
+
+// Round 18 (two same-name properties): `x: number; x: string;` in one interface
+// merges into one symbol (the binder's `PropertyExcludes` excludes `Property`),
+// so the checker reports both as duplicates (property + property).
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations (state==1)
+#[test]
+fn interface_duplicate_property_reports_2300() {
+    let count = duplicate_identifier_count("interface I {\n    x: number;\n    x: string;\n}");
+    assert_eq!(count, 2, "both duplicate properties are reported");
+}
+
+// Round 18 GUARD (no over-fire): a LEGAL get/set accessor pair in an interface
+// merges into a single accessor symbol but is NOT a duplicate (state stays `2`,
+// `kind == 2`), so NO TS2300.
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations (state==2 && kind==2)
+#[test]
+fn interface_legal_get_set_pair_no_duplicate() {
+    let count = duplicate_identifier_count(
+        "interface I {\n    get x(): number;\n    set x(value: number);\n}",
+    );
+    assert_eq!(count, 0, "a legal get/set accessor pair is not a duplicate");
+}
+
+// Round 18 GUARD (no over-fire): distinct member names in one interface produce
+// no duplicate-identifier diagnostic.
+#[test]
+fn interface_distinct_members_no_duplicate() {
+    let count = duplicate_identifier_count(
+        "interface I {\n    a: number;\n    b: string;\n    c(): void;\n}",
+    );
+    assert_eq!(count, 0, "distinct members are not duplicates");
+}
+
+// Round 18 GUARD (no over-fire): a static and an instance member sharing a name
+// in a class are NOT duplicates (they live in distinct member tables, so the
+// checker keys instance vs static names separately).
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations (static/instance maps)
+#[test]
+fn class_static_and_instance_same_name_no_duplicate() {
+    let count =
+        duplicate_identifier_count("declare class C {\n    static x: number;\n    x: number;\n}");
+    assert_eq!(
+        count, 0,
+        "a static member and an instance member may share a name"
+    );
+}
+
+// Round 18 GUARD (no over-fire): two empty interface declarations legally merge
+// (no members) and produce no duplicate-identifier diagnostic.
+#[test]
+fn merged_empty_interfaces_no_duplicate() {
+    let count = duplicate_identifier_count("interface I {}\ninterface I {}");
+    assert_eq!(count, 0, "empty merged interfaces are legal");
+}
+
 // Go: internal/checker/checker.go:Checker.checkSourceFile (links.typeChecked guard)
 #[test]
 fn check_source_file_is_idempotent() {

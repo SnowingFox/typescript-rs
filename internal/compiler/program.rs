@@ -442,13 +442,20 @@ impl Program {
             .checker_pool
             .collect_diagnostics_grouped_excluding(&exclude);
         // For each bound file, the bind diagnostics precede the checker
-        // diagnostics (Go's `BindDiagnostics() ++ checker.GetDiagnostics()`).
+        // diagnostics (Go's `BindDiagnostics() ++ checker.GetDiagnostics()`),
+        // then the combined per-file list is sorted and deduplicated exactly as
+        // Go's `GetSemanticDiagnosticsWithoutNoEmitFiltering` applies
+        // `SortAndDeduplicateDiagnostics` per file. The dedup collapses the
+        // IDENTICAL diagnostic a binder merge conflict re-emits on the same prior
+        // declaration across two separate conflicts (a `get x` flagged once when
+        // a method collides and again when the trailing `set x` collides).
+        // Go: internal/compiler/program.go:GetSemanticDiagnosticsWithoutNoEmitFiltering
         bind_groups
             .into_iter()
             .zip(checker_groups)
             .map(|(mut bind, check)| {
                 bind.extend(check);
-                bind
+                sort_and_deduplicate_diagnostics(bind)
             })
             .collect()
     }
@@ -1117,6 +1124,89 @@ fn single_threaded_of(opts: &ProgramOptions) -> bool {
 /// `related` list is converted recursively into `related_information` (Go's
 /// `Diagnostic.relatedInformation`).
 ///
+/// Sorts and deduplicates a single file's semantic (bind-and-check) diagnostics,
+/// the per-file reachable subset of Go's `SortAndDeduplicateDiagnostics`
+/// (`compactAndMergeRelatedInfos` after a `CompareDiagnostics` sort). Within one
+/// file there is no path key, so diagnostics order by `(start, end, code,
+/// message)`; a run of consecutive entries that are equal IGNORING related
+/// information is compacted into one, merging (then sorting + deduplicating)
+/// their related-information lists.
+///
+/// This removes the IDENTICAL duplicate a binder merge conflict re-emits on the
+/// SAME prior declaration across two separate conflicts — e.g. a `get x` flagged
+/// once when a method of the same name collides and again when the trailing
+/// `set x` collides (the surviving symbol having been marked a full accessor) —
+/// exactly as `tsc`'s `GetSemanticDiagnostics` collapses them.
+///
+/// Side effects: none (pure).
+// Go: internal/compiler/program.go:SortAndDeduplicateDiagnostics / compactAndMergeRelatedInfos
+fn sort_and_deduplicate_diagnostics(
+    mut diagnostics: Vec<tsgo_checker::Diagnostic>,
+) -> Vec<tsgo_checker::Diagnostic> {
+    if diagnostics.len() < 2 {
+        return diagnostics;
+    }
+    diagnostics.sort_by(compare_checker_diagnostics);
+    let mut result: Vec<tsgo_checker::Diagnostic> = Vec::with_capacity(diagnostics.len());
+    let mut i = 0;
+    while i < diagnostics.len() {
+        // Count the run of entries equal to `diagnostics[i]` ignoring related info.
+        let mut n = 1;
+        while i + n < diagnostics.len()
+            && equal_diagnostics_no_related_info(&diagnostics[i], &diagnostics[i + n])
+        {
+            n += 1;
+        }
+        let mut kept = diagnostics[i].clone();
+        if n > 1 {
+            // Merge the run's related-information lists (sorted + deduplicated).
+            let mut related: Vec<tsgo_checker::Diagnostic> = Vec::new();
+            for entry in diagnostics.iter().skip(i).take(n) {
+                related.extend(entry.related_information.iter().cloned());
+            }
+            if !related.is_empty() {
+                related.sort_by(compare_checker_diagnostics);
+                related.dedup();
+                kept.related_information = related;
+            }
+        }
+        result.push(kept);
+        i += n;
+    }
+    result
+}
+
+/// Orders two checker diagnostics within one file: by start, then end
+/// (`start + length`), then code, then message — the path-less reachable subset
+/// of Go's `ast.CompareDiagnostics`.
+// Go: internal/ast/diagnostic.go:CompareDiagnostics
+fn compare_checker_diagnostics(
+    a: &tsgo_checker::Diagnostic,
+    b: &tsgo_checker::Diagnostic,
+) -> std::cmp::Ordering {
+    a.start
+        .cmp(&b.start)
+        .then_with(|| (a.start + a.length).cmp(&(b.start + b.length)))
+        .then_with(|| a.code.cmp(&b.code))
+        .then_with(|| a.message.cmp(&b.message))
+        .then_with(|| a.message_chain.len().cmp(&b.message_chain.len()))
+}
+
+/// Reports whether two checker diagnostics are equal IGNORING their related
+/// information (Go's `ast.EqualDiagnosticsNoRelatedInfo`): same span, code,
+/// localized message (which bakes in the message args), and message chain.
+// Go: internal/ast/diagnostic.go:EqualDiagnosticsNoRelatedInfo
+fn equal_diagnostics_no_related_info(
+    a: &tsgo_checker::Diagnostic,
+    b: &tsgo_checker::Diagnostic,
+) -> bool {
+    a.start == b.start
+        && a.length == b.length
+        && a.code == b.code
+        && a.message == b.message
+        && a.message_chain == b.message_chain
+}
+
 /// Side effects: none (pure).
 // Go: internal/ast/diagnostic.go:NewDiagnostic + internal/scanner/scanner.go:GetErrorRangeForNode
 fn binder_diagnostic_to_checker(

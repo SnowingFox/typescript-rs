@@ -3940,11 +3940,15 @@ impl Checker {
             self.check_grammar_type_parameter_defaults(program, type_parameters);
             self.check_type_node(program, type_node);
         }
-        // An interface declaration grammar-checks its type-parameter list (2706);
-        // its member type nodes are not yet descended (DEFER below).
+        // An interface declaration grammar-checks its type-parameter list (2706)
+        // and reports duplicate members (`Duplicate identifier`, TS2300) within
+        // the declaration; its member type nodes are not yet descended (DEFER
+        // below).
+        // Go: internal/checker/checker.go:Checker.checkInterfaceDeclaration(4990)
         if let NodeData::InterfaceDeclaration(d) = program.arena().data(node) {
             let type_parameters = d.type_parameters.clone();
             self.check_grammar_type_parameter_defaults(program, type_parameters);
+            self.check_object_type_for_duplicate_declarations(program, node);
         }
         // A `{ ... }` block checks each contained statement (Go's `checkBlock` ->
         // `checkSourceElements`).
@@ -4361,6 +4365,11 @@ impl Checker {
     // resolution + generic type-argument instantiation through `this`.
     // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4266)
     fn check_class_like_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        // Report duplicate members (`Duplicate identifier`, TS2300) within the
+        // class first (Go runs it from `checkClassLikeDeclaration` regardless of
+        // whether the declared type resolves).
+        // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4279)
+        self.check_object_type_for_duplicate_declarations(program, node);
         let Some(symbol) = program.symbol_of_node(node) else {
             return;
         };
@@ -4420,6 +4429,107 @@ impl Checker {
                     &tsgo_diagnostics::CLASS_0_INCORRECTLY_IMPLEMENTS_INTERFACE_1,
                     &[class_str.as_str(), interface_str.as_str()],
                 );
+            }
+        }
+    }
+
+    // Checks that an object-type declaration (interface / class) does not declare
+    // the same instance (or static) member name twice, or mix a property and an
+    // accessor with the same name. Mirrors Go's per-name state machine over the
+    // merged member symbols: a member is only a candidate once it has MERGED into
+    // a symbol with more than one declaration (`len(Declarations) > 1`). State `0`
+    // (unseen) records the member kind (`1` = property, `2` = accessor); a second
+    // property, or a property after an accessor / an accessor after a property,
+    // reports `Duplicate identifier` (TS2300) on EVERY same-named member and then
+    // records state `3` (reported). Two SAME-kind accessors / a method colliding
+    // with anything are already flagged by the binder's `declareSymbol` excludes
+    // (which do NOT let those merge), and a LEGAL get/set pair stays state `2`
+    // (no error), so this checker half only reports the property-vs-property and
+    // property-vs-accessor combinations the binder intentionally lets merge.
+    //
+    // DEFER(phase-4-checker): the `checkPrivateNames` static/instance private-name
+    // conflict, the static `prototype` name conflict, constructor
+    // parameter-property declarations, computed/late-bound names (the
+    // `__computed` members are bound anonymously and only merge after checker
+    // late-binding), and type-literal members. blocked-by: private-identifier
+    // symbol naming + parameter-property binding + checker late-binding +
+    // type-literal traversal in `check_type_node`.
+    // Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3122)
+    fn check_object_type_for_duplicate_declarations(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) {
+        let mut instance_names: std::collections::HashMap<String, i32> =
+            std::collections::HashMap::new();
+        let mut static_names: std::collections::HashMap<String, i32> =
+            std::collections::HashMap::new();
+        for member in object_type_member_nodes(program, node) {
+            // DEFER: constructor parameter-property declarations.
+            if program.arena().kind(member) == Kind::Constructor {
+                continue;
+            }
+            let Some(symbol) = program.symbol_of_node(member) else {
+                continue;
+            };
+            let Some(kind) = classify_property_or_accessor(program, member) else {
+                continue;
+            };
+            // Only members that MERGED into one symbol can be duplicates.
+            if program.symbol(symbol).declarations.len() <= 1 {
+                continue;
+            }
+            let is_static = has_static_modifier(program.arena(), member);
+            let name = program.symbol(symbol).name.clone();
+            let names = if is_static {
+                &mut static_names
+            } else {
+                &mut instance_names
+            };
+            let state = names.get(&name).copied().unwrap_or(0);
+            if state == 0 {
+                // On first occurrence just record the kind.
+                names.insert(name, kind);
+            } else if state == 1 || (state == 2 && kind != 2) {
+                // Error on a second property, or a property/accessor combination.
+                names.insert(name.clone(), 3);
+                self.report_duplicate_member_errors(program, node, &name, is_static);
+            }
+        }
+    }
+
+    // Reports `Duplicate identifier` (TS2300) on every member of `node` whose
+    // symbol name is `name` and whose static-ness matches `is_static` (Go's
+    // `reportDuplicateMemberErrors` with `checkStatic` always true here). The
+    // span is the member NAME node with leading trivia skipped, matching Go's
+    // `c.error(member.Name(), ...)` -> `GetErrorRangeForNode`.
+    // Go: internal/checker/checker.go:Checker.reportDuplicateMemberErrors(3193)
+    fn report_duplicate_member_errors(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        name: &str,
+        is_static: bool,
+    ) {
+        for member in object_type_member_nodes(program, node) {
+            if program.arena().kind(member) == Kind::Constructor {
+                continue;
+            }
+            let Some(symbol) = program.symbol_of_node(member) else {
+                continue;
+            };
+            if program.symbol(symbol).name == name
+                && is_static == has_static_modifier(program.arena(), member)
+            {
+                if let Some(name_node) = member_name_node_for_duplicate(program, member) {
+                    let display = super::nodebuilder::symbol_to_string(program, symbol);
+                    self.error_skipping_leading_trivia(
+                        program,
+                        name_node,
+                        &tsgo_diagnostics::DUPLICATE_IDENTIFIER_0,
+                        &[&display],
+                    );
+                }
             }
         }
     }
@@ -6254,6 +6364,58 @@ fn is_numeric_literal_name(name: &str) -> bool {
 fn declaration_name_node(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
     match program.arena().data(node) {
         NodeData::PropertySignature(d) | NodeData::PropertyDeclaration(d) => Some(d.name),
+        _ => None,
+    }
+}
+
+// Returns the member declaration nodes of an object-type declaration (interface
+// or class) for the duplicate-declaration check (Go's `node.Members()`).
+// Go: internal/ast/utilities.go:Node.Members
+fn object_type_member_nodes(program: &dyn BoundProgram, node: NodeId) -> Vec<NodeId> {
+    match program.arena().data(node) {
+        NodeData::InterfaceDeclaration(d)
+        | NodeData::ClassDeclaration(d)
+        | NodeData::ClassExpression(d) => d.members.nodes.clone(),
+        _ => Vec::new(),
+    }
+}
+
+// Classifies a member for `checkObjectTypeForDuplicateDeclarations`: `1` for a
+// property/property-signature (not an auto-accessor), `2` for a get/set accessor
+// or an `accessor`-modified property; `None` for any other member kind (methods,
+// index signatures, ... are not subject to this check).
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations
+//     (the property/accessor classification, 3170-3173)
+fn classify_property_or_accessor(program: &dyn BoundProgram, member: NodeId) -> Option<i32> {
+    match program.arena().kind(member) {
+        Kind::PropertySignature => Some(1),
+        Kind::PropertyDeclaration => {
+            if has_accessor_modifier(program.arena(), member) {
+                Some(2)
+            } else {
+                Some(1)
+            }
+        }
+        Kind::GetAccessor | Kind::SetAccessor => Some(2),
+        _ => None,
+    }
+}
+
+// Reports whether `node` carries the `accessor` modifier (an auto-accessor
+// property, Go's `ast.HasAccessorModifier`).
+fn has_accessor_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    modifier_flags_of(arena, node).contains(tsgo_ast::ModifierFlags::ACCESSOR)
+}
+
+// Returns the NAME node of a class/interface member declaration (Go's
+// `member.Name()`), for the property/accessor/method member kinds the
+// duplicate-declaration check reports on.
+fn member_name_node_for_duplicate(program: &dyn BoundProgram, member: NodeId) -> Option<NodeId> {
+    match program.arena().data(member) {
+        NodeData::PropertySignature(d) | NodeData::PropertyDeclaration(d) => Some(d.name),
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => Some(d.name),
+        NodeData::MethodSignature(d) => Some(d.name),
+        NodeData::MethodDeclaration(d) => Some(d.name),
         _ => None,
     }
 }
