@@ -687,11 +687,22 @@ fn expanded_compiler_subset_parity_smoke() {
     // Measured parity on the larger subset (characterization; see the worklog).
     // EXPECTED to be far from 100% — the port is a reachable subset of tsc. Bump
     // `passed` upward (and lower `failed`) only as real parity improves.
+    //
+    // Round 14 (cross-module import/alias resolution): a reference to a name
+    // imported with `import { x } from "m"` / `import d from "m"` / `import * as
+    // ns from "m"` / `import x = require("m")` now resolves to the target
+    // module's export (Go's `resolveAlias` chain over the compiler's specifier ->
+    // module-symbol bridge) instead of cascading into TS2304. This flips NINE
+    // subset cases to PASS (69 -> 78) and drops `extra TS2304 ×34 -> ×17`. No
+    // case regressed PASS -> FAIL (every import-bearing case was already failing
+    // on the TS2304 cascade). `extra TS2339 ×16` is unchanged net: some
+    // namespace-member accesses now resolve while a few JS-expando-module imports
+    // surface a DEFERRED `{}`-shape TS2339 (the expando/CommonJS-JS export root).
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 69,
-            failed: 81,
+            passed: 78,
+            failed: 72,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -746,9 +757,13 @@ fn expanded_compiler_subset_parity_smoke() {
         counts.failed,
         "every failed case is categorized"
     );
-    assert_eq!(hist.no_baseline_but_errors, 25);
-    assert_eq!(hist.missing_all_errors, 37);
-    assert_eq!(hist.divergent, 19);
+    // Round 14: cross-module import resolution flips 9 `no_baseline_but_errors`
+    // cases to clean PASS (25 -> 16); the residual divergent -> missing_all_errors
+    // drift (a removed spurious TS2304 leaving a case with only unmet committed
+    // errors) shifts divergent 19 -> 15 and missing_all_errors 37 -> 41.
+    assert_eq!(hist.no_baseline_but_errors, 16);
+    assert_eq!(hist.missing_all_errors, 41);
+    assert_eq!(hist.divergent, 15);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare
@@ -815,9 +830,11 @@ fn expanded_compiler_subset_parity_smoke() {
     // JS-expando `TS2339`s (the deferred expando-property feature). The `missing`
     // histogram is UNCHANGED (no over-resolution masked a real error;
     // `missing TS2339 ×5` is intact), and no case regressed PASS -> FAIL.
+    // Round 14: the dominant false-positive cluster `extra TS2304` drops
+    // 34 -> 17 as cross-module imports resolve; TS2339 stays 16 (net).
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 34), (2339, 16)],
+        vec![(2304, 17), (2339, 16)],
         "top extra (false-positive) codes; histogram:\n{}",
         hist.report()
     );
@@ -926,12 +943,13 @@ fn expanded_compiler_subset_parity_smoke() {
          signal (missing 94 -> 52) lives in the FULL corpus; histogram:\n{}",
         hist.report()
     );
-    // `top_extra(2)` is unchanged — the new TS2451 ×8 ranks below TS2339 ×16.
+    // `top_extra(2)` after Round 14: `extra TS2304 ×17` (down from 34 as
+    // cross-module imports resolve), `extra TS2339 ×16` unchanged.
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 34), (2339, 16)],
-        "the binder-surface round does not disturb the dominant unresolved-name \
-         cascade; histogram:\n{}",
+        vec![(2304, 17), (2339, 16)],
+        "the import-resolution round drops the dominant unresolved-name cascade; \
+         histogram:\n{}",
         hist.report()
     );
 }

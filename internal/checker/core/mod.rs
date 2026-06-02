@@ -199,6 +199,18 @@ pub struct Checker {
     type_aliases_resolving: rustc_hash::FxHashSet<SymbolId>,
     /// Lazily-computed types of value/property symbols.
     value_symbol_links: SymbolLinks<ValueSymbolLinks>,
+    /// Resolved alias targets (Go's `aliasSymbolLinks[symbol].aliasTarget`): the
+    /// non-alias symbol an `import`/`export` alias resolves to. A present key is
+    /// "resolved"; `None` records resolution FAILURE (Go's `unknownSymbol` — a
+    /// missing export, already reported once via TS2305, kept so a referenced
+    /// alias suppresses a cascading TS2304 rather than re-reporting).
+    // Go: internal/checker/checker.go:Checker.aliasSymbolLinks (aliasTarget)
+    alias_targets: FxHashMap<SymbolId, Option<SymbolId>>,
+    /// Alias symbols whose target is currently being resolved, breaking circular
+    /// import aliases (`import a = b; import b = a;`) the way Go's
+    /// `pushTypeResolution(AliasTarget)` does.
+    // Go: internal/checker/checker.go:Checker.resolveAlias (pushTypeResolution)
+    aliases_resolving: rustc_hash::FxHashSet<SymbolId>,
     /// Checker-owned arena of synthesized (transient) symbols minted during
     /// union/intersection property synthesis (Go's `symbolArena` + `newSymbol`).
     /// Wrapped in `RefCell` so the `&Checker` `get_property_of_type` entry point
@@ -465,6 +477,8 @@ impl Checker {
             type_alias_links: SymbolLinks::default(),
             type_aliases_resolving: rustc_hash::FxHashSet::default(),
             value_symbol_links: SymbolLinks::default(),
+            alias_targets: FxHashMap::default(),
+            aliases_resolving: rustc_hash::FxHashSet::default(),
             synthesized_symbols: RefCell::new(Vec::new()),
             synthesized_property_cache: RefCell::new(FxHashMap::default()),
             signatures: SignatureArena::new(),

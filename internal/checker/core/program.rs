@@ -201,6 +201,27 @@ pub trait BoundProgram {
         let _ = symbol;
         None
     }
+
+    /// Resolves a module-specifier string written at an import/export in the file
+    /// `importing_file` (a [`file_handle`](BoundProgram::file_handle)) to the
+    /// (merged) symbol of the target external module — its source file's
+    /// `ValueModule` symbol, whose [`exports`](tsgo_ast::Symbol::exports) table is
+    /// the module's exported names.
+    ///
+    /// This is the specifier → module-symbol bridge the checker's
+    /// `resolveExternalModuleName` needs: the compiler resolves and loads every
+    /// `import`/`export` specifier during program construction, and a multi-file
+    /// program records, per importing file, which target file each specifier
+    /// resolved to. The default returns `None` (a single-file program / stub has
+    /// no cross-module imports); a multi-file program overrides it.
+    ///
+    /// Side effects: none (a read-only lookup).
+    // Go: internal/checker/checker.go:Checker.resolveExternalModule
+    //     (program.GetResolvedModule -> GetSourceFileForResolvedModule -> file.Symbol)
+    fn resolve_module_symbol(&self, importing_file: NodeId, specifier: &str) -> Option<SymbolId> {
+        let _ = (importing_file, specifier);
+        None
+    }
 }
 
 #[cfg(test)]

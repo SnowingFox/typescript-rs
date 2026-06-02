@@ -31,7 +31,7 @@ use super::declared_types::{
     fill_missing_type_arguments, get_apparent_type, get_constraint_of_type_parameter,
     get_declared_type_of_symbol, get_indexed_access_type, get_min_type_argument_count,
     get_property_of_type, get_type_from_type_node, get_type_of_property_of_type,
-    get_type_of_symbol,
+    get_type_of_symbol, resolve_alias,
 };
 use super::inference::{InferenceContext, InferencePriority};
 use super::mapper::TypeMapper;
@@ -1155,6 +1155,28 @@ impl Checker {
         let globals = program.globals();
         match resolve_name(program, node, &name, SymbolFlags::VALUE, false, globals) {
             None => {
+                // Alias fallback (Go's `getSymbol` alias branch): a name imported
+                // with `import { x } from "m"` / `import d from "m"` / `import *
+                // as ns from "m"` is bound as an `Alias` symbol whose flags do
+                // not intersect `Value`, so the direct `Value` lookup misses it.
+                // Resolve the alias's target; when it denotes a value (or its
+                // resolution failed — Go's `unknownSymbol`, already reported via
+                // TS2305, returned to suppress a cascading TS2304) the alias
+                // resolves, and `get_type_of_symbol` follows it to the imported
+                // declaration's type.
+                // Go: internal/binder/nameresolver.go:NameResolver.getSymbol (alias branch)
+                if let Some(alias) =
+                    resolve_name(program, node, &name, SymbolFlags::ALIAS, false, globals)
+                {
+                    let resolves_to_value = match resolve_alias(self, program, alias) {
+                        Some(target) => program.symbol(target).flags.intersects(SymbolFlags::VALUE),
+                        None => true,
+                    };
+                    if resolves_to_value {
+                        let declared = get_type_of_symbol(self, program, alias, globals);
+                        return self.get_flow_type_of_reference(program, node, declared);
+                    }
+                }
                 // Go registers a global `undefinedSymbol` (type
                 // `undefinedWideningType`) in `NewChecker`, so the `undefined`
                 // value identifier always resolves; the stub program has no lib,

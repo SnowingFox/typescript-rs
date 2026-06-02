@@ -143,6 +143,24 @@ impl CompilerCheckerPool {
         files: &[ParsedFile],
         options: Rc<CompilerOptions>,
     ) {
+        self.create_checkers_with_modules(files, options, &[]);
+    }
+
+    /// Like [`Self::create_checkers_with_options`], but also threads the
+    /// program's per-import module resolutions `(containing file name, specifier
+    /// text, resolved file name)` into the shared [`MultiFileBoundProgram`], so
+    /// the checker's `resolveExternalModuleName` can map an import's specifier to
+    /// the target module's symbol (the cross-module import/alias resolution).
+    ///
+    /// Side effects: allocates `checker_count` checkers and retains the shared
+    /// program.
+    // Go: internal/compiler/checkerpool.go:createCheckers (program carries resolvedModules)
+    pub fn create_checkers_with_modules(
+        &mut self,
+        files: &[ParsedFile],
+        options: Rc<CompilerOptions>,
+        resolved_modules: &[(String, String, String)],
+    ) {
         if !self.checkers.is_empty() {
             return;
         }
@@ -150,8 +168,9 @@ impl CompilerCheckerPool {
         // Go constructs every checker over the same shared `*Program`; the
         // ported counterpart is one `MultiFileBoundProgram` over every bound
         // file, shared by `Rc::clone`, carrying the program's real options.
-        let program: Rc<dyn BoundProgram> =
-            Rc::new(MultiFileBoundProgram::new_with_options(files, options));
+        let program: Rc<dyn BoundProgram> = Rc::new(
+            MultiFileBoundProgram::new_with_options_and_modules(files, options, resolved_modules),
+        );
         // Associate by source-file handle index (the checker drives one file per
         // handle); `i % K` mirrors Go's `fileAssociations`.
         let file_count = program.source_files().len();

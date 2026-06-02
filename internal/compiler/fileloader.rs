@@ -64,6 +64,12 @@ pub struct ProcessedFiles {
     /// The canonical path of the program's default library file (the automatic
     /// target lib, or the first `--lib` entry), if one was included.
     default_lib_path: Option<Path>,
+    /// Per-import module resolutions as `(containing file name, specifier text,
+    /// resolved file name)`, captured while loading the file graph. The basis of
+    /// the checker's specifier → module-symbol bridge (see
+    /// [`crate::MultiFileBoundProgram`]).
+    // Go: internal/compiler/program.go:Program.resolvedModules
+    resolved_modules: Vec<(String, String, String)>,
 }
 
 impl ProcessedFiles {
@@ -121,13 +127,25 @@ impl ProcessedFiles {
         files: Vec<ParsedFile>,
         files_by_path: HashMap<Path, usize>,
         missing_files: Vec<String>,
+        resolved_modules: Vec<(String, String, String)>,
     ) -> ProcessedFiles {
         ProcessedFiles {
             files,
             files_by_path,
             missing_files,
             default_lib_path: None,
+            resolved_modules,
         }
+    }
+
+    /// The per-import module resolutions `(containing file name, specifier text,
+    /// resolved file name)` captured while loading the file graph — the basis of
+    /// the checker's specifier → module-symbol bridge.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/compiler/program.go:Program.resolvedModules
+    pub(crate) fn resolved_modules(&self) -> &[(String, String, String)] {
+        &self.resolved_modules
     }
 }
 
@@ -190,19 +208,34 @@ impl FileLoader {
     ///
     /// Side effects: reads the file system; populates the resolver caches.
     // Go: internal/compiler/fileloader.go:fileLoader.resolveImportsAndModuleAugmentations
-    pub(crate) fn resolve_import_file_names(&self, file: &ParsedFile) -> Vec<String> {
+    /// Resolves `file`'s module specifiers, returning each `(specifier text,
+    /// normalized resolved file name)` pair (dropping specifiers that do not
+    /// resolve).
+    ///
+    /// This is the data behind the checker's specifier → module-symbol bridge
+    /// (`BoundProgram::resolve_module_symbol`): the program records, per
+    /// importing file, which loaded file each `import`/`export` specifier
+    /// resolved to, so the checker can map an import's specifier back to the
+    /// target module's symbol (and its `exports`) without re-running resolution.
+    /// The resolved-name projection of this also seeds the load worklist (see
+    /// [`crate::FilesParser`]).
+    ///
+    /// Side effects: reads the file system; populates the resolver caches.
+    // Go: internal/compiler/fileloader.go:fileLoader.resolveImportsAndModuleAugmentations
+    //     (per-import resolutions stored on the program for resolveExternalModule)
+    pub(crate) fn resolve_import_specifiers(&self, file: &ParsedFile) -> Vec<(String, String)> {
         let containing_file = file.file_name();
         let mode = get_default_resolution_mode_for_file(&self.options);
-        let mut resolved_names = Vec::new();
+        let mut resolved = Vec::new();
         for specifier in file.import_specifiers() {
-            let (resolved, _trace) =
+            let (result, _trace) =
                 self.resolver
                     .resolve_module_name(&specifier, containing_file, mode, None);
-            if resolved.is_resolved() {
-                resolved_names.push(normalize_path(&resolved.resolved_file_name));
+            if result.is_resolved() {
+                resolved.push((specifier, normalize_path(&result.resolved_file_name)));
             }
         }
-        resolved_names
+        resolved
     }
 
     /// Resolves a lib file's `/// <reference lib="X" />` directives into the

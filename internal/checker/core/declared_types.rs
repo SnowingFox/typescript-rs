@@ -1239,9 +1239,21 @@ pub fn get_type_of_symbol(
     if flags.intersects(SymbolFlags::MODULE) {
         return get_type_of_module(checker, program, symbol);
     }
-    // DEFER(phase-4-checker-C-D2+): accessor/class-value/alias value types.
-    // blocked-by: accessor signature collection, the constructor/static-side
-    // type of a class value symbol, and alias resolution.
+    // An `import`/`export` alias's value type is the type of the symbol it
+    // resolves to (Go's `getTypeOfSymbol` -> alias arm -> `getTypeOfSymbol(
+    // resolveAlias(symbol))`): a named/default import yields the imported
+    // declaration's type, a namespace import (`import * as ns`) yields the
+    // target module's object type so `ns.x` reads an export.
+    // Go: internal/checker/checker.go:Checker.getTypeOfSymbol (SymbolFlagsAlias)
+    if flags.intersects(SymbolFlags::ALIAS) {
+        return match resolve_alias(checker, program, symbol) {
+            Some(target) => get_type_of_symbol(checker, program, target, globals),
+            None => checker.error_type(),
+        };
+    }
+    // DEFER(phase-4-checker-C-D2+): accessor/class-value types.
+    // blocked-by: accessor signature collection + the constructor/static-side
+    // type of a class value symbol.
     checker.error_type()
 }
 
@@ -1277,6 +1289,355 @@ fn get_type_of_module(
     let t = checker.new_object_type(ObjectFlags::ANONYMOUS, Some(symbol), object);
     checker.value_symbol_links.get(symbol).resolved_type = Some(t);
     t
+}
+
+// === Cross-module import/alias resolution (Round 14) ===
+//
+// Ports the reachable subset of Go's `resolveAlias` chain so a reference to a
+// name imported with `import { x } from "m"` / `import d from "m"` / `import *
+// as ns from "m"` / `import x = require("m")` resolves to the target module's
+// export instead of cascading into TS2304 (and clears the TS2339 amplified by
+// it on namespace/default member access). The specifier -> module-symbol bridge
+// is `BoundProgram::resolve_module_symbol` (the compiler records each import's
+// resolved target file).
+//
+// DEFER(phase-4): `export { x } from "m"` re-export specifiers, `export =`
+// supplemental type exports, `export *` star re-exports, synthetic-default /
+// esModuleInterop wrappers, and the type-only alias markers. blocked-by: the
+// re-export + synthetic-default surfaces (a later round).
+
+/// Reports whether `node` is an import/export ALIAS declaration — the local
+/// name node whose binder symbol carries [`SymbolFlags::ALIAS`].
+// Go: internal/checker/checker.go:isAliasSymbolDeclaration (reachable subset)
+fn is_alias_symbol_declaration(arena: &NodeArena, node: NodeId) -> bool {
+    matches!(
+        arena.kind(node),
+        Kind::ImportEqualsDeclaration
+            | Kind::NamespaceImport
+            | Kind::ImportSpecifier
+            | Kind::ExportSpecifier
+            | Kind::ImportClause
+            | Kind::NamespaceExport
+    )
+}
+
+/// The alias DECLARATION node carrying `symbol` (Go's
+/// `getDeclarationOfAliasSymbol`): the first declaration that is an
+/// import/export alias declaration.
+// Go: internal/checker/checker.go:Checker.getDeclarationOfAliasSymbol
+fn get_declaration_of_alias_symbol(program: &dyn BoundProgram, symbol: SymbolId) -> Option<NodeId> {
+    program
+        .symbol(symbol)
+        .declarations
+        .iter()
+        .rev()
+        .copied()
+        .find(|&d| is_alias_symbol_declaration(program.arena(), d))
+}
+
+/// Resolves an alias `symbol` to the non-alias symbol it ultimately denotes
+/// (Go's `resolveAlias`), caching the result (a missing export is cached as
+/// `None`, Go's `unknownSymbol`, after its TS2305 is reported once). A circular
+/// import alias resolves to `None`.
+// Go: internal/checker/checker.go:Checker.resolveAlias
+pub(crate) fn resolve_alias(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> Option<SymbolId> {
+    if let Some(&cached) = checker.alias_targets.get(&symbol) {
+        return cached;
+    }
+    // Circularity guard (Go's pushTypeResolution(AliasTarget)): a re-entrant
+    // resolve of the same alias yields `unknown` rather than recursing forever.
+    if !checker.aliases_resolving.insert(symbol) {
+        checker.alias_targets.insert(symbol, None);
+        return None;
+    }
+    let target = get_declaration_of_alias_symbol(program, symbol)
+        .and_then(|node| get_target_of_alias_declaration(checker, program, node));
+    checker.aliases_resolving.remove(&symbol);
+    checker.alias_targets.insert(symbol, target);
+    target
+}
+
+/// `resolveSymbolEx(symbol, dontResolveAlias=false)`: a non-local alias is
+/// followed to its target; anything else is returned unchanged.
+// Go: internal/checker/checker.go:Checker.resolveSymbolEx
+fn resolve_symbol(checker: &mut Checker, program: &dyn BoundProgram, symbol: SymbolId) -> SymbolId {
+    if program.symbol(symbol).flags.contains(SymbolFlags::ALIAS) {
+        if let Some(target) = resolve_alias(checker, program, symbol) {
+            return target;
+        }
+    }
+    symbol
+}
+
+/// Dispatches an alias declaration to its target resolver (Go's
+/// `getTargetOfAliasDeclaration`).
+// Go: internal/checker/checker.go:Checker.getTargetOfAliasDeclaration
+fn get_target_of_alias_declaration(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Option<SymbolId> {
+    match program.arena().kind(node) {
+        Kind::ImportSpecifier => get_target_of_import_specifier(checker, program, node),
+        Kind::ImportClause => get_target_of_import_clause(checker, program, node),
+        Kind::NamespaceImport => get_target_of_namespace_import(checker, program, node),
+        Kind::ImportEqualsDeclaration => {
+            get_target_of_import_equals_declaration(checker, program, node)
+        }
+        // DEFER(phase-4): ExportSpecifier / NamespaceExport / ExportAssignment.
+        _ => None,
+    }
+}
+
+/// Resolves `import { x } from "m"` / `import { x as y } from "m"` to the
+/// module's exported `x` (Go's `getTargetOfImportSpecifier` ->
+/// `getExternalModuleMember`).
+// Go: internal/checker/checker.go:Checker.getTargetOfImportSpecifier
+fn get_target_of_import_specifier(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Option<SymbolId> {
+    let import_decl = enclosing_import_or_export_declaration(program.arena(), node)?;
+    // `import { default as X } from "m"` imports the module's DEFAULT export
+    // (subject to synthetic-default semantics), NOT a member literally named
+    // `default`; Go routes it through `getTargetOfModuleDefault`. Handling it as
+    // a plain named member would falsely report TS2305 when the default is
+    // synthetic (`allowSyntheticDefaultImports`/`esModuleInterop`).
+    // Go: internal/checker/checker.go:Checker.getTargetOfImportSpecifier (ModuleExportNameIsDefault)
+    if let Some((_, name_text)) = import_specifier_name(program.arena(), node) {
+        if name_text == "default" {
+            if let Some(specifier) = module_specifier_text(program.arena(), import_decl) {
+                if let Some(module_symbol) = resolve_external_module_name(program, &specifier) {
+                    return get_target_of_module_default(
+                        checker,
+                        program,
+                        module_symbol,
+                        &specifier,
+                        node,
+                    );
+                }
+            }
+            return None;
+        }
+    }
+    get_external_module_member(checker, program, import_decl, node)
+}
+
+/// Resolves the default import binding `import d from "m"` to the module's
+/// `default` export (Go's `getTargetOfImportClause` ->
+/// `getTargetOfModuleDefault`).
+// Go: internal/checker/checker.go:Checker.getTargetOfImportClause
+fn get_target_of_import_clause(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Option<SymbolId> {
+    let import_decl = program.arena().parent(node)?;
+    let specifier = module_specifier_text(program.arena(), import_decl)?;
+    let module_symbol = resolve_external_module_name(program, &specifier)?;
+    get_target_of_module_default(checker, program, module_symbol, &specifier, node)
+}
+
+/// The `default` export of a module, reported (TS1192) when absent (Go's
+/// `getTargetOfModuleDefault` reachable subset — synthetic-default /
+/// esModuleInterop wrappers DEFER).
+// Go: internal/checker/checker.go:Checker.getTargetOfModuleDefault
+fn get_target_of_module_default(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    module_symbol: SymbolId,
+    _specifier: &str,
+    _node: NodeId,
+) -> Option<SymbolId> {
+    let resolved = resolve_external_module_symbol(checker, program, module_symbol);
+    if let Some(default) = get_export_of_module(checker, program, resolved, "default") {
+        return Some(default);
+    }
+    // No explicit `default` export. Go would either resolve a SYNTHETIC default
+    // (under `allowSyntheticDefaultImports`/`esModuleInterop`, e.g. a CommonJS
+    // module imported as its whole shape) or report TS1192/TS2613. Both branches
+    // need the synthetic-default analysis, which is DEFER'd this round; until
+    // then the default target is left unresolved WITHOUT a diagnostic, so a
+    // synthetic-default case (tsc: no error) is not turned into a false positive.
+    // The referenced binding still resolves (to the unresolved alias), so it
+    // does not cascade a TS2304 either.
+    // DEFER(phase-4): canHaveSyntheticDefault + the no-default TS1192/TS2613
+    // diagnostics. blocked-by: `esModuleInterop`/`allowSyntheticDefaultImports`
+    // synthetic-default analysis.
+    None
+}
+
+/// Resolves `import * as ns from "m"` to the module symbol itself, so `ns.x`
+/// reads the module's exports (Go's `getTargetOfNamespaceImport` ->
+/// `resolveESModuleSymbol`; the synthetic-default wrapper DEFER).
+// Go: internal/checker/checker.go:Checker.getTargetOfNamespaceImport
+fn get_target_of_namespace_import(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Option<SymbolId> {
+    // node: NamespaceImport -> ImportClause -> ImportDeclaration
+    let import_clause = program.arena().parent(node)?;
+    let import_decl = program.arena().parent(import_clause)?;
+    let specifier = module_specifier_text(program.arena(), import_decl)?;
+    let module_symbol = resolve_external_module_name(program, &specifier)?;
+    Some(resolve_external_module_symbol(
+        checker,
+        program,
+        module_symbol,
+    ))
+}
+
+/// Resolves `import x = require("m")` (Go's
+/// `getTargetOfImportEqualsDeclaration`, reachable subset: the
+/// `require`/external-module form; entity-name `import x = M.N` DEFER).
+// Go: internal/checker/checker.go:Checker.getTargetOfImportEqualsDeclaration
+fn get_target_of_import_equals_declaration(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Option<SymbolId> {
+    let NodeData::ImportEqualsDeclaration(d) = program.arena().data(node) else {
+        return None;
+    };
+    let module_reference = d.module_reference;
+    // Only the `require("m")` / external-module form is ported; an entity-name
+    // module reference (`import x = M.N`) needs `resolveEntityName` alias
+    // chaining (DEFER).
+    let specifier = external_module_reference_text(program.arena(), module_reference)?;
+    let module_symbol = resolve_external_module_name(program, &specifier)?;
+    Some(resolve_external_module_symbol(
+        checker,
+        program,
+        module_symbol,
+    ))
+}
+
+/// `getExternalModuleMember`: looks the import specifier's exported name up in
+/// the resolved module's exports, reporting TS2305 when the module has no such
+/// exported member (the GUARD against a silent resolve).
+// Go: internal/checker/checker.go:Checker.getExternalModuleMember
+fn get_external_module_member(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    import_decl: NodeId,
+    specifier_node: NodeId,
+) -> Option<SymbolId> {
+    let specifier = module_specifier_text(program.arena(), import_decl)?;
+    let (name_node, name_text) = import_specifier_name(program.arena(), specifier_node)?;
+    // The module must resolve+load for the alias to have a target. When it does
+    // not (DEFER: TS2307), the alias is left unresolved.
+    let module_symbol = resolve_external_module_name(program, &specifier)?;
+    let target = resolve_external_module_symbol(checker, program, module_symbol);
+    match get_export_of_module(checker, program, target, &name_text) {
+        Some(symbol) => Some(symbol),
+        None => {
+            // GUARD: a named import of a NON-EXISTENT export is TS2305, never a
+            // silent resolve (and never a TS2304 on the reference).
+            let module_name = format!("\"{specifier}\"");
+            checker.error_skipping_leading_trivia(
+                program,
+                name_node,
+                &tsgo_diagnostics::MODULE_0_HAS_NO_EXPORTED_MEMBER_1,
+                &[&module_name, &name_text],
+            );
+            None
+        }
+    }
+}
+
+/// `resolveExternalModuleName`: maps an import specifier string to the target
+/// module's symbol via the program's specifier -> module-symbol bridge.
+// Go: internal/checker/checker.go:Checker.resolveExternalModuleName (resolveExternalModule)
+fn resolve_external_module_name(program: &dyn BoundProgram, specifier: &str) -> Option<SymbolId> {
+    program.resolve_module_symbol(program.file_handle(), specifier)
+}
+
+/// `resolveExternalModuleSymbol`: a module defined by `export = x` resolves to
+/// that export's symbol; otherwise the module symbol itself.
+// Go: internal/checker/checker.go:Checker.resolveExternalModuleSymbol
+fn resolve_external_module_symbol(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    module_symbol: SymbolId,
+) -> SymbolId {
+    if let Some(&export_equals) = program
+        .symbol(module_symbol)
+        .exports
+        .get(tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_EXPORT_EQUALS)
+    {
+        return resolve_symbol(checker, program, export_equals);
+    }
+    module_symbol
+}
+
+/// Looks `name` up in a (resolved) module symbol's exports and follows it
+/// through any alias chain (Go's `getExportOfModule` over `getExportsOfModule`;
+/// the `export *` visit is DEFER).
+// Go: internal/checker/checker.go:Checker.getExportOfModule / getExportsOfModule
+fn get_export_of_module(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    module_symbol: SymbolId,
+    name: &str,
+) -> Option<SymbolId> {
+    let export = *program.symbol(module_symbol).exports.get(name)?;
+    Some(resolve_symbol(checker, program, export))
+}
+
+/// Walks up from an import/export specifier to its enclosing `ImportDeclaration`
+/// / `ExportDeclaration` (the node carrying the module specifier).
+fn enclosing_import_or_export_declaration(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
+    let mut current = arena.parent(node);
+    while let Some(n) = current {
+        match arena.kind(n) {
+            Kind::ImportDeclaration | Kind::ExportDeclaration => return Some(n),
+            _ => current = arena.parent(n),
+        }
+    }
+    None
+}
+
+/// The (unquoted) module specifier text of an `ImportDeclaration` /
+/// `ExportDeclaration`, if it has one.
+fn module_specifier_text(arena: &NodeArena, node: NodeId) -> Option<String> {
+    match arena.data(node) {
+        NodeData::ImportDeclaration(d) => Some(arena.text(d.module_specifier).to_string()),
+        NodeData::ExportDeclaration(d) => d.module_specifier.map(|m| arena.text(m).to_string()),
+        _ => None,
+    }
+}
+
+/// The exported name an `ImportSpecifier` refers to (its `propertyName` if
+/// present, else its `name`) plus the node to anchor a not-found diagnostic on.
+fn import_specifier_name(arena: &NodeArena, node: NodeId) -> Option<(NodeId, String)> {
+    match arena.data(node) {
+        NodeData::ImportSpecifier(d) => {
+            let name_node = d.property_name.unwrap_or(d.name);
+            Some((name_node, arena.text(name_node).to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// The (unquoted) module specifier of an `ExternalModuleReference`
+/// (`require("m")`), if `node` is one.
+fn external_module_reference_text(arena: &NodeArena, node: NodeId) -> Option<String> {
+    match arena.data(node) {
+        NodeData::ExternalModuleReference(d) => {
+            let expr = d.expression;
+            if arena.kind(expr) == Kind::StringLiteral {
+                return Some(arena.text(expr).to_string());
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 // Builds (or returns the cached) type of a function symbol: an anonymous object

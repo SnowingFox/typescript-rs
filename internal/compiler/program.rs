@@ -271,8 +271,9 @@ impl Program {
         // program.Options()`.
         let options = std::rc::Rc::new(self.options().clone());
         let files = self.processed.files();
+        let resolved_modules = self.processed.resolved_modules();
         self.checker_pool
-            .create_checkers_with_options(files, options);
+            .create_checkers_with_modules(files, options, resolved_modules);
     }
 
     /// The built-in checker pool (sized; call [`Self::create_checkers`] to build

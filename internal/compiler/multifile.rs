@@ -74,6 +74,13 @@ struct ViewRegistry {
     ranges: Vec<(u32, u32)>,
     /// Back-pointers to each file's view, filled after all views are built.
     views: RefCell<Vec<Weak<FileView>>>,
+    /// The specifier → module-symbol bridge: `(importing file index, specifier
+    /// text)` → the (merged) `ValueModule` symbol of the resolved target file.
+    /// Built from the program's per-import resolutions; the basis of the
+    /// checker's `resolveExternalModuleName` (see
+    /// [`BoundProgram::resolve_module_symbol`]).
+    // Go: internal/compiler/program.go:Program.resolvedModules + GetSourceFileForResolvedModule
+    module_resolutions: FxHashMap<(usize, String), SymbolId>,
 }
 
 pub(crate) struct FileView {
@@ -179,6 +186,27 @@ impl BoundProgram for FileView {
             .upgrade()
             .map(|view| view as Rc<dyn BoundProgram>)
     }
+
+    fn resolve_module_symbol(&self, importing_file: NodeId, specifier: &str) -> Option<SymbolId> {
+        // The shared registry resolves for any importing file, so the lookup is
+        // independent of which view answers it.
+        resolve_module_symbol_in(&self.registry, importing_file, specifier)
+    }
+}
+
+/// The shared `resolve_module_symbol` lookup: maps the `(importing file index,
+/// specifier)` of `importing_file` (a file handle) to the resolved module
+/// symbol recorded in `registry`.
+fn resolve_module_symbol_in(
+    registry: &ViewRegistry,
+    importing_file: NodeId,
+    specifier: &str,
+) -> Option<SymbolId> {
+    let index = (importing_file.0 >> FILE_INDEX_SHIFT) as usize;
+    registry
+        .module_resolutions
+        .get(&(index, specifier.to_string()))
+        .copied()
 }
 
 /// A real multi-file bound program: every bound [`ParsedFile`] of the program
@@ -236,6 +264,27 @@ impl MultiFileBoundProgram {
     pub fn new_with_options(
         files: &[ParsedFile],
         options: Rc<CompilerOptions>,
+    ) -> MultiFileBoundProgram {
+        MultiFileBoundProgram::new_with_options_and_modules(files, options, &[])
+    }
+
+    /// Like [`Self::new_with_options`], but also builds the specifier →
+    /// module-symbol bridge from the program's per-import resolutions
+    /// `(containing file name, specifier text, resolved file name)`, so the
+    /// checker's `resolveExternalModuleName` can map an `import`/`export`
+    /// specifier to the target file's `ValueModule` symbol (and its `exports`).
+    ///
+    /// A resolution whose containing or resolved file is not among the bound
+    /// files (e.g. an unbound file the partial binder skipped) is dropped — the
+    /// bridge only links files the checker actually sees.
+    ///
+    /// Side effects: none (offset-merges the files' symbol spaces; shares their
+    /// arenas via `Rc`).
+    // Go: internal/compiler/program.go:Program (resolvedModules threaded to the checker)
+    pub fn new_with_options_and_modules(
+        files: &[ParsedFile],
+        options: Rc<CompilerOptions>,
+        resolved_modules: &[(String, String, String)],
     ) -> MultiFileBoundProgram {
         // Only bound files contribute (their symbol/flow side maps exist).
         let bound: Vec<&ParsedFile> = files.iter().filter(|f| f.is_bound()).collect();
@@ -323,11 +372,41 @@ impl MultiFileBoundProgram {
             let bind = file.bind_result().expect("bound");
             symbol_ranges.push((off, off + bind.symbols.len() as u32));
         }
+        // The specifier -> module-symbol bridge: map each importing file's
+        // resolved specifiers to the (merged) `ValueModule` symbol of the target
+        // file (its bound `file_symbol`, offset into the merged space). A
+        // resolution whose endpoints are not both bound files is dropped.
+        let file_index_by_name: FxHashMap<&str, usize> = bound
+            .iter()
+            .enumerate()
+            .map(|(i, file)| (file.file_name(), i))
+            .collect();
+        let module_symbol_of = |index: usize| -> Option<SymbolId> {
+            bound[index]
+                .bind_result()
+                .expect("bound")
+                .file_symbol
+                .map(|s| SymbolId(s.0 + offsets[index]))
+        };
+        let mut module_resolutions: FxHashMap<(usize, String), SymbolId> = FxHashMap::default();
+        for (containing, specifier, resolved) in resolved_modules {
+            let (Some(&importing_idx), Some(&resolved_idx)) = (
+                file_index_by_name.get(containing.as_str()),
+                file_index_by_name.get(resolved.as_str()),
+            ) else {
+                continue;
+            };
+            if let Some(module_symbol) = module_symbol_of(resolved_idx) {
+                module_resolutions.insert((importing_idx, specifier.clone()), module_symbol);
+            }
+        }
+
         // The shared cross-file resolution registry: ranges are known now; the
         // `views` weak back-pointers are filled after the views are built.
         let registry = Rc::new(ViewRegistry {
             ranges: symbol_ranges.clone(),
             views: RefCell::new(Vec::with_capacity(bound.len())),
+            module_resolutions,
         });
 
         let mut views = Vec::with_capacity(bound.len());
@@ -450,6 +529,14 @@ impl BoundProgram for MultiFileBoundProgram {
 
     fn compiler_options(&self) -> &CompilerOptions {
         &self.options
+    }
+
+    fn resolve_module_symbol(&self, importing_file: NodeId, specifier: &str) -> Option<SymbolId> {
+        // The registry is shared by every view; any view answers for any
+        // importing file (the lookup keys on the file index in the handle).
+        self.views
+            .first()
+            .and_then(|view| resolve_module_symbol_in(&view.registry, importing_file, specifier))
     }
 }
 

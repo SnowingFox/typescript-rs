@@ -1584,3 +1584,185 @@ fn single_threaded_program_uses_one_checker() {
         &["/src/index.ts".to_string()]
     );
 }
+
+/// Cross-module ES NAMED import resolution (Round 14, headline): a reference to
+/// a name imported with `import { a } from "./m"` resolves to the target
+/// module's exported `a` — so there is NO spurious `TS2304` ("Cannot find
+/// name"). Before alias resolution the local `a` was bound as an `Alias` symbol
+/// whose flags did not intersect `Value`, so `checkIdentifier` failed to resolve
+/// it and cascaded into a 2304 (the dominant full-corpus false positive).
+// Go: internal/checker/checker.go:Checker.resolveAlias / getTargetOfImportSpecifier
+#[test]
+fn cross_module_named_import_resolves_no_2304() {
+    let options = CompilerOptions {
+        module_resolution: tsgo_core::compileroptions::ModuleResolutionKind::Bundler,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[
+            ("/src/m.ts", "export const a = 1;"),
+            ("/src/main.ts", "import { a } from \"./m\";\na;"),
+        ],
+        "/src",
+        &["/src/main.ts"],
+        options,
+        true,
+    );
+    // The referenced module loads (no TS2307), so only the alias resolution is
+    // under test.
+    assert_eq!(program.source_files().len(), 2, "both files load");
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "imported name `a` resolves to its export (no 2304): {diags:?}"
+    );
+}
+
+/// Cross-module DEFAULT import resolution: a reference to a default import
+/// `import d from "./m"` resolves to the target module's `default` export, so
+/// there is NO spurious `TS2304`.
+// Go: internal/checker/checker.go:Checker.getTargetOfImportClause / getTargetOfModuleDefault
+#[test]
+fn cross_module_default_import_resolves_no_2304() {
+    let options = CompilerOptions {
+        module_resolution: tsgo_core::compileroptions::ModuleResolutionKind::Bundler,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[
+            ("/src/m.ts", "export default function greet() { return 1; }"),
+            ("/src/main.ts", "import greet from \"./m\";\ngreet();"),
+        ],
+        "/src",
+        &["/src/main.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "default import `greet` resolves (no 2304): {diags:?}"
+    );
+}
+
+/// Cross-module NAMESPACE import resolution: `import * as ns from "./m"` binds
+/// `ns` to the module symbol, so a member access `ns.a` reads the module's
+/// exported `a` — there is NO spurious `TS2304` on `ns` and NO `TS2339` on
+/// `ns.a` (the cascade amplifier).
+// Go: internal/checker/checker.go:Checker.getTargetOfNamespaceImport / resolveESModuleSymbol
+#[test]
+fn cross_module_namespace_import_member_resolves_no_2304_no_2339() {
+    let options = CompilerOptions {
+        module_resolution: tsgo_core::compileroptions::ModuleResolutionKind::Bundler,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[
+            ("/src/m.ts", "export const a = 1;"),
+            ("/src/main.ts", "import * as ns from \"./m\";\nns.a;"),
+        ],
+        "/src",
+        &["/src/main.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2304 && d.code != 2339),
+        "namespace member `ns.a` resolves (no 2304/2339): {diags:?}"
+    );
+}
+
+/// GUARD: a named import of a NON-EXISTENT export still reports `TS2305`
+/// ("Module ... has no exported member"), NOT a silent resolve and NOT a
+/// `TS2304`. The module name is rendered as the quoted specifier, matching
+/// `tsc`'s committed baseline.
+// Go: internal/checker/checker.go:Checker.errorNoModuleMemberSymbol
+#[test]
+fn cross_module_missing_named_export_reports_2305_not_2304() {
+    let options = CompilerOptions {
+        module_resolution: tsgo_core::compileroptions::ModuleResolutionKind::Bundler,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[
+            ("/src/m.ts", "export const a = 1;"),
+            ("/src/main.ts", "import { nope } from \"./m\";\nnope;"),
+        ],
+        "/src",
+        &["/src/main.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2305 && d.message.contains("no exported member 'nope'")),
+        "missing named export must report TS2305: {diags:?}"
+    );
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "and never a TS2304 on the reference: {diags:?}"
+    );
+}
+
+/// GUARD: a genuinely undefined bare name (not imported, not a global) still
+/// reports `TS2304`, proving alias resolution does not blanket-mute the
+/// "Cannot find name" diagnostic.
+// Go: internal/checker/checker.go:Checker.checkIdentifier (Cannot_find_name_0)
+#[test]
+fn cross_module_undefined_name_still_reports_2304() {
+    let options = CompilerOptions {
+        module_resolution: tsgo_core::compileroptions::ModuleResolutionKind::Bundler,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[
+            ("/src/m.ts", "export const a = 1;"),
+            (
+                "/src/main.ts",
+                "import { a } from \"./m\";\nnotImportedAtAll;",
+            ),
+        ],
+        "/src",
+        &["/src/main.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2304 && d.message.contains("notImportedAtAll")),
+        "a genuinely undefined name still reports 2304: {diags:?}"
+    );
+}
+
+/// Cross-module `import x = require("m")` over an `export =` module: the alias
+/// `mod` resolves to the module's `export =` target, so a reference to `mod`
+/// reports NO spurious `TS2304` (the `exportAssignmentMerging` cluster).
+// Go: internal/checker/checker.go:Checker.getTargetOfImportEqualsDeclaration / resolveExternalModuleSymbol
+#[test]
+fn cross_module_import_equals_require_export_assignment_resolves_no_2304() {
+    let options = CompilerOptions {
+        module: tsgo_core::compileroptions::ModuleKind::CommonJs,
+        module_resolution: tsgo_core::compileroptions::ModuleResolutionKind::Bundler,
+        ..Default::default()
+    };
+    let mut program = program_with(
+        &[
+            ("/src/a.ts", "export = { x: 1 };"),
+            ("/src/b.ts", "import mod = require(\"./a\");\nmod;"),
+        ],
+        "/src",
+        &["/src/b.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "import-equals alias `mod` resolves to the export= target (no 2304): {diags:?}"
+    );
+}

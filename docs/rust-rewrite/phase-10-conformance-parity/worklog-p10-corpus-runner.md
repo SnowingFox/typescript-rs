@@ -2475,3 +2475,209 @@ binder/checker/parser code touched (the bridge is compiler-crate-only).
   to the BINDER contribution only (the checker-half plain-JS filter is a
   pre-existing divergence). blocked-by: the checker's JSDoc-diagnostic +
   comment-directive surface (the `@ts-*` directives are also unparsed).
+
+# Round 14 — cross-module import/alias resolution (TS2304 cascade)
+
+Round goal: attack Round 12's **#1 false-positive cascade — `extra TS2304 ×96`
+("Cannot find name") + the `extra TS2339 ×63` it amplifies**. The dominant root
+is cross-module import/ALIAS resolution: the binder already binds `import { x }
+from "m"` / `import d from "m"` / `import * as ns from "m"` / `import x =
+require("m")` local names as `SymbolFlagsAlias` symbols and gives each external
+module a `ValueModule` symbol with an `exports` table, but the checker's
+`resolveAlias` chain was a stub (`skip_alias` only followed an already-computed
+`aliasTarget`), so EVERY imported name failed the `Value`-meaning lookup in
+`checkIdentifier` and cascaded into TS2304 (member access on the unresolved
+namespace/default then cascaded TS2339).
+
+## Step-0 categorization of the 96 (+conformance 20) — root → count
+
+A temporary `#[ignore]`d dump (`dump_extra_ts2304`, since REMOVED) ran the full
+corpus through `error_baseline_for_test` + the real `parse_error_baseline` /
+greedy-extra diff, printing every `+TS2304` with its name and the case's
+import/`@filename` context. The 96 compiler (+~21 conformance) extra TS2304
+group by ROOT:
+
+| root | × (compiler) | tractable? |
+|---|---|---|
+| **A — cross-file ES import binding** (`import {x}`/`import d`/`import * as ns`, specifier resolves to a LOADED module) | **~55** | **YES — fixed** |
+|   · A1 relative ES named/default/namespace (`./m`, `./dep`) | ~13 | |
+|   · A2 bare / node_modules package specifiers (`'foo'`, `"x"`, `@scope/pkg`) | ~17 | |
+|   · A3 `#`-subpath / package.json `imports` + tsconfig `paths` | ~15 | |
+|   · conformance `import * as` from package exports (`nodeModulesDeclarationEmit…` ×18 + `jsExports…`) | ~19 | |
+| **B — `import x = require()` / `export =` alias** (`exportAssignmentMerging1-4`) | 8 | **YES — fixed** |
+| C — expando / namespace-function merge / same-name-as-class VALUE access (`classFields…` ×14, `*DecoratorsEnumAccessSameNameAsClass` ×7, `declarationEmitExpandoFunction/Overloads` ×7) | ~28 | DEFER |
+| F — parser recovery (`.tsx` JSX, top-level `await`, `using`, assertion fn) | ~11 | DEFER (separate lanes) |
+| E — JS/JSDoc class exports (`controlFlowJSClassProperty.js`, `jsdocVariadicInOverload.js`) | ~3 | DEFER |
+| other (self `typeof`, expando contextual) | ~3 | DEFER |
+
+The DOMINANT TRACTABLE root is **A (+ B) — cross-module import/alias binding to
+an already-loaded module** (~55 compiler + ~19 conformance + 8 import-equals).
+Crucially the corpus shows TS2304 (not TS2307) on these, proving the target
+modules ARE resolved+loaded by the compiler — only the checker's alias
+resolution was missing. This round fixes A (all variants) and B.
+
+## Go functions ported (→ Rust locations)
+
+Binder (verified ALREADY done, untouched): import/alias declarations bind as
+`SymbolFlagsAlias` locals (`internal/binder/lib.rs:861` Import{Specifier,
+EqualsDeclaration}/NamespaceImport/ExportSpecifier; `:1027` `bind_import_clause`
+default name), and `bind_source_file_as_external_module` (`:908`) gives each
+module file a `ValueModule` symbol whose `exports` table carries its exports.
+
+Compiler — the specifier → module-symbol BRIDGE (Go's `program.GetResolvedModule`
+→ `GetSourceFileForResolvedModule` → `file.Symbol`):
+- **`FileLoader::resolve_import_specifiers`** (`internal/compiler/fileloader.rs`)
+  — returns each `(specifier text, resolved file name)` (the names-only
+  projection seeds the load worklist as before).
+- **`ProcessedFiles.resolved_modules`** / `FilesParser` — records
+  `(containing file, specifier, resolved file)` while loading the graph.
+- **`MultiFileBoundProgram::new_with_options_and_modules`**
+  (`internal/compiler/multifile.rs`) — builds `(importing-file-index, specifier)
+  → target ValueModule symbol` and implements **`BoundProgram::resolve_module_symbol`**
+  (the new trait method, default `None`).
+
+Checker — the `resolveAlias` chain (`internal/checker/core/declared_types.rs`,
+all `// Go:`-anchored to `internal/checker/checker.go`):
+- **`resolve_alias`** ← `Checker.resolveAlias` (cached `alias_targets`; cycle
+  guard `aliases_resolving`; a missing export caches `None` = Go's
+  `unknownSymbol`).
+- **`get_target_of_alias_declaration`** ← `getTargetOfAliasDeclaration`, with
+  **`get_target_of_import_specifier`** / **`get_target_of_import_clause`** /
+  **`get_target_of_namespace_import`** / **`get_target_of_import_equals_declaration`**.
+- **`get_external_module_member`** ← `getExternalModuleMember`,
+  **`get_target_of_module_default`** ← `getTargetOfModuleDefault`,
+  **`resolve_external_module_name`** ← `resolveExternalModuleName`,
+  **`resolve_external_module_symbol`** ← `resolveExternalModuleSymbol` (`export =`),
+  **`get_export_of_module`** ← `getExportOfModule`/`getExportsOfModule`,
+  **`resolve_symbol`** ← `resolveSymbolEx`.
+- **`check_identifier`** (`check.rs`) — the `getSymbol` ALIAS fallback: when the
+  direct `Value` lookup misses, re-lookup with `ALIAS` meaning, `resolve_alias`,
+  and if the target denotes a value (or resolution failed → Go's `unknownSymbol`,
+  reported once, returned to suppress a cascading TS2304) the alias resolves.
+- **`get_type_of_symbol`** (`declared_types.rs`) — the alias arm: a resolved
+  alias's value type is its target's type (`get_type_of_module` already builds a
+  module's object type from `exports`, so `ns.x` reads an export).
+
+## RED→GREEN + guard tests (`internal/compiler/program_test.rs`)
+
+- `cross_module_named_import_resolves_no_2304` (RED→GREEN, headline) —
+  `export const a = 1;` + `import { a } from "./m"; a;` → ZERO TS2304.
+- `cross_module_default_import_resolves_no_2304` (RED→GREEN) — `export default
+  function greet(){}` + `import greet from "./m"; greet();`.
+- `cross_module_namespace_import_member_resolves_no_2304_no_2339` (RED→GREEN) —
+  `import * as ns from "./m"; ns.a;` → no TS2304 on `ns`, no TS2339 on `ns.a`.
+- `cross_module_import_equals_require_export_assignment_resolves_no_2304`
+  (RED→GREEN) — `export = { x: 1 }` + `import mod = require("./a"); mod;`.
+- `cross_module_missing_named_export_reports_2305_not_2304` (GUARD) — `import {
+  nope } from "./m"` → TS2305 `Module '"./m"' has no exported member 'nope'.`,
+  never a silent resolve and never a TS2304 (module name = the quoted specifier,
+  byte-matching the committed baseline).
+- `cross_module_undefined_name_still_reports_2304` (GUARD) — a genuinely
+  undefined bare name still reports TS2304 (alias resolution does not blanket-mute
+  the diagnostic).
+
+## Over-report validation (CRITICAL) — the synthetic-default false TS2305
+
+The first full-corpus run after the chain surfaced ONE new `extra TS2305` in
+`allowSyntheticDefaultImports9.ts` (`import { default as Foo } from "./b"`),
+where tsc's committed baseline is CLEAN (synthetic default resolves `Foo` to the
+whole CommonJS module). Fixed faithfully: `get_target_of_import_specifier` routes
+a `default`-named import through `get_target_of_module_default` (Go's
+`ModuleExportNameIsDefault` branch), and the no-default arm DEFERs the
+synthetic-default / TS1192 decision (returns unresolved WITHOUT a diagnostic)
+rather than emitting a false TS2305/TS1192. The GUARD for genuine NAMED exports
+(TS2305) is intact — proven by `cross_module_missing_named_export_reports_2305_not_2304`.
+
+## Measurement — full corpus BEFORE→AFTER
+
+`tests/cases/compiler` (222 ran):
+
+| metric | BEFORE (R13) | AFTER (R14) | Δ |
+|---|---|---|---|
+| **passed** | **85** | **100** | **+15** |
+| failed | 134 | 119 | −15 |
+| errored | 3 | 3 | 0 |
+| category no_baseline_but_errors | 45 | 30 | −15 (15 clean cases now PASS) |
+| category missing_all_errors | 57 | 62 | +5 (divergent→missing as a spurious TS2304 is removed) |
+| category divergent | 32 | 27 | −5 |
+| **extra TS2304** | **×96** | **×50** | **−46** |
+| extra TS2339 | ×63 | ×63 | 0 (net; namespace members resolve, JS-expando modules surface a DEFERRED `{}`-shape TS2339) |
+| extra TS2305 (false) | 0 | 0 | guard fires only for genuine missing named exports |
+
+`tests/cases/conformance` (19 ran): **10/9/0 → 11/8/0 (+1 PASS)**; **extra TS2304
+×20 → ×2 (−18)**.
+
+**Honest flip count: +16 cases to byte-exact PASS** (15 compiler + 1
+conformance). NO PASS→FAIL regression: every import-bearing case was already
+FAILing on the TS2304 cascade, so resolving imports can only remove a
+false-positive (the passed count rose monotonically and the only category to
+shrink among the "we-emit-errors" buckets is `no_baseline_but_errors`, i.e. clean
+cases that now produce nothing).
+
+`extra TS2339 ×63` is unchanged NET: namespace-member accesses that used to
+short-circuit on an unresolved (`error`) receiver now resolve, while a handful of
+JS-expando / CommonJS-JS `import * as`/default imports resolve their module to an
+incomplete `{}`-shape object type (the expando-export root C/E is DEFERRED), so
+`ns.x` reports a `{}`-shape TS2339 instead of the old TS2304. Net flat, no
+regression.
+
+## 150-subset characterization BEFORE→AFTER
+
+`expanded_compiler_subset_parity_smoke`: **passed 69 → 78 (+9)**, failed 81 → 72,
+errored 0; categories `25/37/19 → 16/41/15`; **`top_extra(2) = [(2304,34),
+(2339,16)] → [(2304,17),(2339,16)]`**. The pinned guards (`extra TS2451 ==8`
+top-level-await, `extra TS1005==5`/`TS1003==3` parser, `extra TS2769==1`,
+`missing TS2300==None`, `top_missing(1)=[(2874,7)]`, no `extra TS7026`) are
+UNCHANGED and re-asserted. The curated 30-case smoke (`18/12/0`) is unaffected
+(its cases have no resolved cross-module imports).
+
+## Gate results (Round 14)
+
+- `cargo test -p tsgo_checker` — GREEN (771 lib + 178 doctests; alias arm covered
+  by the compiler integration tests via the real `MultiFileBoundProgram` bridge).
+- `cargo test -p tsgo_compiler` — 117 lib (111 + 6 NEW Round-14 cross-module
+  tests) + 11 doctests GREEN.
+- `cargo test -p tsgo_testrunner` — 51 lib + 2 ignored (heavy measurement) + 11
+  doctests GREEN; the 150-subset 78/72/0 and 30-case 18/12/0 characterizations
+  re-pinned.
+- `cargo test -p tsgo_binder` (60) / `-p tsgo_testutil_harnessutil` (11) /
+  `-p tsgo_ls` (39) / `-p tsgo_execute` (80) — GREEN (no sibling regression).
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner --all-targets
+  -- -D warnings` — clean.
+- `cargo fmt -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner -- --check` —
+  clean. `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; no test weakened/deleted; no new dependency; the binder was
+verified already-correct and left untouched; the temporary `dump_extra_ts2304`
+categorization test was REMOVED (the tree is clean of throwaway code).
+
+## DEFER list (blocked-by) — Round 14
+
+- **Expando / namespace-function merge / same-name-as-class VALUE access
+  (`extra TS2304 ~28`, root C)** — `Foo`/`MyEnum`/`A`/`B`/`C` used as values where
+  the binder did not merge the function/namespace/expando declaration into a
+  value symbol. blocked-by: expando-member + function/namespace merge in the
+  binder/checker (a separate root).
+- **JS-expando / CommonJS-JS module exports (the new `{}`-shape TS2339)** — a JS
+  module's `module.exports.x = …` / expando exports are not fully captured, so
+  `import * as ns` / default import resolves to an incomplete `{}` object type.
+  blocked-by: the CommonJS/expando export-table population (root C/E).
+- **Synthetic-default / `esModuleInterop` / `allowSyntheticDefaultImports`** —
+  `import d from "m"` / `import { default as X }` over a CommonJS module with no
+  explicit `default`: the no-default arm is left unresolved WITHOUT a diagnostic
+  (so no false positive), DEFERRing both the synthetic-default resolution and the
+  TS1192/TS2613 "no default export" reports. blocked-by: `canHaveSyntheticDefault`.
+- **`export *` star re-exports + `export { x } from "m"` re-export specifiers +
+  `export =` supplemental type exports** — `get_export_of_module` reads direct
+  exports only (no `getExportsOfModuleWorker` star visit), and
+  `get_target_of_alias_declaration` DEFERs `ExportSpecifier`/`NamespaceExport`/
+  `ExportAssignment`. blocked-by: the re-export visit + export-assignment alias.
+- **Type-position imports** — `resolve_entity_name` (type references) does not yet
+  follow alias targets (only `check_identifier` value references do), so an
+  imported TYPE used in a type annotation is not resolved through the alias chain.
+  blocked-by: threading checker alias state into `resolve_entity_name`.
+- **`import x = M.N` entity-name module references** — only the `require("m")` /
+  external-module form of import-equals is ported. blocked-by: `resolveEntityName`
+  alias chaining.
+- **Parser-recovery TS2304 (root F: `.tsx` JSX, top-level `await`, `using`)** and
+  **JS/JSDoc class exports (root E)** — separate parser / JS-checking lanes.

@@ -45,6 +45,11 @@ pub struct ParseTask {
 pub struct FilesParser {
     tasks_by_path: HashMap<Path, ParseTask>,
     root_paths: Vec<Path>,
+    /// Per-import module resolutions `(containing file name, specifier text,
+    /// resolved file name)` accumulated while parsing, threaded into
+    /// [`ProcessedFiles`] for the checker's specifier → module-symbol bridge.
+    // Go: internal/compiler/program.go:Program.resolvedModules
+    resolved_modules: Vec<(String, String, String)>,
 }
 
 impl Default for FilesParser {
@@ -61,6 +66,7 @@ impl FilesParser {
         FilesParser {
             tasks_by_path: HashMap::new(),
             root_paths: Vec::new(),
+            resolved_modules: Vec::new(),
         }
     }
 
@@ -133,7 +139,15 @@ impl FilesParser {
                         sub_tasks.push(sub_path);
                     }
                 }
-                for resolved_name in loader.resolve_import_file_names(parsed) {
+                let containing = parsed.file_name().to_string();
+                for (specifier, resolved_name) in loader.resolve_import_specifiers(parsed) {
+                    // Record the specifier -> resolved file mapping for the
+                    // checker's module-symbol bridge before consuming the name.
+                    self.resolved_modules.push((
+                        containing.clone(),
+                        specifier,
+                        resolved_name.clone(),
+                    ));
                     let sub_path = loader.to_path(&resolved_name);
                     self.ensure_task(sub_path.clone(), resolved_name, false);
                     queue.push(sub_path.clone());
@@ -198,7 +212,7 @@ impl FilesParser {
             files.push(file);
         }
 
-        ProcessedFiles::from_parts(files, files_by_path, missing_files)
+        ProcessedFiles::from_parts(files, files_by_path, missing_files, self.resolved_modules)
     }
 
     /// Depth-first post-order traversal: records `path` after recursing into its
