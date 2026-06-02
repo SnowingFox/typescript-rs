@@ -542,7 +542,7 @@ impl Checker {
     // DEFER(phase-4-checker-later): the `!isGenericType(prop type)` exclusion
     // and the `HasNeverType` interaction. blocked-by: generic-type detection.
     // Go: internal/checker/relater.go:Checker.isDiscriminantProperty(1084)
-    fn is_discriminant_property(
+    pub(crate) fn is_discriminant_property(
         &mut self,
         program: &dyn BoundProgram,
         t: TypeId,

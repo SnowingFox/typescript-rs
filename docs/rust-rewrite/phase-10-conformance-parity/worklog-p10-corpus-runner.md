@@ -3355,3 +3355,52 @@ by the subagent (left to the parent).
   members (`checkTypeLiteral` at 3119). blocked-by: private-identifier symbol
   naming + parameter-property binding + type-literal traversal in
   `check_type_node` (no corpus case needs them this round).
+
+## Round 19 — union-target assignability (TS2322 false positives)
+
+**Root / Go ground truth.** Assigning an object literal to a discriminated-union
+target wrongly reported `TS2322` (and a follow-on excess `TS2353`). Two sub-roots:
+- per-property contextual type was NOT distributed over a UNION contextual type,
+  so the literal's properties widened (Go `getTypeOfPropertyOfContextualTypeEx`
+  via `mapTypeEx`); and `isLiteralOfContextualType` didn't treat a union (`"a"|"b"`)
+  as a literal context.
+- the excess-property check lacked discriminant reduction, so it checked against
+  the wrong constituent (Go `hasExcessProperties` `reducedTarget` via
+  `findMatchingDiscriminantType`/`getBestMatchingType`).
+
+**Rust landing** (`// Go:`-anchored): `contextual.rs` —
+`get_type_of_property_of_contextual_type` distributes over a union;
+`is_literal_of_contextual_type` union/intersection arm. `relations.rs` — new
+`find_matching_discriminant_type`/`find_discriminant_properties`/
+`discriminate_type_by_discriminable_items`/`filter_primitives_if_contains_non_primitive`
++ `get_best_matching_type` wired into the union arm of the relation elaboration
+(reuses `flow.rs::is_discriminant_property`, made `pub(crate)`). `check.rs` —
+`has_excess_properties` reduces the union target before checking, and emits the
+excess `TS2353` via `error_skipping_leading_trivia` (Go `c.error(name)` =
+`GetErrorRangeForNode`, so the span starts at the property name, not the leading
+space) — this span fix is what flips the cases to byte-exact PASS.
+
+**RED→GREEN + guards** (checker +4, compiler real-lib +2): object literal →
+discriminated-union relates; discriminant selects the constituent for the excess
+check; wrong member elaborates against the matched constituent; an object
+matching NO constituent still reports TS2322 (guard).
+
+**Parity BEFORE→AFTER.** Full corpus **passed 109 → 111 (50.0%)** (+2:
+`missingDiscriminants.ts`, `missingDiscriminants2.ts`); `extra TS2322 ×18 → ×8`
+(residual 8 = deferred variable-decl span off-by-one ×5 + conditional + construct-
+sig + `undefined->string`). No new `missing TS2322` (guards prove incompatible
+objects still error). 150-subset **84 → 85**; `extra TS2322 ×12 → ×7`;
+`top_extra(2) = [(2304,14),(2322,7)]`. Zero regressions.
+
+## Gate results (Round 19)
+- `cargo test -p tsgo_checker` (790) · `-p tsgo_compiler` (126) · `-p tsgo_testrunner`
+  (51 + 1 ignored) — GREEN.
+- `cargo clippy … -- -D warnings` + `cargo fmt -- --check` + `cargo build
+  --workspace --all-targets` — GREEN.
+
+Deferred: variable-decl TS2322 span off-by-one (separate span root), conditional-
+type relation, construct-sig cascade, `undefined->string` settings. No
+`--no-verify`; temporary categorization dump removed; tree clean. (Round 19
+subagent completed the relation work then hit a backend outage before the final
+span fix + cleanup + snapshot; the parent applied the one-line span fix, removed
+the dump, updated the snapshot, added this section, and committed.)

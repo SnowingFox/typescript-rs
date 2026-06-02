@@ -766,6 +766,19 @@ impl Checker {
         if self.is_empty_object_type(target) {
             return false;
         }
+        // A union target is reduced to its discriminant-matched constituent
+        // (Go's `reducedTarget = findMatchingDiscriminantType(...)`, else
+        // `filterPrimitivesIfContainsNonPrimitive`), so excess is checked — and
+        // the error reported — against the SELECTED constituent. For
+        // `{ kind: "b", subkind: 1 }` against `… | { kind: "b" }` this reports
+        // `subkind` against `{ kind: "b" }` (matching tsc) instead of treating
+        // `subkind` as known because some OTHER constituent declares it.
+        let reduced_target = if self.get_type(target).flags().contains(TypeFlags::UNION) {
+            self.find_matching_discriminant_type(program, source, target, RelationKind::Assignable)
+                .unwrap_or_else(|| self.filter_primitives_if_contains_non_primitive(target))
+        } else {
+            target
+        };
         // Iterate the literal's own properties in declaration order (Go's
         // `getPropertiesOfType(source)`); every object-literal member is declared
         // directly in the literal, so Go's `shouldCheckAsExcessProperty` holds.
@@ -775,11 +788,17 @@ impl Checker {
         };
         for prop in properties {
             let name = self.property_symbol_name(program, prop);
-            if !self.is_known_property(program, target, &name) {
+            if !self.is_known_property(program, reduced_target, &name) {
                 let error_node = object_literal_property_name_node(program, literal_node, &name)
                     .unwrap_or(literal_node);
-                let target_str = super::nodebuilder::type_to_string(self, program, target);
-                self.error(
+                // Report in terms of the object types we actually check (Go's
+                // `errorTarget = filterType(reducedTarget, isExcessPropertyCheckTarget)`).
+                let error_target = self.filter_excess_property_check_target(reduced_target);
+                let target_str = super::nodebuilder::type_to_string(self, program, error_target);
+                // Go's `c.error(errorNode, …)` uses `GetErrorRangeForNode` =
+                // `skipTrivia(pos)..end`, so the span starts at the property name,
+                // not the leading whitespace before it.
+                self.error_skipping_leading_trivia(
                     program,
                     error_node,
                     &tsgo_diagnostics::OBJECT_LITERAL_MAY_ONLY_SPECIFY_KNOWN_PROPERTIES_AND_0_DOES_NOT_EXIST_IN_TYPE_1,

@@ -741,8 +741,8 @@ fn expanded_compiler_subset_parity_smoke() {
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 84,
-            failed: 66,
+            passed: 85,
+            failed: 65,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -811,9 +811,11 @@ fn expanded_compiler_subset_parity_smoke() {
     // no_baseline_but_errors cases to PASS (14 -> 11); one divergent case whose
     // only extra was the cleared TS2339 shifts to missing_all_errors
     // (divergent 12 -> 11, missing_all_errors 43 -> 44).
+    // Round 19: union-target discriminant relate flips one divergent case
+    // (`missingDiscriminants`) to PASS (divergent 11 -> 10).
     assert_eq!(hist.no_baseline_but_errors, 11);
     assert_eq!(hist.missing_all_errors, 44);
-    assert_eq!(hist.divergent, 11);
+    assert_eq!(hist.divergent, 10);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare
@@ -887,11 +889,16 @@ fn expanded_compiler_subset_parity_smoke() {
     // TS2304, so `extra TS2304` drops 17 -> 14, making TS2339 ×16 the top extra.
     // Round 17: with `extra TS2339` dropping 16 -> 5 (expando / this-property
     // members now resolve), the top extras are now `TS2304 ×14` (the deferred
-    // namespace/enum/export= VALUE-access cascade) and `TS2322 ×12` (the deferred
-    // discriminant/literal union-relate bucket).
+    // namespace/enum/export= VALUE-access cascade) and `TS2322` (the union-relate
+    // bucket).
+    // Round 19: object-literal -> discriminated-union target now relates (per-
+    // property contextual type distributes over the union + discriminant excess
+    // reduction), clearing the `missingDiscriminants*` phantoms: `TS2322 ×12 -> ×7`
+    // (the residual 7 are the deferred variable-decl span off-by-one + conditional
+    // + construct-sig + `undefined->string` roots).
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 14), (2322, 12)],
+        vec![(2304, 14), (2322, 7)],
         "top extra (false-positive) codes; histogram:\n{}",
         hist.report()
     );
@@ -1000,12 +1007,13 @@ fn expanded_compiler_subset_parity_smoke() {
          signal (missing 94 -> 52) lives in the FULL corpus; histogram:\n{}",
         hist.report()
     );
-    // `top_extra(2)` after Round 17: expando / this-property member synthesis
-    // drops `extra TS2339` 16 -> 5, so the top extras are now `TS2304 ×14` (the
-    // deferred namespace/enum/export= value-access cascade) and `TS2322 ×12`.
+    // `top_extra(2)` after Round 19: expando/this-property (R17) dropped
+    // `extra TS2339` 16 -> 5; the union-target discriminant relate (R19) dropped
+    // `extra TS2322` 12 -> 7, leaving `TS2304 ×14` (deferred namespace/enum/
+    // export= value-access cascade) and `TS2322 ×7` (deferred span/conditional).
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 14), (2322, 12)],
+        vec![(2304, 14), (2322, 7)],
         "the import-resolution round drops the dominant unresolved-name cascade; \
          histogram:\n{}",
         hist.report()

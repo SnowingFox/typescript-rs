@@ -1997,3 +1997,89 @@ fn cross_module_import_equals_require_export_assignment_resolves_no_2304() {
         "import-equals alias `mod` resolves to the export= target (no 2304): {diags:?}"
     );
 }
+
+/// End to end with the REAL bundled lib (Round 19, mirroring the corpus
+/// `missingDiscriminants.ts`): assigning fresh object literals to a
+/// discriminated-union annotation under `@strict`. The union contextual type
+/// keeps each property literal (so `{ str: "b", num: 1 }` is NOT widened to
+/// `{ str: string; num: number }` and relates to the `{ str: "b" }`
+/// constituent), and the excess-property check reduces the union to the
+/// discriminant-matched constituent (`item2`'s `subkind` is excess against
+/// `{ kind: "b"; }`). tsc emits ONLY the `2353`, never the `extra TS2322` the
+/// port previously produced for every assignment here.
+// Go: internal/checker/checker.go:Checker.getTypeOfPropertyOfContextualTypeEx +
+//     internal/checker/relater.go:Checker.findMatchingDiscriminantType
+#[test]
+fn discriminated_union_object_literal_no_spurious_2322_with_real_lib() {
+    let options = CompilerOptions {
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let src = "type Thing = { str: \"a\", num: 0 } | { str: \"b\" } | { num: 1 };\n\
+               const thing1: Thing = { str: \"a\", num: 0 };\n\
+               const thing2: Thing = { str: \"b\", num: 1 };\n\
+               const thing3: Thing = { num: 1, str: \"b\" };\n\
+               type Item =\n\
+                 | { kind: \"a\", subkind: 0, value: string }\n\
+                 | { kind: \"a\", subkind: 1, value: number }\n\
+                 | { kind: \"b\" };\n\
+               const item1: Item = { subkind: 1, kind: \"b\" };\n\
+               const item2: Item = { kind: \"b\", subkind: 1 };\n";
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", src)],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    // No phantom `2322`: the three `thing*` and the two `item*` assignments all
+    // relate to a constituent under contextual typing.
+    assert!(
+        diags.iter().all(|d| d.code != 2322),
+        "no spurious 2322 for discriminated-union object-literal assignment: {diags:?}"
+    );
+    // Exactly the two committed excess-property `2353`s (item1 + item2's
+    // `subkind` against `{ kind: "b"; }`), matching the corpus baseline.
+    let excess: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == 2353 && d.message.contains("'subkind'"))
+        .collect();
+    assert_eq!(
+        excess.len(),
+        2,
+        "exactly the two `subkind` excess-property 2353s against `{{ kind: \"b\"; }}`: {diags:?}"
+    );
+    assert!(
+        excess
+            .iter()
+            .all(|d| d.message.contains("'{ kind: \"b\"; }'")),
+        "the excess `subkind` is reported against the discriminant-selected `{{ kind: \"b\"; }}`: {diags:?}"
+    );
+}
+
+/// GUARD (no over-relaxation) with the REAL bundled lib: an object literal whose
+/// discriminant matches NO constituent of the union still reports `2322` — the
+/// union relate is not blanket-accepted.
+// Go: internal/checker/relater.go:Relater.typeRelatedToSomeType (no match -> false)
+#[test]
+fn discriminated_union_object_literal_incompatible_still_reports_2322_with_real_lib() {
+    let options = CompilerOptions {
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let src = "type Thing = { str: \"a\", num: 0 } | { str: \"b\" };\n\
+               const bad: Thing = { str: \"z\", num: 9 };\n";
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", src)],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().any(|d| d.code == 2322),
+        "an object literal matching no constituent must still report 2322: {diags:?}"
+    );
+}

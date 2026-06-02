@@ -708,6 +708,97 @@ fn intersection_source_assignable_to_object_reports_no_diagnostic() {
     assert!(c.get_diagnostics(root).is_empty());
 }
 
+// Go: internal/checker/relater.go:Relater.typeRelatedToSomeType (union target,
+// object-literal source kept fresh by the union contextual type)
+#[test]
+fn object_literal_assignable_to_discriminated_union_target() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type U = { k: \"a\"; x: number } | { k: \"b\"; y: string };\nconst u: U = { k: \"a\", x: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    // The fresh object literal `{ k: "a", x: 1 }` keeps its literal property
+    // types under the union contextual type `U`, so it relates to the
+    // `{ k: "a"; x: number }` constituent and no `2322`/`2353` is reported.
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.hasExcessProperties (union discriminant
+// reduction via findMatchingDiscriminantType)
+#[test]
+fn object_literal_discriminant_selects_constituent_for_excess_property() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Item = { kind: \"a\"; subkind: 0 } | { kind: \"b\" };\nconst i: Item = { kind: \"b\", subkind: 0 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    // The discriminant `kind: "b"` selects the `{ kind: "b" }` constituent, so
+    // `subkind` is an excess property reported as `2353` against THAT
+    // constituent (matching tsc), not against the whole union and not a generic
+    // union `2322`.
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, 2353);
+    assert_eq!(
+        diags[0].message,
+        "Object literal may only specify known properties, and 'subkind' does not exist in type '{ kind: \"b\"; }'."
+    );
+}
+
+// GUARD — Go: internal/checker/relater.go:Relater.typeRelatedToSomeType (no
+// constituent relates -> the relation still fails)
+#[test]
+fn object_literal_matching_no_union_constituent_still_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type U = { k: \"a\"; x: number } | { k: \"b\"; y: string };\nconst u: U = { k: \"c\", x: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    // `k: "c"` matches no constituent's discriminant, so the object relates to
+    // NONE of them and a genuine `2322` still fires — the union relate is not
+    // over-relaxed.
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/relater.go:Relater.typeRelatedToSomeType (reportErrors ->
+// getBestMatchingType -> findMatchingDiscriminantType elaboration)
+#[test]
+fn object_literal_wrong_member_elaborates_against_matched_constituent() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type U = { k: \"a\"; x: number } | { k: \"b\"; y: string };\nconst u: U = { k: \"a\", x: \"oops\" };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    // The discriminant `k: "a"` selects `{ k: "a"; x: number }`, so the failure
+    // elaborates against THAT constituent down to the incompatible `x` (a nested
+    // `2326` chain), instead of a flat union failure with no child.
+    fn mentions_x_incompatible(chain: &[crate::core::check::DiagnosticMessageChain]) -> bool {
+        chain.iter().any(|node| {
+            (node.code == 2326 && node.message.contains("'x'"))
+                || mentions_x_incompatible(&node.next)
+        })
+    }
+    assert!(
+        mentions_x_incompatible(&d.message_chain),
+        "expected an x-incompatibility elaboration, got {:?}",
+        d.message_chain
+    );
+}
+
 // Go: internal/checker/relater.go:errorReporter.reportRelationError (generalizedSource)
 #[test]
 fn variable_initializer_literal_generalizes_to_base_type() {

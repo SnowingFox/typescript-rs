@@ -16,7 +16,7 @@ use tsgo_diagnostics::{Category, Message};
 use super::check::DiagnosticMessageChain;
 use super::declared_types::{
     get_apparent_type, get_applicable_index_info_for_name, get_properties_of_type,
-    get_property_of_type, get_type_of_symbol,
+    get_property_of_type, get_type_of_property_of_type, get_type_of_symbol,
 };
 use super::nodebuilder::type_to_string;
 use super::program::BoundProgram;
@@ -1334,6 +1334,223 @@ impl Checker {
         false
     }
 
+    // Reduces a union `target` to the constituent matching a discriminated
+    // object/intersection `source`, or `None` when no discriminant selects a
+    // single constituent (Go's `findMatchingDiscriminantType`). The reduced
+    // constituent both speeds up the structural relation and — crucially for
+    // excess-property checking — pins error placement to the SELECTED
+    // constituent (e.g. `{ kind: "b", subkind: 1 }` against `… | { kind: "b" }`
+    // reports `subkind` against `{ kind: "b" }`, not the whole union).
+    //
+    // DEFER(phase-4-checker-later): the `getMatchingUnionConstituentForType`
+    // key-property fast path (`getKeyPropertyName` + the ≥10-constituent
+    // `constituentMap`). It returns `nil` for every reachable corpus union
+    // (small unions, or unions whose key property is absent in some
+    // constituent), so the `findDiscriminantProperties` path below is
+    // authoritative; the fast path would only pick the SAME constituent more
+    // cheaply. blocked-by: the union key-property constituent map.
+    // Go: internal/checker/relater.go:Checker.findMatchingDiscriminantType
+    pub(crate) fn find_matching_discriminant_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> Option<TypeId> {
+        if !self.get_type(target).flags().contains(TypeFlags::UNION) {
+            return None;
+        }
+        if !self
+            .get_type(source)
+            .flags()
+            .intersects(TypeFlags::INTERSECTION | TypeFlags::OBJECT)
+        {
+            return None;
+        }
+        let discriminants = self.find_discriminant_properties(program, source, target);
+        if discriminants.is_empty() {
+            return None;
+        }
+        let discriminated = self.discriminate_type_by_discriminable_items(
+            program,
+            target,
+            &discriminants,
+            relation,
+        );
+        if discriminated != target {
+            Some(discriminated)
+        } else {
+            None
+        }
+    }
+
+    // Returns the union constituent that best matches `source` for error
+    // elaboration (Go's `getBestMatchingType`). The reachable subset uses the
+    // discriminant-selected constituent.
+    //
+    // DEFER(phase-4-checker-later): the type-reference / type-alias match, the
+    // object-literal "best" match, the invokable match, and the most-overlappy
+    // scoring fallbacks. blocked-by: type-reference identity matching + overlap
+    // scoring over object members.
+    // Go: internal/checker/relater.go:Checker.getBestMatchingType
+    fn get_best_matching_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> Option<TypeId> {
+        self.find_matching_discriminant_type(program, source, target, relation)
+    }
+
+    // Collects the `(name, source-property-type)` of each source property that
+    // is a discriminant property of the union `target` (Go's
+    // `findDiscriminantProperties` over `getPropertiesOfType(source)`).
+    // Go: internal/checker/relater.go:Checker.findDiscriminantProperties
+    fn find_discriminant_properties(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+    ) -> Vec<(String, TypeId)> {
+        let mut result: Vec<(String, TypeId)> = Vec::new();
+        for (name, _) in get_properties_of_type(self, source) {
+            if self.is_discriminant_property(program, target, &name) {
+                if let Some(source_type) =
+                    get_type_of_property_of_type(self, program, source, &name)
+                {
+                    result.push((name, source_type));
+                }
+            }
+        }
+        result
+    }
+
+    // Refines a union `target` to the constituents whose discriminant
+    // properties match the source (Go's `discriminateTypeByDiscriminableItems`).
+    // Each discriminant eliminates constituents with a non-matching value while
+    // keeping at least one match; an erroneous discriminant (no match) is
+    // ignored. Returns the filtered union, or the original `target` when nothing
+    // is eliminated or the filter would be `never`.
+    // Go: internal/checker/relater.go:Checker.discriminateTypeByDiscriminableItems
+    fn discriminate_type_by_discriminable_items(
+        &mut self,
+        program: &dyn BoundProgram,
+        target: TypeId,
+        discriminants: &[(String, TypeId)],
+        relation: RelationKind,
+    ) -> TypeId {
+        let types = self.get_type(target).union_types().unwrap_or(&[]).to_vec();
+        // `0` = excluded (False), `1` = included (True), `2` = undecided (Maybe).
+        let mut include: Vec<u8> = types
+            .iter()
+            .map(|&t| {
+                let flags = self.get_type(t).flags();
+                if !flags.intersects(TypeFlags::PRIMITIVE) && !flags.intersects(TypeFlags::NEVER) {
+                    1
+                } else {
+                    0
+                }
+            })
+            .collect();
+        for (name, source_type) in discriminants {
+            let mut matched = false;
+            for i in 0..types.len() {
+                if include[i] == 0 {
+                    continue;
+                }
+                if let Some(target_type) =
+                    self.get_type_of_property_or_index_signature_of_type(program, types[i], name)
+                {
+                    if self.is_type_related_to(program, *source_type, target_type, relation) {
+                        matched = true;
+                    } else {
+                        include[i] = 2;
+                    }
+                }
+            }
+            for inc in include.iter_mut() {
+                if *inc == 2 {
+                    *inc = if matched { 0 } else { 1 };
+                }
+            }
+        }
+        if include.contains(&0) {
+            let filtered: Vec<TypeId> = types
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| include[*i] == 1)
+                .map(|(_, &t)| t)
+                .collect();
+            let filtered_union = self.get_union_type(&filtered);
+            if !self
+                .get_type(filtered_union)
+                .flags()
+                .contains(TypeFlags::NEVER)
+            {
+                return filtered_union;
+            }
+        }
+        target
+    }
+
+    // The type of `name` on `t` as a property or, failing that, an applicable
+    // index signature (Go's `getTypeOfPropertyOrIndexSignatureOfType`).
+    // Go: internal/checker/checker.go:Checker.getTypeOfPropertyOrIndexSignatureOfType
+    fn get_type_of_property_or_index_signature_of_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        name: &str,
+    ) -> Option<TypeId> {
+        if let Some(prop_type) = get_type_of_property_of_type(self, program, t, name) {
+            return Some(prop_type);
+        }
+        let info = get_applicable_index_info_for_name(self, program, t, name)?;
+        Some(self.index_info(info).value_type)
+    }
+
+    // Keeps only the constituents of a union for which excess-property checking
+    // applies (Go's `filterType(reducedTarget, isExcessPropertyCheckTarget)`),
+    // used to print the error target in terms of the object types we actually
+    // check. A non-union type is returned unchanged.
+    // Go: internal/checker/relater.go:Relater.hasExcessProperties (errorTarget)
+    pub(crate) fn filter_excess_property_check_target(&mut self, t: TypeId) -> TypeId {
+        if !self.get_type(t).flags().contains(TypeFlags::UNION) {
+            return t;
+        }
+        let members = self.get_type(t).union_types().unwrap_or(&[]).to_vec();
+        let filtered: Vec<TypeId> = members
+            .into_iter()
+            .filter(|&m| self.is_excess_property_check_target(m))
+            .collect();
+        self.get_union_type(&filtered)
+    }
+
+    // If `union` contains the non-primitive `object` type, drops its primitive
+    // constituents (Go's `filterPrimitivesIfContainsNonPrimitive`). For every
+    // reachable corpus union this is the identity (no bare `object`
+    // constituent), so the full union is checked for excess properties.
+    // Go: internal/checker/relater.go:Checker.filterPrimitivesIfContainsNonPrimitive
+    pub(crate) fn filter_primitives_if_contains_non_primitive(&mut self, union: TypeId) -> TypeId {
+        let members = self.get_type(union).union_types().unwrap_or(&[]).to_vec();
+        if members.iter().any(|&m| {
+            self.get_type(m)
+                .flags()
+                .intersects(TypeFlags::NON_PRIMITIVE)
+        }) {
+            let filtered: Vec<TypeId> = members
+                .into_iter()
+                .filter(|&m| !self.get_type(m).flags().intersects(TypeFlags::PRIMITIVE))
+                .collect();
+            let result = self.get_union_type(&filtered);
+            if !self.get_type(result).flags().contains(TypeFlags::NEVER) {
+                return result;
+            }
+        }
+        union
+    }
+
     // Runs the reporting twin of the relation recursion for a known-failed
     // `source`/`target` and materializes the nested elaboration chain (Go's
     // `checkTypeRelatedToEx` with `errorNode != nil`, then
@@ -1428,8 +1645,19 @@ impl Checker {
             && (sf.intersects(TypeFlags::UNION_OR_INTERSECTION)
                 || tf.intersects(TypeFlags::UNION_OR_INTERSECTION))
         {
-            // DEFER(phase-4-checker-4bo+): union/intersection elaboration.
-            self.structured_type_related_to(program, source, target, relation)
+            let related = self.structured_type_related_to(program, source, target, relation);
+            // Go's `typeRelatedToSomeType` reportErrors arm: when a non-union
+            // source fails to relate to a union target, elaborate against the
+            // best matching constituent (the discriminant-selected one) so the
+            // chain points at the offending member instead of a flat union
+            // failure. Other union/intersection elaboration is DEFER.
+            // Go: internal/checker/relater.go:Relater.typeRelatedToSomeType
+            if !related && tf.contains(TypeFlags::UNION) && !sf.intersects(TypeFlags::UNION) {
+                if let Some(best) = self.get_best_matching_type(program, source, target, relation) {
+                    self.report_is_related_to(program, source, best, relation, reporter);
+                }
+            }
+            related
         } else if relation != RelationKind::Identity
             && sf.contains(TypeFlags::OBJECT)
             && tf.contains(TypeFlags::OBJECT)

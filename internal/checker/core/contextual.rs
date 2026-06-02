@@ -437,23 +437,60 @@ impl Checker {
         self.check_iterated_type_or_element_type(program, t, None, true)
     }
 
-    /// The type of the property named `name` in a contextual type `t`: the
-    /// matching property's type, else the value type of an applicable index
-    /// signature, else `None`.
+    /// The type of the property named `name` in a contextual type `t`,
+    /// distributed over a union contextual type (Go wraps the per-constituent
+    /// lookup in `mapTypeEx(t, f, noReductions)`).
     ///
-    /// DEFER(phase-4-checker-4bl+): the union `mapType` distribution, the
-    /// intersection per-constituent combine, generic mapped types
-    /// (`getIndexedMappedTypeSubstitutedTypeOfContextualType`), the circular
-    /// mapped-property guard, and `removeMissingType` for optional members.
-    /// blocked-by: union/intersection contextual typing + generic mapped types +
-    /// optional-member missing-type stripping.
-    // Go: internal/checker/checker.go:Checker.getTypeOfPropertyOfContextualType
+    /// For a union contextual type each constituent contributes its own
+    /// property type and the results are unioned with no reduction, so a
+    /// discriminated-union annotation `{ k: "a"; x } | { k: "b"; y }`
+    /// contextually types property `k` as `"a" | "b"` — letting an object
+    /// literal `{ k: "a", ... }` keep its `"a"` literal property rather than
+    /// widening to `string`. A single (object) constituent resolves a concrete
+    /// property or an applicable index signature.
+    ///
+    /// DEFER(phase-4-checker-4bl+): the intersection per-constituent combine,
+    /// generic mapped types (`getIndexedMappedTypeSubstitutedTypeOfContextualType`),
+    /// the circular mapped-property guard, and `removeMissingType` for optional
+    /// members. blocked-by: intersection contextual typing + generic mapped
+    /// types + optional-member missing-type stripping.
+    // Go: internal/checker/checker.go:Checker.getTypeOfPropertyOfContextualTypeEx
     fn get_type_of_property_of_contextual_type(
         &mut self,
         program: &dyn BoundProgram,
         t: TypeId,
         name: &str,
     ) -> Option<TypeId> {
+        // Go: `mapTypeEx` returns `never` unchanged and otherwise distributes
+        // `f` over a union, unioning the non-nil results with no reduction.
+        if self.get_type(t).flags().contains(TypeFlags::NEVER) {
+            return Some(t);
+        }
+        if self.get_type(t).flags().contains(TypeFlags::UNION) {
+            let members = self.get_type(t).union_types().unwrap_or(&[]).to_vec();
+            let mut mapped: Vec<TypeId> = Vec::new();
+            let mut changed = false;
+            for member in members {
+                match self.get_type_of_property_of_contextual_type(program, member, name) {
+                    Some(mapped_member) => {
+                        if mapped_member != member {
+                            changed = true;
+                        }
+                        mapped.push(mapped_member);
+                    }
+                    None => changed = true,
+                }
+            }
+            if changed {
+                if mapped.is_empty() {
+                    return None;
+                }
+                // Go uses `UnionReductionNone`; the port's `get_union_type`
+                // dedups/sorts without literal/subtype reduction, matching it.
+                return Some(self.get_union_type(&mapped));
+            }
+            return Some(t);
+        }
         if !self.get_type(t).flags().contains(TypeFlags::OBJECT) {
             return None;
         }
@@ -705,12 +742,14 @@ impl Checker {
     /// contextual type is a literal of the same primitive kind. Such a context
     /// preserves the literal instead of widening it.
     ///
-    /// DEFER(phase-4-checker-4bl+): the union/intersection distribution
-    /// (`Some(contextualType.Types(), ...)`), the instantiable-non-primitive
-    /// constraint path (`T extends string` etc.), and the bigint /
-    /// unique-ES-symbol / `Index` / template-literal / string-mapping literal
-    /// kinds. blocked-by: union/intersection contextual typing + base-constraint
-    /// resolution + bigint/unique-symbol/template-literal typing.
+    /// A union (or intersection) contextual type is a literal context when
+    /// *some* constituent is (Go's `core.Some(contextualType.Types(), ...)`), so
+    /// a discriminated-union annotation `"a" | "b"` keeps an `"a"` value literal.
+    ///
+    /// DEFER(phase-4-checker-4bl+): the instantiable-non-primitive constraint
+    /// path (`T extends string` etc.), and the bigint / unique-ES-symbol /
+    /// `Index` / template-literal / string-mapping literal kinds. blocked-by:
+    /// base-constraint resolution + bigint/unique-symbol/template-literal typing.
     // Go: internal/checker/checker.go:Checker.isLiteralOfContextualType
     pub(crate) fn is_literal_of_contextual_type(
         &self,
@@ -720,6 +759,23 @@ impl Checker {
         let Some(contextual_type) = contextual_type else {
             return false;
         };
+        // A union/intersection contextual type is a literal context if any
+        // constituent is (Go distributes via `core.Some(contextualType.Types())`).
+        if self
+            .get_type(contextual_type)
+            .flags()
+            .intersects(TypeFlags::UNION_OR_INTERSECTION)
+        {
+            let ty = self.get_type(contextual_type);
+            let members = ty
+                .union_types()
+                .or_else(|| ty.intersection_types())
+                .unwrap_or(&[])
+                .to_vec();
+            return members
+                .iter()
+                .any(|&m| self.is_literal_of_contextual_type(candidate_type, Some(m)));
+        }
         let context = self.get_type(contextual_type).flags();
         let candidate = self.get_type(candidate_type).flags();
         context.intersects(TypeFlags::STRING_LITERAL)
