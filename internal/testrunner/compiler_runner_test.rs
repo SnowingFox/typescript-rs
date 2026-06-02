@@ -889,6 +889,51 @@ fn expanded_compiler_subset_parity_smoke() {
         "TS7026 must match tsc's spans exactly — no over-firing (extra TS7026); histogram:\n{}",
         hist.report()
     );
+
+    // Round 13 (surface binder diagnostics): the program's bind-and-check pass
+    // now merges each file's binder `bindDiagnostics` (TS2300 duplicate
+    // identifier, TS2451 block-scoped redeclare, TS2528 multiple-default-exports,
+    // ...) ahead of the checker diagnostics, exactly as Go's
+    // `getBindAndCheckDiagnosticsWithChecker` (`BindDiagnostics() ++
+    // checker.GetDiagnostics()`), gated by the SAME default-lib exclusion +
+    // JS-skip mask and the plain-JS `plainJSErrors` filter. On the FULL corpus
+    // this drops `missing TS2300 ×94 -> ×52` (see the worklog Round 13 section);
+    // this ≤25-line subset has NO missing-TS2300 case, so the duplicate-identifier
+    // signal does not show here (the headline counts/categories are unchanged).
+    //
+    // The ONE new extra in this subset is `awaitObjectLiteral.ts` (already a
+    // FAILing `no_baseline_but_errors` case): our parser does not yet support
+    // TOP-LEVEL `await`, so its recovery synthesizes empty-named declarations
+    // that the binder then flags as block-scoped redeclares — 8 spurious TS2451,
+    // all on empty (`''`) names co-located with the parser's TS2304/TS1005/TS1003
+    // recovery errors. This is a PARSER-recovery cascade, NOT a binder
+    // excludes/merge bug (Go's parser accepts top-level await and produces a
+    // clean tree); it is DEFERRED behind top-level-await parsing, and the case
+    // already failed, so no case regressed PASS -> FAIL. The binder's merge rules
+    // are correct on VALID input — see `program_test.rs`'s
+    // `legal_merges_produce_no_duplicate_identifier` guard.
+    assert_eq!(
+        hist.extra.get(&2451),
+        Some(&8),
+        "the lone new extra is awaitObjectLiteral's top-level-await parser-recovery \
+         TS2451 cascade (DEFERRED, not a binder bug); histogram:\n{}",
+        hist.report()
+    );
+    assert_eq!(
+        hist.missing.get(&2300),
+        None,
+        "this ≤25-line subset has no missing-TS2300 case; the duplicate-identifier \
+         signal (missing 94 -> 52) lives in the FULL corpus; histogram:\n{}",
+        hist.report()
+    );
+    // `top_extra(2)` is unchanged — the new TS2451 ×8 ranks below TS2339 ×16.
+    assert_eq!(
+        hist.top_extra(2),
+        vec![(2304, 34), (2339, 16)],
+        "the binder-surface round does not disturb the dominant unresolved-name \
+         cascade; histogram:\n{}",
+        hist.report()
+    );
 }
 
 // `ParitySummary::report` renders deterministic per-case lines with the tally

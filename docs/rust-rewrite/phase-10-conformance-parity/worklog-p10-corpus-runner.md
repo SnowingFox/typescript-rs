@@ -2291,3 +2291,187 @@ location capture is the intended measurement design.
   deliberately invalid-UTF-8 fixture surfaces as `errored`. blocked-by: a lossy
   / byte-oriented case read (a small runner change, deferred to keep this round
   measurement-only).
+
+## Round 13 — surface binder diagnostics (TS2300 et al.)
+
+Round goal: act on Round 12's **#1 false-NEGATIVE — `missing TS2300 ×94`**. The
+binder already DETECTS duplicate identifiers (`internal/binder/symbols.rs:
+report_merge_conflict` emits `DUPLICATE_IDENTIFIER_0`/TS2300,
+`CANNOT_REDECLARE_BLOCK_SCOPED_VARIABLE_0`/TS2451,
+`A_MODULE_CANNOT_HAVE_MULTIPLE_DEFAULT_EXPORTS`/TS2528, the enum-merge
+TS2567, ...), but `Program::semantic_diagnostics` collected ONLY checker-pool
+diagnostics and dropped the binder's `bindDiagnostics`, so these were produced
+and silently discarded. This round wires them through, exactly as tsc's
+`getBindAndCheckDiagnostics` = `bindDiagnostics ++ checkDiagnostics`.
+
+### Go ground truth ported
+
+`internal/compiler/program.go:getBindAndCheckDiagnosticsWithChecker` is the
+per-file composition:
+
+```go
+// Go: internal/compiler/program.go:getBindAndCheckDiagnosticsWithChecker
+if p.SkipTypeChecking(sourceFile, false) { return nil }
+diags := slices.Clip(sourceFile.BindDiagnostics())          // binder FIRST
+diags = append(diags, fileChecker.GetDiagnostics(ctx, sourceFile)...) // then checker
+isPlainJS := ast.IsPlainJSFile(sourceFile, compilerOptions.CheckJs)
+if isPlainJS { return core.Filter(diags, plainJSErrors.Has) } // plain-JS keeps only plainJSErrors codes
+// (isCheckJS JSDocDiagnostics append + @ts-ignore/@ts-expect-error directive filtering — DEFERRED)
+```
+
+Confirmed: bind diagnostics are subject to the SAME gate as check diagnostics
+(`SkipTypeChecking` → default-lib exclusion + the JS `canIncludeBindAndCheckDiagnostics`
+skip), and for a *plain* JS file the combined list is filtered to the
+`plainJSErrors` code set (`DUPLICATE_IDENTIFIER_0`/TS2300 is NOT in that set;
+`CANNOT_REDECLARE_BLOCK_SCOPED_VARIABLE_0`/TS2451 IS). The final baseline order
+is handled by the existing diagnostic-writer sort (by file then position), so
+only the per-file bind-then-check MERGE is needed here.
+
+### What landed (Rust locations, surgical/additive)
+
+`internal/compiler/program.rs`:
+
+- **`binder_diagnostic_to_checker(&BinderDiagnostic, text) -> tsgo_checker::Diagnostic`**
+  — the conversion bridge (the two crates keep distinct diagnostic types; Go
+  has one `*ast.Diagnostic`). Maps `code`/`category` from the static `Message`,
+  localizes the text exactly as the checker does
+  (`tsgo_diagnostics::format(&message.to_string(), args)`), and converts the
+  binder's `related` list into `related_information` RECURSIVELY. The span is
+  trivia-skipped against the OWNING file's text
+  (`tsgo_scanner::skip_trivia(text, loc.pos())..loc.end()`), matching Go's
+  `createDiagnosticForNode` → `scanner.GetErrorRangeForNode` (default case for
+  the name nodes the binder reports merge conflicts on), so it byte-matches
+  tsc's baseline.
+- **`Program::bind_and_check_diagnostics_grouped()`** — the per-bound-file merge
+  (binder diagnostics FIRST, then the pool's checker diagnostics), gated by the
+  SAME `is_excluded_from_semantic_diagnostics` mask (default-lib + JS-skip) as
+  the checker path. For a *plain* JS file the binder diagnostics are filtered to
+  the binder slice of `plainJSErrors` (`binder_code_allowed_in_plain_js`:
+  TS2451/TS2528/TS2752/TS2753 kept, TS2300/TS2567 dropped).
+- **`Program::semantic_diagnostics` / `semantic_diagnostics_by_file`** now both
+  derive from the grouped merge (flatten / zip-with-names), so the harness
+  baseline (which consumes `semantic_diagnostics_by_file`) and the flat API both
+  surface bind diagnostics attributed to the owning file.
+- **`Program::is_plain_js_file`** — 1:1 port of `ast.IsPlainJSFile` (the
+  `@ts-check` directive arm is DEFERRED behind the parser's check-js scan).
+
+No production binder/checker/parser code was touched; the bridge lives entirely
+in the compiler crate.
+
+### RED→GREEN + guard tests (`internal/compiler/program_test.rs`)
+
+- `binder_duplicate_identifier_surfaces_ts2300` (RED→GREEN) — `class C {} class C {}`
+  now surfaces 2× TS2300 with trivia-skipped spans `(6,1)`/`(17,1)` and correct
+  per-file attribution.
+- `binder_block_scoped_redeclare_surfaces_ts2451` (RED→GREEN) — `const x=1; const x=2;`
+  surfaces TS2451 (the block-scoped arm), never TS2300.
+- `legal_merges_produce_no_duplicate_identifier` (GUARD, no over-report) —
+  `interface I {} interface I {}`, `namespace N {} namespace N {}`,
+  `function f(){} namespace f {}`, `enum E {} namespace E {}` → ZERO
+  TS2300/TS2451 (the excludes/merge rules are honored on VALID input).
+- `binder_diagnostics_in_default_lib_are_not_reported` (GATE) — no bind/check
+  diagnostic is attributed to a `bundled:///libs/` file.
+- `check_js_false_suppresses_binder_duplicate` (GATE) — a `.js` file with
+  `checkJs:false` is skipped, so its binder TS2300 does not surface.
+- `plain_js_filters_ts2300_but_keeps_ts2451` (GATE) — plain JS drops binder
+  TS2300 (not in `plainJSErrors`) but keeps TS2451 (in `plainJSErrors`).
+- `binder_multiple_default_exports_carries_related_info` (related-info) —
+  `export default 1; export default 2;` surfaces TS2528 carrying a TS2752
+  related entry (recursive `related` → `related_information` round-trip).
+
+### Measurement — full corpus BEFORE→AFTER
+
+`tests/cases/compiler` (222 cases ran):
+
+| metric | BEFORE | AFTER | Δ |
+|---|---|---|---|
+| passed | 85 | 85 | 0 |
+| failed | 134 | 134 | 0 |
+| errored | 3 | 3 | 0 |
+| **missing TS2300** | **×94** | **×52** | **−42** |
+| extra TS2300 | 0 | ×8 | +8 (see below) |
+| extra TS2451 | 0 | ×8 | +8 (see below) |
+
+`missing TS2300 ×94 → ×52` (−42 surfaced correctly) is the headline. The pass
+count is flat because every TS2300-bearing case ALSO carries other reachable
+gaps (the dominant `extra TS2304 ×96 / TS2339 ×63` unresolved-name cascade,
+missing relation codes, ...), so surfacing TS2300 alone flips no case to a
+byte-exact PASS. The remaining `missing TS2300 ×52` are duplicates our partial
+binder does not yet detect (cross-file / checker-level duplicate detection,
+plus merge cases the binder handles differently) — DEFERRED.
+
+`tests/cases/conformance` (19 cases): **10/9/0** BEFORE and AFTER (unchanged; no
+TS2300 there — the suite's misses are the TS2304 cascade + JSDoc TS8024).
+
+### Over-report validation (CRITICAL) — both roots are PARSER recovery, DEFERRED
+
+The new `extra TS2300 ×8` + `extra TS2451 ×8` are confined to exactly TWO cases,
+BOTH already-FAILing and BOTH parser-recovery cascades (NOT binder excludes/merge
+bugs — every spurious diagnostic is on an EMPTY (`''`) name co-located with the
+parser's own TS2304/TS1005/TS1003/TS1128 recovery errors):
+
+- **`awaitObjectLiteral.ts` → extra TS2451 ×8.** Our parser does not yet support
+  TOP-LEVEL `await` (`const foo = await { bar: 42 }`); recovery synthesizes
+  empty-named declarations the binder then flags as block-scoped redeclares.
+  tsc's baseline is CLEAN (no `.errors.txt`). DEFER — blocked-by: top-level
+  `await` parsing.
+- **`jsxTernaryWithObjectInAttribute.tsx` → extra TS2300 ×8.** Our `.tsx` parser
+  fails on the complex ternary-with-object-in-attribute (the same JSX-recovery
+  backlog as Round 12's `extra TS1005/TS1003/TS1128`); recovery synthesizes
+  empty-named declarations the binder flags as duplicate identifiers. tsc's
+  baseline is 8× TS7026 only. DEFER — blocked-by: JSX ternary / object-in-attribute
+  parser recovery.
+
+Neither case regressed PASS→FAIL (both were already failing). The binder's
+merge/excludes rules are CORRECT on valid input, proven by the
+`legal_merges_produce_no_duplicate_identifier` guard. NO binder diagnostic was
+broadly suppressed to hit a number.
+
+### 150-subset characterization BEFORE→AFTER
+
+`expanded_compiler_subset_parity_smoke` is UNCHANGED on the headline numbers
+(**passed 69, failed 81, errored 0**; categories `25/37/19`; `top_extra(2) =
+[(2304,34),(2339,16)]`). The ≤25-line subset has NO missing-TS2300 case, so the
+duplicate-identifier improvement does not show there; the only new extra is the
+`awaitObjectLiteral.ts` top-level-await TS2451 ×8 cascade (it is ≤25 lines;
+`jsxTernary…` is longer and outside the subset). Added Round-13 guards pinning
+`extra TS2451 == 8`, `missing TS2300 == None`, and the unchanged `top_extra(2)`
+so the new extra is explicit and cannot drift silently.
+
+### Gate results (Round 13)
+
+- `cargo test -p tsgo_binder` — 60 GREEN.
+- `cargo test -p tsgo_checker` — GREEN (771/10/178 across the test binaries).
+- `cargo test -p tsgo_compiler` — 111 unit + 11 doctests GREEN (7 NEW Round-13
+  tests).
+- `cargo test -p tsgo_testrunner` — 51 unit + 1 ignored (heavy measurement) + 11
+  doctests GREEN; the 18/12/0 and 69/81/0 characterizations hold with the new
+  Round-13 guards.
+- `cargo test -p tsgo_testutil_harnessutil` — 11 unit + 4 doctests GREEN (bind
+  diagnostics now flow into the baseline).
+- `cargo clippy -p tsgo_compiler -p tsgo_testrunner --all-targets -- -D warnings`
+  — clean.
+- `cargo fmt -p tsgo_compiler -p tsgo_testrunner -- --check` — clean.
+- `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; no test weakened/deleted; no new dependency; no production
+binder/checker/parser code touched (the bridge is compiler-crate-only).
+
+### DEFER list (blocked-by) — Round 13
+
+- **Remaining `missing TS2300 ×52`** — duplicates the partial binder does not
+  detect (cross-file duplicate identifiers, checker-level duplicate-member /
+  duplicate-declaration checks, and merge cases the binder handles differently).
+  blocked-by: the checker's duplicate-symbol diagnostics + a fuller binder merge
+  surface.
+- **`extra TS2451 ×8` (`awaitObjectLiteral.ts`)** — blocked-by: top-level
+  `await` parsing (parser recovery synthesizes empty-named declarations).
+- **`extra TS2300 ×8` (`jsxTernaryWithObjectInAttribute.tsx`)** — blocked-by:
+  complex JSX ternary / object-in-attribute parser recovery.
+- **plain-JS `plainJSErrors` filter (checker half) + `isCheckJS`
+  `JSDocDiagnostics` append + `@ts-ignore`/`@ts-expect-error` directive
+  filtering** — Go filters the COMBINED bind+check list for plain JS and appends
+  JSDoc diagnostics for checkJS; this round applies the `plainJSErrors` filter
+  to the BINDER contribution only (the checker-half plain-JS filter is a
+  pre-existing divergence). blocked-by: the checker's JSDoc-diagnostic +
+  comment-directive surface (the `@ts-*` directives are also unparsed).

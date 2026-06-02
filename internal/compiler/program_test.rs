@@ -1315,6 +1315,256 @@ fn ts_file_is_checked_regardless_of_check_js() {
     );
 }
 
+/// Round 13 (surface binder diagnostics): a duplicate class declaration is a
+/// binder merge conflict that emits `DUPLICATE_IDENTIFIER_0` (TS2300) on BOTH
+/// the existing and the new name. Before this round
+/// [`Program::semantic_diagnostics`] collected only checker diagnostics and
+/// dropped the binder's `bindDiagnostics`, so these never surfaced — this is
+/// the RED that drove merging bind diagnostics into the program's bind-and-check
+/// pass (Go's `getBindAndCheckDiagnosticsWithChecker` = `BindDiagnostics()` ++
+/// `checker.GetDiagnostics()`). The spans are trivia-skipped to match Go's
+/// `GetErrorRangeForNode` (the default case for a name node), so they byte-match
+/// tsc: `class C {} class C {}` flags the two `C` names at columns 7 and 18.
+// Go: internal/compiler/program.go:getBindAndCheckDiagnosticsWithChecker (BindDiagnostics ++ check)
+#[test]
+fn binder_duplicate_identifier_surfaces_ts2300() {
+    let mut program = program_with(
+        &[("/index.ts", "class C {} class C {}")],
+        "/",
+        &["/index.ts"],
+        CompilerOptions {
+            no_lib: tsgo_core::tristate::Tristate::True,
+            ..Default::default()
+        },
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    let mut dup: Vec<(i32, i32)> = diags
+        .iter()
+        .filter(|d| d.code == 2300)
+        .map(|d| (d.start, d.length))
+        .collect();
+    dup.sort();
+    // Both `C` names: the first at byte 6 (`skipTrivia` past the space after
+    // `class`), the second at byte 17, each one character wide.
+    assert_eq!(
+        dup,
+        vec![(6, 1), (17, 1)],
+        "duplicate-class binder TS2300 must surface on both names with trivia-skipped spans: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .filter(|d| d.code == 2300)
+            .all(|d| d.message == "Duplicate identifier 'C'."),
+        "TS2300 message is localized with the name argument: {diags:?}"
+    );
+
+    // The per-file collector attributes both to the file that owns them.
+    let by_file = program.semantic_diagnostics_by_file();
+    let owner = by_file
+        .iter()
+        .find(|(name, _)| name == "/index.ts")
+        .expect("the duplicate-identifier diagnostics are attributed to /index.ts");
+    assert_eq!(
+        owner.1.iter().filter(|d| d.code == 2300).count(),
+        2,
+        "both TS2300 are attributed to /index.ts: {by_file:?}"
+    );
+}
+
+/// Round 13: a duplicate block-scoped `const` is the OTHER binder merge-conflict
+/// arm — the existing symbol carries `BLOCK_SCOPED_VARIABLE`, so the binder
+/// reports `CANNOT_REDECLARE_BLOCK_SCOPED_VARIABLE_0` (TS2451) rather than
+/// TS2300. It must surface through the program now too.
+// Go: internal/compiler/program.go:getBindAndCheckDiagnosticsWithChecker (BindDiagnostics)
+#[test]
+fn binder_block_scoped_redeclare_surfaces_ts2451() {
+    let mut program = program_with(
+        &[("/index.ts", "const x = 1; const x = 2;")],
+        "/",
+        &["/index.ts"],
+        CompilerOptions {
+            no_lib: tsgo_core::tristate::Tristate::True,
+            ..Default::default()
+        },
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2451 && d.message == "Cannot redeclare block-scoped variable 'x'."),
+        "block-scoped redeclare must surface the binder's TS2451: {diags:?}"
+    );
+    // It is NOT a TS2300 (that arm is for non-block-scoped duplicates).
+    assert!(
+        diags.iter().all(|d| d.code != 2300),
+        "a block-scoped redeclare is TS2451, never TS2300: {diags:?}"
+    );
+}
+
+/// Round 13 GUARD (no over-report): legal declaration MERGES must produce NO
+/// duplicate-identifier diagnostic. `tsc` merges interface+interface,
+/// namespace+namespace, function+namespace, and enum+namespace, so the binder's
+/// excludes/merge rules must not flag any of them — surfacing bind diagnostics
+/// must not turn a legal merge into a spurious TS2300/TS2451.
+// Go: internal/binder/binder.go:declareSymbolEx (no conflict when excludes don't intersect)
+#[test]
+fn legal_merges_produce_no_duplicate_identifier() {
+    for src in [
+        "interface I {} interface I {}",
+        "namespace N {} namespace N {}",
+        "function f() {} namespace f {}",
+        "enum E {} namespace E {}",
+    ] {
+        let mut program = program_with(
+            &[("/index.ts", src)],
+            "/",
+            &["/index.ts"],
+            CompilerOptions {
+                no_lib: tsgo_core::tristate::Tristate::True,
+                ..Default::default()
+            },
+            true,
+        );
+        let diags = program.semantic_diagnostics();
+        assert!(
+            diags.iter().all(|d| d.code != 2300 && d.code != 2451),
+            "legal merge `{src}` must not report a duplicate-identifier diagnostic: {diags:?}"
+        );
+    }
+}
+
+/// Round 13 GATE (default-library exclusion preserved): a program built over the
+/// REAL bundled libs must never attribute ANY semantic diagnostic — checker OR
+/// binder — to a `lib.*.d.ts` file. Bind diagnostics flow through the SAME
+/// default-lib exclusion mask as checker diagnostics, so a (legal) lib-internal
+/// declaration merge never leaks a diagnostic positioned in a lib file (which
+/// `tsc` does not report and which would slice out of bounds when rendered
+/// against a user file).
+// Go: internal/compiler/program.go:SkipTypeChecking (IsSourceFileDefaultLibrary)
+#[test]
+fn binder_diagnostics_in_default_lib_are_not_reported() {
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "export const ok = 1;\n")],
+        "/src",
+        &["/src/index.ts"],
+        CompilerOptions {
+            lib: vec!["es5".to_string()],
+            ..Default::default()
+        },
+        true,
+    );
+    let by_file = program.semantic_diagnostics_by_file();
+    assert!(
+        by_file
+            .iter()
+            .all(|(name, _)| !name.starts_with("bundled:///libs/")),
+        "no semantic diagnostic (bind or check) may be attributed to a default-lib file: {by_file:?}"
+    );
+}
+
+/// Round 13 GATE (JS skip): a `.js` file compiled with `checkJs: false` is
+/// skipped by `canIncludeBindAndCheckDiagnostics`, so its binder
+/// duplicate-identifier diagnostics are NOT surfaced — the bind-and-check skip
+/// gate applies to bind diagnostics exactly as it does to checker diagnostics.
+// Go: internal/compiler/program.go:getBindAndCheckDiagnosticsWithChecker (SkipTypeChecking -> nil)
+#[test]
+fn check_js_false_suppresses_binder_duplicate() {
+    let mut program = program_with(
+        &[("/index.js", "class C {} class C {}")],
+        "/",
+        &["/index.js"],
+        CompilerOptions {
+            no_lib: tsgo_core::tristate::Tristate::True,
+            check_js: tsgo_core::tristate::Tristate::False,
+            ..Default::default()
+        },
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.is_empty(),
+        "checkJs:false JS file is skipped, so its binder TS2300 is not surfaced: {diags:?}"
+    );
+}
+
+/// Round 13 GATE (plain-JS filter, Go-faithful): a PLAIN JS file (`checkJs`
+/// unset) IS bind-and-checked, but Go keeps only the `plainJSErrors` codes of
+/// the combined bind+check diagnostics. `Duplicate_identifier` (TS2300) is NOT
+/// in that set, while `Cannot_redeclare_block_scoped_variable` (TS2451) IS — so
+/// a duplicate class in plain JS surfaces NO TS2300, but a block-scoped
+/// redeclare still surfaces TS2451. This prevents a plain-JS bind over-report.
+// Go: internal/compiler/program.go:getBindAndCheckDiagnosticsWithChecker (isPlainJS -> plainJSErrors)
+#[test]
+fn plain_js_filters_ts2300_but_keeps_ts2451() {
+    let mut dup_class = program_with(
+        &[("/index.js", "class C {} class C {}")],
+        "/",
+        &["/index.js"],
+        CompilerOptions {
+            no_lib: tsgo_core::tristate::Tristate::True,
+            ..Default::default()
+        },
+        true,
+    );
+    let diags = dup_class.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2300),
+        "plain JS filters the binder TS2300 (not in plainJSErrors): {diags:?}"
+    );
+
+    let mut dup_const = program_with(
+        &[("/index.js", "let x = 1; let x = 2;")],
+        "/",
+        &["/index.js"],
+        CompilerOptions {
+            no_lib: tsgo_core::tristate::Tristate::True,
+            ..Default::default()
+        },
+        true,
+    );
+    let diags = dup_const.semantic_diagnostics();
+    assert!(
+        diags.iter().any(|d| d.code == 2451),
+        "plain JS keeps the binder TS2451 (in plainJSErrors): {diags:?}"
+    );
+}
+
+/// Round 13 (related info round-trips): two `export default` statements are a
+/// binder merge conflict that emits `A_module_cannot_have_multiple_default_exports`
+/// (TS2528) with a related `The_first_export_default_is_here` (TS2752) pointing
+/// at the first export. The conversion bridge must carry the binder
+/// diagnostic's `related` list into the checker diagnostic's
+/// `related_information` recursively.
+// Go: internal/binder/binder.go:declareSymbolEx (multiple-default-exports related info)
+#[test]
+fn binder_multiple_default_exports_carries_related_info() {
+    let mut program = program_with(
+        &[("/index.ts", "export default 1;\nexport default 2;")],
+        "/",
+        &["/index.ts"],
+        CompilerOptions {
+            no_lib: tsgo_core::tristate::Tristate::True,
+            ..Default::default()
+        },
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    let with_related = diags
+        .iter()
+        .find(|d| d.code == 2528 && !d.related_information.is_empty())
+        .expect("a TS2528 carries the 'first export default is here' related info");
+    assert!(
+        with_related
+            .related_information
+            .iter()
+            .any(|r| r.code == 2752),
+        "the related info is TS2752 (The first export default is here): {with_related:?}"
+    );
+}
+
 /// A single-threaded program uses one checker and reports its host/command line.
 // Go: internal/compiler/program.go:Program.SingleThreaded / Host / CommandLine
 #[test]

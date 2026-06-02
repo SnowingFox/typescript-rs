@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use tsgo_binder::BinderDiagnostic;
 use tsgo_core::compileroptions::{CompilerOptions, NewLineKind};
 use tsgo_core::scriptkind::ScriptKind;
 use tsgo_core::tristate::Tristate;
@@ -312,35 +313,22 @@ impl Program {
     /// assert_eq!(diags[0].message, "Cannot find name 'y'.");
     /// ```
     ///
-    /// DEFER(P6): per-file filtering, suggestion/declaration diagnostics, and
-    /// `@ts-expect-error`/`@ts-ignore` directive handling.
-    /// blocked-by: multi-file `BoundProgram` view + checker directive surface.
+    /// DEFER(P6): suggestion/declaration diagnostics, the `isCheckJS`
+    /// `JSDocDiagnostics` append, and `@ts-expect-error`/`@ts-ignore` directive
+    /// handling.
+    /// blocked-by: the checker's suggestion/JSDoc-diagnostic + directive surface.
     ///
     /// Side effects: binds every file (mutating per-file arenas) and allocates
     /// the pool's checkers.
     // Go: internal/compiler/program.go:GetSemanticDiagnostics
     pub fn semantic_diagnostics(&mut self) -> Vec<tsgo_checker::Diagnostic> {
-        // Bind every file and build the pool's checkers (idempotent), then drive
-        // checking through the pool.
-        self.create_checkers();
-        // Exclude the auto-included default-library files: `tsc` does not report
-        // semantic diagnostics located in `lib.*.d.ts`, and this partial checker
-        // would otherwise false-positive on their advanced constructs — a
-        // lib-positioned diagnostic rendered against a user file also panics the
-        // diagnostic writer (out-of-bounds slice). A bound file is a library file
-        // iff it lives under the default-library directory (the directory of the
-        // resolved default lib). Parallel to the bound-program's source-file order
-        // (`MultiFileBoundProgram::new` keeps the `processed.files()` order,
-        // filtered to bound files).
-        let lib_dir = self.default_library_directory();
-        let exclude: Vec<bool> = self
-            .processed
-            .files()
-            .iter()
-            .filter(|f| f.is_bound())
-            .map(|f| self.is_excluded_from_semantic_diagnostics(f, &lib_dir))
-            .collect();
-        self.checker_pool.collect_diagnostics_excluding(&exclude)
+        // Flatten the per-file bind-and-check groups in source-file order: each
+        // file contributes its binder diagnostics followed by its checker
+        // diagnostics (Go's per-file `BindDiagnostics() ++ checker.GetDiagnostics()`).
+        self.bind_and_check_diagnostics_grouped()
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// Like [`Self::semantic_diagnostics`], but returns the diagnostics grouped
@@ -348,8 +336,8 @@ impl Program {
     /// source-file order (default-library files excluded, files with no
     /// diagnostics omitted).
     ///
-    /// A checker [`Diagnostic`](tsgo_checker::Diagnostic)'s `start`/`length` are
-    /// byte offsets into *its own* file's text. Callers (the harness baseline
+    /// A [`Diagnostic`](tsgo_checker::Diagnostic)'s `start`/`length` are byte
+    /// offsets into *its own* file's text. Callers (the harness baseline
     /// renderer) must attribute each diagnostic to that file; the flat
     /// [`Self::semantic_diagnostics`] drops the association, which let a later
     /// file's diagnostic be rendered against an earlier (shorter) file and slice
@@ -359,10 +347,8 @@ impl Program {
     /// [`Self::semantic_diagnostics`]).
     // Go: internal/compiler/program.go:GetSemanticDiagnostics (per-file)
     pub fn semantic_diagnostics_by_file(&mut self) -> Vec<(String, Vec<tsgo_checker::Diagnostic>)> {
-        self.create_checkers();
-        let lib_dir = self.default_library_directory();
-        // Bound files in `source_files()` order, with their names — parallel to
-        // the `exclude` mask and the pool's grouped output.
+        let groups = self.bind_and_check_diagnostics_grouped();
+        // Bound files in `source_files()` order, parallel to the grouped output.
         let bound_file_names: Vec<String> = self
             .processed
             .files()
@@ -370,20 +356,99 @@ impl Program {
             .filter(|f| f.is_bound())
             .map(|f| f.file_name().to_string())
             .collect();
-        let exclude: Vec<bool> = self
-            .processed
-            .files()
-            .iter()
-            .filter(|f| f.is_bound())
-            .map(|f| self.is_excluded_from_semantic_diagnostics(f, &lib_dir))
-            .collect();
-        let groups = self
-            .checker_pool
-            .collect_diagnostics_grouped_excluding(&exclude);
         bound_file_names
             .into_iter()
             .zip(groups)
             .filter(|(_, diags)| !diags.is_empty())
+            .collect()
+    }
+
+    /// The per-file semantic (bind-and-check) diagnostics for every bound file,
+    /// in source-file order: each file's list is its binder diagnostics followed
+    /// by its checker diagnostics, the reachable subset of Go's
+    /// `getBindAndCheckDiagnosticsWithChecker`
+    /// (`slices.Clip(sourceFile.BindDiagnostics())` then
+    /// `append(..., fileChecker.GetDiagnostics(...))`).
+    ///
+    /// Gating mirrors Go exactly:
+    /// - a file the bind-and-check gate skips (`SkipTypeChecking`: a default-lib
+    ///   file, or a JS file the JS-skip rule drops) yields an EMPTY list, so
+    ///   neither its bind nor its check diagnostics surface
+    ///   ([`Self::is_excluded_from_semantic_diagnostics`]);
+    /// - for a *plain* JS file (`checkJs` unset) Go keeps only the
+    ///   `plainJSErrors` codes of the combined list. This port applies that
+    ///   filter to the BINDER diagnostics (whose codes are a small, known set),
+    ///   so a plain-JS duplicate-class does not over-report TS2300 while a
+    ///   block-scoped redeclare (TS2451, in `plainJSErrors`) still surfaces. The
+    ///   checker-diagnostic half of the plain-JS filter is a pre-existing
+    ///   divergence left unchanged here.
+    ///
+    /// The result is parallel to the pool's grouped output (one entry per bound
+    /// file, including excluded files as an empty list), so the flat and
+    /// per-file collectors can flatten / zip it directly. Ordering within a file
+    /// is bind-then-check; cross-file ordering is source-file order. The harness
+    /// baseline writer sorts by (file, position) before rendering, matching Go's
+    /// final diagnostic sort.
+    ///
+    /// DEFER(P6): the `isCheckJS` `JSDocDiagnostics` append and the
+    /// `@ts-expect-error`/`@ts-ignore` directive filtering of the combined list.
+    /// blocked-by: the checker's JSDoc-diagnostic + comment-directive surface.
+    ///
+    /// Side effects: binds every file (mutating per-file arenas) and allocates
+    /// the pool's checkers (via [`Self::create_checkers`]).
+    // Go: internal/compiler/program.go:getBindAndCheckDiagnosticsWithChecker
+    fn bind_and_check_diagnostics_grouped(&mut self) -> Vec<Vec<tsgo_checker::Diagnostic>> {
+        // Bind every file and build the pool's checkers (idempotent).
+        self.create_checkers();
+        // Exclude the auto-included default-library files and JS files the
+        // bind-and-check gate skips: `tsc` does not report semantic diagnostics
+        // located in `lib.*.d.ts`, and a JS file with `checkJs: false` (or a
+        // `@ts-nocheck` directive, deferred) is not bind-and-checked. A
+        // lib-positioned diagnostic rendered against a user file also panics the
+        // diagnostic writer (out-of-bounds slice). Parallel to the bound-program's
+        // source-file order (`MultiFileBoundProgram::new` keeps the
+        // `processed.files()` order, filtered to bound files).
+        let lib_dir = self.default_library_directory();
+        // Convert each bound file's binder diagnostics up front (an empty list
+        // for an excluded file), parallel to the pool's grouped checker output.
+        let mut bind_groups: Vec<Vec<tsgo_checker::Diagnostic>> = Vec::new();
+        let mut exclude: Vec<bool> = Vec::new();
+        for file in self.processed.files().iter().filter(|f| f.is_bound()) {
+            let excluded = self.is_excluded_from_semantic_diagnostics(file, &lib_dir);
+            exclude.push(excluded);
+            if excluded {
+                bind_groups.push(Vec::new());
+                continue;
+            }
+            let plain_js = self.is_plain_js_file(file);
+            let text = file.text();
+            let mut diags: Vec<tsgo_checker::Diagnostic> = Vec::new();
+            if let Some(bind) = file.bind_result() {
+                for diagnostic in &bind.diagnostics {
+                    let converted = binder_diagnostic_to_checker(diagnostic, text);
+                    // Plain JS keeps only the `plainJSErrors` codes (Go filters
+                    // the combined list); for the binder contribution this drops
+                    // e.g. TS2300/TS2567 while keeping TS2451/TS2528.
+                    if plain_js && !binder_code_allowed_in_plain_js(converted.code) {
+                        continue;
+                    }
+                    diags.push(converted);
+                }
+            }
+            bind_groups.push(diags);
+        }
+        let checker_groups = self
+            .checker_pool
+            .collect_diagnostics_grouped_excluding(&exclude);
+        // For each bound file, the bind diagnostics precede the checker
+        // diagnostics (Go's `BindDiagnostics() ++ checker.GetDiagnostics()`).
+        bind_groups
+            .into_iter()
+            .zip(checker_groups)
+            .map(|(mut bind, check)| {
+                bind.extend(check);
+                bind
+            })
             .collect()
     }
 
@@ -456,6 +521,26 @@ impl Program {
         // `checkJs` is unset (`Tristate::Unknown`).
         let is_plain_js = is_js && check_js == Tristate::Unknown;
         is_plain_js || is_check_js || kind == ScriptKind::Deferred
+    }
+
+    /// Reports whether `file` is a *plain* JS file (a `.js`/`.jsx` script kind
+    /// whose `checkJs` is unset and that has no `// @ts-check` directive), a
+    /// 1:1 port of Go's `ast.IsPlainJSFile`.
+    ///
+    /// Go keeps only the `plainJSErrors` codes of a plain JS file's combined
+    /// bind-and-check diagnostics; this is the predicate that selects it.
+    ///
+    /// DEFER(P10): the `// @ts-check` directive arm (`CheckJsDirective`), which
+    /// is not parsed yet (so this collapses to `is_js && checkJs unset`, exactly
+    /// matching Go when no directive is present).
+    /// blocked-by: the parser's check-js directive scan.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/ast/utilities.go:IsPlainJSFile
+    fn is_plain_js_file(&self, file: &ParsedFile) -> bool {
+        let kind = effective_script_kind(file.file_name());
+        let is_js = matches!(kind, ScriptKind::Js | ScriptKind::Jsx);
+        is_js && self.options().check_js == Tristate::Unknown
     }
 
     /// Reports whether `file`'s semantic diagnostics are excluded from the
@@ -1012,6 +1097,68 @@ impl OutputPathsHost for ProgramOutputPathsHost {
 // Go: internal/compiler/program.go:Program.SingleThreaded
 fn single_threaded_of(opts: &ProgramOptions) -> bool {
     opts.single_threaded || opts.config.compiler_options().single_threaded.is_true()
+}
+
+/// Converts a binder [`BinderDiagnostic`] into the [`tsgo_checker::Diagnostic`]
+/// shape the program returns, the bridge that lets a binder
+/// `bindDiagnostic` flow through the program's bind-and-check pass alongside
+/// checker diagnostics (Go: both are `*ast.Diagnostic`, so no conversion is
+/// needed there; this port keeps two diagnostic types and reconciles them
+/// here).
+///
+/// The span is refined to skip leading trivia against the OWNING file's `text`,
+/// matching Go's `createDiagnosticForNode` → `scanner.GetErrorRangeForNode`
+/// (the default case for the name nodes the binder reports merge conflicts on:
+/// `SkipTrivia(text, node.Pos())..node.End()`). The binder stores the raw node
+/// loc, so the start is trivia-skipped here to byte-match `tsc`'s baseline. The
+/// message text is localized exactly as the checker does
+/// (`tsgo_diagnostics::format(&message.to_string(), args)`), and the binder's
+/// `related` list is converted recursively into `related_information` (Go's
+/// `Diagnostic.relatedInformation`).
+///
+/// Side effects: none (pure).
+// Go: internal/ast/diagnostic.go:NewDiagnostic + internal/scanner/scanner.go:GetErrorRangeForNode
+fn binder_diagnostic_to_checker(
+    diagnostic: &BinderDiagnostic,
+    text: &str,
+) -> tsgo_checker::Diagnostic {
+    let start = tsgo_scanner::skip_trivia(text, diagnostic.loc.pos());
+    let args: Vec<&str> = diagnostic.args.iter().map(String::as_str).collect();
+    tsgo_checker::Diagnostic {
+        code: diagnostic.message.code(),
+        category: diagnostic.message.category(),
+        message: tsgo_diagnostics::format(&diagnostic.message.to_string(), &args),
+        start,
+        length: diagnostic.loc.end() - start,
+        related_information: diagnostic
+            .related
+            .iter()
+            .map(|related| binder_diagnostic_to_checker(related, text))
+            .collect(),
+        message_chain: Vec::new(),
+    }
+}
+
+/// Reports whether a BINDER diagnostic `code` is in Go's `plainJSErrors` set, so
+/// it survives the plain-JS filter (Go keeps only `plainJSErrors` codes of a
+/// plain JS file's combined diagnostics).
+///
+/// The binder emits only a small set of codes (`report_merge_conflict` +
+/// `add_class_prototype`): `Duplicate_identifier` (TS2300) and the enum-merge
+/// TS2567 are NOT in `plainJSErrors` (dropped in plain JS), while
+/// `Cannot_redeclare_block_scoped_variable` (TS2451),
+/// `A_module_cannot_have_multiple_default_exports` (TS2528), and the two
+/// export-default-location notes (TS2752/TS2753) ARE. This is the binder slice
+/// of Go's `plainJSErrors`; the full set (grammar/strict-mode codes) is not
+/// reached by this port's binder.
+///
+/// Side effects: none (pure).
+// Go: internal/compiler/program.go:plainJSErrors (binder-error subset)
+fn binder_code_allowed_in_plain_js(code: i32) -> bool {
+    code == tsgo_diagnostics::CANNOT_REDECLARE_BLOCK_SCOPED_VARIABLE_0.code()
+        || code == tsgo_diagnostics::A_MODULE_CANNOT_HAVE_MULTIPLE_DEFAULT_EXPORTS.code()
+        || code == tsgo_diagnostics::ANOTHER_EXPORT_DEFAULT_IS_HERE.code()
+        || code == tsgo_diagnostics::THE_FIRST_EXPORT_DEFAULT_IS_HERE.code()
 }
 
 #[cfg(test)]
