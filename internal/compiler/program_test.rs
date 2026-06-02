@@ -386,6 +386,37 @@ fn resolves_string_length_via_real_lib_es5() {
     );
 }
 
+/// Span fidelity (round 21): a real-lib program over the canonical
+/// `simpleTestSingleFile.ts` shape (`const x: number = "";`) reports `TS2322`
+/// whose span is the declaration NAME `x` — `tsc` baselines `(1,7)` with a
+/// single-character underline, so the byte span is `start` at the index of `x`
+/// and `length == 1`, NOT the whole `x: number = ""` declaration. This is the
+/// end-to-end mirror of the checker unit `variable_declaration_2322_span_is_the_name`,
+/// proving the `GetErrorRangeForNode` narrowing flows through the real compiler
+/// pipeline (parse -> bind -> check -> diagnostics) the corpus runner drives.
+// Go: internal/scanner/scanner.go:GetErrorRangeForNode (KindVariableDeclaration)
+#[test]
+fn variable_declaration_2322_span_is_the_name_real_lib() {
+    let src = "const x: number = \"\";";
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", src)],
+        "/src",
+        &["/src/index.ts"],
+        CompilerOptions::default(),
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert_eq!(diags.len(), 1, "exactly one TS2322: {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+    let x = src.find('x').expect("name `x` present") as i32;
+    assert_eq!(diags[0].start, x, "span starts at the name `x` (col 7)");
+    assert_eq!(diags[0].length, 1, "span underlines only the name `x`");
+}
+
 /// Panic-robustness (P10 corpus triage, category d): checking a property access
 /// whose property is a method DECLARED IN A LIB FILE (`array.push(...)`, where
 /// `array: any[]`) must not panic. The `push` symbol's declarations live in

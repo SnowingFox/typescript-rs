@@ -755,6 +755,56 @@ fn variable_initializer_not_assignable_reports_diagnostic() {
     assert_eq!(diags[0].message, "Type 'B' is not assignable to type 'A'.");
 }
 
+// Go: internal/scanner/scanner.go:GetErrorRangeForNode (KindVariableDeclaration ->
+//     GetNameOfDeclaration) + internal/checker/checker.go:checkVariableLikeDeclaration(5869)
+// A `const x: number = "";` relation error narrows its span to the declaration
+// NAME `x` (start at `x` after `skipTrivia`, length = the name), NOT the whole
+// `x: number = ""` declaration. tsc reports `(1,7)` with a single-character
+// underline; the byte span is therefore `start == <index of x>`, `length == 1`.
+#[test]
+fn variable_declaration_2322_span_is_the_name() {
+    let src = "const x: number = \"\";";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, 2322);
+    let x = src.find('x').expect("name `x` present") as i32;
+    assert_eq!(
+        diags[0].start, x,
+        "span starts at the name `x`, not the leading trivia / declaration"
+    );
+    assert_eq!(
+        diags[0].length, 1,
+        "span length is the name `x` (1 char), not the whole declaration"
+    );
+}
+
+// Go: internal/scanner/scanner.go:GetErrorRangeForNode (default case, expression
+//     node) + internal/checker/checker.go:checkAssignmentOperator(12701)
+// GUARD: an assignment-expression `2322` still reports on the LHS reference
+// expression, with the span at the LHS identifier (`skipTrivia(pos)..end`),
+// length 1 — narrowing applies to declarations, not to a bare assignment LHS.
+#[test]
+fn assignment_2322_span_is_the_lhs_identifier() {
+    let src = "declare const n: number;\nn = \"s\";";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, 2322);
+    // The LHS `n` of the second statement (after the newline); `skip_trivia`
+    // moves the start past the leading line break to the identifier itself.
+    let lhs = src.find("n = ").expect("LHS `n` present") as i32;
+    assert_eq!(diags[0].start, lhs, "span starts at the LHS identifier `n`");
+    assert_eq!(
+        diags[0].length, 1,
+        "span length is the LHS identifier (1 char)"
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration (2322, intersection target)
 #[test]
 fn variable_initializer_not_assignable_to_intersection_reports_diagnostic() {

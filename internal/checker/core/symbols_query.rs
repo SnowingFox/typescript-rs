@@ -155,7 +155,7 @@ fn is_declaration_name(arena: &NodeArena, node: NodeId) -> bool {
 // Returns the "name" child of a declaration node, for the declaration kinds 4b
 // resolves. More kinds are added as their queries are needed.
 // Go: internal/ast/utilities.go:getNameOfDeclaration (subset)
-fn name_of_declaration(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
+pub(crate) fn name_of_declaration(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
     match arena.data(node) {
         NodeData::InterfaceDeclaration(d)
         | NodeData::ClassDeclaration(d)

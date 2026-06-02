@@ -13,12 +13,12 @@ use tsgo_testutil_harnessutil::{HarnessDiagnostic, HarnessFile, TestFile};
 /// TS2322 inline case (see `error_baseline_for_ts2322_matches_go_format`),
 /// rendered with the case file named `errored.ts`.
 const TS2322_ERRORED_BASELINE: &str = concat!(
-    "errored.ts(1,4): error TS2322: Type 'string' is not assignable to type 'number'.\r\n",
+    "errored.ts(1,5): error TS2322: Type 'string' is not assignable to type 'number'.\r\n",
     "\r\n",
     "\r\n",
     "==== errored.ts (1 errors) ====\r\n",
     "    var x: number = \"s\";\r\n",
-    "       ~~~~~~~~~~~~~~~~\r\n",
+    "        ~\r\n",
     "!!! error TS2322: Type 'string' is not assignable to type 'number'.",
 );
 
@@ -57,13 +57,16 @@ fn write_reference(root: &Path, suite: &str, name: &str, content: &str) {
 #[test]
 fn error_baseline_for_ts2322_matches_go_format() {
     let baseline = error_baseline_for_test("var x: number = \"s\";", "errored.ts");
+    // Round 21: the TS2322 span narrows to the declaration NAME `x` (Go's
+    // `GetErrorRangeForNode` for `KindVariableDeclaration`), so tsc baselines
+    // `(1,5)` with a single-character underline — not the whole declaration.
     let expected = concat!(
-        "errored.ts(1,4): error TS2322: Type 'string' is not assignable to type 'number'.\r\n",
+        "errored.ts(1,5): error TS2322: Type 'string' is not assignable to type 'number'.\r\n",
         "\r\n",
         "\r\n",
         "==== errored.ts (1 errors) ====\r\n",
         "    var x: number = \"s\";\r\n",
-        "       ~~~~~~~~~~~~~~~~\r\n",
+        "        ~\r\n",
         "!!! error TS2322: Type 'string' is not assignable to type 'number'.",
     );
     assert_eq!(baseline, expected);
@@ -295,13 +298,15 @@ fn run_case_mismatch_reports_failure_with_diff() {
 /// Builds the canonical TS2322 `.errors.txt` baseline for a case named `file`,
 /// optionally with the code swapped to `code` (to force a `wrong_code`).
 fn ts_number_baseline(file: &str, code: &str) -> String {
+    // Round 21: the span narrows to the declaration NAME `x` (Go's
+    // `GetErrorRangeForNode`), so the location is `(1,5)` with a 1-char underline.
     format!(
-        "{file}(1,4): error {code}: Type 'string' is not assignable to type 'number'.\r\n\
+        "{file}(1,5): error {code}: Type 'string' is not assignable to type 'number'.\r\n\
          \r\n\
          \r\n\
          ==== {file} (1 errors) ====\r\n    \
-         var x: number = \"s\";\r\n       \
-         ~~~~~~~~~~~~~~~~\r\n\
+         var x: number = \"s\";\r\n        \
+         ~\r\n\
          !!! error {code}: Type 'string' is not assignable to type 'number'."
     )
 }
@@ -757,11 +762,24 @@ fn expanded_compiler_subset_parity_smoke() {
     // parser-recovery roots). `extra TS2339 ×5` is unchanged (the alias-bearing
     // `export *` re-export is routed through alias resolution, not mapped to a
     // class whose static side is unmodeled), so no false-resolve regression.
+    //
+    // Round 21 (assignability error-span fidelity / `GetErrorRangeForNode`): a
+    // variable-declaration relation error (`const x: number = ""`) now narrows
+    // its `TS2322` span to the declaration NAME `x` (Go's `GetErrorRangeForNode`
+    // -> `GetNameOfDeclaration`, then `skipTrivia(pos)..name.End()`) instead of
+    // spanning the whole `x: number = ""` declaration from the leading trivia.
+    // This byte-matches `tsc`'s `(1,7)` single-character underline, flipping
+    // THREE divergent subset cases to PASS (89 -> 92): `simpleTestSingleFile`,
+    // `singleSettingsSimpleTest`, and `simpleTestMultiFile` (whose `foo.ts` /
+    // `bar.ts` both narrow). Each was previously `divergent` (committed `(1,7)`
+    // vs produced `(1,6)`), so divergent drops 10 -> 7; no_baseline_but_errors /
+    // missing_all_errors are unchanged. The subset's `extra TS2322 ×7 -> ×3` and
+    // `missing TS2322` drop by the four flipped diagnostics with NO new code.
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 89,
-            failed: 61,
+            passed: 92,
+            failed: 58,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -835,9 +853,11 @@ fn expanded_compiler_subset_parity_smoke() {
     // Round 20: the `ExportValue` value-access fix flips FOUR clean
     // no_baseline_but_errors subset cases to PASS (no_baseline 11 -> 7);
     // missing_all_errors and divergent are unchanged (no case shifted category).
+    // Round 21: the var-decl span narrowing flips three divergent cases to PASS
+    // (10 -> 7); no_baseline_but_errors / missing_all_errors are unchanged.
     assert_eq!(hist.no_baseline_but_errors, 7);
     assert_eq!(hist.missing_all_errors, 44);
-    assert_eq!(hist.divergent, 10);
+    assert_eq!(hist.divergent, 7);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare
@@ -922,9 +942,12 @@ fn expanded_compiler_subset_parity_smoke() {
     // `extra TS2304 ×14 -> ×4`, so the dominant false positives are now the
     // deferred union-relate `TS2322 ×7` and the object-literal-expando /
     // require-this `TS2339 ×5`.
+    // Round 21: the var-decl span narrowing (`GetErrorRangeForNode`) flips the
+    // four `simpleTest*` / `singleSettings*` diagnostics out of `extra TS2322`
+    // (7 -> 3), so the top extras become `TS2339 ×5` and `TS2304 ×4`.
     assert_eq!(
         hist.top_extra(2),
-        vec![(2322, 7), (2339, 5)],
+        vec![(2339, 5), (2304, 4)],
         "top extra (false-positive) codes; histogram:\n{}",
         hist.report()
     );
@@ -1041,10 +1064,15 @@ fn expanded_compiler_subset_parity_smoke() {
     // `ExportValue` phantom -> `export_symbol` map), dropping `extra TS2304
     // ×14 -> ×4`; the top extras are now the deferred `TS2322 ×7` (union relate)
     // and `TS2339 ×5` (object-literal expando / require-this members).
+    // Round 21: the var-decl span narrowing flips the four `simpleTest*` /
+    // `singleSettings*` diagnostics out of `extra TS2322` (7 -> 3), so the top
+    // extras are now `TS2339 ×5` (object-literal expando / require-this members)
+    // and `TS2304 ×4` (the deferred `export =`-namespace / cross-module-package /
+    // parser-recovery value-access roots); the residual `TS2322 ×3` follows.
     assert_eq!(
         hist.top_extra(2),
-        vec![(2322, 7), (2339, 5)],
-        "the export-value resolution round drops the same-module unresolved-name cascade; \
+        vec![(2339, 5), (2304, 4)],
+        "the var-decl span narrowing drops the simpleTest* extra TS2322; \
          histogram:\n{}",
         hist.report()
     );

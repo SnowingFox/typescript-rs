@@ -3585,3 +3585,174 @@ only the 4 intended files modified). Not committed (left to the parent).
   + **`using`-declaration parser recovery** (`usingDeclarationWithNewline`) — three
   separate small roots (package-dedup resolution, `.d.ts` parse-error tolerance,
   `using` newline ASI), `extra TS2304 ×6` total.
+
+# Round 21 — assignability error-span fidelity (`getErrorRangeForNode`)
+
+Round goal: byte-match `tsc`'s `TS2322`/`TS2345` SPAN for the variable-declaration
+assignability path so the var-decl relation error underlines the declaration NAME
+(not the whole declaration from its leading trivia). SOLO lane, strict TDD
+red->green.
+
+## Step-0 — exact tsc range vs ours (temporary `#[ignore]`d dump, REMOVED)
+
+A throwaway dump (`temp_round21_span_dump`, since REMOVED) ran the full corpus
+through `run_cases` + printed `error_baseline_for_test` for each var-decl case and
+the full-corpus `wrong_span` / `extra` / `missing` TS2322 tallies.
+
+| case | tsc committed (name `x`) | ours BEFORE (whole decl) |
+|---|---|---|
+| `simpleTestSingleFile.ts` | `(1,7)` `~` (len 1) | `(1,6)` `~~~~~~~~~~~~~~~` (len 15) |
+| `singleSettingsSimpleTest.ts` | `(2,7)` `~` | `(2,6)` (len 22) |
+| `tsconfigSimpleTest.ts` (`foo.ts`) | `(2,7)` `~` | `(2,6)` (len 22) |
+| `simpleTestMultiFile.ts` (`foo.ts`) | `(1,7)` `~` | `(1,6)` (len 15) |
+| `simpleTestMultiFile.ts` (`bar.ts`) | `(1,7)` `~` | `(1,6)` (len 14) |
+
+Root: `report_type_not_assignable` (`internal/checker/core/check.rs`) built the
+`Diagnostic` directly from `program.arena().loc(node)` — the RAW `pos..end` of the
+whole `VariableDeclaration` node — WITHOUT Go's `scanner.GetErrorRangeForNode`.
+A `VariableDeclaration`'s `pos` is its full-start (the leading space after `const`,
+col 6), and its `end` is the initializer's end, so we underlined the entire
+`x: number = ""`. Because the start COLUMN differed (6 vs 7), the categorizer did
+NOT see these as `wrong_span` — `hist.wrong_span` was EMPTY `{}`; they surfaced as
+co-located-but-shifted `missing TS2322 (col 7)` + `extra TS2322 (col 6)` PAIRS
+(part of the full corpus `extra TS2322 ×8` / `missing TS2322 ×10`). The same raw-pos
+gap also mis-pointed the ASSIGNMENT LHS path at the leading newline (`n = "s"`
+produced `start = pos = 24` = the `\n`, not 25 = the `n`).
+
+## Go ground truth ported (`// Go:`-anchored)
+
+- **`internal/scanner/scanner.go:GetErrorRangeForNode(2517)`** — the canonical
+  error-range fn. `KindVariableDeclaration` (with the rest of the declaration group
+  + the `KindClassExpression` arm) maps `errorNode = ast.GetNameOfDeclaration(node)`;
+  the generic tail is `pos = errorNode.Pos()`, `skipTrivia(text, pos)` unless the
+  node is missing or JSX text, and `end = errorNode.End()`. So a var-decl error
+  range is `skipTrivia(name.Pos())..name.End()` — the name `x`, len 1.
+- **`internal/checker/checker.go:checkVariableLikeDeclaration(5869)`** passes the
+  WHOLE declaration `node` (not the name) as the `errorNode` to
+  `checkTypeAssignableToAndOptionallyElaborate(initializerType, t, node, initializer,
+  ...)`; the narrowing to the name happens INSIDE `GetErrorRangeForNode` (reached via
+  `createDiagnosticForNode` -> `NewDiagnosticForNode` -> `GetErrorRangeForNode`).
+- **`internal/checker/checker.go:checkAssignmentOperator(12701)`** passes the LHS
+  expression `left` as the error node — an expression, NOT a declaration, so it
+  keeps the generic `skipTrivia(pos)..end` tail (no name narrowing).
+
+## Rust landing (`internal/checker/core/check.rs`)
+
+- New helper **`Checker::get_error_range_for_node`** ports `GetErrorRangeForNode`:
+  the declaration kinds (Go's narrowing group + `ClassExpression`) narrow to the
+  name via the now-`pub(crate)` `symbols_query::name_of_declaration`; every node
+  then applies `skip_trivia(text, pos)..end` (skipping leading trivia unless the
+  node is missing / JSX text). The exotic non-narrowing arms (SourceFile,
+  ArrowFunction, Case/DefaultClause, Return/Yield, SatisfiesExpression, Constructor,
+  reparsed Function/Method) are DEFER-noted — none are reached by the relation-error
+  emitters, so they fall through to the faithful generic tail.
+- **`report_type_not_assignable`** (the chain path AND the defensive flat fallback)
+  now computes its `start`/`length` via `get_error_range_for_node` instead of raw
+  `loc.pos()..loc.end()`. This covers BOTH var-decl init (`check_variable_declaration`,
+  property init `check_property_declaration` -> narrow to name) and the assignment
+  LHS (`check_assignment_operator` -> `skip_trivia(pos)..end` over the identifier).
+- `symbols_query::name_of_declaration` made `pub(crate)` for reuse (unchanged
+  behavior; still the subset of Go's `getNameOfDeclaration` covering the kinds the
+  relation path needs — VariableDeclaration / Property{Declaration,Signature} / …).
+
+## RED->GREEN + guard tests
+
+Checker (`internal/checker/core/check_test.rs`, +2):
+- `variable_declaration_2322_span_is_the_name` (RED->GREEN headline) —
+  `const x: number = "";` -> `diags[0].start == <index of x>` AND
+  `diags[0].length == 1` (RED: start 5 / len 15).
+- `assignment_2322_span_is_the_lhs_identifier` (GUARD) — `n = "s"` (`n: number`)
+  reports at the LHS identifier `n` (`skip_trivia` past the leading `\n`), len 1
+  (RED: start 24 = the `\n`).
+
+Compiler real-lib (`internal/compiler/program_test.rs`, +1):
+- `variable_declaration_2322_span_is_the_name_real_lib` (RED->GREEN, mirrors
+  `simpleTestSingleFile`) — `const x: number = "";` over the bundled lib reports
+  exactly one TS2322 at `start == <index of x>`, `length == 1`.
+
+Testrunner snapshots updated to the byte-exact actuals
+(`internal/testrunner/compiler_runner_test.rs`): `TS2322_ERRORED_BASELINE`,
+`error_baseline_for_ts2322_matches_go_format`, and `ts_number_baseline` now carry
+`(1,5)` + the single-char `~` underline for `var x: number = "s";` (was `(1,4)` +
+16 tildes) — the same `GetErrorRangeForNode` narrowing the corpus exercises.
+
+## Measurement — full corpus BEFORE->AFTER
+
+`tests/cases/compiler` (222 ran):
+
+| metric | BEFORE (R20) | AFTER (R21) | Δ |
+|---|---|---|---|
+| **passed** | **115** (51.8%) | **119** (53.6%) | **+4** |
+| failed | 106 | 102 | −4 |
+| errored | 1 | 1 | 0 |
+| no_baseline_but_errors | 20 | 20 | 0 |
+| missing_all_errors | 68 | 68 | 0 |
+| divergent | 18 | 14 | −4 (4 divergent cases now PASS) |
+| **extra TS2322** | **×8** | **×3** | **−5** |
+| **missing TS2322** | **×10** | **×5** | **−5** |
+| `wrong_span` (all codes) | `{}` | `{}` | unchanged (was/stays empty) |
+| every other extra/missing code | — | — | UNCHANGED |
+
+`tests/cases/conformance` (19 ran): passed 13 -> 13 (the conformance var-decl span
+cases are not in that suite); no regression.
+
+**Honest flip count: +4 cases to byte-exact PASS** — `simpleTestSingleFile`,
+`singleSettingsSimpleTest`, `tsconfigSimpleTest`, `simpleTestMultiFile` (the last
+carries TWO narrowed diagnostics, `foo.ts` + `bar.ts`, hence `extra`/`missing`
+TS2322 each drop by 5 across 4 cases). NO PASS->FAIL regression: `passed` rose
+monotonically (115->119), `no_baseline_but_errors`/`missing_all_errors` UNCHANGED,
+and `extra TS2322 ×8->×3` / `missing TS2322 ×10->×5` dropped by EXACTLY the flipped
+diagnostics with NO new code and no other-span churn (every other extra/missing
+count flat). `settingsSimpleTest.ts` now ALSO emits the correct `(2,7)` span but
+remains a `no_baseline_but_errors` case on its unrelated `TS5108`
+(`moduleResolution=Classic`), so it does not flip — its span is fixed regardless.
+
+## 150-subset BEFORE->AFTER
+
+`expanded_compiler_subset_parity_smoke`: **passed 89 -> 92 (+3)**, failed 61 -> 58;
+categories `no_baseline 7->7, missing_all 44->44, divergent 10->7`; the var-decl
+narrowing drops `extra TS2322 ×7 -> ×3` (the four `simpleTest*`/`singleSettings*`
+diagnostics), so `top_extra(2) = [(2322,7),(2339,5)] -> [(2339,5),(2304,4)]`. All
+pinned guards (`extra TS2339==5`, `TS2769==1`, `TS2583==None`, `TS1005/1003/1155
+==None`, `extra/missing TS7026==None`, `extra TS2451==None`, `top_missing(1)=
+[(2874,7)]`, `missing TS2300==None`) re-asserted UNCHANGED. (`tsconfigSimpleTest` is
+outside this 150 subset; its flip shows only in the full corpus, hence +3 here vs
++4 full.)
+
+## Gate results (Round 21)
+
+- `cargo test -p tsgo_checker --lib` — GREEN (**796** [+2 span tests]).
+- `cargo test -p tsgo_compiler --lib` — GREEN (**129** [+1 real-lib span test]).
+- `cargo test -p tsgo_testrunner --lib` — GREEN (51 + 1 ignored [full-corpus
+  measurement]; 150-subset re-pinned 92/58/0).
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner --all-targets
+  -- -D warnings` — clean (no `manual_contains` / other lints).
+- `cargo fmt` then `cargo fmt -- --check` — clean.
+- `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; additive/surgical vertical slice; no test weakened/deleted; no new
+dependency (`Cargo.lock` untouched). The span fix is routed ONLY through the
+relation-error path (`report_type_not_assignable`); the generic `self.error`
+emitters are NOT broadly rewritten. The temporary `temp_round21_span_dump` was
+REMOVED (tree clean — only the 5 intended files modified). Not committed (left to
+the parent).
+
+## DEFER list (blocked-by) — Round 21
+
+- **General span fidelity for the OTHER diagnostic emitters** — `self.error` /
+  `diagnostic_for_node` (`internal/checker/core/check.rs`) still build the span from
+  the RAW `loc.pos()..loc.end()`. Go reports EVERY diagnostic through
+  `createDiagnosticForNode -> GetErrorRangeForNode`, so any emitter whose error node
+  has leading trivia (or is a narrowable declaration) is a latent off-by-one. This
+  round routed only the relation-error path (`report_type_not_assignable`) plus the
+  pre-existing `error_skipping_leading_trivia` (JSX). blocked-by: a per-emitter audit
+  + routing every `self.error` site through `get_error_range_for_node` (broad; out of
+  this round's scope — `check_type_assignable_to_or_error`'s `in`-operand path and
+  the arithmetic-operand paths are the next candidates, none in the current corpus
+  `wrong_span` set).
+- **The non-narrowing `GetErrorRangeForNode` arms** — SourceFile, ArrowFunction,
+  Case/DefaultClause, Return/Yield, SatisfiesExpression, Constructor, and the
+  reparsed-JSDoc Function/Method nuance — need `GetRangeOfTokenAtPosition` / a token
+  re-scan / the ECMA line map. None are reached by the relation-error path; the
+  helper falls through to the faithful generic `skipTrivia(pos)..end` tail for them.
+  blocked-by: `GetRangeOfTokenAtPosition` + reparsed-JSDoc declaration handling.

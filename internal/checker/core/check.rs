@@ -5585,6 +5585,73 @@ impl Checker {
         self.add_diagnostic(program, diagnostic);
     }
 
+    // Computes the reported source range `[start, end)` for an error on `node`,
+    // faithfully porting Go's `scanner.GetErrorRangeForNode` for the cases the
+    // relation-error path reaches. Two rules combine:
+    //   * a DECLARATION whose error range narrows to its NAME — Go's switch maps
+    //     `KindVariableDeclaration` (and the rest of the declaration group, plus
+    //     `KindClassExpression`) to `errorNode = GetNameOfDeclaration(node)`, so
+    //     `const x: number = "";` underlines just `x`, not `x: number = ""`;
+    //   * the generic tail — `pos = errorNode.Pos()`, then `skipTrivia(pos)`
+    //     unless the node is missing or JSX text, and `end = errorNode.End()`.
+    // An expression error node (e.g. an assignment LHS identifier) is not in the
+    // narrowing group, so it keeps `skipTrivia(pos)..end` over the node itself.
+    //
+    // DEFER(phase-4-checker): the special non-narrowing arms of Go's switch —
+    // `KindSourceFile`, `KindArrowFunction`, `KindCaseClause`/`KindDefaultClause`,
+    // `KindReturnStatement`/`KindYieldExpression`, `KindSatisfiesExpression`,
+    // `KindConstructor`, and the `KindFunctionDeclaration`/`KindMethodDeclaration`
+    // reparsed nuance — need `GetRangeOfTokenAtPosition` / a re-scan / the line
+    // map; none are reached by the relation-error emitters routed through here,
+    // so they fall through to the generic `skipTrivia(pos)..end` tail.
+    // blocked-by: `GetRangeOfTokenAtPosition` + reparsed-JSDoc declarations.
+    // Go: internal/scanner/scanner.go:GetErrorRangeForNode(2517)
+    fn get_error_range_for_node(&self, program: &dyn BoundProgram, node: NodeId) -> (i32, i32) {
+        let arena = program.arena();
+        // The declaration kinds whose error range narrows to the declaration
+        // NAME (Go's `GetErrorRangeForNode` declaration group + the
+        // `KindClassExpression` arm). `name_of_declaration` returns the name for
+        // the kinds it covers; an absent name falls back to the node itself
+        // (Go's `errorNode == nil` tail, approximated without the token re-scan).
+        let error_node = match arena.kind(node) {
+            Kind::VariableDeclaration
+            | Kind::BindingElement
+            | Kind::ClassDeclaration
+            | Kind::InterfaceDeclaration
+            | Kind::ModuleDeclaration
+            | Kind::EnumDeclaration
+            | Kind::EnumMember
+            | Kind::FunctionExpression
+            | Kind::GetAccessor
+            | Kind::SetAccessor
+            | Kind::TypeAliasDeclaration
+            | Kind::PropertyDeclaration
+            | Kind::PropertySignature
+            | Kind::NamespaceImport
+            | Kind::FunctionDeclaration
+            | Kind::MethodDeclaration
+            | Kind::ClassExpression => {
+                super::symbols_query::name_of_declaration(arena, node).unwrap_or(node)
+            }
+            _ => node,
+        };
+        let loc = arena.loc(error_node);
+        let pos = loc.pos();
+        // Generic tail: skip leading trivia unless the node is missing or JSX
+        // text (a node's `pos` is its full-start, leading trivia included).
+        let start = if !tsgo_ast::utilities::node_is_missing(arena, error_node)
+            && arena.kind(error_node) != Kind::JsxText
+        {
+            match program.source_text() {
+                Some(text) => tsgo_scanner::skip_trivia(text, pos),
+                None => pos,
+            }
+        } else {
+            pos
+        };
+        (start, loc.end())
+    }
+
     // Builds (without recording) a diagnostic at `node` from `message` with
     // `args` substituted; its related-information list starts empty (Go's
     // `createDiagnosticForNode`). Callers attach related entries via
@@ -5634,25 +5701,39 @@ impl Checker {
         else {
             // Defensive: the caller only reaches here after the bool fast path
             // reported the relation as failing, so a chain is expected. Fall
-            // back to the flat head if it somehow holds.
+            // back to the flat head if it somehow holds — still through
+            // `get_error_range_for_node` so the span matches the chain path.
             let generalized = self.generalized_source_for_error(source, target);
             let source_str = super::nodebuilder::type_to_string(self, program, generalized);
             let target_str = super::nodebuilder::type_to_string(self, program, target);
-            self.error(
-                program,
-                node,
-                &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1,
-                &[source_str.as_str(), target_str.as_str()],
-            );
+            let message = &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1;
+            let (start, end) = self.get_error_range_for_node(program, node);
+            let diagnostic = Diagnostic {
+                code: message.code(),
+                category: message.category(),
+                message: tsgo_diagnostics::format(
+                    &message.to_string(),
+                    &[source_str.as_str(), target_str.as_str()],
+                ),
+                start,
+                length: end - start,
+                related_information: Vec::new(),
+                message_chain: Vec::new(),
+            };
+            self.add_diagnostic(program, diagnostic);
             return;
         };
-        let loc = program.arena().loc(node);
+        // Go reports every relation error through `createDiagnosticForNode` ->
+        // `GetErrorRangeForNode`, so a `VariableDeclaration` error node narrows
+        // to its name (`const x: number = ""` underlines `x`) and an expression
+        // error node skips leading trivia — both byte-matching `tsc`.
+        let (start, end) = self.get_error_range_for_node(program, node);
         let diagnostic = Diagnostic {
             code: report.code,
             category: report.category,
             message: report.message,
-            start: loc.pos(),
-            length: loc.end() - loc.pos(),
+            start,
+            length: end - start,
             related_information: Vec::new(),
             message_chain: report.message_chain,
         };
