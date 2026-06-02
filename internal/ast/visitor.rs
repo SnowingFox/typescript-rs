@@ -2029,6 +2029,7 @@ impl NodeArena {
         NodeList {
             loc: list.loc,
             nodes,
+            missing: list.missing,
         }
     }
 
@@ -2057,6 +2058,7 @@ impl NodeArena {
         let mut result = NodeList {
             loc: list.loc,
             nodes,
+            missing: list.missing,
         };
         if opts.synthetic_location {
             result.loc = TextRange::new(-1, -1);

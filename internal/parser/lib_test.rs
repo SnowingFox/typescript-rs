@@ -2504,3 +2504,167 @@ fn parse_labeled_statement() {
         other => panic!("expected LabeledStatement, got {other:?}"),
     }
 }
+
+// Helper: collect (code, pos, end) tuples for a parsed result.
+fn diag_codes(result: &ParseResult) -> Vec<i32> {
+    result
+        .diagnostics
+        .iter()
+        .map(|d| d.message.code())
+        .collect()
+}
+
+// Round 15 / R5 — a ternary whose true branch is a parenthesized identifier and
+// whose false branch is a JSX element with a braced attribute value used to
+// mis-commit a speculative arrow function (its broken parenthesized return type
+// swallowed a later `{`), cascading bogus TS1005/TS1003/TS1109/TS1128. tsc parses
+// this cleanly. Mirrors `tests/cases/compiler/jsxTernaryWithObjectInAttribute.tsx`.
+// Go: internal/parser/parser.go:parseParenthesizedArrowFunctionExpression
+//     (typeHasArrowFunctionBlockingParseError guard)
+#[test]
+fn parse_jsx_ternary_with_object_in_attribute_no_false_syntax_errors() {
+    let source = "export const E = memo(function E() {\n  return (\n    <div>\n      {!ok ? (\n        NULLV\n      ) : (\n        <H label={\n          <div>\n            {t('k', {\n              s1: nf(1, { precision: 2, rounding: 'down' }),\n              s2: nf(2, { precision: 2, rounding: 'down' }),\n            })}\n          </div>\n        }></H>\n      )}\n    </div>\n  );\n});\n";
+    let result = parse_tsx(source);
+    assert!(
+        result.diagnostics.is_empty(),
+        "ternary-with-object-in-attribute must parse cleanly, got {:?}",
+        diag_codes(&result)
+    );
+}
+
+// Round 15 / R5 — a legit speculative arrow function whose return type is a
+// parenthesized function type (`(() => void)`) must NOT be aborted by the
+// arrow-blocking guard (its parameter list is genuinely empty, not missing).
+// Go: internal/parser/parser.go:typeHasArrowFunctionBlockingParseError
+#[test]
+fn parse_arrow_with_parenthesized_function_type_return_is_not_suppressed() {
+    let result = parse_ts("const f = (x): (() => void) => g;\n");
+    assert!(
+        result.diagnostics.is_empty(),
+        "legit arrow with parenthesized function-type return must parse, got {:?}",
+        diag_codes(&result)
+    );
+    // It is a variable statement whose initializer is an arrow function.
+    let stmts = statements(&result);
+    let init = match result.arena.data(stmts[0]) {
+        NodeData::VariableStatement(d) => {
+            let list = d.declaration_list;
+            match result.arena.data(list) {
+                NodeData::VariableDeclarationList(dl) => {
+                    match result.arena.data(dl.declarations.nodes[0]) {
+                        NodeData::VariableDeclaration(vd) => vd.initializer,
+                        other => panic!("expected VariableDeclaration, got {other:?}"),
+                    }
+                }
+                other => panic!("expected VariableDeclarationList, got {other:?}"),
+            }
+        }
+        other => panic!("expected VariableStatement, got {other:?}"),
+    };
+    assert_eq!(
+        result.arena.kind(init.expect("initializer present")),
+        Kind::ArrowFunction,
+        "initializer must be parsed as an arrow function"
+    );
+}
+
+// Round 15 / R5 — adjacent JSX elements as a JSX attribute value
+// (`<X a=<b/><c/> />`) recover into a synthetic comma `BinaryExpression` with a
+// single TS2657, exactly as tsc, rather than cascading TS1109/TS1128/TS1161.
+// Go: internal/parser/parser.go:parseJsxElementOrSelfClosingElementOrFragment
+#[test]
+fn parse_jsx_adjacent_elements_in_attribute_recovers_with_ts2657() {
+    let result = parse_tsx("<X a=<b/><c/> />\n");
+    assert_eq!(
+        diag_codes(&result),
+        vec![2657],
+        "only the JSX one-parent-element recovery diagnostic is expected"
+    );
+    let d = &result.diagnostics[0];
+    assert_eq!(
+        (d.loc.pos(), d.loc.end()),
+        (5, 13),
+        "TS2657 spans `<b/><c/>`"
+    );
+}
+
+// Round 15 / R5 — well-formed nested JSX must NOT trigger the adjacent-element
+// recovery (no spurious TS2657).
+#[test]
+fn parse_nested_jsx_does_not_trigger_one_parent_element_recovery() {
+    let result = parse_tsx("const x = <div><span/></div>;\n");
+    assert!(
+        result.diagnostics.is_empty(),
+        "well-formed nested JSX must parse cleanly, got {:?}",
+        diag_codes(&result)
+    );
+}
+
+// Round 15 / R7 — top-level `await` in a module: a file that is an external
+// module (here via `export {}`) reparses its top-level statements under await
+// context, so `await { ... }` is an await expression rather than an `await`
+// identifier followed by a block (which cascaded TS1005/TS1003/TS2304/TS2451).
+// Mirrors `tests/cases/compiler/awaitObjectLiteral.ts`.
+// Go: internal/parser/parser.go:reparseTopLevelAwait
+#[test]
+fn parse_top_level_await_in_module_is_await_expression() {
+    let result = parse_ts("export {}\nconst foo = await { bar: 42 }\n");
+    assert!(
+        result.diagnostics.is_empty(),
+        "top-level await in a module must parse cleanly, got {:?}",
+        diag_codes(&result)
+    );
+    let stmts = statements(&result);
+    // statements: [`export {}`, `const foo = await { bar: 42 }`]
+    let init = match result.arena.data(stmts[1]) {
+        NodeData::VariableStatement(d) => match result.arena.data(d.declaration_list) {
+            NodeData::VariableDeclarationList(dl) => {
+                match result.arena.data(dl.declarations.nodes[0]) {
+                    NodeData::VariableDeclaration(vd) => vd.initializer,
+                    other => panic!("expected VariableDeclaration, got {other:?}"),
+                }
+            }
+            other => panic!("expected VariableDeclarationList, got {other:?}"),
+        },
+        other => panic!("expected VariableStatement, got {other:?}"),
+    };
+    assert_eq!(
+        result.arena.kind(init.expect("initializer present")),
+        Kind::AwaitExpression,
+        "`await {{ ... }}` must be parsed as an await expression after the reparse"
+    );
+}
+
+// Round 15 / R7 — an `export const` statement that uses top-level `await` is
+// also reparsed (the first statement carries the external-module indicator).
+// Go: internal/parser/parser.go:reparseTopLevelAwait
+#[test]
+fn parse_top_level_await_in_exported_declaration() {
+    let result = parse_ts("export const baz = await { x: 1 }\n");
+    assert!(
+        result.diagnostics.is_empty(),
+        "exported top-level await must parse cleanly, got {:?}",
+        diag_codes(&result)
+    );
+}
+
+// Round 15 / R7 GUARD — a SCRIPT (non-module) file is NOT reparsed (Go gates the
+// reparse on an external-module indicator), so `const foo = await { ... }` still
+// errors, matching Go/tsc.
+// Go: internal/parser/parser.go:parseSourceFileWorker (ExternalModuleIndicator gate)
+#[test]
+fn parse_top_level_await_in_script_still_errors() {
+    let result = parse_ts("const foo = await { bar: 42 }\n");
+    assert!(
+        !result.diagnostics.is_empty(),
+        "a non-module script must still error on `await {{ ... }}` (no reparse)"
+    );
+    // No external-module indicator was recorded for a plain script.
+    match result.arena.data(result.source_file) {
+        NodeData::SourceFile(d) => assert!(
+            d.external_module_indicator.is_none(),
+            "a plain script is not an external module"
+        ),
+        other => panic!("expected SourceFile, got {other:?}"),
+    }
+}

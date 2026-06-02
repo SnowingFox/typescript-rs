@@ -50,6 +50,7 @@ pub fn extract_modifiers(
         list: NodeList {
             loc: modifiers.list.loc,
             nodes: kept,
+            missing: modifiers.list.missing,
         },
         modifier_flags,
     })

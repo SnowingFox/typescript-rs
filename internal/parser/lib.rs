@@ -28,7 +28,8 @@ use std::rc::Rc;
 
 use tsgo_ast::utilities::{
     is_assignment_operator, is_class_member_modifier, is_keyword,
-    is_left_hand_side_expression_kind, is_modifier_kind, modifier_to_flag, node_is_present,
+    is_left_hand_side_expression_kind, is_modifier_kind, modifier_to_flag, node_is_missing,
+    node_is_present,
 };
 use tsgo_ast::{Kind, ModifierFlags, ModifierList, NodeArena, NodeFlags, NodeId, NodeList};
 use tsgo_core::languagevariant::LanguageVariant;
@@ -228,6 +229,14 @@ struct Parser {
     has_parse_error: bool,
     identifier_count: usize,
     scan_errors: ScanErrorSink,
+    /// Set while parsing a top-level statement when an `await` identifier is
+    /// created outside an await context (drives top-level-await reparse).
+    // Go: internal/parser/parser.go:Parser.statementHasAwaitIdentifier
+    statement_has_await_identifier: bool,
+    /// Paired `[start, end)` top-level statement indices that used an `await`
+    /// identifier; reparsed under await context when the file is a module.
+    // Go: internal/parser/parser.go:Parser.possibleAwaitSpans
+    possible_await_spans: Vec<usize>,
 }
 
 /// A snapshot of mutable parser state for speculative parsing (`look_ahead`).
@@ -239,6 +248,7 @@ struct ParserState {
     context_flags: NodeFlags,
     diagnostics_len: usize,
     has_parse_error: bool,
+    statement_has_await_identifier: bool,
 }
 
 /// Parses `source_text` as a source file of the given `script_kind`.
@@ -305,6 +315,8 @@ impl Parser {
             has_parse_error: false,
             identifier_count: 0,
             scan_errors: Rc::new(RefCell::new(Vec::new())),
+            statement_has_await_identifier: false,
+            possible_await_spans: Vec::new(),
         }
     }
 
@@ -353,8 +365,8 @@ impl Parser {
             self.context_flags |= NodeFlags::AMBIENT;
         }
         let pos = self.node_pos();
-        let statements = self.parse_list_index(ParsingContext::SourceElements, |p| {
-            p.parse_toplevel_statement()
+        let statements = self.parse_list_index(ParsingContext::SourceElements, |p, i| {
+            p.parse_toplevel_statement(i)
         });
         let end = self.node_pos();
         let eof = self.parse_token_node();
@@ -372,6 +384,22 @@ impl Parser {
         let node = self.finish_node(node, pos);
         self.set_is_declaration_file(node, is_declaration_file);
         self.finish_source_file(node);
+        // Top-level await: a module whose top-level statements used `await` as an
+        // identifier outside an await context is reparsed under await context so
+        // those `await`s become await expressions (matching tsc / Go).
+        // Go: internal/parser/parser.go:parseSourceFileWorker (reparseTopLevelAwait)
+        let node = if !is_declaration_file
+            && self.has_external_module_indicator(node)
+            && !self.possible_await_spans.is_empty()
+        {
+            let reparsed = self.reparse_top_level_await(node);
+            let reparsed = self.finish_node(reparsed, pos);
+            self.set_is_declaration_file(reparsed, is_declaration_file);
+            self.finish_source_file(reparsed);
+            reparsed
+        } else {
+            node
+        };
         ParseResult {
             arena: std::mem::take(&mut self.arena),
             source_file: node,
@@ -384,8 +412,114 @@ impl Parser {
         self.collect_external_module_references(source_file);
         self.set_external_module_indicator(source_file);
         // DEFER(phase-4): comment directives, pragmas, `@jsImportTag` reparse,
-        // CommonJS module indicator, and top-level-await reparse.
-        // blocked-by: JSDoc/pragma scanning subsystem.
+        // CommonJS module indicator. blocked-by: JSDoc/pragma scanning subsystem.
+    }
+
+    /// Reports whether the source-file node has an external-module indicator
+    /// (the gate for a top-level-await reparse).
+    fn has_external_module_indicator(&self, source_file: NodeId) -> bool {
+        match self.arena.data(source_file) {
+            tsgo_ast::NodeData::SourceFile(d) => d.external_module_indicator.is_some(),
+            _ => false,
+        }
+    }
+
+    // Go: internal/parser/parser.go:reparseTopLevelAwait
+    //
+    // Rebuilds the source file, reparsing each `possible_await_spans` range
+    // under await context (so `await` is an await expression, not an
+    // identifier), while preserving the diagnostics of the untouched ranges and
+    // regenerating diagnostics for the reparsed ranges.
+    fn reparse_top_level_await(&mut self, source_file: NodeId) -> NodeId {
+        debug_assert!(
+            self.possible_await_spans.len().is_multiple_of(2),
+            "possible_await_spans malformed: odd number of indices"
+        );
+        let (orig_statements, statements_loc, eof) = match self.arena.data(source_file) {
+            tsgo_ast::NodeData::SourceFile(d) => (
+                d.statements.nodes.clone(),
+                d.statements.loc,
+                d.end_of_file_token,
+            ),
+            _ => return source_file,
+        };
+        let spans = std::mem::take(&mut self.possible_await_spans);
+        let saved = std::mem::take(&mut self.diagnostics);
+        let mut statements: Vec<NodeId> = Vec::new();
+        let mut after_await_statement = 0usize;
+        let mut i = 0usize;
+        while i < spans.len() {
+            let next_await_statement = spans[i];
+            let prev_statement_pos = self.arena.loc(orig_statements[after_await_statement]).pos();
+            let next_statement_pos = self.arena.loc(orig_statements[next_await_statement]).pos();
+            // Carry over the non-await statements between the previous span and
+            // this one, plus the diagnostics that fall in that range.
+            statements
+                .extend_from_slice(&orig_statements[after_await_statement..next_await_statement]);
+            if let Some(diag_start) = saved.iter().position(|d| d.pos() >= prev_statement_pos) {
+                match saved[diag_start..]
+                    .iter()
+                    .position(|d| d.pos() >= next_statement_pos)
+                {
+                    Some(rel_end) => self
+                        .diagnostics
+                        .extend_from_slice(&saved[diag_start..diag_start + rel_end]),
+                    None => self.diagnostics.extend_from_slice(&saved[diag_start..]),
+                }
+            }
+            let mut state = self.mark();
+            self.context_flags |= NodeFlags::AWAIT_CONTEXT;
+            self.scanner.reset_pos(next_statement_pos);
+            self.next_token();
+            after_await_statement = spans[i + 1];
+            while self.token != Kind::EndOfFile {
+                let start_pos = self.scanner.token_full_start();
+                let statement = self.parse_statement();
+                statements.push(statement);
+                if start_pos == self.scanner.token_full_start() {
+                    self.next_token();
+                }
+                if after_await_statement < orig_statements.len() {
+                    let non_await_pos =
+                        self.arena.loc(orig_statements[after_await_statement]).pos();
+                    let statement_end = self.arena.loc(statement).end();
+                    if statement_end == non_await_pos {
+                        // Done reparsing this section.
+                        break;
+                    }
+                    if statement_end > non_await_pos {
+                        // Ate into the next statement; continue with the next span.
+                        i += 2;
+                        after_await_statement = if i < spans.len() {
+                            spans[i + 1]
+                        } else {
+                            orig_statements.len()
+                        };
+                    }
+                }
+            }
+            // Keep the reparse diagnostics; rewind only scanner/context state.
+            state.diagnostics_len = self.diagnostics.len();
+            self.rewind(state);
+            i += 2;
+        }
+        // Carry over the trailing statements + their diagnostics.
+        if after_await_statement < orig_statements.len() {
+            let prev_statement_pos = self.arena.loc(orig_statements[after_await_statement]).pos();
+            statements.extend_from_slice(&orig_statements[after_await_statement..]);
+            if let Some(diag_start) = saved.iter().position(|d| d.pos() >= prev_statement_pos) {
+                self.diagnostics.extend_from_slice(&saved[diag_start..]);
+            }
+        }
+        let statement_list = self.new_node_list(statements_loc, statements);
+        let file_name = self.opts.file_name.clone();
+        self.arena.new_source_file(
+            &file_name,
+            self.script_kind,
+            self.language_variant,
+            statement_list,
+            eof,
+        )
     }
 
     // Go: internal/parser/references.go:collectExternalModuleReferences (subset)
@@ -774,6 +908,7 @@ impl Parser {
             context_flags: self.context_flags,
             diagnostics_len: self.diagnostics.len(),
             has_parse_error: self.has_parse_error,
+            statement_has_await_identifier: self.statement_has_await_identifier,
         }
     }
 
@@ -784,6 +919,7 @@ impl Parser {
         self.context_flags = state.context_flags;
         self.diagnostics.truncate(state.diagnostics_len);
         self.has_parse_error = state.has_parse_error;
+        self.statement_has_await_identifier = state.statement_has_await_identifier;
     }
 
     // Go: internal/parser/parser.go:lookAhead (always rewinds)
@@ -872,7 +1008,11 @@ impl Parser {
 
     // Go: internal/parser/parser.go:newNodeList
     fn new_node_list(&mut self, loc: TextRange, nodes: Vec<NodeId>) -> NodeList {
-        NodeList { loc, nodes }
+        NodeList {
+            loc,
+            nodes,
+            missing: false,
+        }
     }
 
     // Go: internal/parser/parser.go:finishNode
@@ -911,14 +1051,14 @@ impl Parser {
     fn parse_list_index(
         &mut self,
         kind: ParsingContext,
-        mut parse_element: impl FnMut(&mut Parser) -> NodeId,
+        mut parse_element: impl FnMut(&mut Parser, usize) -> NodeId,
     ) -> Vec<NodeId> {
         let save_parsing_contexts = self.parsing_contexts;
         self.parsing_contexts |= 1 << (kind as u32);
         let mut list = Vec::new();
         while !self.is_list_terminator(kind) {
             if self.is_list_element(kind, false) {
-                let elt = parse_element(self);
+                let elt = parse_element(self, list.len());
                 list.push(elt);
                 continue;
             }
@@ -1211,8 +1351,26 @@ impl Parser {
     // ---- statements ----
 
     // Go: internal/parser/parser.go:parseToplevelStatement
-    fn parse_toplevel_statement(&mut self) -> NodeId {
-        self.parse_statement()
+    fn parse_toplevel_statement(&mut self, i: usize) -> NodeId {
+        self.statement_has_await_identifier = false;
+        let statement = self.parse_statement();
+        if self.statement_has_await_identifier
+            && !self
+                .arena
+                .flags(statement)
+                .contains(NodeFlags::AWAIT_CONTEXT)
+        {
+            // Record (or extend) the contiguous span of statements that need a
+            // top-level-await reparse.
+            if self.possible_await_spans.last() != Some(&i) {
+                self.possible_await_spans.push(i);
+                self.possible_await_spans.push(i + 1);
+            } else {
+                let last = self.possible_await_spans.len() - 1;
+                self.possible_await_spans[last] = i + 1;
+            }
+        }
+        statement
     }
 
     // Go: internal/parser/parser.go:parseStatement (subset)
@@ -1918,10 +2076,10 @@ impl Parser {
     fn parse_list(
         &mut self,
         kind: ParsingContext,
-        parse_element: impl FnMut(&mut Parser) -> NodeId,
+        mut parse_element: impl FnMut(&mut Parser) -> NodeId,
     ) -> NodeList {
         let pos = self.node_pos();
-        let nodes = self.parse_list_index(kind, parse_element);
+        let nodes = self.parse_list_index(kind, move |p, _| parse_element(p));
         let end = self.node_pos();
         self.new_node_list(TextRange::new(pos, end), nodes)
     }
@@ -2174,8 +2332,19 @@ impl Parser {
         };
         let has_return_colon = self.token == Kind::ColonToken;
         let return_type = self.parse_return_type(Kind::ColonToken, false);
-        // DEFER(phase-3): typeHasArrowFunctionBlockingParseError refinement.
-        // blocked-by: full function/constructor type-node parsing.
+        // A parenthesized arrow signature often looks like other valid
+        // expressions whose return-type parse recovered through a broken node
+        // (e.g. `a ? (b): (<x y={1}/>) : c`, where the "type" recovers into a
+        // function type with a missing parameter list). When this happens
+        // speculatively, abort so the caller rewinds rather than committing to
+        // a bogus arrow whose body swallows a later `{`.
+        // Go: internal/parser/parser.go:parseParenthesizedArrowFunctionExpression
+        //     (typeHasArrowFunctionBlockingParseError guard)
+        if let Some(return_type) = return_type {
+            if !allow_ambiguity && self.type_has_arrow_function_blocking_parse_error(return_type) {
+                return None;
+            }
+        }
         if !allow_ambiguity
             && self.token != Kind::EqualsGreaterThanToken
             && self.token != Kind::OpenBraceToken
@@ -2625,9 +2794,9 @@ impl Parser {
     fn parse_jsx_element_or_self_closing_element_or_fragment(
         &mut self,
         in_expression_context: bool,
-        _top_invalid_node_position: i32,
+        top_invalid_node_position: i32,
         _opening_tag: Option<NodeId>,
-        _must_be_unary: bool,
+        must_be_unary: bool,
     ) -> NodeId {
         let pos = self.node_pos();
         let opening = self
@@ -2662,8 +2831,47 @@ impl Parser {
             Kind::JsxSelfClosingElement => opening,
             other => panic!("Unhandled case in JSX element parse: {other:?}"),
         };
-        // DEFER(phase-4): unclosed-tag restructure + `<a/><b/>` binary-comma recovery.
-        // blocked-by: tag-mismatch recovery (well-formed JSX parses without it).
+        // DEFER(phase-4): the unclosed-tag restructure (reattaching a parent's
+        // closing tag, `<div>(...<span>...</div>) -> <div>(...<span>...</>)</div>`).
+        // Well-formed JSX and the binary-comma recovery below do not need it.
+        // blocked-by: JSX tag-mismatch restructure with parent-pointer resets.
+
+        // If the user writes `<a/><b/>` in an expression context (not wrapped in
+        // a parent element), naively parsing the trailing `<` as a relational
+        // operator mangles the rest. Speculatively parse the next element and
+        // wrap both in a synthetic comma `BinaryExpression`, reporting TS2657,
+        // so the recovery matches tsc instead of cascading TS1109/TS1128.
+        // A unary context cannot use this recovery (the binary result is not a
+        // valid `UnaryExpression`).
+        // Go: internal/parser/parser.go:parseJsxElementOrSelfClosingElementOrFragment
+        if !must_be_unary && in_expression_context && self.token == Kind::LessThanToken {
+            let top_bad_pos = if top_invalid_node_position < 0 {
+                self.arena.loc(result).pos()
+            } else {
+                top_invalid_node_position
+            };
+            let invalid_element = self.parse_jsx_element_or_self_closing_element_or_fragment(
+                true,
+                top_bad_pos,
+                None,
+                false,
+            );
+            let invalid_pos = self.arena.loc(invalid_element).pos();
+            let invalid_end = self.arena.loc(invalid_element).end();
+            let operator_token = self.arena.new_token(Kind::CommaToken);
+            self.arena
+                .set_loc(operator_token, TextRange::new(invalid_pos, invalid_pos));
+            self.parse_error_at(
+                tsgo_scanner::skip_trivia(&self.source_text, top_bad_pos),
+                invalid_end,
+                &diagnostics::JSX_EXPRESSIONS_MUST_HAVE_ONE_PARENT_ELEMENT,
+                Vec::new(),
+            );
+            let node = self
+                .arena
+                .new_binary_expression(result, operator_token, invalid_element);
+            return self.finish_node(node, pos);
+        }
         result
     }
 
@@ -3727,7 +3935,11 @@ impl Parser {
         modifier_flags: ModifierFlags,
     ) -> ModifierList {
         ModifierList {
-            list: NodeList { loc, nodes },
+            list: NodeList {
+                loc,
+                nodes,
+                missing: false,
+            },
             modifier_flags,
         }
     }
@@ -4348,12 +4560,60 @@ impl Parser {
         flags
     }
 
-    // Go: internal/parser/parser.go:createMissingList (empty-list stand-in)
+    // Go: internal/parser/parser.go:createMissingList
     //
-    // DEFER(phase-3): missing-list sentinel (`isMissingNodeList`).
-    // blocked-by: NodeList missing-flag representation.
+    // The list is flagged `missing` (mirroring Go's `missingListNodes`
+    // sentinel) so [`is_missing_node_list`](Self::is_missing_node_list) can
+    // tell a recovered list (expected opener absent) from a genuinely empty
+    // one.
     fn create_missing_list(&mut self) -> NodeList {
-        self.new_node_list(TextRange::new(self.node_pos(), self.node_pos()), Vec::new())
+        let mut list =
+            self.new_node_list(TextRange::new(self.node_pos(), self.node_pos()), Vec::new());
+        list.missing = true;
+        list
+    }
+
+    // Go: internal/parser/parser.go:isMissingNodeList
+    fn is_missing_node_list(list: &NodeList) -> bool {
+        list.missing
+    }
+
+    // Go: internal/parser/parser.go:typeHasArrowFunctionBlockingParseError
+    //
+    // Reports whether a speculatively-parsed arrow return type recovered through
+    // a node that makes the arrow interpretation untenable: a type reference
+    // with a missing name, or a function/constructor type with a missing
+    // parameter list (or such a return type), possibly behind parentheses.
+    fn type_has_arrow_function_blocking_parse_error(&self, node: NodeId) -> bool {
+        match self.arena.kind(node) {
+            Kind::TypeReference => {
+                let type_name = match self.arena.data(node) {
+                    tsgo_ast::NodeData::TypeReference(d) => d.type_name,
+                    _ => return false,
+                };
+                node_is_missing(&self.arena, type_name)
+            }
+            Kind::FunctionType | Kind::ConstructorType => {
+                let (params_missing, return_type) = match self.arena.data(node) {
+                    tsgo_ast::NodeData::FunctionType(d)
+                    | tsgo_ast::NodeData::ConstructorType(d) => {
+                        (Self::is_missing_node_list(&d.parameters), d.type_node)
+                    }
+                    _ => return false,
+                };
+                params_missing
+                    || return_type
+                        .is_some_and(|t| self.type_has_arrow_function_blocking_parse_error(t))
+            }
+            Kind::ParenthesizedType => {
+                let inner = match self.arena.data(node) {
+                    tsgo_ast::NodeData::ParenthesizedType(d) => d.type_node,
+                    _ => return false,
+                };
+                self.type_has_arrow_function_blocking_parse_error(inner)
+            }
+            _ => false,
+        }
     }
 
     // ---- classes ----
@@ -6387,6 +6647,9 @@ impl Parser {
     // Go: internal/parser/parser.go:newIdentifier
     fn new_identifier(&mut self, text: &str) -> NodeId {
         self.identifier_count += 1;
+        if text == "await" {
+            self.statement_has_await_identifier = true;
+        }
         self.arena.new_identifier(text)
     }
 

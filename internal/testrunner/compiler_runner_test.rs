@@ -598,14 +598,17 @@ fn curated_compiler_subset_parity_smoke() {
     // parser / checker / emit panic on these inputs): the three emit/arena cases
     // (`classExpressionWithComputedPropertyInLoop`,
     // `declarationMapInlineSourcesContent`, `emitEndOfFileJSDocComments`) now
-    // PASS, while the two whose underlying feature is still a reachable gap
-    // (`awaitObjectLiteral` top-level await; `allowSyntheticDefaultImports9`
-    // synthetic-default import) degrade gracefully to a FAIL rather than a panic.
+    // PASS.
+    //
+    // Round 15 (parser top-level-await reparse): `awaitObjectLiteral.ts` is a
+    // module (each file has `export`) whose top-level `const foo = await { ... }`
+    // is now reparsed under await context, so `await` is an await expression and
+    // the case parses cleanly to a byte-exact PASS (18 -> 19).
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 18,
-            failed: 12,
+            passed: 19,
+            failed: 11,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -698,11 +701,23 @@ fn expanded_compiler_subset_parity_smoke() {
     // on the TS2304 cascade). `extra TS2339 ×16` is unchanged net: some
     // namespace-member accesses now resolve while a few JS-expando-module imports
     // surface a DEFERRED `{}`-shape TS2339 (the expando/CommonJS-JS export root).
+    //
+    // Round 15 (parser JSX/await recovery): two parser false-positive roots clear
+    // in this subset, flipping +2 to PASS (78 -> 80):
+    //   - top-level await (`awaitObjectLiteral.ts`, a module) reparses
+    //     `const foo = await { ... }` under await context, clearing its
+    //     `extra TS1005 ×5 / TS1003 ×3 / TS2304 ×2 / TS2451 ×8` cascade;
+    //   - the `<X a=<b/><c/> />` adjacent-JSX-element recovery
+    //     (`jsxAttributeValueBinaryExpression.tsx`) now emits exactly tsc's
+    //     TS2657 (plus the checker's TS2304 + 2× TS7026), clearing its
+    //     `wrong_code TS7026 -> TS1128` + `extra TS1109` + empty-name `TS2304`.
+    // (`jsxTernaryWithObjectInAttribute.tsx` is 40 lines, outside this ≤25-line
+    // subset; its full clear shows in the full-corpus measurement.)
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 78,
-            failed: 72,
+            passed: 80,
+            failed: 70,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -761,9 +776,11 @@ fn expanded_compiler_subset_parity_smoke() {
     // cases to clean PASS (25 -> 16); the residual divergent -> missing_all_errors
     // drift (a removed spurious TS2304 leaving a case with only unmet committed
     // errors) shifts divergent 19 -> 15 and missing_all_errors 37 -> 41.
-    assert_eq!(hist.no_baseline_but_errors, 16);
+    // Round 15: `awaitObjectLiteral.ts` flips no_baseline -> PASS (16 -> 15) and
+    // `jsxAttributeValueBinaryExpression.tsx` flips divergent -> PASS (15 -> 14).
+    assert_eq!(hist.no_baseline_but_errors, 15);
     assert_eq!(hist.missing_all_errors, 41);
-    assert_eq!(hist.divergent, 15);
+    assert_eq!(hist.divergent, 14);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare
@@ -832,9 +849,12 @@ fn expanded_compiler_subset_parity_smoke() {
     // `missing TS2339 ×5` is intact), and no case regressed PASS -> FAIL.
     // Round 14: the dominant false-positive cluster `extra TS2304` drops
     // 34 -> 17 as cross-module imports resolve; TS2339 stays 16 (net).
+    // Round 15: top-level await + JSX-adjacent recovery clear `awaitObjectLiteral`'s
+    // 2 empty-name TS2304 and `jsxAttributeValueBinaryExpression`'s empty-name
+    // TS2304, so `extra TS2304` drops 17 -> 14, making TS2339 ×16 the top extra.
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 17), (2339, 16)],
+        vec![(2339, 16), (2304, 14)],
         "top extra (false-positive) codes; histogram:\n{}",
         hist.report()
     );
@@ -866,16 +886,19 @@ fn expanded_compiler_subset_parity_smoke() {
     // over-reports must stay cleared (the const-type-parameter, optional-tuple,
     // abstract-class, and declare-global parser fixes + the NodeIsMissing checker
     // guard). `tsc` emits NONE of these on the valid corpus inputs.
+    // Round 15: the residual `extra TS1005 ×5` / `extra TS1003 ×3` were entirely
+    // `awaitObjectLiteral.ts`'s top-level-await recovery cascade; the reparse
+    // clears them (both -> 0 / `None`).
     assert_eq!(
         hist.extra.get(&1005),
-        Some(&5),
-        "extra TS1005 must stay at 5 (was 9 before Round 9); histogram:\n{}",
+        None,
+        "extra TS1005 is cleared by the top-level-await reparse (was 5); histogram:\n{}",
         hist.report()
     );
     assert_eq!(
         hist.extra.get(&1003),
-        Some(&3),
-        "extra TS1003 must stay at 3 (was 5 before Round 9); histogram:\n{}",
+        None,
+        "extra TS1003 is cleared by the top-level-await reparse (was 3); histogram:\n{}",
         hist.report()
     );
     assert_eq!(
@@ -918,22 +941,16 @@ fn expanded_compiler_subset_parity_smoke() {
     // this ≤25-line subset has NO missing-TS2300 case, so the duplicate-identifier
     // signal does not show here (the headline counts/categories are unchanged).
     //
-    // The ONE new extra in this subset is `awaitObjectLiteral.ts` (already a
-    // FAILing `no_baseline_but_errors` case): our parser does not yet support
-    // TOP-LEVEL `await`, so its recovery synthesizes empty-named declarations
-    // that the binder then flags as block-scoped redeclares — 8 spurious TS2451,
-    // all on empty (`''`) names co-located with the parser's TS2304/TS1005/TS1003
-    // recovery errors. This is a PARSER-recovery cascade, NOT a binder
-    // excludes/merge bug (Go's parser accepts top-level await and produces a
-    // clean tree); it is DEFERRED behind top-level-await parsing, and the case
-    // already failed, so no case regressed PASS -> FAIL. The binder's merge rules
-    // are correct on VALID input — see `program_test.rs`'s
-    // `legal_merges_produce_no_duplicate_identifier` guard.
+    // Round 13 surfaced `awaitObjectLiteral.ts`'s 8 spurious TS2451 (empty-named
+    // declarations the top-level-await *recovery* synthesized, flagged by the
+    // binder as block-scoped redeclares). Round 15 fixes the root: the file is a
+    // module, so its `const foo = await { ... }` is reparsed under await context
+    // and parses cleanly — clearing the entire `extra TS2451 ×8` cascade (-> 0).
     assert_eq!(
         hist.extra.get(&2451),
-        Some(&8),
-        "the lone new extra is awaitObjectLiteral's top-level-await parser-recovery \
-         TS2451 cascade (DEFERRED, not a binder bug); histogram:\n{}",
+        None,
+        "the top-level-await reparse clears awaitObjectLiteral's TS2451 cascade \
+         (was 8); histogram:\n{}",
         hist.report()
     );
     assert_eq!(
@@ -943,11 +960,12 @@ fn expanded_compiler_subset_parity_smoke() {
          signal (missing 94 -> 52) lives in the FULL corpus; histogram:\n{}",
         hist.report()
     );
-    // `top_extra(2)` after Round 14: `extra TS2304 ×17` (down from 34 as
-    // cross-module imports resolve), `extra TS2339 ×16` unchanged.
+    // `top_extra(2)` after Round 15: `extra TS2339 ×16` is now the top extra,
+    // `extra TS2304 ×14` (down from 17 as the parser-recovery empty-name 2304s
+    // clear).
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 17), (2339, 16)],
+        vec![(2339, 16), (2304, 14)],
         "the import-resolution round drops the dominant unresolved-name cascade; \
          histogram:\n{}",
         hist.report()

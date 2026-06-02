@@ -68,6 +68,13 @@ pub struct NodeList {
     pub loc: TextRange,
     /// Element node ids, in source order.
     pub nodes: Vec<NodeId>,
+    /// Marks a "missing" list produced by error recovery when an expected
+    /// opening token (e.g. `(`) was absent, mirroring Go's `missingListNodes`
+    /// sentinel. Distinguishes a recovered (empty) list from a genuinely empty
+    /// one (`()`), which the parser needs to detect arrow-function-blocking
+    /// parse errors.
+    // Go: internal/parser/parser.go:isMissingNodeList (missingListNodes sentinel)
+    pub missing: bool,
 }
 
 impl NodeList {
@@ -79,6 +86,7 @@ impl NodeList {
         NodeList {
             loc: TextRange::undefined(),
             nodes,
+            missing: false,
         }
     }
 

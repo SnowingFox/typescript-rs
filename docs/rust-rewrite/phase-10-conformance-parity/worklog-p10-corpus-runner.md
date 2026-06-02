@@ -2681,3 +2681,54 @@ categorization test was REMOVED (the tree is clean of throwaway code).
   alias chaining.
 - **Parser-recovery TS2304 (root F: `.tsx` JSX, top-level `await`, `using`)** and
   **JS/JSDoc class exports (root E)** — separate parser / JS-checking lanes.
+
+## Round 15 — parser top-level-await reparse + JSX-adjacent recovery
+
+**Root / Go ground truth.** Two parser-recovery false-positive roots from the
+full-corpus map:
+- **Top-level `await`** (`awaitObjectLiteral.ts`): a module file (each file has
+  `export`) whose top-level `const foo = await { ... }` was parsed with `await`
+  as an IDENTIFIER outside await context, synthesizing empty-named declarations
+  → spurious `extra TS1005 ×5 / TS1003 ×3 / TS2304 ×2` and (since Round 13
+  surfaced binder diagnostics) `extra TS2451 ×8` (empty-named block-scoped
+  redeclares). Go reparses the file under await context when it discovers a
+  top-level `await` identifier in a module — `parser.go:reparseTopLevelAwait`
+  (gated by `hasExternalModuleIndicator`), driven by `statementHasAwaitIdentifier`
+  + `possibleAwaitSpans`.
+- **JSX attribute-value recovery** (`jsxAttributeValueBinaryExpression.tsx`): our
+  parser mis-recovered, emitting `wrong_code TS7026→TS1128` + `extra TS1109` +
+  an empty-name `TS2304`; Go parses it cleanly so the checker emits exactly
+  `TS2657` (+ the checker's `TS2304` + 2× `TS7026`).
+
+**Rust landing** (`internal/parser/lib.rs`, all `// Go:`-anchored): ported
+`statement_has_await_identifier`, `possible_await_spans`,
+`has_external_module_indicator`, and `reparse_top_level_await` (rewinds
+scanner/context state and reparses the affected top-level statements under await
+context, keeping reparse diagnostics) wired into `parse_source_file_worker`;
+plus JSX/arrow recovery helpers (`is_missing_node_list`,
+`type_has_arrow_function_blocking_parse_error`, `create_missing_list`). Small
+supporting `internal/ast/lib.rs` (+8), `ast/visitor.rs` (+2),
+`transformers/modifiervisitor.rs` (+1) changes.
+
+**RED→GREEN + guards** (parser 122→129 unit): top-level `await foo;` in a module
+parses as an await expression (no TS2304/TS1005); a SCRIPT file still errors per
+Go; JSX `<a b={x ? {y:1} : {z:2}} />` / `<a b={1 + 2} />` parse clean.
+
+**Parity BEFORE→AFTER.** 150-subset **78/72 → 80/70 (+2)**:
+`awaitObjectLiteral.ts` (top-level await) + `jsxAttributeValueBinaryExpression.tsx`
+flip to byte-exact PASS. 30-case smoke 18→19. `extra TS2304 17→14`,
+`extra TS1005 5→0`, `extra TS1003 3→0`, the `TS2451 ×8` cascade cleared, and the
+`TS7026→TS1128` wrong-code cleared; `top_extra(2)` becomes `[(2339,16),(2304,14)]`.
+Zero regressions. `jsxTernaryWithObjectInAttribute.tsx` (40 lines, outside the
+≤25-line subset) + `using`/other recovery roots deferred.
+
+## Gate results (Round 15)
+- `cargo test -p tsgo_parser` (129 unit + 7 doctests) · `-p tsgo_checker` (771) ·
+  `-p tsgo_compiler` (117) · `-p tsgo_testrunner` (51 + 1 ignored) — all GREEN.
+- `cargo clippy … -- -D warnings` + `cargo fmt -- --check` + `cargo build
+  --workspace --all-targets` — GREEN.
+
+No `--no-verify`; additive; no new deps; not committed by the subagent (the
+round aborted on a network error after completing the implementation + tests +
+snapshot; the parent finished verification, added this worklog section, and
+committed).
