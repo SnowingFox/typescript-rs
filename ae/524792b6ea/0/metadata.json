@@ -1,0 +1,70 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "ae524792b6ea",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-02T06:29:16.60885Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/rust-rewrite/phase-10-conformance-parity/worklog-p10-corpus-runner.md",
+    "internal/checker/core/check.rs",
+    "internal/checker/core/check_test.rs",
+    "internal/checker/core/contextual.rs",
+    "internal/checker/core/declared_types.rs",
+    "internal/compiler/program_test.rs",
+    "internal/testrunner/compiler_runner_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-opus-4-8-thinking-xhigh",
+  "turn_id": "525bfad1210c",
+  "checkpoint_transcript_start": 669,
+  "transcript_lines_at_start": 669,
+  "session_metrics": {
+    "turn_count": 10,
+    "context_tokens": 933669,
+    "context_window_size": 1000000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-02T06:29:16.541774Z",
+    "agent_lines": 151,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 46,
+    "total_committed": 151,
+    "total_lines_changed": 197,
+    "agent_percentage": 76.6497461928934,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 289,
+      "user_lines_removed": 46,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "internal/checker/core/check.rs": 41,
+        "internal/checker/core/check_test.rs": 99,
+        "internal/checker/core/contextual.rs": 48,
+        "internal/checker/core/declared_types.rs": 25,
+        "internal/compiler/program_test.rs": 55,
+        "internal/testrunner/compiler_runner_test.rs": 21
+      },
+      "user_removed_per_file": {
+        "internal/checker/core/check.rs": 26,
+        "internal/checker/core/contextual.rs": 14,
+        "internal/checker/core/declared_types.rs": 1,
+        "internal/testrunner/compiler_runner_test.rs": 5
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 289,
+      "agent_lines_removed": 46
+    }
+  ]
+}
