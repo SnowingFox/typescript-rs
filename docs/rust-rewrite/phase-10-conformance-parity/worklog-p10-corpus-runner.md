@@ -1592,3 +1592,225 @@ No `--no-verify`; no test weakened/deleted; byte comparison unchanged; no new
 dependency; `Cargo.toml`/`Cargo.lock` untouched. Additive only (the parser fixes
 extend existing dispatch/modifier paths; the checker fix is a guard in
 `check_identifier`).
+
+---
+
+# Round 10 — TS2339 property false positives (cross-file lib-interface merge)
+
+Round goal: reduce the P10 `extra TS2339 ×18` — "Property '{0}' does not exist
+on type '{1}'." FALSE POSITIVES (we report a missing property where tsc resolves
+it). These had been STUCK at 18 since the Round-3 error-cascade fix, so they are
+genuine property-RESOLUTION gaps, not cascade artifacts. SOLO lane, strict TDD
+red→green. Edits: `internal/compiler/{multifile.rs,multifile_test.rs,program_test.rs}`
++ `internal/checker/core/declared_types.rs` (one defensive owning-view guard) +
+`internal/testrunner/compiler_runner_test.rs` (re-measured snapshot) + this
+worklog. No `binder`/`ast`/`parser` production change.
+
+## Step-0 categorization of the 18 (case → property → receiver → root)
+
+Every `+` (we-emit) `TS2339` in the 150-case FAIL diffs was extracted and
+confirmed ABSENT from the committed `.errors.txt` (tsc resolves the property):
+
+| case (file) | property → receiver | construct | bucket |
+|---|---|---|---|
+| `expandoFunctionAsAssertion.ts` | `isFoo` → `example` ×2 | `function example(){}; example.isFoo = …` | **H** TS expando-function |
+| `expandoPropertyEmptyArrayWidening.ts` | `a` → `f1` ×1 | `function f1(){}; f1.a = []` | **H** TS expando-function |
+| `expandoNoInferredIndex.ts` (`main.js`) | `foo`/`bar`/`buzz` → `{}` ×3 | `const obj = {}; obj.foo = …` (JS) | **H** JS expando-object |
+| `expandoNoInferredIndex.ts` (`main.js`) | `values` → `ObjectConstructor` ×1 | `Object.values(obj)` | **G** lib-interface merge |
+| `nonExpandoDeclarations.ts` (`main.js`) | `foo` → `{}` ×1 | `/** @type {Record<…>} */ let m = {}; m.foo = …` | **H** JS JSDoc-typed local |
+| `nonExpandoDeclarations.ts` (`main.js`) | `merged_props` → `f2` ×3 | `function f2(){}; f2.merged_props = {}` | **H** JS expando-function |
+| `jsDeclarationEmitThisAssignment.ts` (`main.js`) | `baz` → `Foo`, `x`/`y` → `Bar` ×3 | `class Foo { constructor(){ this.baz = … } }` (JS) | **H** JS `this`-property |
+| `jsDeclarationsRequireImportForms.ts` (`obj.js`/`index.js`) | `x` → `Obj`, `usage`/`usage2` → `Container` ×3 | `class Obj { constructor(){ this.x = … } }` (JS) | **H** JS `this`-property |
+| `objectSubtypeReduction.ts` | `entries` → `ObjectConstructor` ×1 | `Object.entries(x \|\| {})` (`@target esnext`) | **G** lib-interface merge |
+
+**18 extra TS2339 = bucket H ×16 + bucket G ×2.**
+
+- **Bucket H — JS/TS expando-property + `this`-property assignment (×16).** The
+  binder/checker JS-expando feature: `func.prop = v` adds an expando member to a
+  function type, `obj.prop = v` to a JS object-literal type, and `this.x = v` in
+  a JS class/constructor adds an instance member. ROOT Go path:
+  `binder.go:bindDeferredExpandoAssignments` + `checker.go:getWidenedType
+  ForAssignmentDeclaration` / `getTypeOfFuncClassEnumModule` + JS `this`-property
+  inference. This is the SAME deferred feature noted in Rounds 3/4/8. **DEFERRED**
+  — it is a large multi-behavior feature, AND tsc reports `TS7008`/`TS7022`
+  (implicit-any) on these members in the committed baselines, so resolving them
+  alone would not flip the cases (the implicit-any reporting would still be
+  missing). The LARGEST bucket but out of a surgical round's reach.
+- **Bucket G — cross-file lib-interface member resolution (×2).** `Object.entries`
+  / `Object.values` on `ObjectConstructor`. ROOT: `getPropertyOfType` finds an
+  interface's members via the binder-merged symbol's member table, but the
+  multi-file program's globals merge kept only the FIRST file's symbol for a
+  same-named global (`or_insert`, "first file wins"). `ObjectConstructor` is
+  declared across `lib.es5.d.ts` + `lib.es2015.core.d.ts` + `lib.es2017.object.d.ts`
+  + …, so the es2017 members (`entries`/`values`) were dropped. **FIXED this
+  round** — the largest TRACTABLE bucket.
+
+## The fix (Go-faithful cross-file declaration merging — member-table half)
+
+`internal/compiler/multifile.rs` `MultiFileBoundProgram::new_with_options`: the
+globals merge no longer `or_insert`s (first-file-wins) for a same-named global.
+When a name collides and the two symbols are *mergeable* (Go's
+`getExcludedSymbolFlags` test), the first file's symbol is the merge TARGET and
+each later same-named symbol's MEMBERS are unioned into it. A non-mergeable
+collision still keeps the first symbol (the duplicate-identifier diagnostic stays
+DEFER'd). Ports of Go:
+
+- `excluded_symbol_flags(flags)` — 1:1 port of `getExcludedSymbolFlags`.
+- `merge_global_symbol(symbols, target, source)` — the member-table half of
+  `mergeSymbol`: `target.flags |= source.flags` + `mergeSymbolTable(target.Members,
+  source.Members)` (insert-if-absent; member names already on the base target
+  win). Snapshots the source members (both live in the merged vector) before
+  mutating the target.
+- Go: `internal/checker/checker.go:Checker.initializeChecker` → `mergeGlobalSymbol`
+  → `mergeSymbol` / `getExcludedSymbolFlags`.
+
+`internal/checker/core/declared_types.rs:collect_index_infos_of_members` — a
+defensive owning-view guard: a merged interface's `__index` member may now come
+from another file, so its `IndexSignature` declaration node is read through the
+view of the file that DECLARES it (mirroring the owning-view switch in
+`get_declared_type_of_symbol`), avoiding a cross-arena read. The member-TYPE
+resolution path (`get_type_of_symbol`) already switched owning views (the Round-1
+`Array.push` fix), so `entries`/`values` (methods) resolve their signatures in
+their own (es2017) file.
+
+**DEFERRED (NOT ported, with blocked-by):** the rest of `mergeSymbol` — merging
+the `declarations` list and the `exports` table, and the recursive same-named
+member merge. Only the member-table union is needed for cross-file lib-interface
+property resolution. blocked-by: a per-declaration owning-view switch in the
+declared-type builders (`collect_local_type_parameters` / `resolve_base_types` /
+`collect_late_bound_well_known_members` would read a cross-file declaration node
+through the merge target's arena) + namespace export merging + `globalThis`.
+
+## RED→GREEN slices (one behavior at a time)
+
+`tsgo_compiler` (real bundled-lib path, the parity runner's path):
+
+1. **`object_entries_resolves_via_cross_file_lib_interface_merge`** (tracer) —
+   `Object.entries({})` with `lib: ["es2017"]` (pulls es5 → es2015.core →
+   es2017.object, so `ObjectConstructor` is declared in three lib files). RED:
+   `TS2339 Property 'entries' does not exist on type 'ObjectConstructor'` →
+   GREEN. (`@target esnext` would load the same chain but the full/DOM aggregate
+   trips a *pre-existing, unrelated* binder panic; `lib: ["es2017"]` is the clean
+   minimal repro.)
+2. **GUARD `absent_object_constructor_property_still_reports_2339_after_merge`** —
+   `Object.thisIsNotARealMethod` still reports `TS2339` (the merge resolves real
+   members, it does not blanket-mute the receiver).
+3. **GUARD `object_keys_es5_base_member_still_resolves_after_merge`** — the BASE
+   `lib.es5.d.ts` member `Object.keys` still resolves (the merge ADDS later-lib
+   members without dropping the first declaration's).
+
+`tsgo_compiler` (`multifile_test.rs`, synthetic multi-file, fast / isolated):
+
+4. **`cross_file_interface_members_merge_into_one_global_symbol`** — two files
+   each `interface Foo { … }` → the merged global `Foo` symbol's member table is
+   the UNION of both declarations' members.
+5. **GUARD `cross_file_non_mergeable_collision_keeps_first_symbol`** — two
+   block-scoped `let dup` across files are NOT merged (the gate); the first
+   file's symbol wins.
+
+Pre-existing guards `missing_property_reports_diagnostic` /
+`union_property_absent_from_one_constituent_reports_2339` stay GREEN.
+
+## Headline — measured parity BEFORE → AFTER (150-case subset)
+
+```
+BEFORE (Round 9):  150 cases — passed 69, failed 81, errored 0
+  extra: TS2304 ×34, TS2339 ×18, TS2322 ×12, TS2345 ×9, TS1005 ×5, TS1003 ×3,
+         TS2495 ×2, TS1109 ×1, TS1161 ×1, TS2344 ×1, TS2583 ×1, TS2591 ×1, TS5108 ×1
+  categories: no_baseline 25, missing_all 36, divergent 20
+AFTER  (Round 10): 150 cases — passed 69, failed 81, errored 0
+  extra: TS2304 ×34, TS2339 ×16, TS2322 ×12, TS2345 ×9, TS1005 ×5, TS1003 ×3,
+         TS2495 ×2, TS1109 ×1, TS1161 ×1, TS2344 ×1, TS2591 ×1, TS2769 ×1, TS5108 ×1
+  categories: no_baseline 25, missing_all 37, divergent 19
+```
+
+- **extra TS2339 ×18 → ×16 (−2)** — both `ObjectConstructor` false positives
+  cleared (`objectSubtypeReduction`'s `entries`, `expandoNoInferredIndex`'s
+  `values`); the property genuinely resolves.
+- **extra TS2583 ×1 → ×0** — a BONUS: the `Promise` global VALUE (`main.js`
+  `TS2583 Cannot find name 'Promise'`) now resolves once its split
+  interface/`var` declarations merge across the lib files.
+- **extra TS2769 ×0 → ×1 (NEW, DEFERRED)** — an HONEST downstream exposure:
+  `objectSubtypeReduction`'s `Object.entries(x || {})` now reaches overload
+  resolution (previously short-circuited by the `error`-type 2339), and we report
+  `No overload matches this call` because `object | {}` is not yet related to the
+  empty object type `{}`. This is a SEPARATE relations/union-reduction bucket
+  (neither Go's `isSimpleTypeRelatedTo` nor the structural object arm relates a
+  NonPrimitive `object` source to an empty-object target — tsc's path is union
+  subtype reduction of `x || {}`), out of a property-resolution round's scope.
+- **Honest flip count: 0.** Both TS2339-affected cases retain OTHER reachable
+  gaps (`objectSubtypeReduction` → the new TS2769; `expandoNoInferredIndex` → its
+  3 deferred JS-expando 2339s). Net spurious diagnostics: −2 TS2339 −1 TS2583
+  +1 TS2769 = **−2**.
+- **PROOF of no over-resolution:** the `missing` histogram is BYTE-IDENTICAL
+  BEFORE vs AFTER (`missing TS2339 ×5`, `top_missing TS2874 ×7`, all 52 codes
+  unchanged) — the merge did NOT mask any real error. **ZERO PASS→FAIL
+  regressions** (PASS/FAIL/ERR verdict set diffed byte-for-byte: identical
+  69/81/0). The category shift (`missing_all 36→37`, `divergent 19`,
+  `no_baseline 25`) is internal reclassification of cases that lost a false
+  positive, not a verdict change.
+
+## Test deltas
+
+- `tsgo_compiler`: **98 → 103** unit (+5: 3 real-lib `program_test.rs`, 2
+  synthetic `multifile_test.rs`); doctests unchanged (11).
+- `tsgo_checker`: unit/doctest counts unchanged (771 / 178) — the
+  `collect_index_infos_of_members` change is a defensive owning-view guard
+  exercised by the real-lib compiler merge tests.
+- `tsgo_testrunner`: unit/doctest counts unchanged (47 / 11); the
+  `expanded_compiler_subset_parity_smoke` characterization re-measured
+  (`missing_all 36→37`, `divergent 20→19`, `top_extra(2)` `(2339,18)→(2339,16)`,
+  new guards `extra TS2339 == 16`, `extra TS2583 == None`, `extra TS2769 == 1`).
+  Counts `{69,81,0}` and `top_missing TS2874 ×7` unchanged. The 30-case smoke is
+  UNCHANGED (18/12/0).
+- No existing test weakened or deleted; byte comparison unchanged.
+
+## Gate results (Round 10)
+
+- `cargo test -p tsgo_checker` — GREEN (771 unit + 178 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (103 unit + 11 doctests) [real bundled-lib].
+- `cargo test -p tsgo_testrunner` — GREEN (47 unit + 11 doctests; 150-case re-measure).
+- Sibling suites GREEN: `tsgo_binder` (54), `tsgo_transformers` (311),
+  `tsgo_printer` (194, 1 ignored), `tsgo_ast` (57).
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner --all-targets
+  -- -D warnings` — GREEN.
+- `cargo fmt -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner -- --check` — GREEN.
+- `cargo build --workspace --all-targets` — GREEN.
+
+No `--no-verify`; no test weakened/deleted; byte comparison unchanged; no new
+dependency; `Cargo.toml`/`Cargo.lock` untouched. Additive only (the globals merge
++ two new free fns in `multifile.rs`; the `declared_types.rs` change is an
+owning-view guard internal to `collect_index_infos_of_members`).
+
+## DEFER list (blocked-by) — Round 10
+
+- **Bucket H — JS/TS expando + `this`-property assignment (the remaining
+  `extra TS2339 ×16`)** — `func.prop = v` / `obj.prop = v` / `this.x = v` member
+  inference. A large multi-behavior binder+checker feature; AND tsc reports
+  `TS7008`/`TS7022` (implicit-any) on these members (the committed baselines), so
+  resolving them would not flip the cases without the implicit-any reporting too.
+  blocked-by: `binder.go:bindDeferredExpandoAssignments` /
+  `bindSpecialPropertyAssignment` + `checker.go:getWidenedTypeForAssignment
+  Declaration` / `getTypeOfFuncClassEnumModule` (expando member synthesis) + JS
+  `this`-property instance-member inference. Cases: `expandoFunctionAsAssertion`,
+  `expandoPropertyEmptyArrayWidening`, `expandoNoInferredIndex`,
+  `nonExpandoDeclarations`, `jsDeclarationEmitThisAssignment`,
+  `jsDeclarationsRequireImportForms`.
+- **`object | {}` → `{}` overload/assignability (the newly-exposed
+  `extra TS2769 ×1`)** — `objectSubtypeReduction`'s `Object.entries(x || {})`.
+  A NonPrimitive `object` source is not related to the empty object type `{}`
+  (neither `isSimpleTypeRelatedTo` nor the structural object arm covers it); tsc's
+  path is union subtype reduction of the `||` result. A separate relations /
+  union-reduction bucket. blocked-by: `getUnionType` subtype reduction of the
+  `||`/`&&` result type + the empty-object-target relation
+  (`isEmptyObjectType(target)` short-circuit reached for a NonPrimitive source).
+- **Full `mergeSymbol` (declarations + exports + recursive member merge)** — only
+  the member-table union is ported this round. blocked-by: a per-declaration
+  owning-view switch in the declared-type builders + namespace export merging +
+  `globalThis` (see "The fix").
+- **Pre-existing `@target: esnext` full/DOM-lib binder panic** — surfaced (not
+  caused) by the tracer probe at `binder/symbols.rs:375` (`symbol_of(container)
+  .unwrap()` on a `None` for an exported declaration whose container file has no
+  symbol). Unrelated to this round (the parity harness does not load the
+  full/DOM aggregate for these cases); the tracer uses `lib: ["es2017"]` to avoid
+  it. blocked-by: a separate binder triage of the esnext-full lib chain.

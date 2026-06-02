@@ -858,6 +858,97 @@ fn property_access_chain_on_any_reports_no_2339() {
     );
 }
 
+/// End to end with the REAL bundled lib: `Object.entries(...)` resolves the
+/// `entries` member on `ObjectConstructor`, which is declared across MULTIPLE
+/// lib files (`lib.es5.d.ts` declares `ObjectConstructor` with `keys`/...; the
+/// `entries`/`values` members live in `lib.es2017.object.d.ts`). With
+/// `@target: esnext` the whole lib chain is loaded, so tsc merges every
+/// `interface ObjectConstructor` declaration and resolves `entries` — producing
+/// NO `TS2339`. Before the cross-file declaration-merge fix the program's
+/// merged globals kept only the FIRST file's `ObjectConstructor` symbol
+/// (`lib.es5.d.ts`), so the es2017 `entries`/`values` members were lost and we
+/// reported a spurious `TS2339` (the P10 `objectSubtypeReduction` false
+/// positive).
+// Go: internal/checker/checker.go:Checker.mergeGlobalSymbol / mergeSymbol (cross-file declaration merging)
+#[test]
+fn object_entries_resolves_via_cross_file_lib_interface_merge() {
+    // `lib: ["es2017"]` pulls the es5 -> es2015.core -> es2017.object chain (so
+    // `ObjectConstructor` is declared in three separate lib files) WITHOUT the
+    // DOM/full aggregate, a minimal/deterministic repro of the cross-file
+    // interface merge.
+    let options = CompilerOptions {
+        lib: vec!["es2017".to_string()],
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "Object.entries({});\n")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "Object.entries (es2017 member of the multiply-declared ObjectConstructor) \
+         must resolve via cross-file interface merge (no 2339): {diags:?}"
+    );
+}
+
+/// GUARD (NOT over-resolution): a property that is genuinely absent from the
+/// merged `ObjectConstructor` STILL reports `TS2339`. This proves the cross-file
+/// merge resolves real members rather than blanket-muting the diagnostic on the
+/// receiver.
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty (TS2339)
+#[test]
+fn absent_object_constructor_property_still_reports_2339_after_merge() {
+    let options = CompilerOptions {
+        lib: vec!["es2017".to_string()],
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "Object.thisIsNotARealMethod;\n")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2339 && d.message.contains("thisIsNotARealMethod")),
+        "a genuinely-absent member must still report 2339: {diags:?}"
+    );
+}
+
+/// GUARD (no regression of base members): a BASE (`lib.es5.d.ts`)
+/// `ObjectConstructor` member (`keys`) still resolves after the cross-file merge
+/// — the merge ADDS later-lib members without dropping the first declaration's.
+// Go: internal/checker/checker.go:Checker.mergeSymbol (target members are kept)
+#[test]
+fn object_keys_es5_base_member_still_resolves_after_merge() {
+    let options = CompilerOptions {
+        lib: vec!["es2017".to_string()],
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", "Object.keys({});\n")],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "the es5 base member `Object.keys` must still resolve after the merge: {diags:?}"
+    );
+}
+
 /// End to end with the REAL bundled lib (the path the P10 corpus parity runner
 /// exercises): a CommonJS `require(...)` call in a checked JS file resolves the
 /// bare `require` callee to the synthetic `require` symbol (type `any`), so

@@ -610,12 +610,24 @@ fn collect_index_infos_of_members(
     let Some(&index_symbol) = members.get(INTERNAL_SYMBOL_NAME_INDEX) else {
         return Vec::new();
     };
+    // The `__index` member may have been merged in from ANOTHER file (cross-file
+    // declaration merging of a global interface — see
+    // `MultiFileBoundProgram`'s globals merge); its `IndexSignature` declaration
+    // node lives in that file's arena, so read it through the view of the file
+    // that DECLARES the index symbol, mirroring the owning-view switch in
+    // `get_declared_type_of_symbol`. For a single-file program `view_for_symbol`
+    // is `None` and this is a no-op (the index symbol is local).
+    let owner = program.view_for_symbol(index_symbol);
+    let prog: &dyn BoundProgram = match owner.as_deref() {
+        Some(view) if view.file_handle() != program.file_handle() => view,
+        _ => program,
+    };
     let mut index_infos = Vec::new();
-    for &decl in &program.symbol(index_symbol).declarations {
-        if program.arena().kind(decl) != Kind::IndexSignature {
+    for &decl in &prog.symbol(index_symbol).declarations {
+        if prog.arena().kind(decl) != Kind::IndexSignature {
             continue;
         }
-        let (param_nodes, type_node, modifiers) = match program.arena().data(decl) {
+        let (param_nodes, type_node, modifiers) = match prog.arena().data(decl) {
             NodeData::IndexSignatureDeclaration(d) => {
                 (&d.parameters.nodes, d.type_node, d.modifiers.as_ref())
             }
@@ -624,28 +636,19 @@ fn collect_index_infos_of_members(
         if param_nodes.len() != 1 {
             continue;
         }
-        let key_type_node = match program.arena().data(param_nodes[0]) {
+        let key_type_node = match prog.arena().data(param_nodes[0]) {
             NodeData::ParameterDeclaration(d) => d.type_node,
             _ => None,
         };
         let Some(key_node) = key_type_node else {
             continue;
         };
-        let key_type = get_type_from_type_node_with_type_params(
-            checker,
-            program,
-            key_node,
-            type_params,
-            globals,
-        );
+        let key_type =
+            get_type_from_type_node_with_type_params(checker, prog, key_node, type_params, globals);
         let value_type = match type_node {
-            Some(node) => get_type_from_type_node_with_type_params(
-                checker,
-                program,
-                node,
-                type_params,
-                globals,
-            ),
+            Some(node) => {
+                get_type_from_type_node_with_type_params(checker, prog, node, type_params, globals)
+            }
             None => checker.any_type(),
         };
         let is_readonly = modifiers

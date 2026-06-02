@@ -257,14 +257,28 @@ impl MultiFileBoundProgram {
                 merged_symbols.push(remap_symbol(symbol, off));
             }
         }
-        let merged_symbols = Rc::new(merged_symbols);
 
         // The merged global table: the union of every file's top-level (root
         // `locals`) declarations, with merged ids (Go's `Checker.globals`).
-        // DEFER(P6): cross-file symbol MERGE for same-named declarations
-        // (declaration merging) — first file wins here, mirroring the harness.
-        // blocked-by: `mergeSymbol`/`mergeSymbolTable` (the binder's cross-file
-        // merge) + `globalThis`.
+        //
+        // Cross-file DECLARATION MERGING (Go's `mergeGlobalSymbol` ->
+        // `mergeSymbol`): when a global name is declared in more than one file
+        // and the declarations are *mergeable* (e.g. a global `interface`
+        // augmented across lib files — `ObjectConstructor` is declared in
+        // `lib.es5.d.ts`, `lib.es2015.core.d.ts`, `lib.es2017.object.d.ts`, ...),
+        // the FIRST file's symbol is the merge TARGET and each later same-named
+        // symbol's MEMBERS are unioned into it, so a property declared only in a
+        // later lib file (`Object.entries`/`Object.values` on `ObjectConstructor`)
+        // still resolves. A non-mergeable collision keeps the first symbol (the
+        // duplicate-identifier diagnostic is DEFER'd).
+        //
+        // DEFER(P6): merging the `declarations` list / the `exports` table and
+        // the recursive same-named member merge (the rest of Go's `mergeSymbol`).
+        // Only the member-table union (+ OR-ed flags) is ported — exactly what
+        // cross-file lib-interface property resolution needs. blocked-by: a
+        // per-declaration owning-view switch in the declared-type builders (a
+        // cross-file declaration node must be read through its own file's arena,
+        // not the merge target's) + namespace export merging + `globalThis`.
         let mut merged_globals = SymbolTable::default();
         for (i, file) in bound.iter().enumerate() {
             let off = offsets[i];
@@ -286,12 +300,19 @@ impl MultiFileBoundProgram {
                     {
                         continue;
                     }
-                    merged_globals
-                        .entry(name.clone())
-                        .or_insert(SymbolId(sid.0 + off));
+                    let source = SymbolId(sid.0 + off);
+                    match merged_globals.get(name).copied() {
+                        None => {
+                            merged_globals.insert(name.clone(), source);
+                        }
+                        Some(target) => {
+                            merge_global_symbol(&mut merged_symbols, target, source);
+                        }
+                    }
                 }
             }
         }
+        let merged_symbols = Rc::new(merged_symbols);
         let merged_globals = Rc::new(merged_globals);
 
         // Per-file merged-symbol ranges (parallel to `views`), used to map a
@@ -437,6 +458,109 @@ impl BoundProgram for MultiFileBoundProgram {
 /// Symbol-id fields (`members`/`exports` table values, `parent`,
 /// `export_symbol`) are shifted; declaration *node* ids stay file-local (they
 /// are only ever read through the owning file's arena).
+/// Merges a later same-named global symbol's MEMBERS into the first-encountered
+/// (`target`) symbol — the member-table half of Go's `mergeSymbol`
+/// (`target.Flags |= source.Flags` + `mergeSymbolTable(target.Members,
+/// source.Members)`). A global `interface` augmented across files (e.g.
+/// `ObjectConstructor` declared in the es5/es2015/es2017 lib files) thus exposes
+/// every declaration's members, so `Object.entries`/`Object.values` resolve.
+///
+/// The merge is gated by the same mergeability test Go uses
+/// ([`excluded_symbol_flags`]): two interfaces merge, but e.g. an interface and a
+/// block-scoped `let` do not. A non-mergeable collision is left as first-wins
+/// (the duplicate-identifier diagnostic is DEFER'd, as before). Member names
+/// already on the target win (the target is the base declaration); a member
+/// present only on `source` is added (Go's `mergeSymbolTable` inserts the
+/// not-yet-present source members and recursively merges colliding ones — the
+/// recursive same-named member merge is DEFER'd here).
+///
+/// Only the member table and the OR-ed flags are merged — NOT `declarations` or
+/// `exports` (see the globals-merge note for the blocked-by).
+// Go: internal/checker/checker.go:Checker.mergeSymbol (Flags |= ; mergeSymbolTable(Members))
+fn merge_global_symbol(symbols: &mut [Symbol], target: SymbolId, source: SymbolId) {
+    if target == source {
+        return;
+    }
+    let target_flags = symbols[target.index()].flags;
+    let source_flags = symbols[source.index()].flags;
+    // Go: `target.Flags & getExcludedSymbolFlags(source.Flags) == 0 ||
+    //      (source.Flags | target.Flags) & SymbolFlagsAssignment != 0`
+    let mergeable = (target_flags & excluded_symbol_flags(source_flags)) == SymbolFlags::NONE
+        || (source_flags | target_flags).contains(SymbolFlags::ASSIGNMENT);
+    if !mergeable {
+        return;
+    }
+    // The source and target both live in `symbols`, so snapshot the source's
+    // (already merge-id-remapped) members before mutating the target.
+    let source_members: Vec<(String, SymbolId)> = symbols[source.index()]
+        .members
+        .iter()
+        .map(|(name, &member)| (name.clone(), member))
+        .collect();
+    let target_sym = &mut symbols[target.index()];
+    target_sym.flags |= source_flags;
+    for (name, member) in source_members {
+        target_sym.members.entry(name).or_insert(member);
+    }
+}
+
+/// Ports Go's `getExcludedSymbolFlags`: the symbol-flag bits a declaration with
+/// `flags` cannot merge with. Used to gate cross-file global declaration merging
+/// (two `interface`s merge; an `interface` and a `let` do not).
+// Go: internal/checker/checker.go:getExcludedSymbolFlags
+fn excluded_symbol_flags(flags: SymbolFlags) -> SymbolFlags {
+    let mut result = SymbolFlags::NONE;
+    if flags.contains(SymbolFlags::BLOCK_SCOPED_VARIABLE) {
+        result |= SymbolFlags::BLOCK_SCOPED_VARIABLE_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::FUNCTION_SCOPED_VARIABLE) {
+        result |= SymbolFlags::FUNCTION_SCOPED_VARIABLE_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::PROPERTY) {
+        result |= SymbolFlags::PROPERTY_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::ENUM_MEMBER) {
+        result |= SymbolFlags::ENUM_MEMBER_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::FUNCTION) {
+        result |= SymbolFlags::FUNCTION_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::CLASS) {
+        result |= SymbolFlags::CLASS_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::INTERFACE) {
+        result |= SymbolFlags::INTERFACE_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::REGULAR_ENUM) {
+        result |= SymbolFlags::REGULAR_ENUM_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::CONST_ENUM) {
+        result |= SymbolFlags::CONST_ENUM_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::VALUE_MODULE) {
+        result |= SymbolFlags::VALUE_MODULE_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::METHOD) {
+        result |= SymbolFlags::METHOD_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::GET_ACCESSOR) {
+        result |= SymbolFlags::GET_ACCESSOR_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::SET_ACCESSOR) {
+        result |= SymbolFlags::SET_ACCESSOR_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::TYPE_PARAMETER) {
+        result |= SymbolFlags::TYPE_PARAMETER_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::TYPE_ALIAS) {
+        result |= SymbolFlags::TYPE_ALIAS_EXCLUDES;
+    }
+    if flags.contains(SymbolFlags::ALIAS) {
+        result |= SymbolFlags::ALIAS_EXCLUDES;
+    }
+    result
+}
+
 fn remap_symbol(symbol: &Symbol, offset: u32) -> Symbol {
     Symbol {
         flags: symbol.flags,

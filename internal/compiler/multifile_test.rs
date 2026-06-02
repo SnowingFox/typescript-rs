@@ -93,6 +93,59 @@ fn compiler_options_reflects_program_options() {
     );
 }
 
+/// Cross-file DECLARATION MERGING: a global `interface` declared in more than
+/// one file (the lib pattern — `ObjectConstructor` is augmented across
+/// `lib.es5.d.ts`/`lib.es2015.core.d.ts`/`lib.es2017.object.d.ts`) is merged
+/// into a single global symbol whose member table is the UNION of every
+/// declaration's members. This is the member-table half of Go's `mergeSymbol`.
+// Go: internal/checker/checker.go:Checker.mergeGlobalSymbol / mergeSymbol
+#[test]
+fn cross_file_interface_members_merge_into_one_global_symbol() {
+    let files = vec![
+        bound("/a.d.ts", "interface Foo { a: number; }"),
+        bound("/b.d.ts", "interface Foo { b: string; }"),
+    ];
+    let program = MultiFileBoundProgram::new(&files);
+    let globals = program.globals().expect("merged globals");
+
+    let foo = *globals.get("Foo").expect("merged Foo global");
+    let members = &program.symbol(foo).members;
+    assert!(
+        members.contains_key("a"),
+        "member from the first declaration is kept: {:?}",
+        members.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        members.contains_key("b"),
+        "member from the second declaration is merged in: {:?}",
+        members.keys().collect::<Vec<_>>()
+    );
+}
+
+/// Guard for the merge gate (`getExcludedSymbolFlags`): a NON-mergeable
+/// same-named collision (two block-scoped `let`s) is NOT merged — the first
+/// file's symbol wins (the duplicate-identifier diagnostic is DEFER'd), so the
+/// merge does not blanket-combine every collision.
+// Go: internal/checker/checker.go:getExcludedSymbolFlags (BlockScopedVariableExcludes)
+#[test]
+fn cross_file_non_mergeable_collision_keeps_first_symbol() {
+    let files = vec![
+        bound("/a.ts", "let dup = 1;"),
+        bound("/b.ts", "let dup = 2;"),
+    ];
+    let program = MultiFileBoundProgram::new(&files);
+    let handles = program.source_files();
+    let globals = program.globals().expect("merged globals");
+
+    let dup = *globals.get("dup").expect("dup global");
+    let dup_view = program.view_for_symbol(dup).expect("declaring view");
+    assert_eq!(
+        dup_view.file_handle(),
+        handles[0],
+        "a non-mergeable collision keeps the FIRST file's symbol (no merge)"
+    );
+}
+
 /// `view_for_symbol(merged_id)` returns the view of the file that *declares* the
 /// symbol, so the checker can build a global type against the arena that owns
 /// its declaration nodes (Go: a symbol's declaring file).

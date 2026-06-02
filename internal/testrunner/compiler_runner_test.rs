@@ -697,8 +697,8 @@ fn expanded_compiler_subset_parity_smoke() {
         "every failed case is categorized"
     );
     assert_eq!(hist.no_baseline_but_errors, 25);
-    assert_eq!(hist.missing_all_errors, 36);
-    assert_eq!(hist.divergent, 20);
+    assert_eq!(hist.missing_all_errors, 37);
+    assert_eq!(hist.divergent, 19);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare
@@ -747,10 +747,52 @@ fn expanded_compiler_subset_parity_smoke() {
     // `extra TS1005 ×5` / `TS1003 ×3` are `awaitObjectLiteral` (DEFERRED top-level
     // await) plus the `declarationEmitTypeofIndexedAccessNoParens` typeof-query
     // checker residue.
+    // Round 10 (cross-file lib-interface declaration merging): a global
+    // `interface` declared across MULTIPLE lib files (e.g. `ObjectConstructor`
+    // in `lib.es5.d.ts` + `lib.es2015.core.d.ts` + `lib.es2017.object.d.ts`) is
+    // now merged into one global symbol whose member table is the UNION of every
+    // declaration's members (the member-table half of Go's `mergeGlobalSymbol` /
+    // `mergeSymbol`). So an es2017 member (`Object.entries`/`Object.values`) now
+    // RESOLVES instead of reporting a spurious `TS2339` — dropping
+    // `extra TS2339 ×18 -> ×16` (the `objectSubtypeReduction` `entries` + the
+    // `expandoNoInferredIndex` `values`). It also clears `extra TS2583 ×1` (the
+    // `Promise` global VALUE now resolves once its split interface/var
+    // declarations merge across lib files). No case flips to PASS — both
+    // TS2339-affected cases retain OTHER reachable gaps: `objectSubtypeReduction`
+    // now surfaces a DEFERRED `extra TS2769 ×1` (`object | {}` is not yet related
+    // to the empty object type `{}` in overload resolution — a separate
+    // relations/union-reduction gap), and `expandoNoInferredIndex` keeps its 3
+    // JS-expando `TS2339`s (the deferred expando-property feature). The `missing`
+    // histogram is UNCHANGED (no over-resolution masked a real error;
+    // `missing TS2339 ×5` is intact), and no case regressed PASS -> FAIL.
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 34), (2339, 18)],
+        vec![(2304, 34), (2339, 16)],
         "top extra (false-positive) codes; histogram:\n{}",
+        hist.report()
+    );
+    // Round 10 guards: the two `ObjectConstructor` false positives are cleared
+    // (the property genuinely resolves), the `Promise`-value `TS2583` is cleared,
+    // and the newly-exposed downstream `object -> {}` overload gap is the lone
+    // new extra (DEFERRED — a relations/union-reduction bucket, not property
+    // resolution).
+    assert_eq!(
+        hist.extra.get(&2339),
+        Some(&16),
+        "cross-file lib-interface merge clears the 2 ObjectConstructor TS2339; histogram:\n{}",
+        hist.report()
+    );
+    assert_eq!(
+        hist.extra.get(&2583),
+        None,
+        "the `Promise` target-lib TS2583 is cleared by the cross-file merge; histogram:\n{}",
+        hist.report()
+    );
+    assert_eq!(
+        hist.extra.get(&2769),
+        Some(&1),
+        "objectSubtypeReduction's `Object.entries` now resolves, exposing a DEFERRED \
+         `object -> {{}}` overload-resolution gap (TS2769); histogram:\n{}",
         hist.report()
     );
     // Round 9 parser-recovery false-positive guards: the cleared syntax-error
