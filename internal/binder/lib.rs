@@ -1111,14 +1111,33 @@ impl<'a> Binder<'a> {
         }
     }
 
-    // Go: internal/binder/binder.go:bindModuleDeclaration (partial)
+    // Go: internal/binder/binder.go:bindModuleDeclaration
+    //
+    // Go creates the module's symbol on EVERY path: the non-ambient branch via
+    // `declareModuleSymbol`, and the ambient branch via either
+    // `declareModuleSymbol` (`IsModuleAugmentationExternal`) or
+    // `declareSymbolAndAddToSymbolTable`. All of them funnel through
+    // `declareSymbolAndAddToSymbolTable` with `ValueModule` flags and identical
+    // symbol-table placement, so the symbol creation is unconditional here.
+    //
+    // Creating it is the correctness-critical effect: an ambient module
+    // container (`declare global { … }` / `declare module "…" { … }`) must own a
+    // symbol BEFORE its members are bound, or `declareModuleMember`'s
+    // `symbol_of(container).unwrap()` hits `None` and panics. (A prior port
+    // returned early for ambient modules, leaving the `declare global`
+    // augmentation in the bundled `lib.es2025.iterator.d.ts` — and any
+    // `.d.ts`/`@types` `declare module "…"` — without a container symbol.)
+    //
+    // DEFER(phase-4): the `ValueModule`-vs-`NamespaceModule` instance-state
+    // selection (`declareModuleSymbol`/`GetModuleInstanceState`), the
+    // const-enum-only-module bookkeeping, the `export`-modifier TS2668 error, and
+    // the string-literal `module "…"` pattern tracking (`TryParsePattern` /
+    // `PatternAmbientModules`). None of these change which symbol table the
+    // module symbol lands in for the bundled libs; the `ValueModule`
+    // simplification matches the pre-existing non-ambient path.
+    // blocked-by: `GetModuleInstanceState` + `core.TryParsePattern` ports.
     fn bind_module_declaration(&mut self, node: NodeId) {
         self.set_export_context_flag(node);
-        if astquery::is_ambient_module(self.arena, node) {
-            // Ambient module declaration handling is deferred (needs pattern
-            // parsing + augmentation rules).
-            return;
-        }
         self.declare_symbol_and_add_to_symbol_table(
             node,
             SymbolFlags::VALUE_MODULE,

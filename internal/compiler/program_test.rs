@@ -420,6 +420,83 @@ fn property_access_on_lib_declared_method_does_not_panic() {
     let _ = program.semantic_diagnostics();
 }
 
+/// Round 11 (esnext/DOM lib bind panic fix): binding the FULL `@target: esnext`
+/// default lib — which expands to the DOM lib plus the whole `es20xx` chain,
+/// including `lib.es2025.iterator.d.ts`'s `declare global { … }` augmentation —
+/// must complete WITHOUT panicking, and the real globals must resolve.
+///
+/// The `declare global` block is an ambient module. The binder used to DEFER its
+/// symbol creation, then panic at `declareModuleMember`'s
+/// `symbol_of(container).unwrap()` (`internal/binder/symbols.rs`) when binding
+/// the block's `interface`/`var` members — `bind_source_files` swallowed the
+/// panic and left `lib.es2025.iterator.d.ts` UNBOUND. With the root fix (the
+/// ambient module now owns a symbol before its members bind, matching Go's
+/// `bindModuleDeclaration`), every esnext+dom lib binds and contributes globals.
+// Go: internal/binder/binder.go:bindModuleDeclaration (ambient-module symbol creation)
+#[test]
+fn binds_full_esnext_dom_lib_without_panic() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::EsNext,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[(
+            "/src/index.ts",
+            "let o: Object;\nlet el: HTMLElement;\nlet p: Promise<number>;\n",
+        )],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    // `@target: esnext` expands the default-lib reference graph to the full set,
+    // including the `declare global` augmentation lib and the DOM lib.
+    let names: Vec<String> = program
+        .source_files()
+        .iter()
+        .map(|f| f.file_name().to_string())
+        .collect();
+    assert!(
+        names
+            .iter()
+            .any(|n| n == "bundled:///libs/lib.es2025.iterator.d.ts"),
+        "esnext pulls in the `declare global` augmentation lib: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "bundled:///libs/lib.dom.d.ts"),
+        "esnext pulls in the DOM lib: {names:?}"
+    );
+
+    // Bind every file. `bind_source_files` swallows per-file binder panics
+    // (leaving the file unbound); the regression left
+    // `lib.es2025.iterator.d.ts` UNBOUND. With the fix, every lib binds.
+    program.bind_source_files();
+    let unbound: Vec<&str> = program
+        .source_files()
+        .iter()
+        .filter(|f| !f.is_bound())
+        .map(|f| f.file_name())
+        .collect();
+    assert!(
+        unbound.is_empty(),
+        "every esnext+dom lib must bind without panicking; unbound: {unbound:?}"
+    );
+
+    // The merged globals from the full lib resolve: no `TS2304 Cannot find name`
+    // for the `es5`/`dom`/`es2015` globals referenced above (each lives in a lib
+    // that now binds and contributes to the multi-file program's globals).
+    let diags = program.semantic_diagnostics();
+    let unresolved: Vec<&str> = diags
+        .iter()
+        .filter(|d| d.code == 2304)
+        .map(|d| d.message.as_str())
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "real esnext+dom globals (Object/HTMLElement/Promise) must resolve: {unresolved:?}"
+    );
+}
+
 /// End to end (P6-8): a program with the DEFAULT lib (no explicit `--lib`)
 /// resolves a real global declared in a *referenced* lib. The aggregator
 /// `lib.d.ts` pulls in `lib.es5.d.ts` via `/// <reference lib>`, so the merged

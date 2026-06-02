@@ -1814,3 +1814,218 @@ owning-view guard internal to `collect_index_infos_of_members`).
   symbol). Unrelated to this round (the parity harness does not load the
   full/DOM aggregate for these cases); the tracer uses `lib: ["es2017"]` to avoid
   it. blocked-by: a separate binder triage of the esnext-full lib chain.
+  **→ FIXED in Round 11 (below).**
+
+# Round 11 — esnext/DOM lib bind panic fix
+
+Round goal: fix the **critical robustness bug** that made the compiler unusable
+on real-world projects — the binder PANICKED at `internal/binder/symbols.rs:375`
+(`let sym = self.symbol_of(container).unwrap();`) whenever the full
+`@target: esnext` / DOM lib set was bound. Strict TDD red→green, one vertical
+slice. Edits: `internal/binder/lib.rs` (the root fix) + `internal/binder/symbols_test.rs`
+(focused binder tests) + `internal/compiler/program_test.rs` (the real-lib
+headline) + this doc. Surgical/additive — no test weakened or deleted.
+
+## Reproduce + pinpoint (STEP 0)
+
+A temporary instrumented `eprintln!` just before the `symbol_of(container)
+.unwrap()` in `declareModuleMember`'s export-context branch, driven by a focused
+binder test binding an external-module file with a `declare global { … }`
+augmentation, captured the EXACT trigger:
+
+```
+file=… container_kind=ModuleDeclaration node_kind=InterfaceDeclaration node_name=Some("IteratorObject")
+panicked at internal/binder/symbols.rs:375: called `Option::unwrap()` on a `None` value
+```
+
+- **Lib file:** `internal/bundled/libs/lib.es2025.iterator.d.ts` — the only
+  bundled lib with a `declare global { … }` block. It is an **external module**
+  (`export {};` at the top), and the `declare global` block holds
+  `interface IteratorObject<…>`, `interface IteratorConstructor`, and
+  `var Iterator: IteratorConstructor`. `@target: esnext` reaches it via
+  `lib.esnext.full.d.ts` → `esnext` → `es2025` → `es2025.iterator`.
+- **Symbol-less container:** the `declare global { … }` node — a
+  `ModuleDeclaration` with `keyword == GlobalKeyword`, i.e. a **global scope
+  augmentation** (`ast.IsGlobalScopeAugmentation` ⇒ `ast.IsAmbientModule`).
+- **Declaration that tripped it:** the first member, `interface IteratorObject`.
+- **Why `None`:** the global block is an **ambient module**, and the Rust binder
+  `bind_module_declaration` **returned early for ambient modules without creating
+  their symbol**. When the block's members then bound (container = the global
+  block), `declareModuleMember`'s export-context branch did
+  `symbol_of(container).unwrap()` on a `None`. The block IS a locals container
+  (`HAS_LOCALS`) and IS in export context (`set_export_context_flag` sets
+  `EXPORT_CONTEXT` because the block is `AMBIENT` and has no export
+  declarations), so binding reached the 2-symbol local+export path (line 374–375)
+  rather than the `!is_locals_container` arm (line 359). This is hypothesis (c):
+  a namespace/module container whose symbol isn't set before its members bind.
+
+`internal/compiler/program.rs:bind_source_files` wraps each file's bind in
+`catch_unwind`, so the panic was swallowed and `lib.es2025.iterator.d.ts` was
+left **UNBOUND** (its globals silently dropped) — the headline test asserts it
+is now bound.
+
+## Go ground truth (why Go never hits a `nil` `container.Symbol()` here)
+
+```go
+// Go: internal/binder/binder.go:bindModuleDeclaration (778)
+func (b *Binder) bindModuleDeclaration(node *ast.Node) {
+	b.setExportContextFlag(node)
+	if ast.IsAmbientModule(node) {
+		if ast.HasSyntacticModifier(node, ast.ModifierFlagsExport) { /* TS2668 */ }
+		if ast.IsModuleAugmentationExternal(node) {
+			b.declareModuleSymbol(node)                                  // ← creates the symbol
+		} else {
+			symbol := b.declareSymbolAndAddToSymbolTable(node, ast.SymbolFlagsValueModule, …) // ← creates the symbol
+			/* string-literal `module "…"` pattern bookkeeping */
+		}
+	} else {
+		state := b.declareModuleSymbol(node)                              // ← creates the symbol
+		/* const-enum-only-module bookkeeping */
+	}
+}
+```
+
+Go creates the module's symbol on **every** path (the ambient branch and the
+non-ambient branch both funnel through `declareSymbolAndAddToSymbolTable`). For
+the `declare global` augmentation in an external-module lib,
+`ast.IsModuleAugmentationExternal` is `true` (parent is the source file and
+`ast.IsExternalModule(parent)` holds because of `export {};`), so Go calls
+`declareModuleSymbol` → `declareSymbolAndAddToSymbolTable` → (container is the
+`SourceFile`) `declareSourceFileMember` → (external module) `declareModuleMember`.
+There, `getDeclarationName` returns `InternalSymbolNameGlobal` (`__global`) and
+`ast.IsAmbientModule(node)` is `true`, so the `!IsAmbientModule(node) && …`
+guard at `binder.go:404` is skipped and the global block's symbol is declared
+into the file's **locals** — never via the export-context branch. The symbol
+exists before the block's members bind, so `container.Symbol()` is non-nil when
+`declareModuleMember` runs for `interface IteratorObject`.
+
+The divergence was NOT (a) `declareSourceFileMember` mis-routing a global-script
+file (that path correctly routes to locals — guarded below), nor (b) an
+`EXPORT_CONTEXT` mis-set on a global-script source file. It was (c): the Rust
+port deferred the ambient-module **container-symbol assignment**.
+
+## The fix (root — Go-faithful, surgical)
+
+`internal/binder/lib.rs:bind_module_declaration` no longer returns early for
+ambient modules; it declares the module symbol unconditionally (matching Go,
+which creates it on every path):
+
+```rust
+fn bind_module_declaration(&mut self, node: NodeId) {
+    self.set_export_context_flag(node);
+    self.declare_symbol_and_add_to_symbol_table(
+        node,
+        SymbolFlags::VALUE_MODULE,
+        SymbolFlags::VALUE_MODULE_EXCLUDES,
+    );
+}
+```
+
+This is the **identical symbol-table routing** Go uses: `declareSymbolAndAddToSymbolTable`
+dispatches on the container kind, so a top-level `declare global` /
+`declare module "…"` lands in the file locals/exports exactly as Go places it.
+Both Go ambient sub-branches (`IsModuleAugmentationExternal` →
+`declareModuleSymbol`; otherwise `declareSymbolAndAddToSymbolTable`) collapse to
+this single call once the deferred details are factored out. **Deferred (with
+blocked-by, documented at the call site):** the `ValueModule`-vs-`NamespaceModule`
+instance-state selection (`declareModuleSymbol`/`GetModuleInstanceState`), the
+const-enum-only-module bookkeeping, the TS2668 export-modifier error, and the
+string-literal `module "…"` pattern tracking (`TryParsePattern` /
+`PatternAmbientModules`). None change which symbol table the module symbol lands
+in for the bundled libs, and `ValueModule` matches the pre-existing non-ambient
+simplification — so this stays within the existing port's simplification level
+while removing the panic. No defensive `if let Some(sym)` was added; the root
+(missing container-symbol assignment) is fixed.
+
+## RED→GREEN slices (one behavior at a time)
+
+`tsgo_binder` (`symbols_test.rs`, focused unit):
+
+1. **`bind_declare_global_augmentation_creates_container_symbol`** (HEADLINE
+   routing/ordering) — an `export {};` + `declare global { interface
+   IteratorObject<T> {} var Iterator: number; }` file. RED: panic at
+   `symbols.rs:375` (`symbol_of(container).unwrap()` on `None`). GREEN: the
+   global block owns a `__global` symbol, and its members bind through the
+   export-context 2-symbol path (asserts `IteratorObject`/`Iterator` are exports
+   of the block AND `IteratorObject` is a local of the block).
+2. **GUARD `bind_external_module_export_produces_export_symbol`** — a real
+   external module (`export const x = 1;`) STILL routes through
+   `declareModuleMember`: `x` has both a file local and an export symbol on the
+   file symbol. (The fix must not regress normal module-member routing.)
+3. **GUARD `bind_global_script_declared_member_goes_to_locals`** — a global
+   script (`declare var g: number;`, no top-level import/export) routes its
+   ambient `declare`d member to the file LOCALS (not the export-context
+   module-member path); there is no file symbol.
+
+`tsgo_compiler` (`program_test.rs`, REAL bundled-lib path — the headline):
+
+4. **`binds_full_esnext_dom_lib_without_panic`** — a trivial file
+   (`let o: Object; let el: HTMLElement; let p: Promise<number>;`) under
+   `@target: esnext` (no explicit `--lib`), so the default-lib graph expands to
+   the full DOM + `es20xx` set including `lib.es2025.iterator.d.ts`. RED: binding
+   panicked at `symbols.rs:375` and left `lib.es2025.iterator.d.ts` UNBOUND.
+   GREEN: **every** esnext+dom lib binds (asserts no unbound files), and the real
+   `Object`/`HTMLElement`/`Promise` globals resolve (no `TS2304`).
+
+## Measurement
+
+- **Exact root:** ambient-module container (`declare global` / `declare module
+  "…"`) whose symbol the Rust binder deferred; member binding then hit
+  `symbol_of(container).unwrap()` on `None`. Go avoids it by always creating the
+  module symbol in `bindModuleDeclaration` before the members bind.
+- **Full esnext+dom lib now binds without panic** — the headline test asserts
+  zero unbound source files for `@target: esnext` (full DOM + `es20xx` graph),
+  including `lib.es2025.iterator.d.ts` and `lib.dom.d.ts`.
+- **Parity UNCHANGED at 69 / 81 / 0** — the `tsgo_testrunner`
+  `expanded_compiler_subset_parity_smoke` 150-case characterization is GREEN with
+  its `{passed: 69, failed: 81, errored: 0}` counts and full extra/missing
+  histogram intact (the corpus tracer still uses `lib: ["es2017"]`; the lib was
+  NOT widened this round, per scope). The 30-case smoke (18/12/0) is also
+  unchanged. The fix is additive (ambient modules that previously panicked were
+  `errored`=0 in the snapshot, i.e. absent from the subset), so no case verdict
+  changed.
+
+## Test deltas
+
+- `tsgo_binder`: **57 → 60** unit (+3: the headline ordering test + two routing
+  guards); doctests unchanged (10).
+- `tsgo_compiler`: **103 → 104** unit (+1: the real-lib esnext/dom headline);
+  doctests unchanged (11).
+- `tsgo_checker`: unit/doctest counts unchanged (178 doctests).
+- `tsgo_testrunner`: unit/doctest counts unchanged (47 / 11); parity
+  characterization re-run GREEN (69/81/0).
+- No existing test weakened or deleted.
+
+## Gate results (Round 11)
+
+- `cargo test -p tsgo_binder` — GREEN (60 unit + 10 doctests).
+- `cargo test -p tsgo_checker` — GREEN (unit + 178 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (104 unit + 11 doctests) [real bundled lib].
+- `cargo test -p tsgo_testrunner` — GREEN (47 unit + 11 doctests; parity 69/81/0).
+- `cargo clippy -p tsgo_binder -p tsgo_compiler --all-targets -- -D warnings` — GREEN.
+- `cargo fmt -p tsgo_binder -p tsgo_compiler -- --check` — GREEN.
+- `cargo build --workspace --all-targets` — GREEN.
+
+No `--no-verify`; no test weakened/deleted; no new dependency; `Cargo.toml`/
+`Cargo.lock` untouched. Temporary instrumentation removed.
+
+## DEFER list (blocked-by) — Round 11
+
+- **Module instance-state flags + const-enum-only modules** — Go's
+  `declareModuleSymbol`/`GetModuleInstanceState` selects `ValueModule` vs
+  `NamespaceModule` (and `bindModuleDeclaration` tracks
+  `ConstEnumOnlyModule`). The port declares every module symbol with
+  `ValueModule` (consistent with the pre-existing non-ambient simplification).
+  blocked-by: a `GetModuleInstanceState` port (the `KindModuleBlock` recursion +
+  `getModuleInstanceStateForAliasTarget` ancestors walk).
+- **Ambient-module diagnostics + string-literal pattern modules** — the TS2668
+  `export`-modifier error on ambient modules and the `module "foo*"` wildcard
+  pattern bookkeeping (`core.TryParsePattern` + `file.PatternAmbientModules`)
+  are not ported (the bundled libs do not need them; deferring avoids any
+  parity-span risk this round). blocked-by: `core.TryParsePattern` port +
+  `errorOnFirstToken` span narrowing.
+- **Widening the corpus tracer lib beyond `es2017`** — now that the esnext/DOM
+  bind panic is fixed, a future measurement round MAY widen the tracer's
+  `lib` toward the full default lib; left as-is here to keep the 150-case parity
+  snapshot stable (per scope). blocked-by: a dedicated re-measurement round that
+  re-baselines the extra/missing histogram against the wider lib.

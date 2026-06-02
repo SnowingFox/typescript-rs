@@ -202,6 +202,92 @@ fn bind_lib_style_well_known_symbols_no_panic() {
     );
 }
 
+fn nth_statement(arena: &NodeArena, sf: NodeId, n: usize) -> NodeId {
+    match arena.data(sf) {
+        NodeData::SourceFile(d) => d.statements.nodes[n],
+        _ => unreachable!(),
+    }
+}
+
+// Go: internal/binder/binder.go:bindModuleDeclaration (ambient-module symbol
+// creation). An external-module file (`export {}`) with a `declare global { … }`
+// augmentation must bind WITHOUT panicking: the global block is an ambient
+// module whose symbol is created (under the internal `__global` name) before its
+// members bind, so `declareModuleMember`'s `symbol_of(container)` is non-`None`.
+// This is the headline routing/ordering regression fixed this round (the binder
+// used to defer ambient-module symbol creation and panic at the
+// `symbol_of(container).unwrap()` in the export-context branch).
+#[test]
+fn bind_declare_global_augmentation_creates_container_symbol() {
+    let (arena, sf, result) = bind(
+        "export {};\n\
+         declare global {\n\
+             interface IteratorObject<T> {}\n\
+             var Iterator: number;\n\
+         }",
+    );
+    // The `declare global` block owns a symbol, declared into the external
+    // module file's locals under the internal `__global` name.
+    let global_sym = result
+        .local(sf, tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_GLOBAL)
+        .expect("declare global augmentation owns a symbol");
+    // Its top-level members bound through `declareModuleMember`'s export-context
+    // branch into the global block's exports (the path that used to panic).
+    assert!(
+        result.export(global_sym, "IteratorObject").is_some(),
+        "interface member exported from the global augmentation"
+    );
+    assert!(
+        result.export(global_sym, "Iterator").is_some(),
+        "var member exported from the global augmentation"
+    );
+    // And into the global block's own locals (the local half of the 2-symbol
+    // exported declaration).
+    let global_block = nth_statement(&arena, sf, 1);
+    assert!(
+        result.local(global_block, "IteratorObject").is_some(),
+        "interface member is also a local of the global block"
+    );
+}
+
+// Go: internal/binder/binder.go:declareModuleMember (export-context 2-symbol
+// path). GUARD: a real external-module file (top-level `export`) still routes
+// its exported top-level declarations through `declareModuleMember`, producing
+// BOTH a local symbol and an export symbol on the file symbol — the fix must not
+// regress the normal module-member routing.
+#[test]
+fn bind_external_module_export_produces_export_symbol() {
+    let (_arena, sf, result) = bind("export const x = 1;");
+    let file_sym = result
+        .file_symbol
+        .expect("external module file has a symbol");
+    assert!(
+        result.export(file_sym, "x").is_some(),
+        "exported const has an export symbol on the file symbol"
+    );
+    assert!(
+        result.local(sf, "x").is_some(),
+        "exported const also has a file local"
+    );
+}
+
+// Go: internal/binder/binder.go:declareSourceFileMember (global-script branch).
+// GUARD: a global script (no top-level import/export) routes its top-level
+// members — even an ambient `declare`d member — to the file LOCALS, NOT through
+// `declareModuleMember`'s export-context path; there is no file symbol.
+#[test]
+fn bind_global_script_declared_member_goes_to_locals() {
+    let (_arena, sf, result) = bind("declare var g: number;");
+    assert!(
+        result.file_symbol.is_none(),
+        "global script has no external-module file symbol"
+    );
+    assert!(
+        result.local(sf, "g").is_some(),
+        "declared global var is a file local, not an export"
+    );
+}
+
 // Go: internal/binder/binder.go:getDeclarationName (private identifier name format)
 #[test]
 fn bind_private_identifier_name() {
