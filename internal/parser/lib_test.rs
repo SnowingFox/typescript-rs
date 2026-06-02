@@ -678,6 +678,224 @@ fn parse_function_generics() {
     assert!(result.diagnostics.is_empty());
 }
 
+// A `const` modifier on a type parameter (`<const T>`, TS 5.0 const type
+// parameters) must parse cleanly, exactly like `tsc`/Go, which call
+// `parseModifiersEx(permitConstAsModifier: true)` from `parseTypeParameter`.
+// Previously the parser passed `permitConstAsModifier: false`, so `const` was
+// not accepted as a type-parameter modifier and a spurious `TS1003` (Identifier
+// expected) was reported at the `const` keyword.
+// Go: internal/parser/parser.go:parseTypeParameter (parseModifiersEx permitConstAsModifier=true)
+#[test]
+fn parse_const_type_parameter_modifier() {
+    let result = parse_ts("declare function f<const T extends string>(x: T): T;");
+    assert!(
+        result.diagnostics.is_empty(),
+        "no diagnostics for a const type parameter: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| (d.message.code(), d.pos()))
+            .collect::<Vec<_>>(),
+    );
+    match result.arena.data(statements(&result)[0]) {
+        NodeData::FunctionDeclaration(d) => {
+            let tps = d
+                .type_parameters
+                .as_ref()
+                .expect("type params present")
+                .nodes
+                .clone();
+            assert_eq!(tps.len(), 1);
+            match result.arena.data(tps[0]) {
+                NodeData::TypeParameterDeclaration(t) => {
+                    assert_eq!(result.arena.text(t.name), "T");
+                    let mods = t.modifiers.as_ref().expect("const modifier present");
+                    assert!(
+                        mods.modifier_flags.contains(ModifierFlags::CONST),
+                        "type parameter must carry the CONST modifier flag",
+                    );
+                }
+                other => panic!("expected TypeParameterDeclaration, got {other:?}"),
+            }
+        }
+        other => panic!("expected FunctionDeclaration, got {other:?}"),
+    }
+}
+
+// Guards for the const-type-parameter modifier across declaration kinds, and
+// that the `in`/`out` variance modifiers (which already worked) are unaffected.
+// Go: internal/parser/parser.go:parseTypeParameter
+#[test]
+fn parse_const_type_parameter_modifier_variants() {
+    for src in [
+        "class C<const T> {}",
+        "interface I<const T> {}",
+        "const f = <const T,>(x: T) => x;",
+        "type F = <const T>(x: T) => T;",
+        "interface I<in T, out U> {}",
+    ] {
+        let result = parse_ts(src);
+        assert!(
+            result.diagnostics.is_empty(),
+            "no diagnostics for {src:?}: {:?}",
+            result
+                .diagnostics
+                .iter()
+                .map(|d| (d.message.code(), d.pos()))
+                .collect::<Vec<_>>(),
+        );
+    }
+}
+
+// Guard: a standalone `const` declaration must NOT be swallowed as a type
+// parameter modifier — `const enum E {}` is still a const enum, and a bare
+// `const x = 1;` is still a variable statement. (Mirrors Go's
+// `tryParseModifier` requiring the next token to follow a modifier on the same
+// line.)
+// Go: internal/parser/parser.go:tryParseModifier (permitConstAsModifier)
+#[test]
+fn parse_const_keyword_not_misread_as_type_parameter_modifier() {
+    let enum_result = parse_ts("const enum E { A }");
+    assert!(
+        enum_result.diagnostics.is_empty(),
+        "const enum still parses: {:?}",
+        enum_result
+            .diagnostics
+            .iter()
+            .map(|d| d.message.code())
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        enum_result.arena.kind(statements(&enum_result)[0]),
+        Kind::EnumDeclaration,
+    );
+    let var_result = parse_ts("const x = 1;");
+    assert!(var_result.diagnostics.is_empty());
+    assert_eq!(
+        var_result.arena.kind(statements(&var_result)[0]),
+        Kind::VariableStatement,
+    );
+}
+
+// `declare global { ... }` (a global augmentation) must parse as a module
+// declaration. Go's `scanStartOfDeclaration` has a `KindGlobalKeyword` arm
+// (after `declare`, a `global` followed by `{`/identifier/`export` starts a
+// declaration); the Rust port omitted it, so `declare global` fell through to
+// expression-statement parsing and over-reported `TS1005`/`TS1155`/`TS2304`.
+// Go: internal/parser/parser.go:scanStartOfDeclaration (KindGlobalKeyword arm)
+#[test]
+fn parse_declare_global_augmentation() {
+    let result = parse_ts("declare global {\n  const x: any;\n}");
+    assert!(
+        result.diagnostics.is_empty(),
+        "no diagnostics for `declare global {{ ... }}`: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| (d.message.code(), d.pos()))
+            .collect::<Vec<_>>(),
+    );
+    let stmts = statements(&result);
+    assert_eq!(stmts.len(), 1);
+    assert_eq!(result.arena.kind(stmts[0]), Kind::ModuleDeclaration);
+}
+
+// Guard: a bare `global` used as an identifier expression is NOT swallowed as a
+// global-augmentation declaration (Go's `KindGlobalKeyword` arm requires the
+// next token to be `{`, an identifier, or `export`).
+// Go: internal/parser/parser.go:scanStartOfDeclaration (KindGlobalKeyword arm)
+#[test]
+fn parse_global_identifier_is_expression_statement() {
+    let result = parse_ts("global;");
+    assert!(
+        result.diagnostics.is_empty(),
+        "`global;` parses as an expression statement: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| d.message.code())
+            .collect::<Vec<_>>(),
+    );
+    let stmts = statements(&result);
+    assert_eq!(stmts.len(), 1);
+    assert_eq!(result.arena.kind(stmts[0]), Kind::ExpressionStatement);
+}
+
+// `abstract class` (and the other class-modifier keywords) at statement /
+// source-element level must route to declaration parsing, exactly like Go's
+// `parseStatement`, whose modifier-keyword case includes `abstract`, `accessor`,
+// `static`, `readonly`, `public`, `private`, `protected`. Previously the Rust
+// `parse_statement` modifier guard omitted those keywords, so `abstract class C
+// {}` fell through to expression-statement parsing: `abstract` was parsed as an
+// identifier and `class` then triggered a spurious `TS1005` (';' expected).
+// Go: internal/parser/parser.go:parseStatement (modifier-keyword case)
+#[test]
+fn parse_abstract_class_statement() {
+    let result = parse_ts("abstract class C {}");
+    assert!(
+        result.diagnostics.is_empty(),
+        "no diagnostics for `abstract class C {{}}`: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| (d.message.code(), d.pos()))
+            .collect::<Vec<_>>(),
+    );
+    let stmts = statements(&result);
+    assert_eq!(stmts.len(), 1, "exactly one statement (the class)");
+    assert_eq!(result.arena.kind(stmts[0]), Kind::ClassDeclaration);
+    match result.arena.data(stmts[0]) {
+        NodeData::ClassDeclaration(d) => {
+            let mods = d.modifiers.as_ref().expect("abstract modifier present");
+            assert!(mods.modifier_flags.contains(ModifierFlags::ABSTRACT));
+        }
+        other => panic!("expected ClassDeclaration, got {other:?}"),
+    }
+}
+
+// `abstract class` after a preceding declaration on its own line must also parse
+// cleanly (the corpus repro `keyofUnresolvedBaseMembers.ts` has a `type ... ;`
+// immediately before an `abstract class`).
+// Go: internal/parser/parser.go:parseStatement
+#[test]
+fn parse_abstract_class_after_type_alias() {
+    let result = parse_ts("type A = Partial<X>;\nabstract class C extends B {}");
+    assert!(
+        result.diagnostics.is_empty(),
+        "no diagnostics: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| (d.message.code(), d.pos()))
+            .collect::<Vec<_>>(),
+    );
+    let stmts = statements(&result);
+    assert_eq!(stmts.len(), 2);
+    assert_eq!(result.arena.kind(stmts[1]), Kind::ClassDeclaration);
+}
+
+// Guard: a bare modifier keyword used as an identifier expression is still
+// parsed as an expression statement (Go gates the modifier-keyword case on
+// `isStartOfDeclaration`, which looks ahead for a following declaration on the
+// same line).
+// Go: internal/parser/parser.go:parseStatement / isStartOfDeclaration
+#[test]
+fn parse_abstract_identifier_is_expression_statement() {
+    let result = parse_ts("abstract;");
+    assert!(
+        result.diagnostics.is_empty(),
+        "`abstract;` parses as an expression statement: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| d.message.code())
+            .collect::<Vec<_>>(),
+    );
+    let stmts = statements(&result);
+    assert_eq!(stmts.len(), 1);
+    assert_eq!(result.arena.kind(stmts[0]), Kind::ExpressionStatement);
+}
+
 // Go: parser.go:parseDeclaration (modifiers: export/async/declare)
 #[test]
 fn parse_function_with_modifiers() {
@@ -1588,6 +1806,85 @@ fn parse_tuple_types() {
         other => panic!("expected TupleType, got {other:?}"),
     }
     assert!(result.diagnostics.is_empty() && named.diagnostics.is_empty());
+}
+
+// An unnamed optional tuple element (`[T?]`) must parse cleanly into an
+// `OptionalType`, exactly like Go's `parseTupleElementType`, which converts the
+// postfix `T?` (a JSDoc-nullable type produced by `parsePostfixTypeOrHigher`
+// when the token after `?` is not the start of a type) into an `OptionalType`.
+// Previously the Rust parser did not consume the postfix `?`, so a spurious
+// `TS1005` (',' expected) was reported at the `?`.
+// Go: internal/parser/parser.go:parseTupleElementType / parsePostfixTypeOrHigher
+#[test]
+fn parse_optional_tuple_element() {
+    let result = parse_ts("type T = [string?];");
+    assert!(
+        result.diagnostics.is_empty(),
+        "no diagnostics for an optional tuple element: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| (d.message.code(), d.pos()))
+            .collect::<Vec<_>>(),
+    );
+    match result.arena.data(alias_type(&result)) {
+        NodeData::TupleType(d) => {
+            assert_eq!(d.types.nodes.len(), 1);
+            assert_eq!(result.arena.kind(d.types.nodes[0]), Kind::OptionalType);
+        }
+        other => panic!("expected TupleType, got {other:?}"),
+    }
+}
+
+// Optional tuple elements over a `typeof` query / parenthesized type and in a
+// multi-element tuple (the corpus repro `declarationEmitTypeofIndexedAccessNoParens`
+// uses `[typeof C?]` and `[(typeof C)?]`).
+// Go: internal/parser/parser.go:parseTupleElementType
+#[test]
+fn parse_optional_tuple_element_variants() {
+    for src in [
+        "type T = [typeof C?];",
+        "type T = [(typeof C)?];",
+        "type T = [number?, string?];",
+        "type T = [string, number?];",
+    ] {
+        let result = parse_ts(src);
+        assert!(
+            result.diagnostics.is_empty(),
+            "no diagnostics for {src:?}: {:?}",
+            result
+                .diagnostics
+                .iter()
+                .map(|d| (d.message.code(), d.pos()))
+                .collect::<Vec<_>>(),
+        );
+    }
+}
+
+// Guard: a conditional type inside a tuple (`[A extends B ? C : D]`) is parsed
+// as a conditional type, not mis-read as an optional element — Go's
+// `parsePostfixTypeOrHigher` only consumes the `?` as optional when the token
+// after it is NOT the start of a type.
+// Go: internal/parser/parser.go:parsePostfixTypeOrHigher (nextIsStartOfType guard)
+#[test]
+fn parse_conditional_type_in_tuple_is_not_optional() {
+    let result = parse_ts("type T = [A extends B ? C : D];");
+    assert!(
+        result.diagnostics.is_empty(),
+        "no diagnostics for a conditional tuple element: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| (d.message.code(), d.pos()))
+            .collect::<Vec<_>>(),
+    );
+    match result.arena.data(alias_type(&result)) {
+        NodeData::TupleType(d) => {
+            assert_eq!(d.types.nodes.len(), 1);
+            assert_eq!(result.arena.kind(d.types.nodes[0]), Kind::ConditionalType);
+        }
+        other => panic!("expected TupleType, got {other:?}"),
+    }
 }
 
 // Go: parser.go:parseMappedType

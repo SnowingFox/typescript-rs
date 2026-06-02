@@ -45,6 +45,60 @@ fn undefined_identifier_reports_cannot_find_name() {
     assert_eq!(diags[0].message, "Cannot find name 'y'.");
 }
 
+// A parser-recovered MISSING identifier (zero-width, empty text) must NOT be
+// resolved or reported by the checker — Go's `getResolvedSymbol` guards
+// `if !ast.NodeIsMissing(node)` before calling `resolveName`, so a missing
+// identifier resolves to `unknownSymbol` with no "Cannot find name ''"
+// diagnostic. Here `do` at EOF error-recovers into a do-statement whose body and
+// `while` condition are missing identifiers; the parser reports `TS1109`
+// (syntactic) but the checker must add nothing.
+// Go: internal/checker/checker.go:Checker.getResolvedSymbol (NodeIsMissing guard)
+#[test]
+fn missing_identifier_from_recovery_reports_no_cannot_find_name() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "do"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "a missing (recovered) identifier must not report a cannot-find-name 2304, got {diags:?}",
+    );
+}
+
+// Same root via a different recovery shape: `for (let in)` (an empty
+// declaration list) error-recovers into a missing identifier; the checker must
+// not report `TS2304: Cannot find name ''`.
+// Go: internal/checker/checker.go:Checker.getResolvedSymbol (NodeIsMissing guard)
+#[test]
+fn missing_identifier_in_for_in_reports_no_cannot_find_name() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "for (let in) { y; }"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.message != "Cannot find name ''."),
+        "the empty-name identifier must not be reported, got {diags:?}",
+    );
+}
+
+// Guard: a genuine (present) undefined identifier STILL reports `TS2304` — the
+// NodeIsMissing guard must only suppress zero-width recovered nodes, not real
+// references.
+// Go: internal/checker/checker.go:Checker.getResolvedSymbol (resolveName on present node)
+#[test]
+fn present_undefined_identifier_still_reports_cannot_find_name() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "missingName;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected exactly the 2304, got {diags:?}");
+    assert_eq!(diags[0].code, 2304);
+    assert_eq!(diags[0].message, "Cannot find name 'missingName'.");
+}
+
 // Go: internal/checker/checker.go:Checker.getDiagnostics (triggers checkSourceFile)
 #[test]
 fn get_diagnostics_triggers_checking() {

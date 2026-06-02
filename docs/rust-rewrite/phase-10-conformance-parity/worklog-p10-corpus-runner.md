@@ -1367,3 +1367,228 @@ dependency; `Cargo.toml`/`Cargo.lock` untouched.
   `exportAssignmentMerging6` `a.js(4,20)` vs committed `a.js(5,1)`) — a
   pre-existing error-range/offset discrepancy, NOT touched by this round.
   blocked-by: multi-file error-range attribution.
+
+---
+
+# Round 9 — parser recovery false positives (SYNTAX over-reports tsc never emits)
+
+Round goal: kill the PARSER false positives on the P10 subset — SYNTAX errors our
+parser emits that `tsc`/Go's parser do NOT on valid input (`extra TS1005 ×9`,
+`TS1003 ×5`, `TS1109 ×1`, `TS1155 ×1`, `TS1161 ×1`, plus the empty-identifier
+`TS2304: Cannot find name ''.`). Since our parser is a 1:1 port of `parser.go`,
+each such over-report is a PORT BUG (a missing parse path / divergent recovery).
+SOLO lane, strict TDD red→green, one root at a time. Edits: `internal/parser/
+{lib.rs,lib_test.rs}` (four parser roots) + `internal/checker/core/{check.rs,
+check_test.rs}` (one checker root) + `internal/testrunner/compiler_runner_test.rs`
+(re-measured characterization) + this worklog. No `ast`/`binder`/`scanner`
+production change (no new AST node was added).
+
+## Step-0 case list + ROOT divergences (pinpointed before any fix)
+
+Each offending case was run through the real parity path; its `+` (we-emit)
+syntax errors were confirmed ABSENT from the committed `.errors.txt` baseline
+(tsc parses cleanly or with different/earlier errors), proving an over-report.
+Minimal snippets were distilled and run through `parse_source_file` to isolate
+the exact parser-level diagnostics (`code`/`pos`/`end`) from the full-compile
+cascade.
+
+| case | offending extra (we emit) | tsc / committed | ROOT |
+|---|---|---|---|
+| `emitIncompleteDoStatement.ts` | `TS2304 ''` ×2 | only `TS1109` | **R1 empty-name (CHECKER)** |
+| `panicForInEmptyDeclarationList.ts` | `TS2304 ''` ×1 | only `TS1109` | **R1** |
+| `jsxAttributeValueBinaryExpression.tsx` | `TS2304 ''` ×1 + `TS1109`/`TS1161`/`TS1128` | `2304`+`2×7026`+`2657` | R1 + **R5 JSX recovery (DEFER)** |
+| `declarationEmitAsConstSatisfiesNonReadonlyResult.ts` | `TS1003` ×1 (at `const`) | clean | **R2 const type-param modifier** |
+| `inferenceWithNeverSource1.ts` | `TS1003` ×1 (at `const`) + cascade | clean | **R2** |
+| `declarationEmitTypeofIndexedAccessNoParens.ts` | `TS1005` ×2 (at `?`) + cascade | clean | **R3 optional tuple element `[T?]`** |
+| `keyofUnresolvedBaseMembers.ts` | `TS1005` ×1 (at `class`) + cascade | divergent | **R4 `abstract` statement-start modifier** |
+| `invalidGlobalAugmentation.ts` | `TS1005` ×2, `TS1155` ×1, `TS2304` `declare`/`global` | `TS2669`+`TS2664` | **R6 `declare global` augmentation** |
+| `awaitObjectLiteral.ts` | `TS2304 await` ×2, `TS1005` ×4, `TS1003` ×3 | clean | **R7 top-level await (DEFER)** |
+
+**Up-front estimate (delivered):** 9 cases, 5 fixable roots (R1–R4, R6) + 2 DEFER
+(R5, R7). Fixing R1–R4 + R6 flips **+3** to PASS and clears
+`extra TS1005 ×9→×5`, `TS1003 ×5→×3`, `TS1155 ×1→×0`, empty-name `TS2304 ×4→×0`.
+
+## Roots diagnosed + fixed (Go ground truth → Rust landing, RED→GREEN)
+
+### R1 — empty-name `TS2304` is a CHECKER over-report, not a parser one (traced)
+
+The parser is CORRECT: `do`<EOF> / `for (let in)` error-recover by creating
+zero-width MISSING identifier nodes (Go's `createMissingNode`), and emit exactly
+the `TS1109` tsc emits — verified by parsing the snippets directly (one `TS1109`,
+no `TS2304`). The divergence is in the CHECKER: Go's `getResolvedSymbol`
+(`checker.go:13796`) only calls `resolveName` (which reports the
+cannot-find-name diagnostic) `if !ast.NodeIsMissing(node)`; a missing identifier
+resolves to `unknownSymbol` silently. Our `check_identifier` lacked that guard,
+so the empty-name identifier cascaded into `TS2304: Cannot find name ''.`.
+- **Fix** (`internal/checker/core/check.rs:check_identifier`): short-circuit
+  `node_is_missing(arena, node) → error_type` at the top (mirrors
+  unknownSymbol → `checkIdentifier` returns `errorType`).
+- RED→GREEN: `missing_identifier_from_recovery_reports_no_cannot_find_name`
+  (`do` → was 2× `TS2304 ''`, now none),
+  `missing_identifier_in_for_in_reports_no_cannot_find_name`; GUARD
+  `present_undefined_identifier_still_reports_cannot_find_name` (a real
+  undefined name still `TS2304`).
+- Go: `internal/checker/checker.go:Checker.getResolvedSymbol` (NodeIsMissing guard)
+  + `internal/ast/utilities.go:NodeIsMissing`.
+
+### R2 — `const` type-parameter modifier (`<const T>`, TS 5.0 const type params)
+
+`parse_type_parameter` called `parse_modifiers()` (i.e.
+`permitConstAsModifier: false`), so `const` was not accepted as a type-parameter
+modifier and a spurious `TS1003` (Identifier expected) landed on the `const`
+keyword. Go's `parseTypeParameter` (`parser.go:3228`) calls
+`parseModifiersEx(false, true /*permitConstAsModifier*/, false)`.
+- **Fix** (`internal/parser/lib.rs:parse_type_parameter`): call
+  `parse_modifiers_ex(false, true, false)` (the `try_parse_modifier`
+  const-modifier path already existed).
+- RED→GREEN: `parse_const_type_parameter_modifier` (`<const T extends string>`,
+  asserts the `CONST` flag), `parse_const_type_parameter_modifier_variants`
+  (class/interface/arrow/fn-type + `in`/`out` still clean); GUARD
+  `parse_const_keyword_not_misread_as_type_parameter_modifier` (`const enum E`,
+  `const x = 1;` unaffected).
+- Go: `internal/parser/parser.go:parseTypeParameter` / `tryParseModifier`.
+
+### R3 — unnamed optional tuple element `[T?]`
+
+`parse_postfix_type_or_higher` only handled the `[` (array/indexed) postfix,
+never the `?` (Go's `parsePostfixTypeOrHigher` `KindQuestionToken` case →
+`JSDocNullableType`), so `[string?]` / `[typeof C?]` left the `?` unconsumed and
+the tuple list reported `TS1005` (',' expected). Go's `parseTupleElementType`
+(`parser.go:3644`) converts a postfix `T?` into an `OptionalType`.
+- **Fix** (`internal/parser/lib.rs:parse_tuple_element_type` + new
+  `next_is_start_of_type`): the port does not model `JSDocNullableType`, so the
+  postfix `?` for an unnamed optional tuple element is recognized directly where
+  it becomes an `OptionalType` (the only position it is valid). The Go
+  `nextIsStartOfType` guard is preserved so a real conditional element
+  (`[A extends B ? C : D]`) is unaffected. Observationally identical to Go
+  (`OptionalType` node + zero diagnostics); `OptionalType` already round-trips
+  through the printer.
+- RED→GREEN: `parse_optional_tuple_element` (`[string?]` → `OptionalType`),
+  `parse_optional_tuple_element_variants` (`[typeof C?]`, `[(typeof C)?]`,
+  `[number?, string?]`); GUARD `parse_conditional_type_in_tuple_is_not_optional`
+  (`[A extends B ? C : D]` stays a `ConditionalType`).
+- Go: `internal/parser/parser.go:parseTupleElementType` / `parsePostfixTypeOrHigher`.
+
+### R4 — `abstract` (and the class-modifier keywords) at statement level
+
+`parse_statement`'s declaration-keyword guard omitted `abstract`/`accessor`/
+`static`/`readonly`/`public`/`private`/`protected`, so `abstract class C {}` fell
+through to expression-statement parsing — `abstract` became an identifier and
+`class` triggered a spurious `TS1005` (';' expected). Go's `parseStatement`
+(`parser.go:1059`) lists all of these in its modifier-keyword case (gated on
+`isStartOfDeclaration`).
+- **Fix** (`internal/parser/lib.rs:parse_statement`): add the missing
+  modifier-keyword arms to the guard (still gated on `is_start_of_declaration`,
+  which already handled them in `scan_start_of_declaration`).
+- RED→GREEN: `parse_abstract_class_statement` (asserts `ClassDeclaration` +
+  `ABSTRACT` flag), `parse_abstract_class_after_type_alias` (the corpus shape);
+  GUARD `parse_abstract_identifier_is_expression_statement` (`abstract;` stays an
+  expression statement).
+- Go: `internal/parser/parser.go:parseStatement` (modifier-keyword case).
+
+### R6 — `declare global { ... }` augmentation
+
+`parse_module_declaration` already handled the `global` keyword, but
+`scan_start_of_declaration` was MISSING the `KindGlobalKeyword` arm, so
+`is_start_of_declaration()` returned `false` for `declare global` and it never
+routed to declaration parsing → `declare`/`global` became identifiers,
+`TS1005`/`TS1155`/`TS2304` cascaded. Go's `scanStartOfDeclaration` has a
+`case ast.KindGlobalKeyword: nextToken(); return token == { | identifier |
+export`.
+- **Fix** (`internal/parser/lib.rs:scan_start_of_declaration`): add the
+  `GlobalKeyword` arm 1:1.
+- RED→GREEN: `parse_declare_global_augmentation` (`declare global { ... }` →
+  `ModuleDeclaration`, no diagnostics); GUARD
+  `parse_global_identifier_is_expression_statement` (`global;` stays an
+  expression statement).
+- Go: `internal/parser/parser.go:scanStartOfDeclaration` (KindGlobalKeyword arm).
+
+## Headline — measured parity BEFORE → AFTER (150-case subset)
+
+```
+BEFORE (Round 8):  150 cases — passed 66, failed 84, errored 0
+  extra: TS2304 ×41, TS2339 ×18, TS2322 ×12, TS1005 ×9, TS2345 ×8, TS1003 ×5,
+         TS2495 ×2, TS1109 ×1, TS1155 ×1, TS1161 ×1, TS2344 ×1, TS2583 ×1,
+         TS2591 ×1, TS5108 ×1
+  categories: no_baseline 26, missing_all 35, divergent 23
+AFTER  (Round 9):  150 cases — passed 69, failed 81, errored 0
+  extra: TS2304 ×34, TS2339 ×18, TS2322 ×12, TS2345 ×9, TS1005 ×5, TS1003 ×3,
+         TS2495 ×2, TS1109 ×1, TS1161 ×1, TS2344 ×1, TS2583 ×1, TS2591 ×1,
+         TS5108 ×1
+  categories: no_baseline 25, missing_all 36, divergent 20
+```
+
+- **passed 66 → 69 (+3)** — verified produced==committed: `emitIncompleteDoStatement`,
+  `panicForInEmptyDeclarationList` (R1 empty-name), `declarationEmitAsConstSatisfiesNonReadonlyResult`
+  (R2 const type-param). ZERO PASS→FAIL regressions (PASS sets diffed).
+- **extra TS1005 ×9 → ×5 (−4)** — R3 (`declarationEmitTypeofIndexedAccessNoParens`
+  ×2) + R4 (`keyofUnresolvedBaseMembers` ×1) + R6 (`invalidGlobalAugmentation` ×1).
+- **extra TS1003 ×5 → ×3 (−2)** — R2 (`declarationEmitAsConstSatisfiesNonReadonlyResult`,
+  `inferenceWithNeverSource1`).
+- **extra TS1155 ×1 → ×0** — R6 (`declare global` now parses).
+- **empty-name `TS2304 ''` ×4 → ×0** — R1 (folded into `extra TS2304 ×41 → ×34`,
+  which also drops `invalidGlobalAugmentation`'s `declare`/`global`).
+- **extra TS2345 ×8 → ×9 (+1)** — NOT a regression and NOT a new code:
+  `inferenceWithNeverSource1` (already FAILing, no committed baseline) now parses
+  its `const T` correctly so its `TS1003` is gone, exposing a DEFERRED
+  const-type-parameter / conditional-type CHECKER gap (false-positive `TS2345`).
+  The case was FAIL before and after; no PASS→FAIL.
+- No NEW diagnostic code appeared anywhere; every other extra/missing bucket is
+  unchanged; byte comparison and the 30-case smoke are untouched.
+
+## Deferred roots (blocked-by)
+
+- **R5 — JSX attribute value with a binary expression** (`jsxAttributeValueBinaryExpression.tsx`,
+  `extra TS1109 ×1` + `TS1161 ×1` + an empty-name `TS2304`): a divergent JSX
+  attribute-value error-recovery; the case also needs `TS2874`/`TS2657`/`2×7026`
+  to PASS. blocked-by: a Go-faithful JSX attribute-value recovery pass (large)
+  + the DEFERRED `TS2874` React-in-scope check.
+- **R7 — top-level `await`** (`awaitObjectLiteral.ts`, `extra TS2304 await ×2`,
+  `TS1005 ×4`, `TS1003 ×3`): `const x = await { ... }` at module top level needs
+  the parser to know the file is a module with top-level await permitted
+  (target/module-kind-driven await context); we treat `await` as an identifier.
+  blocked-by: top-level-await context detection in the parser
+  (`setExternalModuleIndicator` + await-context for ES2022+ modules).
+- **`declarationEmitTypeofIndexedAccessNoParens` typeof-query residue** — the R3
+  parser fix cleared its `TS1005 ×2`, but it stays FAIL on a pre-existing CHECKER
+  `TS2304: Cannot find name 'C'` resolving a value name inside a parenthesized
+  `typeof` query (`(typeof C)`). blocked-by: a checker `typeof`-query value
+  resolution gap (out of a parser round's scope).
+- **`invalidGlobalAugmentation` / `keyofUnresolvedBaseMembers`** — R6/R4 cleared
+  their false positives but they stay FAIL on genuinely-MISSING checker
+  diagnostics (`TS2669`+`TS2664`; `TS2344`/`TS2322`/`TS2345`), now correctly
+  categorized as `missing`/`divergent` rather than masked by parser noise.
+
+## Test deltas
+
+- `tsgo_parser`: **111 → 122** unit (+11): 3 const-type-param, 3 abstract /
+  statement-start, 3 optional-tuple + conditional guard, 2 declare-global.
+  Doctests unchanged (7).
+- `tsgo_checker`: **768 → 771** unit (+3): two missing-identifier (do / for-in)
+  + one present-undefined guard. Doctests unchanged (178).
+- `tsgo_testrunner`: unit/doctest counts unchanged (47 / 11); the
+  `expanded_compiler_subset_parity_smoke` characterization re-measured to
+  `{passed: 69, failed: 81, errored: 0}`, `top_extra(2) == [(2304, 34), (2339, 18)]`,
+  categories `{no_baseline 25, missing_all 36, divergent 20}`, plus new guards
+  `extra TS1005 == 5`, `extra TS1003 == 3`, `extra TS1155 == None`. The 30-case
+  smoke is UNCHANGED (18/12/0).
+- No existing test weakened or deleted; byte comparison unchanged.
+
+## Gate results (Round 9)
+
+- `cargo test -p tsgo_parser` — GREEN (122 unit + 7 doctests).
+- `cargo test -p tsgo_checker` — GREEN (771 unit + 178 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (98 unit + 11 doctests) [real-lib path].
+- `cargo test -p tsgo_testrunner` — GREEN (47 unit + 11 doctests; 150-case
+  re-measure).
+- Sibling suites GREEN (unit, all run with their doctests): `tsgo_binder` (54),
+  `tsgo_ast` (57), `tsgo_printer` (194, 1 ignored), `tsgo_transformers` (311).
+- `cargo clippy -p tsgo_parser -p tsgo_checker -p tsgo_testrunner --all-targets
+  -- -D warnings` — GREEN.
+- `cargo fmt -p tsgo_parser -p tsgo_checker -p tsgo_testrunner -- --check` — GREEN.
+- `cargo build --workspace --all-targets` — GREEN.
+
+No `--no-verify`; no test weakened/deleted; byte comparison unchanged; no new
+dependency; `Cargo.toml`/`Cargo.lock` untouched. Additive only (the parser fixes
+extend existing dispatch/modifier paths; the checker fix is a guard in
+`check_identifier`).

@@ -640,8 +640,8 @@ fn expanded_compiler_subset_parity_smoke() {
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 66,
-            failed: 84,
+            passed: 69,
+            failed: 81,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -696,9 +696,9 @@ fn expanded_compiler_subset_parity_smoke() {
         counts.failed,
         "every failed case is categorized"
     );
-    assert_eq!(hist.no_baseline_but_errors, 26);
-    assert_eq!(hist.missing_all_errors, 35);
-    assert_eq!(hist.divergent, 23);
+    assert_eq!(hist.no_baseline_but_errors, 25);
+    assert_eq!(hist.missing_all_errors, 36);
+    assert_eq!(hist.divergent, 20);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare
@@ -722,10 +722,58 @@ fn expanded_compiler_subset_parity_smoke() {
     // `panicSatisfiesOnExportEqualsDeclaration`. `extra TS2339 ×18` is unchanged
     // (no new cascade; member access on the benign `any`-like CJS symbols does
     // not 2339), and no case regressed.
+    //
+    // Round 9 (parser recovery false positives): fixed four parser roots and one
+    // checker root that emitted SYNTAX errors `tsc`/Go's parser never emit on
+    // valid input.
+    //   - const type-parameter modifier `<const T>` (was `permitConstAsModifier:
+    //     false`) -> cleared `extra TS1003 ×5 -> ×3`;
+    //   - unnamed optional tuple element `[T?]` (postfix `?` -> `OptionalType`)
+    //     and the `abstract`/class-modifier statement-start keywords and the
+    //     `declare global` augmentation (`scanStartOfDeclaration` GlobalKeyword
+    //     arm) -> cleared `extra TS1005 ×9 -> ×5` and `extra TS1155 ×1 -> ×0`;
+    //   - the checker's `getResolvedSymbol` NodeIsMissing guard -> a parser-
+    //     recovered MISSING identifier no longer cascades into `TS2304: Cannot
+    //     find name ''.` (part of `extra TS2304 ×41 -> ×34`).
+    // Three cases flip to PASS (66 -> 69): `emitIncompleteDoStatement`,
+    // `panicForInEmptyDeclarationList` (empty-name), and
+    // `declarationEmitAsConstSatisfiesNonReadonlyResult` (const type parameter).
+    // `extra TS2345 ×8 -> ×9` (+1) is NOT a regression: `inferenceWithNeverSource1`
+    // (an already-FAILing no-baseline case) now parses its `const T` correctly and
+    // its TS1003 is gone, exposing a DEFERRED const-type-parameter/conditional-type
+    // CHECKER gap (false-positive TS2345). No case regressed PASS -> FAIL and no
+    // new diagnostic code appeared. `extra TS1109 ×1` / `TS1161 ×1` remain
+    // (`jsxAttributeValueBinaryExpression`, DEFERRED JSX recovery); the remaining
+    // `extra TS1005 ×5` / `TS1003 ×3` are `awaitObjectLiteral` (DEFERRED top-level
+    // await) plus the `declarationEmitTypeofIndexedAccessNoParens` typeof-query
+    // checker residue.
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 41), (2339, 18)],
+        vec![(2304, 34), (2339, 18)],
         "top extra (false-positive) codes; histogram:\n{}",
+        hist.report()
+    );
+    // Round 9 parser-recovery false-positive guards: the cleared syntax-error
+    // over-reports must stay cleared (the const-type-parameter, optional-tuple,
+    // abstract-class, and declare-global parser fixes + the NodeIsMissing checker
+    // guard). `tsc` emits NONE of these on the valid corpus inputs.
+    assert_eq!(
+        hist.extra.get(&1005),
+        Some(&5),
+        "extra TS1005 must stay at 5 (was 9 before Round 9); histogram:\n{}",
+        hist.report()
+    );
+    assert_eq!(
+        hist.extra.get(&1003),
+        Some(&3),
+        "extra TS1003 must stay at 3 (was 5 before Round 9); histogram:\n{}",
+        hist.report()
+    );
+    assert_eq!(
+        hist.extra.get(&1155),
+        None,
+        "extra TS1155 ('const' must be initialized) is cleared by the `declare global` \
+         parser fix; histogram:\n{}",
         hist.report()
     );
     // The JSX intrinsic-element false negative (`missing TS7026 ×15`) is cleared;

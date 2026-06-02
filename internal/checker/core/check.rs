@@ -1133,6 +1133,18 @@ impl Checker {
     // Resolves an identifier reference to its (flow-narrowed) value type.
     // Go: internal/checker/checker.go:Checker.checkIdentifier(10999)
     fn check_identifier(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        // Go's `getResolvedSymbol` only calls `resolveName` (which emits the
+        // cannot-find-name diagnostic on failure) when `!ast.NodeIsMissing(node)`.
+        // A parser-recovered MISSING identifier (zero-width, empty text — e.g.
+        // the body/condition of an incomplete `do` statement, or an empty
+        // declaration list in `for (let in)`) resolves to `unknownSymbol` with no
+        // error, so `checkIdentifier` returns the error type. Without this guard
+        // the empty-name identifier cascaded into a spurious `TS2304: Cannot find
+        // name ''.` that `tsc` never emits.
+        // Go: internal/checker/checker.go:Checker.getResolvedSymbol (NodeIsMissing guard)
+        if tsgo_ast::utilities::node_is_missing(program.arena(), node) {
+            return self.error_type;
+        }
         let name = program.arena().text(node).to_string();
         // Go's `resolveName` always consults the outermost `c.globals` scope, so
         // a bare identifier referencing a global VALUE (a lib global like

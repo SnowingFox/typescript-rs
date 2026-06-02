@@ -1242,17 +1242,31 @@ impl Parser {
             Kind::TryKeyword | Kind::CatchKeyword | Kind::FinallyKeyword => {
                 self.parse_try_statement()
             }
+            // The full set of modifier / declaration-leading keywords Go's
+            // `parseStatement` routes to `parseDeclaration` when
+            // `isStartOfDeclaration()` holds. The class-member modifier keywords
+            // (`abstract`/`accessor`/`static`/`readonly`/`public`/`private`/
+            // `protected`) were previously omitted, so e.g. `abstract class C {}`
+            // fell through to expression-statement parsing and over-reported a
+            // `TS1005` at `class`.
             Kind::ConstKeyword
+            | Kind::EnumKeyword
             | Kind::ExportKeyword
+            | Kind::ImportKeyword
+            | Kind::PrivateKeyword
+            | Kind::ProtectedKeyword
+            | Kind::PublicKeyword
+            | Kind::AbstractKeyword
+            | Kind::AccessorKeyword
+            | Kind::StaticKeyword
+            | Kind::ReadonlyKeyword
             | Kind::AsyncKeyword
             | Kind::DeclareKeyword
             | Kind::InterfaceKeyword
             | Kind::TypeKeyword
-            | Kind::EnumKeyword
             | Kind::ModuleKeyword
             | Kind::NamespaceKeyword
             | Kind::GlobalKeyword
-            | Kind::ImportKeyword
                 if self.is_start_of_declaration() =>
             {
                 self.parse_declaration()
@@ -4035,6 +4049,12 @@ impl Parser {
                     self.next_token();
                     continue;
                 }
+                Kind::GlobalKeyword => {
+                    self.next_token();
+                    return self.token == Kind::OpenBraceToken
+                        || self.token == Kind::Identifier
+                        || self.token == Kind::ExportKeyword;
+                }
                 _ => return false,
             }
         }
@@ -4140,7 +4160,10 @@ impl Parser {
     // Go: internal/parser/parser.go:parseTypeParameter (subset: no improper-constraint expression)
     fn parse_type_parameter(&mut self) -> NodeId {
         let pos = self.node_pos();
-        let modifiers = self.parse_modifiers();
+        // `permitConstAsModifier: true` so a `const` type parameter (`<const T>`,
+        // TS 5.0 const type parameters) is parsed as a modifier rather than
+        // mis-read as a missing identifier (a spurious `TS1003`).
+        let modifiers = self.parse_modifiers_ex(false, true, false);
         let name = self.parse_identifier();
         let constraint = if self.parse_optional(Kind::ExtendsKeyword) {
             Some(self.parse_type())
@@ -5958,7 +5981,7 @@ impl Parser {
             || (self.token == Kind::QuestionToken && self.next_token() == Kind::ColonToken)
     }
 
-    // Go: internal/parser/parser.go:parseTupleElementType (subset: no JSDoc optional)
+    // Go: internal/parser/parser.go:parseTupleElementType
     fn parse_tuple_element_type(&mut self) -> NodeId {
         let pos = self.node_pos();
         if self.parse_optional(Kind::DotDotDotToken) {
@@ -5966,7 +5989,28 @@ impl Parser {
             let node = self.arena.new_rest_type_node(type_node);
             return self.finish_node(node, pos);
         }
-        self.parse_type()
+        let type_node = self.parse_type();
+        // Go's `parsePostfixTypeOrHigher` consumes a trailing `?` (when the token
+        // after it is not the start of a type) into a postfix JSDoc-nullable
+        // type, which `parseTupleElementType` then converts into an
+        // `OptionalType`. This port does not model `JSDocNullableType`, so the
+        // postfix `?` for an unnamed optional tuple element is recognized here
+        // directly — the only position where it becomes an `OptionalType`. The
+        // `nextIsStartOfType` guard preserves a real conditional element
+        // (`[A extends B ? C : D]` is consumed whole by `parse_type`, so a
+        // leftover `?` followed by a type start is left for the caller).
+        if self.token == Kind::QuestionToken && !self.look_ahead(|p| p.next_is_start_of_type()) {
+            self.next_token();
+            let node = self.arena.new_optional_type_node(type_node);
+            return self.finish_node(node, pos);
+        }
+        type_node
+    }
+
+    // Go: internal/parser/parser.go:nextIsStartOfType
+    fn next_is_start_of_type(&mut self) -> bool {
+        self.next_token();
+        self.is_start_of_type()
     }
 
     // Go: internal/parser/parser.go:nextIsStartOfMappedType
