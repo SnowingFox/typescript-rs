@@ -91,7 +91,9 @@ pub use core::symbols::{
     resolve_name, skip_alias, AliasSymbolLinks, DeclaredTypeLinks, MergedSymbols,
     ModuleSymbolLinks, SymbolLinks, SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
 };
-pub use core::symbols_query::{get_symbol_at_location, get_symbol_of_declaration};
+pub use core::symbols_query::{
+    get_symbol_at_location, get_symbol_of_declaration, get_type_at_location,
+};
 pub use core::type_facts::TypeFacts;
 pub use core::types::{
     format_type_flags, AccessFlags, ConditionalRoot, ConditionalType, IndexFlags, IndexType,

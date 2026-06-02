@@ -1,6 +1,7 @@
 use super::*;
 use crate::core::symbols::resolve_name;
 use crate::core::test_support::StubProgram;
+use crate::core::types::TypeFlags;
 use crate::core::Checker;
 use tsgo_ast::{NodeData, NodeId, SymbolFlags};
 
@@ -87,6 +88,104 @@ fn get_symbol_of_declaration_returns_declaration_symbol() {
     // statement 0 is the interface declaration itself.
     let symbol = get_symbol_of_declaration(&p, stmts[0]).expect("interface has a symbol");
     assert_eq!(p.symbol(symbol).name, "Foo");
+}
+
+// Navigates to the first top-level `VariableDeclaration` node and its name, the
+// shape `const`/`let` type-at-location tests need.
+fn first_variable_declaration(p: &StubProgram) -> (NodeId, NodeId) {
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("expected a source file"),
+    };
+    for stmt in stmts {
+        if let NodeData::VariableStatement(d) = arena.data(stmt) {
+            let decls = match arena.data(d.declaration_list) {
+                NodeData::VariableDeclarationList(l) => l.declarations.nodes.clone(),
+                _ => panic!("expected a variable declaration list"),
+            };
+            let decl = decls[0];
+            let name = match arena.data(decl) {
+                NodeData::VariableDeclaration(v) => v.name,
+                _ => panic!("expected a variable declaration"),
+            };
+            return (decl, name);
+        }
+    }
+    panic!("no variable declaration found");
+}
+
+// Go: internal/checker/checker.go:Checker.GetTypeAtLocation -> getTypeOfNode
+// (IsDeclarationNameOrImportPropertyName -> getTypeOfSymbol). The inferred type
+// of an un-annotated mutable `let x = 1` is the *widened* base primitive
+// `number` (NOT `any`): the query resolves the name to its symbol and reads the
+// symbol's initializer-inferred type.
+#[test]
+fn get_type_at_location_infers_widened_number_for_let() {
+    let p = StubProgram::parse_and_bind("/a.ts", "let x = 1;");
+    let mut c = Checker::new();
+    let (decl, name) = first_variable_declaration(&p);
+    // The declaration name resolves to `number` (widened from the literal `1`).
+    let name_type = get_type_at_location(&mut c, &p, name, None);
+    assert_eq!(c.type_to_string(name_type), "number");
+    // The declaration node itself yields the same type (the `IsDeclaration` arm).
+    let decl_type = get_type_at_location(&mut c, &p, decl, None);
+    assert_eq!(c.type_to_string(decl_type), "number");
+}
+
+// Go: internal/checker/checker.go:getTypeOfNode — a `const` keeps the literal
+// type of its initializer (`const x = 1` -> `1`, not widened to `number` and
+// not `any`). This is the real inferred type, distinct from the `let` case
+// above.
+#[test]
+fn get_type_at_location_keeps_literal_for_const() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const x = 1;");
+    let mut c = Checker::new();
+    let (decl, name) = first_variable_declaration(&p);
+    let name_type = get_type_at_location(&mut c, &p, name, None);
+    assert_eq!(c.type_to_string(name_type), "1");
+    let decl_type = get_type_at_location(&mut c, &p, decl, None);
+    assert_eq!(c.type_to_string(decl_type), "1");
+}
+
+// Go: internal/checker/checker.go:getTypeOfNode — an un-annotated variable
+// initialized from a CALL infers the call's return type (`const x = f()` where
+// `f(): string` -> `string`), so the inference flows through the type query.
+#[test]
+fn get_type_at_location_infers_call_return_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare function f(): string;\nconst x = f();");
+    let mut c = Checker::new();
+    let (decl, _name) = first_variable_declaration(&p);
+    let decl_type = get_type_at_location(&mut c, &p, decl, None);
+    assert_eq!(c.type_to_string(decl_type), "string");
+}
+
+// Go: internal/checker/checker.go:getTypeOfNode — an object-literal initializer
+// infers an anonymous object type (rendered `{ ... }` by the reachable
+// nodebuilder subset). The point is the query returns a real object type, not
+// `any`.
+#[test]
+fn get_type_at_location_infers_object_literal_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1 };");
+    let mut c = Checker::new();
+    let (decl, _name) = first_variable_declaration(&p);
+    let t = get_type_at_location(&mut c, &p, decl, None);
+    assert!(c.get_type(t).as_object().is_some(), "object-literal type");
+    assert!(
+        !c.get_type(t).flags().contains(TypeFlags::ANY),
+        "inferred object type is not any"
+    );
+}
+
+// Go: internal/checker/checker.go:getTypeOfNode (SourceFile / fallthrough) — a
+// node with no answerable type yields the error type rather than panicking. A
+// non-module source file is the first guard.
+#[test]
+fn get_type_at_location_source_file_is_error_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const x = 1;");
+    let mut c = Checker::new();
+    let t = get_type_at_location(&mut c, &p, p.root(), None);
+    assert_eq!(t, c.error_type());
 }
 
 // Go: internal/checker/checker.go:Checker.resolveName (meaning + scope)

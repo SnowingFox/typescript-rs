@@ -8,11 +8,12 @@
 //! more node shapes and routes property access through
 //! `checkPropertyAccessExpression`, which lands in later sub-phases.
 
-use tsgo_ast::{Kind, NodeArena, NodeData, NodeId, SymbolFlags, SymbolId, SymbolTable};
+use tsgo_ast::{Kind, NodeArena, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId, SymbolTable};
 
 use super::declared_types::{get_property_of_type, get_type_of_symbol};
 use super::program::BoundProgram;
 use super::symbols::resolve_name;
+use super::types::TypeId;
 use super::Checker;
 
 /// Returns *some* symbol associated with `node`, or `None`.
@@ -82,6 +83,96 @@ pub fn get_symbol_at_location(
 // Go: internal/checker/checker.go:Checker.getSymbolOfDeclaration
 pub fn get_symbol_of_declaration(program: &dyn BoundProgram, node: NodeId) -> Option<SymbolId> {
     program.symbol_of_node(node)
+}
+
+/// Returns the type at `node` for tooling queries (Go's `GetTypeAtLocation` ->
+/// `getTypeOfNode`), the reachable subset.
+///
+/// This is the type-side analogue of [`get_symbol_at_location`]: the language
+/// service asks "what is the (inferred) type at this node?" and gets the real
+/// type — e.g. `number` for the name / declaration of `let x = 1` and `1` for
+/// `const x = 1` (a `const` keeps the literal), NOT `any`. The work bottoms out
+/// in [`get_type_of_symbol`], so initializer-inferred types flow through
+/// unchanged (`const x = f()` yields `f`'s return type, an object literal its
+/// anonymous object type, ...).
+///
+/// Reachable subset (the branches needed by the inlay-hint / hover consumers):
+/// - a whole non-module source file, or a node inside a `with` block, has no
+///   answerable type and yields the error type (Go's first two guards);
+/// - a **declaration** node (`VariableDeclaration` / `PropertyDeclaration` /
+///   `PropertySignature`) → `get_type_of_symbol(get_symbol_of_declaration(node))`
+///   (Go's `IsDeclaration` arm);
+/// - a **declaration name** identifier → `get_type_of_symbol` of the symbol the
+///   name resolves to (Go's `IsDeclarationNameOrImportPropertyName` arm);
+/// - anything else yields the error type.
+///
+/// DEFER(phase-7-ls): the remaining `getTypeOfNode` arms — `IsPartOfTypeNode`
+/// (`getTypeFromTypeNode`, with the class extends/implements `this`-argument),
+/// `IsExpressionNode` (`getRegularTypeOfExpression`), `IsTypeDeclaration(Name)`
+/// (`getDeclaredTypeOfSymbol`), `IsBindingElement` / `IsBindingPattern`
+/// (`getTypeForVariableLikeDeclaration`), the import/export-assignment right
+/// side, meta-properties, and import attributes. blocked-by: a faithful
+/// `isExpressionNode` / `isPartOfTypeNode` predicate + `getRegularTypeOfExpression`,
+/// and the binding-element typing surface.
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{get_type_at_location, BoundProgram, Checker};
+/// use tsgo_ast::NodeId;
+/// fn type_at<P: BoundProgram>(c: &mut Checker, p: &P, node: NodeId) {
+///     let _ = get_type_at_location(c, p, node, None);
+/// }
+/// ```
+///
+/// Side effects: may build declared/value types and allocate types.
+// Go: internal/checker/checker.go:Checker.GetTypeAtLocation / getTypeOfNode
+pub fn get_type_at_location(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+    globals: Option<&SymbolTable>,
+) -> TypeId {
+    let arena = program.arena();
+    // A whole source file that is not a module, or any node inside a `with`
+    // block, has no answerable semantic type (Go's first two guards).
+    if arena.kind(node) == Kind::SourceFile
+        || arena.flags(node).contains(NodeFlags::IN_WITH_STATEMENT)
+    {
+        return checker.error_type();
+    }
+
+    // A declaration's type is the type of its symbol (Go's `IsDeclaration` arm).
+    if is_declaration(arena, node) {
+        return match get_symbol_of_declaration(program, node) {
+            Some(symbol) => get_type_of_symbol(checker, program, symbol, globals),
+            None => checker.error_type(),
+        };
+    }
+
+    // A declaration *name* resolves to the declared symbol's type (Go's
+    // `IsDeclarationNameOrImportPropertyName` arm).
+    if is_declaration_name(arena, node) {
+        return match get_symbol_at_location(checker, program, node, globals) {
+            Some(symbol) => get_type_of_symbol(checker, program, symbol, globals),
+            None => checker.error_type(),
+        };
+    }
+
+    checker.error_type()
+}
+
+/// Reports whether `node` is a declaration whose type is its symbol's type, for
+/// the kinds [`get_type_at_location`] resolves through the `IsDeclaration` arm.
+///
+/// Mirrors the subset of Go's `ast.IsDeclaration` reachable here; more kinds
+/// (functions, classes, enums, parameters, ...) are added as their type queries
+/// are needed.
+// Go: internal/ast/utilities.go:IsDeclaration (reachable subset)
+fn is_declaration(arena: &NodeArena, node: NodeId) -> bool {
+    matches!(
+        arena.kind(node),
+        Kind::VariableDeclaration | Kind::PropertyDeclaration | Kind::PropertySignature
+    )
 }
 
 // Go: internal/checker/checker.go:Checker.getSymbolOfNameOrPropertyAccessExpression

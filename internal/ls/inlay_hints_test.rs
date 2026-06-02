@@ -59,6 +59,152 @@ fn enum_member_without_initializer_shows_auto_value() {
     );
 }
 
+/// Preferences with only variable-type hints enabled.
+fn variable_type_prefs() -> InlayHintsPreferences {
+    InlayHintsPreferences {
+        include_inlay_variable_type_hints: Tristate::True,
+        ..Default::default()
+    }
+}
+
+// Go: internal/ls/inlay_hints.go:visitVariableLikeDeclaration — an un-annotated
+// mutable `let x = 1` gets a `: number` type hint (the widened initializer
+// type), anchored at the name's end, with `Type` kind and left padding.
+#[test]
+fn variable_type_hint_for_let_shows_widened_number() {
+    let result = hints("let x = 1", &variable_type_prefs());
+    assert_eq!(result.len(), 1);
+    let hint = &result[0];
+    assert_eq!(hint.label.string.as_deref(), Some(": number"));
+    assert_eq!(hint.kind, Some(tsgo_lsproto::InlayHintKind::TYPE));
+    assert_eq!(hint.padding_left, Some(true));
+    assert_eq!(hint.padding_right, None);
+    // `let x` -> the name `x` ends at character 5.
+    assert_eq!(
+        hint.position,
+        Position {
+            line: 0,
+            character: 5
+        }
+    );
+}
+
+// Go: internal/ls/inlay_hints.go:visitVariableLikeDeclaration — a mutable
+// `let x = "s"` widens its string-literal initializer to `string`.
+#[test]
+fn variable_type_hint_for_let_widens_string() {
+    let result = hints("let x = \"s\"", &variable_type_prefs());
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].label.string.as_deref(), Some(": string"));
+}
+
+// GUARD Go: internal/ls/inlay_hints.go:isHintableDeclaration — a `const` bound
+// to a hintable literal (`const x = 1`) gets NO hint (the literal makes the type
+// obvious), unlike the `let` case.
+#[test]
+fn variable_type_hint_suppressed_for_const_literal() {
+    assert!(hints("const x = 1", &variable_type_prefs()).is_empty());
+    assert!(hints("const x = \"s\"", &variable_type_prefs()).is_empty());
+    assert!(hints("const x = true", &variable_type_prefs()).is_empty());
+}
+
+// GUARD Go: internal/ls/inlay_hints.go:visitVariableLikeDeclaration (typeAnnotation
+// != nil) — an annotated declaration shows its type in source, so no hint.
+#[test]
+fn variable_type_hint_suppressed_when_annotated() {
+    assert!(hints("let x: number = 1", &variable_type_prefs()).is_empty());
+    assert!(hints("const x: number = 1", &variable_type_prefs()).is_empty());
+}
+
+// Go: internal/ls/inlay_hints.go:isHintableDeclaration — a `const` initialized
+// from a CALL is hintable (the type is not obvious), and the inferred return
+// type is rendered.
+#[test]
+fn variable_type_hint_for_const_call_inference() {
+    let result = hints(
+        "declare function f(): string;\nconst x = f();",
+        &variable_type_prefs(),
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].label.string.as_deref(), Some(": string"));
+}
+
+// GUARD Go: internal/ls/inlay_hints.go:visitVariableLikeDeclaration (IsBindingPattern)
+// — a destructuring declaration (`const { a } = o`) gets no variable-type hint.
+#[test]
+fn variable_type_hint_suppressed_for_binding_pattern() {
+    let src = "declare const o: { a: number };\nconst { a } = o;";
+    assert!(hints(src, &variable_type_prefs()).is_empty());
+}
+
+// Go: internal/ls/inlay_hints.go:visitVariableLikeDeclaration
+// (…WhenTypeMatchesName) — when the inferred type's text case-insensitively
+// equals the variable name, the hint is suppressed by default and shown only
+// when the `…WhenTypeMatchesName` toggle is on.
+#[test]
+fn variable_type_hint_matches_name_suppression() {
+    let src = "interface Foo {}\ndeclare function make(): Foo;\nconst foo = make();";
+
+    // Default (toggle off): `foo` matches type `Foo` (case-insensitive) -> none.
+    assert!(hints(src, &variable_type_prefs()).is_empty());
+
+    // Toggle on: the matching hint is shown.
+    let prefs = InlayHintsPreferences {
+        include_inlay_variable_type_hints: Tristate::True,
+        include_inlay_variable_type_hints_when_type_matches_name: Tristate::True,
+        ..Default::default()
+    };
+    let result = hints(src, &prefs);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].label.string.as_deref(), Some(": Foo"));
+}
+
+/// Preferences with only property-declaration-type hints enabled.
+fn property_type_prefs() -> InlayHintsPreferences {
+    InlayHintsPreferences {
+        include_inlay_property_declaration_type_hints: Tristate::True,
+        ..Default::default()
+    }
+}
+
+// Go: internal/ls/inlay_hints.go:visitVariableLikeDeclaration (property arm) —
+// an un-annotated class field with an initializer (`a = 1`) gets a `: number`
+// type hint (the widened initializer type). Matches the inlayHintsPropertyDeclarations
+// baseline's `a = 1` -> `: number`.
+#[test]
+fn property_type_hint_for_initialized_field() {
+    let result = hints("class C { a = 1 }", &property_type_prefs());
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].label.string.as_deref(), Some(": number"));
+    assert_eq!(result[0].kind, Some(tsgo_lsproto::InlayHintKind::TYPE));
+}
+
+// GUARD Go: internal/ls/inlay_hints.go:visitVariableLikeDeclaration — an
+// annotated field (`b: number = 2`) shows no hint.
+#[test]
+fn property_type_hint_suppressed_when_annotated() {
+    assert!(hints("class C { b: number = 2 }", &property_type_prefs()).is_empty());
+}
+
+// GUARD Go: internal/ls/inlay_hints.go:visitVariableLikeDeclaration (no
+// initializer && type-at-location is `any`) — a bare `c;` field gets no hint.
+// Matches the inlayHintsPropertyDeclarations baseline's `c;` (no hint).
+#[test]
+fn property_type_hint_suppressed_for_uninitialized_any_field() {
+    assert!(hints("class C { c; }", &property_type_prefs()).is_empty());
+}
+
+// GUARD: the property-declaration toggle does not fire on plain variable
+// declarations, and the variable toggle does not fire on class properties (the
+// two kinds are gated independently in the dispatch chain).
+#[test]
+fn property_and_variable_toggles_are_independent() {
+    // property toggle only: a `let` variable gets no hint.
+    assert!(hints("let x = 1", &property_type_prefs()).is_empty());
+    // variable toggle only: a class field gets no hint.
+    assert!(hints("class C { a = 1 }", &variable_type_prefs()).is_empty());
+}
+
 /// The `= <value>` label strings of every hint, in walk (source) order.
 fn labels(result: &[tsgo_lsproto::InlayHint]) -> Vec<String> {
     result
