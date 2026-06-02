@@ -17,6 +17,7 @@ pub mod jsx;
 pub mod mapper;
 pub mod nodebuilder;
 pub mod program;
+pub mod reachability;
 pub mod relations;
 pub mod signatures;
 pub mod symbols;
@@ -257,6 +258,17 @@ pub struct Checker {
     /// `sourceFileLinks.typeChecked`). Keeps diagnostics from doubling when a
     /// file is checked then re-requested through [`Checker::get_diagnostics`].
     checked_files: FxHashSet<NodeId>,
+    /// Whether the statement currently being checked is inside an
+    /// already-reported unreachable region (Go's `c.withinUnreachableCode`).
+    /// Saved/restored around each statement so the FIRST unreachable statement
+    /// of a subtree reports `TS7027` while its descendants do not re-report.
+    // Go: internal/checker/checker.go:Checker.withinUnreachableCode
+    within_unreachable_code: bool,
+    /// The unreachable statements already folded into a reported `TS7027` run
+    /// (Go's `c.reportedUnreachableNodes`), so a node swallowed by an earlier
+    /// run's forward scan is not reported again. Cleared per file.
+    // Go: internal/checker/checker.go:Checker.reportedUnreachableNodes
+    reported_unreachable_nodes: FxHashSet<NodeId>,
     /// The signature resolved for a call/new expression, keyed by the call node
     /// (Go memoizes this on `signatureLinks[node].resolvedSignature`). C-B2
     /// populates it for a generic call whose type arguments were inferred, so a
@@ -498,6 +510,8 @@ impl Checker {
             emit_resolver: OnceCell::new(),
             program: None,
             checked_files: FxHashSet::default(),
+            within_unreachable_code: false,
+            reported_unreachable_nodes: FxHashSet::default(),
             resolved_signatures: FxHashMap::default(),
             type_reference_cache: FxHashMap::default(),
             any_type,

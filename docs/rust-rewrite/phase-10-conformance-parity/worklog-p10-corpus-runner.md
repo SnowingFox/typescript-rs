@@ -3756,3 +3756,191 @@ the parent).
   re-scan / the ECMA line map. None are reached by the relation-error path; the
   helper falls through to the faithful generic `skipTrivia(pos)..end` tail for them.
   blocked-by: `GetRangeOfTokenAtPosition` + reparsed-JSDoc declaration handling.
+
+# Round 22 — unreachable code detection (TS7027)
+
+Round goal: emit `TS7027 "Unreachable code detected."` — a top FALSE-NEGATIVE in
+the full compiler corpus (`missing TS7027 ×9`) — on statements the control-flow
+analysis proves unreachable (code after `return`/`throw`/`break`/`continue`,
+etc.), gated on `allowUnreachableCode != true`. SOLO lane, strict TDD red->green.
+
+## Step-0 — leverage finding (temporary `#[ignore]`d probe, REMOVED)
+
+A throwaway probe (`temp_round22_ts7027_leverage`, since REMOVED) walked the full
+corpus and printed the per-case `CaseDiff` for every case whose COMMITTED baseline
+expects TS7027. Only THREE corpus cases expect it (the ×9 are occurrences):
+
+| case | committed TS7027 | other diff | flips on byte-exact TS7027? |
+|---|---|---|---|
+| `reachabilityChecks9.ts` | ×2 (after `return` in switch cases) | none | **YES** (TS7027-only) |
+| `reachabilityChecks10.ts` | ×1 (run after `throw`) | none | **YES** (TS7027-only) |
+| `reachabilityChecks11.ts` | ×6 (namespaces / enums / class) | ALSO missing `TS7006` | NO (still needs TS7006) |
+
+**Honest flip count: 2 of 3** (`reachabilityChecks9`, `reachabilityChecks10`).
+`reachabilityChecks11` also misses `TS7006` (implicit-any parameter), so byte-exact
+TS7027 leaves it `divergent`; 3 of its 6 TS7027 live INSIDE namespace bodies the
+checker does not yet descend into (module-body checking is DEFER), so `missing
+TS7027` drops `9 -> 3` rather than to 0. **Span**: from `GetTokenPosOfNode(first
+unreachable stmt)` (= `skipTrivia(text, pos)`) to `lastStmt.End()` — Go reports
+ONCE per maximal unreachable RUN, collapsing consecutive unreachable
+potentially-executable siblings into one diagnostic. **Category**: all three cases
+set `// @allowUnreachableCode: false`, so `addErrorOrSuggestion(isError =
+allowUnreachableCode == false, ...)` makes TS7027 an ERROR (in `.errors.txt`); with
+the option UNSET it is a SUGGESTION Go stores in a SEPARATE collection (never in
+`.errors.txt`).
+
+## Go ground truth ported (`// Go:`-anchored)
+
+- **`internal/checker/checker.go:checkSourceElementUnreachable(2374)`** — guards on
+  `IsPotentiallyExecutableNode`, dedups via `reportedUnreachableNodes`, scans the
+  parent statement list FORWARD to fold the maximal run, then
+  `addErrorOrSuggestion(allowUnreachableCode == TSFalse, NewDiagnostic(range,
+  Unreachable_code_detected))` with `range = GetTokenPosOfNode(start)..end.End()`.
+- **`checker.go:isSourceElementUnreachable(2435)`** — `NodeFlagsUnreachable` set ⇒
+  unreachable (const enum only with `preserveConstEnums`; module only if
+  `IsInstantiatedModule`); else the node's flow node ⇒ `!isReachableFlowNode`.
+- **`checker.go:checkSourceElementWorker(2236)`** — the per-node hook (gated
+  `!withinUnreachableCode && allowUnreachableCode != TSTrue`), with
+  `checkSourceElement` saving/restoring `withinUnreachableCode` around the subtree.
+- AST predicates from `internal/ast/utilities.go`: `IsPotentiallyExecutableNode`,
+  `GetModuleInstanceState`/`getModuleInstanceStateWorker`, `IsInstantiatedModule`,
+  `IsEnumConst`; statement-list shape from `ast.go:Node.{Statements,CanHaveStatements}`.
+- The binder ALREADY stamps `NodeFlags::UNREACHABLE` on potentially-executable
+  statements bound under the unreachable flow (`tsgo_binder::bind_children`,
+  unchanged this round) and exposes a statement's flow node via
+  `BoundProgram::flow_node_of`, so no binder change was needed.
+
+## Rust landing
+
+- New module **`internal/checker/core/reachability.rs`**: `Checker::
+  check_source_element_unreachable` (+ private `is_source_element_unreachable`) and
+  the ported AST predicates `is_potentially_executable_node`, `can_have_statements`,
+  `statements_of`, the `ModuleInstanceState` walk (`module_instance_state` /
+  `_worker` / `is_instantiated_module`), and `is_enum_const`. The error is built
+  from `UNREACHABLE_CODE_DETECTED` and recorded ONLY when `allow_unreachable_code ==
+  false` (the suggestion variant is computed-then-dropped — no suggestion sink is
+  modeled; DEFER).
+- **`core/check.rs`**: `check_statement` now saves `within_unreachable_code`, runs
+  the unreachable hook at entry (gated `!= TSTrue`), and restores on exit;
+  `check_source_file` resets the per-file state; `add_diagnostic` raised to
+  `pub(crate)`. **`core/mod.rs`**: two new `Checker` fields
+  (`within_unreachable_code`, `reported_unreachable_nodes`).
+- **PREREQUISITE — `@ts-ignore` / `@ts-expect-error` preceding-directive filter**
+  (`internal/compiler/program.rs`): `reachabilityChecksIgnored.ts` sets
+  `allowUnreachableCode: false` but its unreachable statements sit under
+  `// @ts-ignore` / `// @ts-expect-error` comment directives, which `tsc`'s program
+  filter (`getDiagnosticsWithPrecedingDirectives`) strips — so emitting a *correct*
+  TS7027 there would over-fire against the (clean) committed baseline. That
+  directive filter was a pre-existing `DEFER(P6)`; this round ports its suppression
+  half into `bind_and_check_diagnostics_grouped` (`filter_diagnostics_with_preceding_directives`
+  + `line_is_comment_directive` + `is_comment_or_blank_line`), recovering the
+  directive lines by a line-leading `//`/`/*` text scan (the scanner-captured
+  `CommentDirectives` and the unused-`@ts-expect-error` TS2578 stay DEFER). The
+  filter only REMOVES diagnostics, so it is parity-safe (can never add an extra).
+
+## RED->GREEN + guard tests
+
+Checker (`core/check_test.rs`, +1 headline): `unreachable_const_after_return_reports_ts7027`
+(`function f() { return 1; const x = 2; }` -> exactly one error-category TS7027 at
+`start = index("const")`, `length = len("const x = 2;")`; RED: 0 emitted).
+
+Checker (`core/reachability_test.rs`, +9): `unreachable_after_throw_reports_ts7027` /
+`..._break_...` / `..._continue_...`; GUARDs `reachable_code_reports_no_ts7027`,
+`allow_unreachable_code_true_suppresses_ts7027` (true/unset/false tristate),
+`maximal_unreachable_run_reports_once` (collapsed run span),
+`type_alias_in_unreachable_position_is_not_reported` (not potentially executable),
+`uninstantiated_namespace_is_not_reported_instantiated_is`,
+`enum_unreachable_arm_respects_const_and_preserve_const_enums`.
+
+Compiler real-lib (`internal/compiler/program_test.rs`, +1):
+`unreachable_run_after_throw_reports_one_ts7027_real_lib` (mirrors
+`reachabilityChecks10` over the bundled libs: one collapsed TS7027).
+
+## Measurement — full corpus BEFORE->AFTER (`tests/cases/compiler`, 222 ran)
+
+| metric | BEFORE | AFTER | Δ |
+|---|---|---|---|
+| **passed** | 119 (53.6%) | **122 (55.0%)** | **+3** |
+| failed | 102 | 99 | −3 |
+| errored | 1 | 1 | 0 |
+| no_baseline_but_errors | 20 | 19 | −1 |
+| missing_all_errors | 68 | 65 | −3 |
+| divergent | 14 | 15 | +1 |
+| **missing TS7027** | **×9** | **×3** | **−6** |
+| **extra TS7027** | 0 | **0** | 0 (NO over-fire) |
+| extra TS2554 | ×1 | 0 | −1 (directive filter) |
+| every other extra/missing code | — | — | UNCHANGED |
+
+**Honest flip count: +3 to byte-exact PASS** — `reachabilityChecks9` +
+`reachabilityChecks10` (the two TS7027-only cases) PLUS `jsExportsImportedIntoTsxLosesTypeInfo.tsx`
+(the `@ts-ignore` directive filter clears its previously-extra TS2554). NO PASS->FAIL
+regression: `passed` rose monotonically; `reachabilityChecks11` shifted
+missing_all_errors -> divergent (now emits 3 of its 6 TS7027; the 3 namespace-interior
+ones + TS7006 remain). NO new extra TS7027 anywhere (the directive filter keeps
+`reachabilityChecksIgnored.ts` clean). `tests/cases/conformance` (19 ran): passed 13
+-> 13 (no regression).
+
+## 150-subset BEFORE->AFTER
+
+`expanded_compiler_subset_parity_smoke`: **passed 92 -> 93 (+1)**, failed 58 -> 57;
+`reachabilityChecks10.ts` flips missing_all_errors -> PASS (`missing_all_errors 44 ->
+43`; `no_baseline 7`, `divergent 7` unchanged). The other AFTER beneficiaries are
+outside the <=25-line subset (`reachabilityChecks9` 29 lines,
+`jsExportsImportedIntoTsxLosesTypeInfo` 121 lines). `curated_compiler_subset_parity_smoke`
+21/9 unchanged (none of its 30 cases involve TS7027 / directives). All other pinned
+subset guards (`top_extra(2)=[(2339,5),(2304,4)]`, `extra TS2339==5`, `TS2583==None`,
+`TS2769==1`, `TS1005/1003/1155==None`, `top_missing(1)=[(2874,7)]`) re-asserted UNCHANGED.
+
+## Gate results (Round 22)
+
+- `cargo test -p tsgo_checker` — GREEN (**806** lib [+10] + 178 doctests).
+- `cargo test -p tsgo_compiler --lib` — GREEN (**130** [+1 real-lib]).
+- `cargo test -p tsgo_testrunner --lib` — GREEN (51 + 1 ignored [full-corpus
+  measurement]; 150-subset re-pinned 93/57).
+- `cargo test -p tsgo_binder` (65+10) — GREEN (no sibling regression; binder
+  untouched). `cargo test -p tsgo_ls` (80) / `-p tsgo_execute` (39+4) — GREEN after
+  a STALE-SNAPSHOT fix (see below).
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner -p tsgo_ls
+  -p tsgo_execute --all-targets -- -D warnings` — clean (fixed `field_reassign_with_default`
+  + `needless_range_loop`). `cargo fmt --all -- --check` — clean.
+  `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; additive/surgical vertical slice; no test weakened/deleted; no new
+dependency (`Cargo.lock` untouched). The temporary `temp_round22_ts7027_leverage`
+probe was REMOVED (tree has only the intended modifications). Not committed (left to
+the parent).
+
+**Pre-existing stale snapshots fixed (NOT this round's behavior):** running the
+sibling suites surfaced THREE Round-21 TS2322-span snapshots that Round 21's
+`GetErrorRangeForNode` name-narrowing left stale because its gate omitted `-p
+tsgo_ls` / `-p tsgo_execute`. Updated to the byte-correct narrowed span (the
+declaration NAME, matching `tsc` and the checker/compiler tests):
+`tsgo_ls::diagnostics_test::get_semantic_diagnostics_reports_ts2322` (`(0,5)..(0,21)`
+-> `(0,6)..(0,7)`), and `tsgo_execute`'s
+`type_error_reports_ts2322_and_exits_one` / `no_emit_errored_exits_two_without_writing_js`
+(`(1,6)` -> `(1,7)`) + `type_error_in_dependency_reports_and_continues` (`(1,13)` ->
+`(1,14)`) — the latter three also had their now-obsolete "DIVERGENCE(port): column
+one less than Go" comments removed (the column now MATCHES Go).
+
+## DEFER list (blocked-by) — Round 22
+
+- **Unreachable code INSIDE a namespace body** (`reachabilityChecks11`'s 3 missing
+  TS7027 at `namespace A`/`A2`/`A4`): the checker does not yet descend into module
+  declaration bodies (`check_statement` has no `ModuleDeclaration` arm), so an
+  unreachable statement nested in a namespace is never visited. blocked-by: module
+  body checking (`checkModuleDeclaration` -> `checkSourceElements(body)`).
+- **The SUGGESTION variant of TS7027** (`allowUnreachableCode` UNSET): Go stores it
+  in `suggestionDiagnostics`, a separate collection absent from `.errors.txt`. The
+  port has no suggestion sink, so the suggestion is computed-then-dropped (the
+  error variant is byte-faithful). blocked-by: a checker suggestion-diagnostic
+  collection.
+- **The flow-node `isReachableFlowNode` branch** of `isSourceElementUnreachable`
+  (code unreachable by flow but NOT flagged `NodeFlagsUnreachable` by the binder,
+  e.g. after an exhaustive switch or a `never`-returning call) is ported and wired,
+  but none of the current corpus TS7027 cases exercise it (all reach via the
+  binder's `NodeFlagsUnreachable`); it is covered by the existing `is_reachable_flow_node`.
+- **`@ts-expect-error` UNUSED -> TS2578** and the scanner-captured `CommentDirectives`
+  (so a TRAILING `code(); // @ts-ignore` directive is recognized): only the
+  line-leading suppression half of `getDiagnosticsWithPrecedingDirectives` is
+  ported. blocked-by: the scanner's comment-directive capture threaded onto the
+  source file + the TS2578 emission.

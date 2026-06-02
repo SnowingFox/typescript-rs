@@ -775,11 +775,24 @@ fn expanded_compiler_subset_parity_smoke() {
     // vs produced `(1,6)`), so divergent drops 10 -> 7; no_baseline_but_errors /
     // missing_all_errors are unchanged. The subset's `extra TS2322 ×7 -> ×3` and
     // `missing TS2322` drop by the four flipped diagnostics with NO new code.
+    //
+    // Round 22 (unreachable-code detection, TS7027): a statement proven
+    // unreachable by the binder's `NodeFlags::UNREACHABLE` marking now reports
+    // `TS7027 Unreachable code detected.` (gated on `allowUnreachableCode !=
+    // true`, error category under `allowUnreachableCode: false`). In this subset
+    // `reachabilityChecks10.ts` (`throw; <stmt>; <stmt>;`) flips from
+    // missing_all_errors to PASS (92 -> 93; missing_all_errors 44 -> 43). The
+    // round also ports the `@ts-ignore` / `@ts-expect-error` preceding-directive
+    // filter (Go's `getDiagnosticsWithPrecedingDirectives`) so the genuinely-
+    // unreachable but directive-suppressed `reachabilityChecksIgnored.ts` does
+    // NOT over-fire; that filter is parity-neutral in THIS subset (its other
+    // beneficiary `jsExportsImportedIntoTsxLosesTypeInfo.tsx` is 121 lines,
+    // outside the <=25-line subset — its flip shows only in the full corpus).
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 92,
-            failed: 58,
+            passed: 93,
+            failed: 57,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -856,7 +869,9 @@ fn expanded_compiler_subset_parity_smoke() {
     // Round 21: the var-decl span narrowing flips three divergent cases to PASS
     // (10 -> 7); no_baseline_but_errors / missing_all_errors are unchanged.
     assert_eq!(hist.no_baseline_but_errors, 7);
-    assert_eq!(hist.missing_all_errors, 44);
+    // Round 22: `reachabilityChecks10.ts` flips out of missing_all_errors (44 ->
+    // 43) as its `throw`-run TS7027 now matches the committed baseline.
+    assert_eq!(hist.missing_all_errors, 43);
     assert_eq!(hist.divergent, 7);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier

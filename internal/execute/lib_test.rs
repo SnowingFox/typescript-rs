@@ -39,10 +39,10 @@ fn clean_program_exits_zero_and_emits_js() {
 // Go ground truth: exit 1; output `index.ts(1,7): error TS2322: Type 'string'
 // is not assignable to type 'number'.`; `index.js` still written.
 //
-// DIVERGENCE(port): the column is `6`, not Go's `7` — the `tsgo_checker`
-// diagnostic span for the variable declaration starts at `start=5` (the space
-// before `x`) where Go uses `6` (the `x`). The checker lives in an out-of-scope
-// crate; the code (TS2322), message, and exit code all match Go exactly.
+// The column is `7` (the declaration NAME `x`), matching Go: the checker's
+// `GetErrorRangeForNode` narrows a variable-declaration relation error to its
+// name (`skipTrivia(name.Pos())..name.End()`), so the span is `x`, not the
+// whole `x: number = "s"` declaration.
 #[test]
 fn type_error_reports_ts2322_and_exits_one() {
     let (sys, fs) = single_file_sys("index.ts", "const x: number = \"s\";\n");
@@ -53,7 +53,7 @@ fn type_error_reports_ts2322_and_exits_one() {
     );
     assert_eq!(
         sys.output(),
-        "index.ts(1,6): error TS2322: Type 'string' is not assignable to type 'number'.\n"
+        "index.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.\n"
     );
     // Outputs are still generated when emit is not blocked.
     assert!(fs.file_exists("/p/index.js"));
@@ -82,7 +82,7 @@ fn no_emit_errored_exits_two_without_writing_js() {
     assert_eq!(result.status, ExitStatus::DiagnosticsPresentOutputsSkipped);
     assert_eq!(
         sys.output(),
-        "index.ts(1,6): error TS2322: Type 'string' is not assignable to type 'number'.\n"
+        "index.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.\n"
     );
     assert!(!fs.file_exists("/p/index.js"));
 }

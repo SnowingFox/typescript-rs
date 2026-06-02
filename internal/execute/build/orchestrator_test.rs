@@ -267,10 +267,9 @@ fn dry_run_reports_up_to_date_after_build() {
 // `b/index.ts(1,14): error TS2322: Type 'string' is not assignable to type
 // 'number'.`; both projects emit their `.js` + `.tsbuildinfo`.
 //
-// DIVERGENCE(port): the column is the `tsgo_checker` variable-declaration span
-// (one less than Go's), an out-of-scope checker-crate divergence already noted
-// for the single-build path; the code (TS2322), message, file, exit code, and
-// build-continues semantics all match Go.
+// The column is `14` (the declaration NAME), matching Go now that the checker's
+// `GetErrorRangeForNode` narrows the variable-declaration relation error to its
+// name.
 #[test]
 fn type_error_in_dependency_reports_and_continues() {
     let (sys, fs) = errored_b_fixture();
@@ -285,12 +284,11 @@ fn type_error_in_dependency_reports_and_continues() {
         out.contains("error TS2322: Type 'string' is not assignable to type 'number'."),
         "missing TS2322: {out:?}"
     );
-    // Port column is `13` (Go's is `14`) — the documented `tsgo_checker`
-    // variable-declaration span off-by-one, an out-of-scope checker-crate
-    // divergence; assert the stable prefix.
+    // The column is `14` (the declaration NAME `x`), matching Go's
+    // `GetErrorRangeForNode` narrowing.
     assert!(
         out.contains(
-            "b/index.ts(1,13): error TS2322: Type 'string' is not assignable to type 'number'."
+            "b/index.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'."
         ),
         "unexpected diagnostic: {out:?}"
     );

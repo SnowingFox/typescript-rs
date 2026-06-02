@@ -23,21 +23,22 @@ fn get_semantic_diagnostics_reports_ts2322() {
         d.message,
         "Type 'string' is not assignable to type 'number'."
     );
-    // The span is the `x: number = "s"` variable declaration (Go reports the
-    // type-not-assignable error at the declaration node). The node's full start
-    // is the byte after `const` (byte 5, the leading space) and it ends after
-    // the initializer (byte 21). On an ASCII single line the UTF-16 character
-    // offset equals the byte offset.
+    // The span narrows to the declaration NAME `x` (Go's `GetErrorRangeForNode`
+    // maps a `KindVariableDeclaration` error node to its name, then
+    // `skipTrivia(name.Pos())..name.End()`), so it underlines just `x` at byte 6
+    // (length 1), NOT the whole `x: number = "s"` declaration. On an ASCII single
+    // line the UTF-16 character offset equals the byte offset. (Matches the
+    // checker/compiler `variable_declaration_2322_span_is_the_name*` tests.)
     assert_eq!(
         d.range,
         Range {
             start: Position {
                 line: 0,
-                character: 5
+                character: 6
             },
             end: Position {
                 line: 0,
-                character: 21
+                character: 7
             },
         }
     );

@@ -3925,6 +3925,12 @@ impl Checker {
             NodeData::SourceFile(d) => d.statements.nodes.clone(),
             _ => return,
         };
+        // Reset the per-file unreachable-code state (Go clears
+        // `reportedUnreachableNodes` per source file; `withinUnreachableCode` is
+        // saved/restored per statement and starts `false`). The node ids are
+        // file-view-local, so the set must not leak across files.
+        self.within_unreachable_code = false;
+        self.reported_unreachable_nodes.clear();
         for statement in statements {
             self.check_statement(view.as_ref(), statement);
         }
@@ -3947,6 +3953,19 @@ impl Checker {
     // body checking + expression-body descent.
     // Go: internal/checker/checker.go:Checker.checkSourceElement(2223)
     fn check_statement(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        // Go's `checkSourceElement` saves/restores `withinUnreachableCode` around
+        // the per-node worker, and `checkSourceElementWorker` reports `TS7027`
+        // (gated on `allowUnreachableCode != true`) on the first unreachable
+        // statement of a subtree, then sets the flag so its descendants do not
+        // re-report. Restoring on the way out keeps siblings independent.
+        let saved_within_unreachable = self.within_unreachable_code;
+        if !self.within_unreachable_code
+            && self.compiler_options().allow_unreachable_code != tsgo_core::tristate::Tristate::True
+            && self.check_source_element_unreachable(program, node)
+        {
+            self.within_unreachable_code = true;
+        }
+
         self.check_grammar_modifiers(program, node);
         // Class members carry their own modifiers (e.g. accessibility), so run
         // the grammar checks on each, then check each member (4r descends into
@@ -4216,6 +4235,10 @@ impl Checker {
                 self.check_return_statement_expression(program, node, expression);
             }
         }
+
+        // Restore the enclosing reachability state (Go's `checkSourceElement`
+        // restores `c.withinUnreachableCode` after the worker returns).
+        self.within_unreachable_code = saved_within_unreachable;
     }
 
     // Checks a function expression (`function (): T { ... }`) appearing in an
@@ -6054,7 +6077,7 @@ impl Checker {
 
     // Records an already-built diagnostic into the per-file collection, keyed by
     // the file `program` is a view of (Go's `c.diagnostics.Add`).
-    fn add_diagnostic(&mut self, program: &dyn BoundProgram, diagnostic: Diagnostic) {
+    pub(crate) fn add_diagnostic(&mut self, program: &dyn BoundProgram, diagnostic: Diagnostic) {
         self.diagnostics_by_file
             .entry(program.file_handle())
             .or_default()

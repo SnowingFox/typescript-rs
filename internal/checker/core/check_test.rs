@@ -9358,3 +9358,40 @@ fn js_without_commonjs_indicator_module_still_reports_2591() {
         "a plain JS file with no CJS pattern keeps `module` unresolved (2591): {diags:?}"
     );
 }
+
+// Round 22 (RED->GREEN headline): a statement after `return` in a function body
+// is unreachable, so with `allowUnreachableCode: false` the checker reports
+// `TS7027 Unreachable code detected.` (category Error) on the unreachable
+// statement, spanning exactly that statement (`GetTokenPosOfNode(stmt)..stmt
+// .End()` — the name-less generic range that skips the leading trivia).
+// Go: internal/checker/checker.go:Checker.checkSourceElementUnreachable(2374)
+#[test]
+fn unreachable_const_after_return_reports_ts7027() {
+    let text = "function f() { return 1; const x = 2; }";
+    let options = tsgo_core::compileroptions::CompilerOptions {
+        allow_unreachable_code: tsgo_core::tristate::Tristate::False,
+        ..Default::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts", text, options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts7027: Vec<_> = diags.iter().filter(|d| d.code == 7027).collect();
+    assert_eq!(
+        ts7027.len(),
+        1,
+        "expected exactly one TS7027, got {diags:?}"
+    );
+    let d = ts7027[0];
+    assert_eq!(d.category, tsgo_diagnostics::Category::Error);
+    assert_eq!(d.message, "Unreachable code detected.");
+    let start = text.find("const").unwrap() as i32;
+    assert_eq!(d.start, start, "span starts at the unreachable statement");
+    assert_eq!(
+        d.length,
+        "const x = 2;".len() as i32,
+        "span covers the unreachable statement"
+    );
+}

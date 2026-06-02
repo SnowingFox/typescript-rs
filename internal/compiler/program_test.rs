@@ -417,6 +417,48 @@ fn variable_declaration_2322_span_is_the_name_real_lib() {
     assert_eq!(diags[0].length, 1, "span underlines only the name `x`");
 }
 
+/// Round 22 (unreachable code, end-to-end): a real-lib program over the
+/// `reachabilityChecks10.ts` shape (`throw ...; <stmt>; <stmt>;` with
+/// `allowUnreachableCode: false`) reports exactly one `TS7027 Unreachable code
+/// detected.` collapsing the maximal run of unreachable statements into a single
+/// diagnostic spanning the first statement's start to the last statement's end.
+/// This is the end-to-end mirror of the checker unit
+/// `maximal_unreachable_run_reports_once`, proving the binder's
+/// `NodeFlags::UNREACHABLE` marking flows through the real pipeline (parse ->
+/// bind -> check -> diagnostics) the corpus runner drives.
+// Go: internal/checker/checker.go:Checker.checkSourceElementUnreachable
+#[test]
+fn unreachable_run_after_throw_reports_one_ts7027_real_lib() {
+    let src = "throw new Error(\"\");\nlet a = 1;\nlet b = 2;\n";
+    let options = CompilerOptions {
+        allow_unreachable_code: tsgo_core::tristate::Tristate::False,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", src)],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    let ts7027: Vec<_> = diags.iter().filter(|d| d.code == 7027).collect();
+    assert_eq!(ts7027.len(), 1, "exactly one collapsed TS7027: {diags:?}");
+    assert_eq!(ts7027[0].message, "Unreachable code detected.");
+    let start = src.find("let a").expect("first unreachable stmt") as i32;
+    // The run ends at the end of `let b = 2;` (just before the trailing newline).
+    let end = (src.find("let b = 2;").unwrap() + "let b = 2;".len()) as i32;
+    assert_eq!(
+        ts7027[0].start, start,
+        "span starts at the first unreachable statement"
+    );
+    assert_eq!(
+        ts7027[0].length,
+        end - start,
+        "span covers the whole maximal unreachable run"
+    );
+}
+
 /// Panic-robustness (P10 corpus triage, category d): checking a property access
 /// whose property is a method DECLARED IN A LIB FILE (`array.push(...)`, where
 /// `array: any[]`) must not panic. The `push` symbol's declarations live in

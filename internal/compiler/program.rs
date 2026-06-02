@@ -414,7 +414,12 @@ impl Program {
         // for an excluded file), parallel to the pool's grouped checker output.
         let mut bind_groups: Vec<Vec<tsgo_checker::Diagnostic>> = Vec::new();
         let mut exclude: Vec<bool> = Vec::new();
+        // Each bound file's source text, parallel to `bind_groups`, so the
+        // combined per-file list can be filtered by its `@ts-ignore` /
+        // `@ts-expect-error` directives (Go's `getDiagnosticsWithPrecedingDirectives`).
+        let mut file_texts: Vec<String> = Vec::new();
         for file in self.processed.files().iter().filter(|f| f.is_bound()) {
+            file_texts.push(file.text().to_string());
             let excluded = self.is_excluded_from_semantic_diagnostics(file, &lib_dir);
             exclude.push(excluded);
             if excluded {
@@ -453,9 +458,14 @@ impl Program {
         bind_groups
             .into_iter()
             .zip(checker_groups)
-            .map(|(mut bind, check)| {
+            .zip(file_texts)
+            .map(|((mut bind, check), text)| {
                 bind.extend(check);
-                sort_and_deduplicate_diagnostics(bind)
+                let combined = sort_and_deduplicate_diagnostics(bind);
+                // Drop diagnostics suppressed by a preceding `@ts-ignore` /
+                // `@ts-expect-error` directive (Go filters the combined list per
+                // file before returning it).
+                filter_diagnostics_with_preceding_directives(&text, combined)
             })
             .collect()
     }
@@ -1174,6 +1184,110 @@ fn sort_and_deduplicate_diagnostics(
         i += n;
     }
     result
+}
+
+/// Removes the diagnostics suppressed by a preceding `@ts-ignore` /
+/// `@ts-expect-error` comment directive (Go's
+/// `Program.getDiagnosticsWithPrecedingDirectives`).
+///
+/// A diagnostic is dropped when, scanning upward from the line above it, the
+/// first non-blank / non-comment line is preceded by a directive line (blank
+/// and comment lines in between are skipped). This is the reachable subset of
+/// Go's filter: the directive lines are recovered by a text scan of the
+/// line-leading `//` / `/*` comment forms rather than from the scanner's
+/// captured `SourceFile.CommentDirectives` (which the parser does not yet
+/// thread through).
+///
+/// DEFER(P10): the scanner-captured directive list (so a TRAILING directive
+/// comment such as `code(); // @ts-ignore` is recognized), and the
+/// `Unused_ts_expect_error_directive` (TS2578) emitted for an `@ts-expect-error`
+/// that suppressed nothing. Only the suppression half is ported; it can only
+/// remove diagnostics, never add one, so it is parity-safe. blocked-by: the
+/// scanner's comment-directive capture on the source file.
+///
+/// Side effects: none (pure).
+// Go: internal/compiler/program.go:Program.getDiagnosticsWithPrecedingDirectives(1333)
+fn filter_diagnostics_with_preceding_directives(
+    text: &str,
+    diagnostics: Vec<tsgo_checker::Diagnostic>,
+) -> Vec<tsgo_checker::Diagnostic> {
+    let line_starts = tsgo_core::compute_ecma_line_starts(text);
+    // Mark every line that bears a `@ts-ignore` / `@ts-expect-error` directive.
+    let mut directive_line: Vec<bool> = vec![false; line_starts.len()];
+    let mut any_directive = false;
+    for (line, start) in line_starts.iter().enumerate() {
+        let line_end = line_starts
+            .get(line + 1)
+            .map(|p| p.0 as usize)
+            .unwrap_or(text.len());
+        if line_is_comment_directive(&text[start.0 as usize..line_end]) {
+            directive_line[line] = true;
+            any_directive = true;
+        }
+    }
+    if !any_directive {
+        return diagnostics;
+    }
+    diagnostics
+        .into_iter()
+        .filter(|diag| {
+            let (diag_line, _) =
+                tsgo_core::position_to_line_and_byte_offset(diag.start, &line_starts);
+            let mut line = diag_line - 1;
+            while line >= 0 {
+                let l = line as usize;
+                if directive_line[l] {
+                    return false;
+                }
+                if !is_comment_or_blank_line(text, line_starts[l].0 as usize) {
+                    break;
+                }
+                line -= 1;
+            }
+            true
+        })
+        .collect()
+}
+
+/// Reports whether a (single) source line begins with a `//` or `/*` comment
+/// whose first token is the `@ts-ignore` / `@ts-expect-error` directive (Go's
+/// scanner `processCommentDirective`, restricted here to the line-leading form).
+///
+/// Side effects: none (pure).
+// Go: internal/scanner/scanner.go:Scanner.processCommentDirective(955)
+fn line_is_comment_directive(line: &str) -> bool {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    let after_open = if let Some(rest) = trimmed.strip_prefix("//") {
+        // Skip any extra leading slashes (`///`).
+        rest.trim_start_matches('/')
+    } else if let Some(rest) = trimmed.strip_prefix("/*") {
+        // Skip extra `*` then any `/`, mirroring Go's `/`+`*` skip.
+        rest.trim_start_matches(['*', '/'])
+    } else {
+        return false;
+    };
+    let directive = after_open.trim_start_matches([' ', '\t']);
+    let Some(rest) = directive.strip_prefix('@') else {
+        return false;
+    };
+    rest.starts_with("ts-expect-error") || rest.starts_with("ts-ignore")
+}
+
+/// Reports whether the line starting at byte `pos` is blank or a `//` line
+/// comment (Go's `isCommentOrBlankLine`): skip spaces / tabs, then the line is
+/// blank/comment when it is at end of text, at a line break, or at `//`.
+///
+/// Side effects: none (pure).
+// Go: internal/compiler/program.go:isCommentOrBlankLine(1396)
+fn is_comment_or_blank_line(text: &str, pos: usize) -> bool {
+    let bytes = text.as_bytes();
+    let mut pos = pos;
+    while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
+        pos += 1;
+    }
+    pos == bytes.len()
+        || (pos < bytes.len() && (bytes[pos] == b'\r' || bytes[pos] == b'\n'))
+        || (pos + 1 < bytes.len() && bytes[pos] == b'/' && bytes[pos + 1] == b'/')
 }
 
 /// Orders two checker diagnostics within one file: by start, then end
