@@ -443,6 +443,27 @@ fn conflict_marker_trivia_detected() {
     assert!(!is_conflict_marker_trivia("<<< HEAD", 0));
 }
 
+// Regression: a multi-byte UTF-8 char ending just before `pos-2` must not panic
+// the `text[:pos-2]` look-back (Go's `DecodeLastRuneInString` tolerates a
+// mid-rune byte slice; the Rust `&str` slice must only cut on a char boundary).
+// Go: internal/scanner/scanner.go:isConflictMarkerTrivia (utf8.DecodeLastRuneInString)
+#[test]
+fn conflict_marker_trivia_multibyte_lookback_no_panic() {
+    // `⚠` is 3 bytes (E2 9A A0); positions land mid-rune for the `pos-2` cut.
+    let text = "⚠a<<<<<<< x";
+    for pos in 0..text.len() as i32 {
+        // Must not panic regardless of where `pos-2` falls relative to `⚠`.
+        let _ = is_conflict_marker_trivia(text, pos);
+    }
+    // A marker not at line start (preceded by the multi-byte run) is not trivia.
+    let marker_pos = text.find("<<<<<<<").unwrap() as i32;
+    assert!(!is_conflict_marker_trivia(text, marker_pos));
+    // ...but the same marker after a newline IS detected.
+    let text2 = "⚠\n<<<<<<< x";
+    let marker_pos2 = text2.find("<<<<<<<").unwrap() as i32;
+    assert!(is_conflict_marker_trivia(text2, marker_pos2));
+}
+
 // Go: internal/scanner/scanner.go:GetLeadingCommentRanges / iterateCommentRanges
 #[test]
 fn leading_comment_ranges_two_block_comments() {

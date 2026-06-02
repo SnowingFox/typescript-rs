@@ -3017,7 +3017,16 @@ pub fn is_conflict_marker_trivia(text: &str, pos: i32) -> bool {
     let upos = pos as usize;
     let mut prev = '\0';
     if pos >= 2 {
-        prev = decode_last_char(&text[..upos - 2]);
+        // Go: `utf8.DecodeLastRuneInString(text[:pos-2])`. A Go byte-slice at a
+        // mid-rune index does not panic; `DecodeLastRuneInString` then yields
+        // `RuneError` (not a line break). A Rust `&str` slice at a non-boundary
+        // index WOULD panic (e.g. multi-byte JSX text before a marker), so only
+        // decode when `upos - 2` is a char boundary; otherwise leave `prev` as
+        // the non-line-break `'\0'`, matching Go's `RuneError` outcome.
+        let cut = upos - 2;
+        if text.is_char_boundary(cut) {
+            prev = decode_last_char(&text[..cut]);
+        }
     }
     if pos == 0
         || stringutil::is_line_break(prev)
