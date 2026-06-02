@@ -99,6 +99,103 @@ fn present_undefined_identifier_still_reports_cannot_find_name() {
     assert_eq!(diags[0].message, "Cannot find name 'missingName'.");
 }
 
+// Round 20 (RED->GREEN headline): a top-level EXPORTED enum referenced as a
+// VALUE within the SAME module must resolve (no TS2304). The binder gives an
+// exported value declaration TWO symbols — a phantom `ExportValue` local in the
+// module's `locals` and the real symbol in `exports` (reached via
+// `export_symbol`) — so a `Value`-only `resolveName` misses the phantom. Go's
+// `getResolvedSymbol` resolves with meaning `Value | ExportValue` and maps the
+// phantom to the export symbol via `getExportSymbolOfValueSymbolIfExported`.
+// Go: internal/checker/checker.go:Checker.getResolvedSymbol + getExportSymbolOfValueSymbolIfExported
+#[test]
+fn same_module_exported_enum_value_access_resolves_no_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "export enum E { A }\nconst y = E.A;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "an exported enum referenced as a value within the same module must resolve, got {diags:?}",
+    );
+}
+
+// Round 20: an exported FUNCTION (and an exported self-referencing CLASS)
+// referenced as a value within the same module also resolve through the
+// `ExportValue` phantom -> `export_symbol` map (the assertion-function /
+// class-self-reference corpus shapes).
+// Go: internal/checker/checker.go:Checker.getResolvedSymbol + getExportSymbolOfValueSymbolIfExported
+#[test]
+fn same_module_exported_function_and_class_self_ref_resolve_no_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "export function assertWeird(value?: string): asserts value {}\n\
+         assertWeird();\n\
+         export class Foo {\n  static instance = new Foo();\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "an exported function called and an exported class self-reference must resolve, got {diags:?}",
+    );
+}
+
+// Round 20 (GUARD): adding `ExportValue` to the value-lookup meaning must NOT
+// blanket-resolve a genuinely-undefined name. In a MODULE (so the `ExportValue`
+// phantom mechanism is active), a bare undefined reference still reports TS2304.
+// Go: internal/checker/checker.go:Checker.getResolvedSymbol (resolveName failure)
+#[test]
+fn same_module_undefined_name_still_reports_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "export const x = 1;\nnope;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let names: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == 2304)
+        .map(|d| d.message.clone())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["Cannot find name 'nope'.".to_string()],
+        "a genuinely-undefined name must still report exactly one TS2304, got {diags:?}",
+    );
+}
+
+// Round 20 (GUARD): resolving the exported enum as a value must NOT silently
+// resolve a NON-EXISTENT member. `E.B` (no member `B`) reports TS2339, not a
+// missed property and never a TS2304 on `E`.
+// Go: internal/checker/checker.go:Checker.checkPropertyAccessExpression (TS2339)
+#[test]
+fn same_module_exported_enum_missing_member_reports_2339_not_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "export enum E { A }\nconst z = E.B;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "the exported enum `E` must resolve (no TS2304), got {diags:?}",
+    );
+    assert!(
+        diags.iter().any(|d| d.code == 2339),
+        "accessing a non-existent enum member must report TS2339, got {diags:?}",
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.getDiagnostics (triggers checkSourceFile)
 #[test]
 fn get_diagnostics_triggers_checking() {

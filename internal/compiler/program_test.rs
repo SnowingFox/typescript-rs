@@ -1068,6 +1068,72 @@ fn function_expando_absent_member_still_reports_2339_with_real_lib() {
     );
 }
 
+/// End to end with the REAL bundled lib, mirroring the corpus
+/// `legacyDecoratorsEnumAccessSameNameAsClass` / `classFieldsPropertyAccessSameNameAsClass`
+/// shape (Round 20): a top-level EXPORTED enum referenced as a value
+/// (`MyEnum.Foo`) and an EXPORTED class self-reference in a static initializer
+/// (`static instance = new SelfRef()`) resolve through the binder's
+/// `ExportValue` phantom -> `export_symbol` link, so they no longer cascade into
+/// a spurious `extra TS2304`. Before Round 20 these were the dominant
+/// false-positive `TS2304` cluster in the full-corpus map.
+// Go: internal/checker/checker.go:Checker.getResolvedSymbol + getExportSymbolOfValueSymbolIfExported
+#[test]
+fn same_module_exported_enum_and_class_value_access_resolves_with_real_lib_no_2304() {
+    let options = CompilerOptions {
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[(
+            "/src/index.ts",
+            "export enum MyEnum { Foo = \"FooValue\", Bar = \"BarValue\" }\n\
+             export class SelfRef {\n\
+             \x20\x20static instance = new SelfRef();\n\
+             \x20\x20type: MyEnum = MyEnum.Foo;\n\
+             \x20\x20getType(): MyEnum { return this.type || MyEnum.Foo; }\n\
+             }\n",
+        )],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2304),
+        "an exported enum value access and an exported class self-reference must resolve (no 2304): {diags:?}"
+    );
+}
+
+/// GUARD with the REAL bundled lib: the `ExportValue` meaning addition must not
+/// blanket-resolve a genuinely-undefined name — a bare undefined reference in an
+/// exporting module still reports `TS2304`.
+// Go: internal/checker/checker.go:Checker.getResolvedSymbol (resolveName failure)
+#[test]
+fn same_module_undefined_name_still_reports_2304_with_real_lib() {
+    let options = CompilerOptions {
+        strict: tsgo_core::tristate::Tristate::True,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[(
+            "/src/index.ts",
+            "export enum MyEnum { Foo }\ntotallyUndefinedName;\n",
+        )],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == 2304 && d.message.contains("totallyUndefinedName")),
+        "a genuinely-undefined name must still report 2304: {diags:?}"
+    );
+}
+
 /// GUARD (no regression of base members): a BASE (`lib.es5.d.ts`)
 /// `ObjectConstructor` member (`keys`) still resolves after the cross-file merge
 /// — the merge ADDS later-lib members without dropping the first declaration's.

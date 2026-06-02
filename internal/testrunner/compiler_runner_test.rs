@@ -604,11 +604,18 @@ fn curated_compiler_subset_parity_smoke() {
     // module (each file has `export`) whose top-level `const foo = await { ... }`
     // is now reparsed under await context, so `await` is an await expression and
     // the case parses cleanly to a byte-exact PASS (18 -> 19).
+    //
+    // Round 20 (remaining TS2304 value-access resolution): same-module references
+    // to top-level EXPORTED declarations now resolve through the `ExportValue`
+    // phantom -> `export_symbol` map, flipping TWO curated cases to PASS:
+    // `assertionWithNoArgument.ts` (the exported assertion function `assertWeird`
+    // is called as a value) and `declarationEmitExpandoOverloads.ts` (the `A.a =
+    // 1` expando base `A` is an exported overloaded function): 19 -> 21.
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 19,
-            failed: 11,
+            passed: 21,
+            failed: 9,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -738,11 +745,23 @@ fn expanded_compiler_subset_parity_smoke() {
     // regression: `extra TS2345` is unchanged (the empty-array expando widens to
     // `any`, so a later `this.x.push(v)` does not spuriously TS2345), and the
     // `missing` histogram (TS7008/TS7022/TS2339) is unchanged (no masked error).
+    //
+    // Round 20 (remaining TS2304 value-access resolution): a same-module
+    // reference to a top-level EXPORTED enum / class / function / const now
+    // resolves through the binder's `ExportValue` phantom -> `export_symbol`
+    // link (Go's `getResolvedSymbol` resolving with `Value | ExportValue`, then
+    // `getExportSymbolOfValueSymbolIfExported`), so it no longer cascades into a
+    // spurious TS2304. This flips FOUR clean no_baseline_but_errors subset cases
+    // to PASS (85 -> 89) and drops the subset's `extra TS2304 ×14 -> ×4` (the
+    // residual ×4 are the DEFERRED `export =`-namespace / cross-module-package /
+    // parser-recovery roots). `extra TS2339 ×5` is unchanged (the alias-bearing
+    // `export *` re-export is routed through alias resolution, not mapped to a
+    // class whose static side is unmodeled), so no false-resolve regression.
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 85,
-            failed: 65,
+            passed: 89,
+            failed: 61,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -813,7 +832,10 @@ fn expanded_compiler_subset_parity_smoke() {
     // (divergent 12 -> 11, missing_all_errors 43 -> 44).
     // Round 19: union-target discriminant relate flips one divergent case
     // (`missingDiscriminants`) to PASS (divergent 11 -> 10).
-    assert_eq!(hist.no_baseline_but_errors, 11);
+    // Round 20: the `ExportValue` value-access fix flips FOUR clean
+    // no_baseline_but_errors subset cases to PASS (no_baseline 11 -> 7);
+    // missing_all_errors and divergent are unchanged (no case shifted category).
+    assert_eq!(hist.no_baseline_but_errors, 7);
     assert_eq!(hist.missing_all_errors, 44);
     assert_eq!(hist.divergent, 10);
 
@@ -896,9 +918,13 @@ fn expanded_compiler_subset_parity_smoke() {
     // reduction), clearing the `missingDiscriminants*` phantoms: `TS2322 ×12 -> ×7`
     // (the residual 7 are the deferred variable-decl span off-by-one + conditional
     // + construct-sig + `undefined->string` roots).
+    // Round 20: the `ExportValue` value-access fix drops the subset's
+    // `extra TS2304 ×14 -> ×4`, so the dominant false positives are now the
+    // deferred union-relate `TS2322 ×7` and the object-literal-expando /
+    // require-this `TS2339 ×5`.
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 14), (2322, 7)],
+        vec![(2322, 7), (2339, 5)],
         "top extra (false-positive) codes; histogram:\n{}",
         hist.report()
     );
@@ -1011,10 +1037,14 @@ fn expanded_compiler_subset_parity_smoke() {
     // `extra TS2339` 16 -> 5; the union-target discriminant relate (R19) dropped
     // `extra TS2322` 12 -> 7, leaving `TS2304 ×14` (deferred namespace/enum/
     // export= value-access cascade) and `TS2322 ×7` (deferred span/conditional).
+    // Round 20: same-module exported value access now resolves (the
+    // `ExportValue` phantom -> `export_symbol` map), dropping `extra TS2304
+    // ×14 -> ×4`; the top extras are now the deferred `TS2322 ×7` (union relate)
+    // and `TS2339 ×5` (object-literal expando / require-this members).
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 14), (2322, 7)],
-        "the import-resolution round drops the dominant unresolved-name cascade; \
+        vec![(2322, 7), (2339, 5)],
+        "the export-value resolution round drops the same-module unresolved-name cascade; \
          histogram:\n{}",
         hist.report()
     );

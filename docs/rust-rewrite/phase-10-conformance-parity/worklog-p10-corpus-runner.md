@@ -3404,3 +3404,184 @@ type relation, construct-sig cascade, `undefined->string` settings. No
 subagent completed the relation work then hit a backend outage before the final
 span fix + cleanup + snapshot; the parent applied the one-line span fix, removed
 the dump, updated the snapshot, added this section, and committed.)
+
+# Round 20 — remaining TS2304 value-access resolution (the `ExportValue` phantom)
+
+Round goal: reduce the #1 remaining FALSE-POSITIVE cluster in the full compiler
+corpus — `extra TS2304 ×37` ("Cannot find name") — the residual after Round 14
+cleared ES imports. SOLO lane, strict TDD red->green.
+
+## Step-0 categorization — root -> count (full corpus, temporary `#[ignore]`d dump, REMOVED)
+
+A throwaway dump (`dump_extra_ts2304_round20`, since REMOVED) ran the full
+compiler corpus through `error_baseline_for_test` + the real `parse_error_baseline`
+greedy-extra diff (mirroring `categorize_diags`), printing every `+TS2304` with
+its name + the case's construct-keyword flags. The 37 group by ROOT:
+
+| root | × | tractable? |
+|---|---|---|
+| **A — same-module value reference to a top-level EXPORTED declaration** (the binder's `ExportValue` phantom local + `export_symbol`): exported enum-as-value (`MyEnum.Foo`), exported class self-reference (`new SelfRef()` in a static initializer), exported function call (`assertWeird()`), exported function expando base (`A.a = v`), exported-const `typeof`, contextually-typed exported const | **27** | **YES — fixed** |
+|   · `classFieldsPrivate/PropertyAccessSameNameAsClass`(4+5), `esDecorators…`(2), `legacyDecorators…`(4) — enum-as-value + class self-ref | 15 | |
+|   · `assertionWithNoArgument`(2), `declarationEmitExpandoFunction`(6), `declarationEmitExpandoOverloads`(1), `declarationEmitExpandoArrowFunctionParameter`(1) — exported function/enum value + expando base | 10 | |
+|   · `declarationEmitTypeofIndexedAccessNoParens`(1, `(typeof C)`), `expandoContextualTypes.tsx`(1, `FooPage`) | 2 | |
+| B — `export =` of a namespace + `import x = require()` value access (`exportAssignmentMerging2/3`, `a`) | 4 | DEFER |
+| C — cross-module package import edge (`duplicatePackage_peerDependencies`, `FooA/FooB`) | 2 | DEFER |
+| D — malformed `.d.ts` (`deduplicatePackages`, literal `content not parsed`) | 3 | DEFER |
+| E — parser recovery (`usingDeclarationWithNewline`, `using\nidentifier;`) | 1 | DEFER |
+
+The DOMINANT TRACTABLE root is **A — same-module value reference to an EXPORTED
+declaration** (27 of 37). The binder gives every top-level exported value
+declaration TWO symbols (`binder.go:declareModuleMember`): a phantom local in the
+module's `locals` flagged ONLY `ExportValue`, and the real symbol in `exports`
+(with the declaration's actual flags), linked from the phantom via `export_symbol`.
+A `Value`-only `resolveName` misses the phantom (`ExportValue` does not intersect
+`Value`), so EVERY same-module reference to an exported enum/class/function/const
+cascaded into a spurious TS2304.
+
+## Go ground truth ported (`// Go:`-anchored to `internal/checker/checker.go`)
+
+- **`Checker.getResolvedSymbol`** resolves a value identifier with meaning
+  `SymbolFlagsValue | SymbolFlagsExportValue` (checker.go:13801). The `| ExportValue`
+  is what lets the phantom local match.
+- **`Checker.getExportSymbolOfValueSymbolIfExported`** (checker.go:14270) maps the
+  resolved phantom to its real export symbol (`if symbol.Flags&ExportValue != 0 &&
+  symbol.ExportSymbol != nil { symbol = symbol.ExportSymbol }`), called from
+  `checkIdentifier` (checker.go:11017) before `getNarrowedTypeOfSymbol`.
+
+## Rust landing (`internal/checker/core/check.rs`)
+
+- `check_identifier` now resolves with `SymbolFlags::VALUE | SymbolFlags::EXPORT_VALUE`
+  (was `VALUE` only).
+- New free fn **`get_export_symbol_of_value_symbol_if_exported`** maps the phantom
+  (`EXPORT_VALUE`, with an `export_symbol` link) to the real export symbol before
+  `get_type_of_symbol`. The binder (`internal/binder/symbols.rs:declare_module_member`)
+  and `Symbol::export_symbol` were verified already-correct and left untouched
+  (the same phantom already drives `emit_resolver.rs`'s `getReferencedValueSymbol`).
+
+## Over-resolution guard (CRITICAL) — the alias-bearing re-export
+
+A first full-corpus run regressed ONE previously-PASSING case,
+`symbolLinkDeclarationEmitModuleNamesRootDir.ts` (a `@link`-symlinked monorepo with
+`export *` re-exports): `import { BindingKey } from '@loopback/context'`'s
+`BindingKey.create<…>()` newly reported `extra TS2339` ("Property 'create' does not
+exist on type 'BindingKey'"). Root: that `BindingKey` resolves to a re-export
+symbol flagged `EXPORT_VALUE | ALIAS`, and mapping its `export_symbol` straight to
+the class lands on `get_type_of_symbol(class)`, which returns the INSTANCE type
+(the constructor/static side of a class value symbol is DEFERRED — only the
+instance type is built), so the static `create` 2339'd. Go types it correctly on
+the static side; we don't yet. Fix (faithful deferral): the map skips
+alias-bearing symbols (`EXPORT_VALUE && !ALIAS`), so an `export *` re-export flows
+through the existing `resolve_alias` path (which itself defers `export *`),
+preserving the pre-existing behavior until BOTH the static-side class type and the
+`export *` star visit land. The pure-phantom same-module exports (the 27) are
+NOT aliases, so they all still resolve.
+
+## RED->GREEN + guard tests
+
+Checker (`internal/checker/core/check_test.rs`, +4):
+- `same_module_exported_enum_value_access_resolves_no_2304` (RED->GREEN headline) —
+  `export enum E { A }; const y = E.A;` -> ZERO TS2304 (RED was `Cannot find name 'E'.`).
+- `same_module_exported_function_and_class_self_ref_resolve_no_2304` (RED->GREEN) —
+  an exported function called + an exported class self-reference resolve.
+- `same_module_undefined_name_still_reports_2304` (GUARD) — in an exporting module
+  a genuinely-undefined `nope;` still reports exactly one TS2304.
+- `same_module_exported_enum_missing_member_reports_2339_not_2304` (GUARD) —
+  `E.B` (no member `B`) reports TS2339 (not a silent resolve), never TS2304 on `E`.
+
+Compiler real-lib (`internal/compiler/program_test.rs`, +2):
+- `same_module_exported_enum_and_class_value_access_resolves_with_real_lib_no_2304`
+  (RED->GREEN, mirrors `legacyDecoratorsEnumAccessSameNameAsClass` /
+  `classFieldsPropertyAccessSameNameAsClass`) — exported enum value access +
+  exported class self-reference over the bundled lib -> no TS2304.
+- `same_module_undefined_name_still_reports_2304_with_real_lib` (GUARD).
+
+## Measurement — full corpus BEFORE->AFTER
+
+`tests/cases/compiler` (222 ran):
+
+| metric | BEFORE (R19) | AFTER (R20) | Δ |
+|---|---|---|---|
+| **passed** | **111** (50.0%) | **115** (51.8%) | **+4** |
+| failed | 110 | 106 | −4 |
+| errored | 1 | 1 | 0 |
+| no_baseline_but_errors | 24 | 20 | −4 (4 clean cases now PASS) |
+| missing_all_errors | 68 | 68 | 0 |
+| divergent | 18 | 18 | 0 |
+| **extra TS2304** | **×37** | **×10** | **−27** |
+| extra TS2339 | ×19 | ×19 | **0 (no false-resolve regression)** |
+| every other extra/missing code | — | — | UNCHANGED |
+
+`tests/cases/conformance` (19 ran): **passed 11 -> 13 (+2)**; **extra TS2304 ×2 -> ×0**
+(its lone residual extra is `TS5108 ×1`).
+
+**Honest flip count: +6 cases to byte-exact PASS** (4 compiler + 2 conformance).
+NO PASS->FAIL regression: `passed` rose monotonically (compiler 111->115,
+conformance 11->13), `missing_all_errors`/`divergent` are UNCHANGED, every
+`missing` code is UNCHANGED (no over-resolution masked a real diagnostic), and
+`extra TS2339` is flat at ×19 (the alias-bearing-re-export guard prevented the one
+candidate regression). The 4 compiler flips are `assertionWithNoArgument`,
+`classFieldsPropertyAccessSameNameAsClass`(+private), `esDecorators…`,
+`legacyDecorators…`-style clean cases whose only extra was the cleared TS2304.
+Guards prove: a genuinely-undefined name still TS2304; a missing enum member
+still TS2339 (not a silent resolve).
+
+The remaining `extra TS2304 ×10` are the DEFERRED roots B–E: `export =`-namespace
++ `import x = require()` value access (`exportAssignmentMerging2/3` ×4),
+cross-module-package import (`duplicatePackage_peerDependencies` ×2), malformed
+`.d.ts` (`deduplicatePackages` ×3), and `using`-declaration parser recovery
+(`usingDeclarationWithNewline` ×1).
+
+## 150-subset + 30-case characterization BEFORE->AFTER
+
+`expanded_compiler_subset_parity_smoke`: **passed 85 -> 89 (+4)**, failed 65 -> 61;
+categories `no_baseline 11->7, missing_all 44->44, divergent 10->10`;
+**`extra TS2304 ×14 -> ×4`**, `extra TS2339 ×5` UNCHANGED, so
+`top_extra(2) = [(2304,14),(2322,7)] -> [(2322,7),(2339,5)]`. All pinned guards
+(`extra TS2769==1`, `TS2583==None`, `TS1005/1003/1155==None`, `extra/missing
+TS7026==None`, `extra TS2451==None`, `top_missing(1)=[(2874,7)]`,
+`missing TS2300==None`) re-asserted UNCHANGED.
+`curated_compiler_subset_parity_smoke`: **passed 19 -> 21 (+2)**
+(`assertionWithNoArgument`, `declarationEmitExpandoOverloads`).
+
+## Gate results (Round 20)
+
+- `cargo test -p tsgo_checker` — GREEN (**794** lib [+4 same_module] + 178 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (**128** lib [+2 real-lib] + 11 doctests).
+- `cargo test -p tsgo_testrunner` — GREEN (51 lib + 1 ignored [full-corpus
+  measurement]; 150-subset 89/61/0 + 30-case 21/9/0 re-pinned).
+- `cargo test -p tsgo_binder` (65) / `-p tsgo_ls` (39) / `-p tsgo_execute` (80) —
+  GREEN (no sibling regression).
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner --all-targets
+  -- -D warnings` — clean. `cargo fmt --all -- --check` — clean.
+  `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; additive/surgical vertical slice; no test weakened/deleted; no
+new dependency (`Cargo.lock` untouched); member access is NOT broadly resolved
+(only the binder's `ExportValue` phantom maps to its export; alias-bearing
+re-exports stay on the alias path — proven by the unchanged `extra TS2339`); the
+temporary `dump_extra_ts2304_round20` categorization test was REMOVED (tree clean —
+only the 4 intended files modified). Not committed (left to the parent).
+
+## DEFER list (blocked-by) — Round 20
+
+- **`export =` of a namespace + `import x = require()` value access**
+  (`exportAssignmentMerging2/3`, `extra TS2304 ×4`) — `import a = require("./a"); a.a;`
+  where module `a` does `export = mod` (a `namespace`). The import-equals alias
+  resolves the module, but reading the namespace's value members through `export =`
+  is not yet wired. blocked-by: `resolveExternalModuleSymbol` (`export =`) + the
+  namespace-as-value member lookup.
+- **Static/constructor-side type of a class value symbol** — `get_type_of_symbol`
+  returns the INSTANCE type for a class, so `Foo.staticMember` / `BindingKey.create`
+  report a spurious TS2339 (currently MASKED for re-exports by the alias-bearing
+  guard above, and present on plain classes like `Other.Baz` in the SameNameAsClass
+  cases). blocked-by: building the constructor/static-side object type (construct
+  signatures + the class symbol's static `exports` members).
+- **`export *` star re-exports** — `get_export_of_module` reads direct exports only;
+  an `export *`-re-exported name resolves through `resolve_alias` to the target
+  (kept on the alias path by the guard). blocked-by: `getExportsOfModuleWorker`
+  star visit. (Carried over from Round 14.)
+- **Cross-module package import edge** (`duplicatePackage_peerDependencies`,
+  `FooA/FooB`) + **malformed-`.d.ts`** (`deduplicatePackages`, `content not parsed`)
+  + **`using`-declaration parser recovery** (`usingDeclarationWithNewline`) — three
+  separate small roots (package-dedup resolution, `.d.ts` parse-error tolerance,
+  `using` newline ASI), `extra TS2304 ×6` total.

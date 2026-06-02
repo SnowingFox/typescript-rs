@@ -1172,7 +1172,24 @@ impl Checker {
         // every global-value reference into a spurious 2304 (and a follow-on
         // 2339 on its `error`-typed members).
         let globals = program.globals();
-        match resolve_name(program, node, &name, SymbolFlags::VALUE, false, globals) {
+        // Go's `getResolvedSymbol` resolves a value identifier with meaning
+        // `Value | ExportValue`. `ExportValue` is required because the binder
+        // gives a top-level EXPORTED value declaration TWO symbols: a phantom
+        // `ExportValue` local in the module's `locals` (so locals/exports of the
+        // same name stay mutually exclusive) and the real symbol in `exports`,
+        // linked from the phantom via `export_symbol`. A `Value`-only lookup
+        // misses the phantom (its sole flag is `ExportValue`, which does not
+        // intersect `Value`), cascading every same-module reference to an
+        // exported enum/class/function/const into a spurious TS2304.
+        // Go: internal/checker/checker.go:Checker.getResolvedSymbol
+        match resolve_name(
+            program,
+            node,
+            &name,
+            SymbolFlags::VALUE | SymbolFlags::EXPORT_VALUE,
+            false,
+            globals,
+        ) {
             None => {
                 // Alias fallback (Go's `getSymbol` alias branch): a name imported
                 // with `import { x } from "m"` / `import d from "m"` / `import *
@@ -1240,6 +1257,12 @@ impl Checker {
                 self.error_type
             }
             Some(symbol) => {
+                // Go's `checkIdentifier` maps the resolved symbol through
+                // `getExportSymbolOfValueSymbolIfExported` before typing it: a
+                // phantom `ExportValue` local carries no real declaration flags,
+                // so its type/declarations must be read from the linked
+                // `export_symbol` (the real exported enum/class/function/const).
+                let symbol = get_export_symbol_of_value_symbol_if_exported(program, symbol);
                 let declared = get_type_of_symbol(self, program, symbol, globals);
                 self.get_flow_type_of_reference(program, node, declared)
             }
@@ -6008,6 +6031,42 @@ fn is_in_js_file(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
     arena
         .flags(node)
         .contains(tsgo_ast::NodeFlags::JAVA_SCRIPT_FILE)
+}
+
+/// Maps a phantom `ExportValue` local symbol to its real exported counterpart.
+///
+/// The binder gives a top-level exported value declaration two symbols: a local
+/// in the module's `locals` flagged only `ExportValue`, and the real symbol in
+/// `exports` (with the declaration's actual flags), linked from the local via
+/// `export_symbol`. When `resolveName` finds the phantom local, the type and
+/// declarations must be read from the export symbol. A non-phantom symbol (no
+/// `ExportValue` flag, or no link) is returned unchanged. `getMergedSymbol` is
+/// identity in the reachable single-/multi-file subset.
+///
+/// A re-export symbol that ALSO carries `Alias` (`export *` / re-export
+/// specifier whose `export_symbol` link points straight at the re-exported
+/// declaration) is left UNMAPPED here, so it flows through the alias-resolution
+/// path in `get_type_of_symbol` instead. Go maps it and then types the target
+/// on its static/constructor side; that static-side class value type is DEFERRED
+/// in this port (only the instance type is built), so mapping an alias-bearing
+/// re-export straight to a class would surface a premature TS2339 on a static
+/// member. Routing it through `resolve_alias` (which itself defers `export *`)
+/// preserves the pre-existing behavior until both land.
+// DEFER(phase-4-checker): the static/constructor-side type of a class value
+// symbol + `export *` re-export resolution. blocked-by: class static-member type
+// construction + `getExportsOfModuleWorker` star visit.
+// Go: internal/checker/checker.go:Checker.getExportSymbolOfValueSymbolIfExported
+fn get_export_symbol_of_value_symbol_if_exported(
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> SymbolId {
+    let s = program.symbol(symbol);
+    if s.flags.contains(SymbolFlags::EXPORT_VALUE) && !s.flags.contains(SymbolFlags::ALIAS) {
+        if let Some(export_symbol) = s.export_symbol {
+            return export_symbol;
+        }
+    }
+    symbol
 }
 
 // Reports whether `node` is a `require(...)` call: a call expression whose
