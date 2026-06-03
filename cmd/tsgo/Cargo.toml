@@ -8,11 +8,14 @@ name = "tsgo"
 path = "main.rs"
 
 [dependencies]
+serde_json = "1.0.150"
 tsgo_bundled = { path = "../../internal/bundled" }
 tsgo_core = { path = "../../internal/core" }
 tsgo_diagnostics = { path = "../../internal/diagnostics" }
 tsgo_execute = { path = "../../internal/execute" }
+tsgo_jsonrpc = { path = "../../internal/jsonrpc" }
 tsgo_locale = { path = "../../internal/locale" }
+tsgo_lsp = { path = "../../internal/lsp" }
 tsgo_tsoptions = { path = "../../internal/tsoptions" }
 tsgo_tspath = { path = "../../internal/tspath" }
 tsgo_vfs = { path = "../../internal/vfs" }

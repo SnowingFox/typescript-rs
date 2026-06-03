@@ -59,6 +59,34 @@ impl Session for StubSession {
     fn did_close_file(&self, uri: &str) {
         self.closed_files.borrow_mut().push(uri.to_string());
     }
+
+    fn hover(&self, uri: &str, _position: &serde_json::Value) -> Option<serde_json::Value> {
+        if uri == "file:///test.ts" {
+            Some(serde_json::json!({
+                "contents": { "kind": "plaintext", "value": "number" },
+                "range": {
+                    "start": { "line": 0, "character": 6 },
+                    "end": { "line": 0, "character": 7 }
+                }
+            }))
+        } else {
+            None
+        }
+    }
+
+    fn completion(&self, uri: &str, _position: &serde_json::Value) -> Option<serde_json::Value> {
+        if uri == "file:///test.ts" {
+            Some(serde_json::json!({
+                "isIncomplete": false,
+                "items": [
+                    { "label": "foo", "kind": 6 },
+                    { "label": "bar", "kind": 6 }
+                ]
+            }))
+        } else {
+            None
+        }
+    }
 }
 
 /// Creates a Server with an in-memory message queue and a stub session.
@@ -315,4 +343,241 @@ fn double_initialize_returns_error() {
 
     let second_init = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
     assert!(second_init.error.is_some(), "second initialize should fail");
+}
+
+// ---------------------------------------------------------------------------
+// T10: hover request dispatches through session and returns result
+// ---------------------------------------------------------------------------
+// Go: internal/lsp/server.go:handlers() → "textDocument/hover"
+#[test]
+fn hover_request_returns_result() {
+    let msgs = vec![
+        make_request(1, "initialize", initialize_params()),
+        make_request(
+            2,
+            "textDocument/hover",
+            serde_json::json!({
+                "textDocument": { "uri": "file:///test.ts" },
+                "position": { "line": 0, "character": 6 }
+            }),
+        ),
+        make_request(3, "shutdown", serde_json::json!(null)),
+        make_notification("exit", serde_json::json!(null)),
+    ];
+    let mut server = test_server(msgs);
+    let responses = server.run().unwrap();
+
+    let hover_resp = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
+    assert!(hover_resp.error.is_none(), "hover should not error");
+    let result: serde_json::Value =
+        serde_json::from_str(hover_resp.result.as_ref().unwrap().get()).unwrap();
+    assert_eq!(result["contents"]["value"], "number");
+    assert_eq!(result["range"]["start"]["character"], 6);
+}
+
+// ---------------------------------------------------------------------------
+// T11: hover on unknown file returns null (no error)
+// ---------------------------------------------------------------------------
+// Go: internal/lsp/server.go:handlers() → "textDocument/hover" (nil hover)
+#[test]
+fn hover_on_unknown_file_returns_null() {
+    let msgs = vec![
+        make_request(1, "initialize", initialize_params()),
+        make_request(
+            2,
+            "textDocument/hover",
+            serde_json::json!({
+                "textDocument": { "uri": "file:///unknown.ts" },
+                "position": { "line": 0, "character": 0 }
+            }),
+        ),
+        make_request(3, "shutdown", serde_json::json!(null)),
+        make_notification("exit", serde_json::json!(null)),
+    ];
+    let mut server = test_server(msgs);
+    let responses = server.run().unwrap();
+
+    let hover_resp = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
+    assert!(hover_resp.error.is_none(), "no-hover should not error");
+    let result: serde_json::Value =
+        serde_json::from_str(hover_resp.result.as_ref().unwrap().get()).unwrap();
+    assert!(result.is_null(), "expected null result for no hover info");
+}
+
+// ---------------------------------------------------------------------------
+// T12: completion request dispatches through session and returns items
+// ---------------------------------------------------------------------------
+// Go: internal/lsp/server.go:handlers() → "textDocument/completion"
+#[test]
+fn completion_request_returns_items() {
+    let msgs = vec![
+        make_request(1, "initialize", initialize_params()),
+        make_request(
+            2,
+            "textDocument/completion",
+            serde_json::json!({
+                "textDocument": { "uri": "file:///test.ts" },
+                "position": { "line": 0, "character": 8 }
+            }),
+        ),
+        make_request(3, "shutdown", serde_json::json!(null)),
+        make_notification("exit", serde_json::json!(null)),
+    ];
+    let mut server = test_server(msgs);
+    let responses = server.run().unwrap();
+
+    let comp_resp = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
+    assert!(comp_resp.error.is_none(), "completion should not error");
+    let result: serde_json::Value =
+        serde_json::from_str(comp_resp.result.as_ref().unwrap().get()).unwrap();
+    let items = result["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["label"], "foo");
+    assert_eq!(items[1]["label"], "bar");
+}
+
+// ---------------------------------------------------------------------------
+// T13: definition request (default impl returns null)
+// ---------------------------------------------------------------------------
+// Go: internal/lsp/server.go:handlers() → "textDocument/definition"
+#[test]
+fn definition_request_returns_null_from_default_impl() {
+    let msgs = vec![
+        make_request(1, "initialize", initialize_params()),
+        make_request(
+            2,
+            "textDocument/definition",
+            serde_json::json!({
+                "textDocument": { "uri": "file:///test.ts" },
+                "position": { "line": 0, "character": 0 }
+            }),
+        ),
+        make_request(3, "shutdown", serde_json::json!(null)),
+        make_notification("exit", serde_json::json!(null)),
+    ];
+    let mut server = test_server(msgs);
+    let responses = server.run().unwrap();
+
+    let def_resp = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
+    assert!(def_resp.error.is_none(), "definition should not error");
+    let result: serde_json::Value =
+        serde_json::from_str(def_resp.result.as_ref().unwrap().get()).unwrap();
+    assert!(result.is_null());
+}
+
+// ---------------------------------------------------------------------------
+// T14: semanticTokens/full request (default impl returns null)
+// ---------------------------------------------------------------------------
+// Go: internal/lsp/server.go:handlers() → "textDocument/semanticTokens/full"
+#[test]
+fn semantic_tokens_full_returns_null_from_default_impl() {
+    let msgs = vec![
+        make_request(1, "initialize", initialize_params()),
+        make_request(
+            2,
+            "textDocument/semanticTokens/full",
+            serde_json::json!({
+                "textDocument": { "uri": "file:///test.ts" }
+            }),
+        ),
+        make_request(3, "shutdown", serde_json::json!(null)),
+        make_notification("exit", serde_json::json!(null)),
+    ];
+    let mut server = test_server(msgs);
+    let responses = server.run().unwrap();
+
+    let tok_resp = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
+    assert!(tok_resp.error.is_none(), "semanticTokens should not error");
+    let result: serde_json::Value =
+        serde_json::from_str(tok_resp.result.as_ref().unwrap().get()).unwrap();
+    assert!(result.is_null());
+}
+
+// ---------------------------------------------------------------------------
+// T15: references request (default impl returns null)
+// ---------------------------------------------------------------------------
+// Go: internal/lsp/server.go:handlers() → "textDocument/references"
+#[test]
+fn references_request_returns_null_from_default_impl() {
+    let msgs = vec![
+        make_request(1, "initialize", initialize_params()),
+        make_request(
+            2,
+            "textDocument/references",
+            serde_json::json!({
+                "textDocument": { "uri": "file:///test.ts" },
+                "position": { "line": 0, "character": 0 },
+                "context": { "includeDeclaration": true }
+            }),
+        ),
+        make_request(3, "shutdown", serde_json::json!(null)),
+        make_notification("exit", serde_json::json!(null)),
+    ];
+    let mut server = test_server(msgs);
+    let responses = server.run().unwrap();
+
+    let ref_resp = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
+    assert!(ref_resp.error.is_none(), "references should not error");
+    let result: serde_json::Value =
+        serde_json::from_str(ref_resp.result.as_ref().unwrap().get()).unwrap();
+    assert!(result.is_null());
+}
+
+// ---------------------------------------------------------------------------
+// T16: rename request (default impl returns null)
+// ---------------------------------------------------------------------------
+// Go: internal/lsp/server.go:handlers() → "textDocument/rename"
+#[test]
+fn rename_request_returns_null_from_default_impl() {
+    let msgs = vec![
+        make_request(1, "initialize", initialize_params()),
+        make_request(
+            2,
+            "textDocument/rename",
+            serde_json::json!({
+                "textDocument": { "uri": "file:///test.ts" },
+                "position": { "line": 0, "character": 6 },
+                "newName": "y"
+            }),
+        ),
+        make_request(3, "shutdown", serde_json::json!(null)),
+        make_notification("exit", serde_json::json!(null)),
+    ];
+    let mut server = test_server(msgs);
+    let responses = server.run().unwrap();
+
+    let ren_resp = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
+    assert!(ren_resp.error.is_none(), "rename should not error");
+    let result: serde_json::Value =
+        serde_json::from_str(ren_resp.result.as_ref().unwrap().get()).unwrap();
+    assert!(result.is_null());
+}
+
+// ---------------------------------------------------------------------------
+// T17: formatting request (default impl returns null)
+// ---------------------------------------------------------------------------
+// Go: internal/lsp/server.go:handlers() → "textDocument/formatting"
+#[test]
+fn formatting_request_returns_null_from_default_impl() {
+    let msgs = vec![
+        make_request(1, "initialize", initialize_params()),
+        make_request(
+            2,
+            "textDocument/formatting",
+            serde_json::json!({
+                "textDocument": { "uri": "file:///test.ts" },
+                "options": { "tabSize": 4, "insertSpaces": true }
+            }),
+        ),
+        make_request(3, "shutdown", serde_json::json!(null)),
+        make_notification("exit", serde_json::json!(null)),
+    ];
+    let mut server = test_server(msgs);
+    let responses = server.run().unwrap();
+
+    let fmt_resp = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
+    assert!(fmt_resp.error.is_none(), "formatting should not error");
+    let result: serde_json::Value =
+        serde_json::from_str(fmt_resp.result.as_ref().unwrap().get()).unwrap();
+    assert!(result.is_null());
 }

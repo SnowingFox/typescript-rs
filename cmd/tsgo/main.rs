@@ -163,14 +163,43 @@ fn print_help_deferred(sys: &dyn System) -> ExitStatus {
     ExitStatus::Success
 }
 
-/// DEFER(P8 lsp): the `--lsp` language server. blocked-by: the `internal/lsp`
-/// port (P8). Go's `runLSP` builds an `lsp.Server` over stdio and runs it; that
-/// server is not yet ported, so this routes to a clear stub instead of
-/// crashing. Mirrors Go's arg0 (`--lsp`) dispatch in `runMain`.
+/// Runs the LSP language server over the provided reader/writer (stdin/stdout
+/// in production, or in-memory buffers in tests). Creates a
+/// [`tsgo_lsp::Server`] with a no-op session stub (the full project session is
+/// deferred to P8 when `tsgo_project` lands) and drives it via
+/// [`tsgo_lsp::Server::run_stdio`].
+///
+/// Exits with [`ExitStatus::Success`] on a clean shutdown or EOF, and with
+/// `DiagnosticsPresentOutputsGenerated` on a JSON error.
 // Go: cmd/tsgo/lsp.go:runLSP
-fn run_lsp(_args: &[String], sys: &dyn System) -> ExitStatus {
-    sys.write("tsgo: the `--lsp` language server is not yet implemented in this build (deferred to phase 8).\n");
-    ExitStatus::NotImplemented
+fn run_lsp(_args: &[String], _sys: &dyn System) -> ExitStatus {
+    run_lsp_over(std::io::stdin().lock(), std::io::stdout().lock())
+}
+
+/// Inner implementation that is generic over `Read`/`Write` so tests can
+/// inject in-memory buffers.
+// Go: cmd/tsgo/lsp.go:runLSP (core loop)
+fn run_lsp_over<R: std::io::Read, W: std::io::Write>(input: R, output: W) -> ExitStatus {
+    let session = StdioSession;
+    let mut server = tsgo_lsp::Server::new(Vec::new(), session);
+    let mut reader = tsgo_jsonrpc::Reader::new(input);
+    let mut writer = tsgo_jsonrpc::Writer::new(output);
+    match server.run_stdio(&mut reader, &mut writer) {
+        Ok(()) => ExitStatus::Success,
+        Err(_) => ExitStatus::DiagnosticsPresentOutputsGenerated,
+    }
+}
+
+/// A minimal no-op session for the LSP server. The real project session that
+/// creates a [`tsgo_ls::LanguageService`] and backs the feature methods is
+/// deferred to P8 when `tsgo_project` lands.
+// Go: internal/lsp/server.go:Server.session (real impl is *project.Session)
+struct StdioSession;
+
+impl tsgo_lsp::Session for StdioSession {
+    fn did_open_file(&self, _uri: &str, _version: i32, _text: &str) {}
+    fn did_change_file(&self, _uri: &str, _version: i32, _changes: &serde_json::Value) {}
+    fn did_close_file(&self, _uri: &str) {}
 }
 
 /// DEFER(P8 api): the `--api` server. blocked-by: the `internal/api` port (P8).

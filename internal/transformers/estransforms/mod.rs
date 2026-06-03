@@ -149,10 +149,16 @@
 
 pub mod r#async;
 pub mod classfields;
+pub mod classthis;
 pub mod exponentiation;
 pub mod forawait;
+pub mod logicalassignment;
 pub mod namedevaluation;
+pub mod nullishcoalescing;
 pub mod objectrestspread;
+pub mod optionalcatch;
 pub mod optionalchain;
 pub mod spread;
+pub mod taggedtemplate;
 pub mod usestrict;
+pub mod using;

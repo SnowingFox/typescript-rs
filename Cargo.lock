@@ -574,11 +574,14 @@ dependencies = [
 name = "tsgo"
 version = "0.0.0"
 dependencies = [
+ "serde_json",
  "tsgo_bundled",
  "tsgo_core",
  "tsgo_diagnostics",
  "tsgo_execute",
+ "tsgo_jsonrpc",
  "tsgo_locale",
+ "tsgo_lsp",
  "tsgo_tsoptions",
  "tsgo_tspath",
  "tsgo_vfs",
@@ -1319,6 +1322,7 @@ dependencies = [
  "tsgo_core",
  "tsgo_debug",
  "tsgo_diagnostics",
+ "tsgo_evaluator",
  "tsgo_jsnum",
  "tsgo_modulespecifiers",
  "tsgo_nodebuilder",

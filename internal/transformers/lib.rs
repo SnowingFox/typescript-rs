@@ -25,6 +25,7 @@ pub mod chain;
 pub mod declarations;
 pub mod destructuring;
 pub mod estransforms;
+pub mod inliners;
 pub mod jsxtransforms;
 pub mod modifiervisitor;
 pub mod moduletransforms;

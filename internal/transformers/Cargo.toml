@@ -16,6 +16,7 @@ tsgo_collections = { path = "../collections" }
 tsgo_core = { path = "../core" }
 tsgo_debug = { path = "../debug" }
 tsgo_diagnostics = { path = "../diagnostics" }
+tsgo_evaluator = { path = "../evaluator" }
 tsgo_jsnum = { path = "../jsnum" }
 tsgo_modulespecifiers = { path = "../modulespecifiers" }
 tsgo_nodebuilder = { path = "../nodebuilder" }

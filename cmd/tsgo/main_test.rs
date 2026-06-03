@@ -97,22 +97,56 @@ fn no_emit_bad_file_exits_two_without_writing_js() {
     assert!(!fs.file_exists("/p/bad.js"));
 }
 
-// Slice 5a: `tsgo --lsp` is recognized by arg0 (like Go's `runMain`) and routed
-// to a clear "not yet implemented" stub. The real LSP server is P8.
+// Slice 5a: `tsgo --lsp` routes to the language server. With an empty reader
+// (immediate EOF), the server exits cleanly with Success.
 //
-// Go ground truth: Go actually runs the language server; there is no fixed
-// stdout to match, so the port emits a clear deferral message and a
-// not-implemented exit status. blocked-by: the `internal/lsp` port (P8).
+// Go ground truth: Go actually runs the language server over stdio; with an
+// empty stdin the base-protocol reader hits EOF and the server stops. The port
+// mirrors this: the Reader sees EOF, `run_stdio` returns Ok(()), exit 0.
 #[test]
-fn lsp_mode_is_deferred_with_clear_message() {
-    let sys = empty_sys();
-    let status = run(&argv(&["--lsp", "--stdio"]), &sys);
-    assert_eq!(status, ExitStatus::NotImplemented);
-    let out = sys.output();
-    assert!(out.contains("--lsp"), "stub must name the mode: {out:?}");
+fn lsp_mode_exits_cleanly_on_eof() {
+    let input: &[u8] = b"";
+    let mut output = Vec::new();
+    let status = run_lsp_over(input, &mut output);
+    assert_eq!(status, ExitStatus::Success);
+}
+
+// Slice 5a-2: `tsgo --lsp` processes an initialize→shutdown→exit sequence
+// over the in-memory transport and produces an initialize response.
+#[test]
+fn lsp_mode_handles_initialize_shutdown_exit() {
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "capabilities": {} }
+    });
+    let shutdown_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "shutdown",
+        "params": null
+    });
+    let exit_notif = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "exit",
+        "params": null
+    });
+
+    let mut input_bytes = Vec::new();
+    for msg in [&init_req, &shutdown_req, &exit_notif] {
+        let body = serde_json::to_vec(msg).unwrap();
+        input_bytes.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+        input_bytes.extend_from_slice(&body);
+    }
+
+    let mut output = Vec::new();
+    let status = run_lsp_over(input_bytes.as_slice(), &mut output);
+    assert_eq!(status, ExitStatus::Success);
+    let output_str = String::from_utf8_lossy(&output);
     assert!(
-        out.contains("not yet implemented"),
-        "stub must be clear: {out:?}"
+        output_str.contains("capabilities"),
+        "expected initialize response with capabilities: {output_str:?}"
     );
 }
 
@@ -237,17 +271,13 @@ fn version_detected_after_file_name_skips_build() {
 
 // Mode dispatch is arg0-only, exactly like Go's `runMain`: `--lsp` after a file
 // name is NOT treated as the LSP mode (it flows to the build driver, where it
-// is an unknown option), so the LSP stub is never printed.
+// is an unknown option). With `--lsp` as a non-arg0 token, the build path runs
+// instead (reporting an unknown option error).
 #[test]
 fn lsp_mode_dispatch_is_arg0_only() {
     let (sys, _fs) = single_file_sys("good.ts", "const x: number = 1;\n");
     let status = run(&argv(&["good.ts", "--lsp"]), &sys);
-    assert_ne!(status, ExitStatus::NotImplemented);
-    assert!(
-        !sys.output().contains("language server"),
-        "non-arg0 --lsp must not trigger the LSP stub: {:?}",
-        sys.output()
-    );
+    assert_ne!(status, ExitStatus::Success);
 }
 
 // Exercises the exact production wiring `main()` builds: a `System` backed by

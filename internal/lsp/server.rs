@@ -11,8 +11,10 @@
 //! - Go's `Server` holds a `*project.Session` directly. This port takes a
 //!   generic `S: Session` trait so tests can plug in stubs.
 
+use std::io::{Read, Write};
+
 use serde_json::value::RawValue;
-use tsgo_jsonrpc::{Id, Message, MessageKind, ResponseError};
+use tsgo_jsonrpc::{Id, Message, MessageKind, Reader, ResponseError, Writer};
 
 /// LSP error code: the server has not been initialized.
 ///
@@ -58,6 +60,67 @@ pub trait Session {
     /// A file was closed in the editor.
     // Go: internal/lsp/server.go:Server.handleDidClose → session.DidCloseFile
     fn did_close_file(&self, uri: &str);
+
+    /// Handles `textDocument/hover`: returns a serialized `Hover` result or
+    /// `None` if no info is available.
+    // Go: internal/lsp/server.go:handlers() → "textDocument/hover" → session.ProvideHover
+    fn hover(&self, uri: &str, position: &serde_json::Value) -> Option<serde_json::Value> {
+        let _ = (uri, position);
+        None
+    }
+
+    /// Handles `textDocument/definition`: returns a serialized `Location[]`
+    /// result or `None`.
+    // Go: internal/lsp/server.go:handlers() → "textDocument/definition"
+    fn definition(&self, uri: &str, position: &serde_json::Value) -> Option<serde_json::Value> {
+        let _ = (uri, position);
+        None
+    }
+
+    /// Handles `textDocument/completion`: returns a serialized `CompletionList`
+    /// result or `None`.
+    // Go: internal/lsp/server.go:handlers() → "textDocument/completion"
+    fn completion(&self, uri: &str, position: &serde_json::Value) -> Option<serde_json::Value> {
+        let _ = (uri, position);
+        None
+    }
+
+    /// Handles `textDocument/references`: returns a serialized `Location[]`
+    /// result or `None`.
+    // Go: internal/lsp/server.go:handlers() → "textDocument/references"
+    fn references(&self, uri: &str, position: &serde_json::Value) -> Option<serde_json::Value> {
+        let _ = (uri, position);
+        None
+    }
+
+    /// Handles `textDocument/rename`: returns a serialized rename locations
+    /// result or `None`.
+    // Go: internal/lsp/server.go:handlers() → "textDocument/rename"
+    fn rename(
+        &self,
+        uri: &str,
+        position: &serde_json::Value,
+        new_name: &str,
+    ) -> Option<serde_json::Value> {
+        let _ = (uri, position, new_name);
+        None
+    }
+
+    /// Handles `textDocument/formatting`: returns a serialized `TextEdit[]`
+    /// result or `None`.
+    // Go: internal/lsp/server.go:handlers() → "textDocument/formatting"
+    fn formatting(&self, uri: &str, options: &serde_json::Value) -> Option<serde_json::Value> {
+        let _ = (uri, options);
+        None
+    }
+
+    /// Handles `textDocument/semanticTokens/full`: returns a serialized
+    /// `SemanticTokens` result or `None`.
+    // Go: internal/lsp/server.go:handlers() → "textDocument/semanticTokens/full"
+    fn semantic_tokens_full(&self, uri: &str) -> Option<serde_json::Value> {
+        let _ = uri;
+        None
+    }
 }
 
 /// The LSP server: reads JSON-RPC messages, dispatches to handlers, collects
@@ -132,6 +195,44 @@ impl<S: Session> Server<S> {
         }
 
         Ok(responses)
+    }
+
+    /// Runs the server over a streaming JSON-RPC transport (stdin/stdout in
+    /// production). Reads messages one at a time from `reader`, dispatches
+    /// them, and writes response messages to `writer`.
+    ///
+    /// The loop exits when `exit` is received or the reader yields EOF.
+    ///
+    /// Side effects: reads from `reader`, writes to `writer`, dispatches
+    /// handlers which may mutate session state.
+    // Go: internal/lsp/server.go:Server.Run (the goroutine-based read/write loops)
+    pub fn run_stdio<R: Read, W: Write>(
+        &mut self,
+        reader: &mut Reader<R>,
+        writer: &mut Writer<W>,
+    ) -> Result<(), ServerError> {
+        loop {
+            let data = match reader.read() {
+                Ok(Some(data)) => data,
+                Ok(None) => return Ok(()),
+                Err(_) => return Ok(()),
+            };
+            let msg: Message = serde_json::from_slice(&data)?;
+
+            match msg.kind() {
+                MessageKind::Request => {
+                    let resp = self.handle_request(&msg);
+                    let payload = serde_json::to_vec(&resp)?;
+                    let _ = writer.write(&payload);
+                }
+                MessageKind::Notification => {
+                    if self.handle_notification(&msg) {
+                        return Ok(());
+                    }
+                }
+                MessageKind::Response => {}
+            }
+        }
     }
 
     /// Dispatches a request message (has id + method) and returns a response.
@@ -312,17 +413,51 @@ impl<S: Session> Server<S> {
 
     /// Dispatches a feature request to the appropriate handler.
     ///
-    /// Currently returns method-not-found for unimplemented features.
+    /// Routes recognized `textDocument/*` methods to [`Session`] trait methods,
+    /// returning the serialized result. Unrecognized methods yield a
+    /// method-not-found error.
     ///
-    /// Side effects: none (stub).
+    /// Side effects: delegates to session methods which may read project state.
     // Go: internal/lsp/server.go:handlers() dispatch table
     fn dispatch_feature_request(&self, msg: &Message) -> Message {
         let id = msg.id.clone();
-        self.error_response(
-            id,
-            tsgo_jsonrpc::CODE_METHOD_NOT_FOUND,
-            &format!("method not found: {}", msg.method),
-        )
+        let method = msg.method.as_str();
+        let params = msg
+            .params
+            .as_ref()
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(p.get()).ok())
+            .unwrap_or(serde_json::Value::Null);
+
+        let uri = params["textDocument"]["uri"].as_str().unwrap_or("");
+        let position = &params["position"];
+
+        let result: Option<serde_json::Value> = match method {
+            "textDocument/hover" => self.session.hover(uri, position),
+            "textDocument/definition" => self.session.definition(uri, position),
+            "textDocument/completion" => self.session.completion(uri, position),
+            "textDocument/references" => self.session.references(uri, position),
+            "textDocument/rename" => {
+                let new_name = params["newName"].as_str().unwrap_or("");
+                self.session.rename(uri, position, new_name)
+            }
+            "textDocument/formatting" => {
+                let options = &params["options"];
+                self.session.formatting(uri, options)
+            }
+            "textDocument/semanticTokens/full" => self.session.semantic_tokens_full(uri),
+            _ => {
+                return self.error_response(
+                    id,
+                    tsgo_jsonrpc::CODE_METHOD_NOT_FOUND,
+                    &format!("method not found: {method}"),
+                );
+            }
+        };
+
+        match result {
+            Some(value) => self.success_response(id, value),
+            None => self.success_response(id, serde_json::Value::Null),
+        }
     }
 
     /// Handles `textDocument/didOpen`: extracts URI and text, forwards to session.
