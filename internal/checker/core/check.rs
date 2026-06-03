@@ -4178,6 +4178,7 @@ impl Checker {
             // Go runs `checkClassLikeDeclaration` (heritage relations: implements
             // satisfaction + extends compatibility) BEFORE iterating the members
             // (`checkSourceElements(node.Members())`).
+            self.check_grammar_class_like_declaration(program, node);
             self.check_class_like_declaration(program, node);
             for member in members {
                 self.check_grammar_modifiers(program, member);
@@ -4189,6 +4190,7 @@ impl Checker {
             self.check_expression(program, expr);
         }
         if let NodeData::VariableStatement(d) = program.arena().data(node) {
+            self.check_grammar_variable_declaration_list(program, d.declaration_list);
             self.check_variable_declaration_list(program, d.declaration_list);
         }
         // A type-alias declaration grammar-checks its type-parameter list (2706)
@@ -4219,6 +4221,7 @@ impl Checker {
         // A `{ ... }` block checks each contained statement (Go's `checkBlock` ->
         // `checkSourceElements`).
         if let NodeData::Block(d) = program.arena().data(node) {
+            self.check_grammar_statement_in_ambient_context(program, node);
             let statements = d.list.nodes.clone();
             for statement in statements {
                 self.check_statement(program, statement);
@@ -4350,6 +4353,7 @@ impl Checker {
         if let NodeData::ForInOrOfStatement(d) = program.arena().data(node) {
             let kind = program.arena().kind(node);
             if matches!(kind, Kind::ForInStatement | Kind::ForOfStatement) {
+                self.check_grammar_for_in_or_for_of_statement(program, node);
                 let (initializer, expression, statement) =
                     (d.initializer, d.expression, d.statement);
                 let expression_type = self.check_expression(program, expression);
@@ -5163,6 +5167,7 @@ impl Checker {
                 }
             }
             NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+                self.check_grammar_accessor(program, member);
                 let params = d.parameters.nodes.clone();
                 for param in params {
                     self.check_parameter(program, param);

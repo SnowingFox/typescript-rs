@@ -281,6 +281,11 @@ pub struct Checker {
     /// walk; drained by [`check_unused_identifiers`] after the check completes.
     // Go: internal/checker/checker.go:sourceFileLinks.identifierCheckNodes
     unused_identifier_nodes: Vec<NodeId>,
+    /// Tracks nodes for which `checkGrammarStatementInAmbientContext` has already
+    /// reported a diagnostic, preventing duplicate noise (Go's
+    /// `nodeLinks.hasReportedStatementInAmbientContext`).
+    // Go: internal/checker/checker.go:nodeLinks.hasReportedStatementInAmbientContext
+    pub(crate) ambient_context_reported: FxHashSet<NodeId>,
     /// Whether the statement currently being checked is inside an
     /// already-reported unreachable region (Go's `c.withinUnreachableCode`).
     /// Saved/restored around each statement so the FIRST unreachable statement
@@ -539,6 +544,7 @@ impl Checker {
             program: None,
             checked_files: FxHashSet::default(),
             unused_identifier_nodes: Vec::new(),
+            ambient_context_reported: FxHashSet::default(),
             within_unreachable_code: false,
             reported_unreachable_nodes: FxHashSet::default(),
             resolved_signatures: FxHashMap::default(),

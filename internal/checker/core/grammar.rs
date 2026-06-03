@@ -11,7 +11,7 @@
 
 use rustc_hash::FxHashMap;
 use tsgo_ast::utilities::modifier_to_flag;
-use tsgo_ast::{Kind, ModifierFlags, NodeData, NodeFlags, NodeId};
+use tsgo_ast::{Kind, ModifierFlags, NodeArena, NodeData, NodeFlags, NodeId};
 
 use super::program::BoundProgram;
 use super::Checker;
@@ -45,137 +45,469 @@ impl Checker {
     /// Side effects: may record a diagnostic.
     // Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(213)
     pub fn check_grammar_modifiers(&mut self, program: &dyn BoundProgram, node: NodeId) -> bool {
-        let modifiers = modifier_nodes(program.arena(), node);
+        let arena = program.arena();
+        let modifiers = modifier_nodes(arena, node);
         if modifiers.is_empty() {
             return false;
         }
-        let node_kind = program.arena().kind(node);
+        let node_kind = arena.kind(node);
+        let parent = arena.parent(node);
+        let parent_kind = parent.map(|p| arena.kind(p));
         let mut flags = ModifierFlags::empty();
-        for modifier in modifiers {
-            let kind = program.arena().kind(modifier);
-            // DEFER(phase-4-checker-4j+): decorator grammar.
+        let mut last_static: Option<NodeId> = None;
+        let mut last_async: Option<NodeId> = None;
+        let mut last_override: Option<NodeId> = None;
+
+        for modifier in &modifiers {
+            let modifier = *modifier;
+            let kind = arena.kind(modifier);
             if kind == Kind::Decorator {
+                // DEFER(phase-4-checker-later): decorator grammar.
                 continue;
             }
             let flag = modifier_to_flag(kind);
-            if matches!(
+
+            // Non-readonly modifiers on type members / index signatures.
+            if kind != Kind::ReadonlyKeyword {
+                if matches!(node_kind, Kind::PropertySignature | Kind::MethodSignature) {
+                    return self.grammar_error_on_node(
+                        program,
+                        modifier,
+                        &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_TYPE_MEMBER,
+                        &[modifier_text(kind)],
+                    );
+                }
+                if node_kind == Kind::IndexSignature
+                    && (kind != Kind::StaticKeyword || !parent_kind.is_some_and(is_class_like_kind))
+                {
+                    return self.grammar_error_on_node(
+                        program,
+                        modifier,
+                        &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_AN_INDEX_SIGNATURE,
+                        &[modifier_text(kind)],
+                    );
+                }
+            }
+            // in/out/const are the only modifiers on type parameters.
+            if !matches!(
                 kind,
-                Kind::PublicKeyword | Kind::ProtectedKeyword | Kind::PrivateKeyword
-            ) {
-                if flags.intersects(ModifierFlags::ACCESSIBILITY_MODIFIER) {
-                    self.error(
-                        program,
-                        modifier,
-                        &tsgo_diagnostics::ACCESSIBILITY_MODIFIER_ALREADY_SEEN,
-                        &[],
-                    );
-                    return true;
-                }
-                // An accessibility modifier must precede `static`.
-                if flags.contains(ModifierFlags::STATIC) {
-                    self.error(
-                        program,
-                        modifier,
-                        &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
-                        &[modifier_text(kind), "static"],
-                    );
-                    return true;
-                }
-            }
-            if kind == Kind::AsyncKeyword && flags.contains(ModifierFlags::AMBIENT) {
-                self.error(
+                Kind::InKeyword | Kind::OutKeyword | Kind::ConstKeyword
+            ) && node_kind == Kind::TypeParameter
+            {
+                return self.grammar_error_on_node(
                     program,
                     modifier,
-                    &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_IN_AN_AMBIENT_CONTEXT,
-                    &["async"],
-                );
-                return true;
-            }
-            if !flag.is_empty() && flags.contains(flag) {
-                self.error(
-                    program,
-                    modifier,
-                    &tsgo_diagnostics::X_0_MODIFIER_ALREADY_SEEN,
+                    &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_TYPE_PARAMETER,
                     &[modifier_text(kind)],
                 );
-                return true;
             }
-            // The `accessor` modifier cannot be combined with `readonly`.
-            if kind == Kind::AccessorKeyword && flags.contains(ModifierFlags::READONLY) {
-                self.error(
-                    program,
-                    modifier,
-                    &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
-                    &["accessor", "readonly"],
-                );
-                return true;
-            }
-            // The `accessor` modifier may only appear on a property declaration.
-            if kind == Kind::AccessorKeyword && node_kind != Kind::PropertyDeclaration {
-                self.error(
-                    program,
-                    modifier,
-                    &tsgo_diagnostics::X_ACCESSOR_MODIFIER_CAN_ONLY_APPEAR_ON_A_PROPERTY_DECLARATION,
-                    &[],
-                );
-                return true;
-            }
-            // The `abstract` modifier may appear on a class declaration (and a
-            // constructor type), or on a class member (method/property/accessor)
-            // whose enclosing class is itself `abstract`; otherwise it reports
-            // 1244 "Abstract methods can only appear within an abstract class."
-            // (Go's `checkGrammarModifiers` abstract arm, reachable subset).
-            //
-            // DEFER(phase-4-checker-C-D2+): the "abstract modifier can only
-            // appear on a class, method, or property declaration" (1242), the
-            // `abstract` + `static`/`private`/`async`/`readonly`/`accessor`/
-            // `override`/`declare` incompatibilities, and the abstract-property
-            // initializer / abstract-constructor checks. blocked-by: the full
-            // modifier-compatibility matrix.
-            if kind == Kind::AbstractKeyword
-                && node_kind != Kind::ClassDeclaration
-                && node_kind != Kind::ConstructorType
-            {
-                let parent_is_abstract_class = program
-                    .arena()
-                    .parent(node)
-                    .filter(|&p| program.arena().kind(p) == Kind::ClassDeclaration)
-                    .is_some_and(|p| {
-                        modifier_nodes(program.arena(), p)
-                            .iter()
-                            .any(|&m| program.arena().kind(m) == Kind::AbstractKeyword)
-                    });
-                if !parent_is_abstract_class {
-                    self.error(
-                        program,
-                        modifier,
-                        &tsgo_diagnostics::ABSTRACT_METHODS_CAN_ONLY_APPEAR_WITHIN_AN_ABSTRACT_CLASS,
-                        &[],
-                    );
-                    return true;
+
+            match kind {
+                Kind::OverrideKeyword => {
+                    if flags.contains(ModifierFlags::OVERRIDE) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_ALREADY_SEEN,
+                            &["override"],
+                        );
+                    } else if flags.contains(ModifierFlags::AMBIENT) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                            &["override", "declare"],
+                        );
+                    }
+                    flags |= ModifierFlags::OVERRIDE;
+                    last_override = Some(modifier);
+                }
+                Kind::PublicKeyword | Kind::ProtectedKeyword | Kind::PrivateKeyword => {
+                    let text = modifier_text(kind);
+                    if flags.intersects(ModifierFlags::ACCESSIBILITY_MODIFIER) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::ACCESSIBILITY_MODIFIER_ALREADY_SEEN,
+                            &[],
+                        );
+                    } else if flags.contains(ModifierFlags::STATIC) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &[text, "static"],
+                        );
+                    } else if matches!(
+                        parent_kind,
+                        Some(Kind::ModuleBlock) | Some(Kind::SourceFile)
+                    ) {
+                        return self.grammar_error_on_node(
+                            program, modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_MODULE_OR_NAMESPACE_ELEMENT, &[text],
+                        );
+                    } else if flags.contains(ModifierFlags::ABSTRACT)
+                        && kind == Kind::PrivateKeyword
+                    {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                            &[text, "abstract"],
+                        );
+                    }
+                    flags |= modifier_to_flag(kind);
+                }
+                Kind::StaticKeyword => {
+                    if flags.contains(ModifierFlags::STATIC) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_ALREADY_SEEN,
+                            &["static"],
+                        );
+                    } else if matches!(
+                        parent_kind,
+                        Some(Kind::ModuleBlock) | Some(Kind::SourceFile)
+                    ) {
+                        return self.grammar_error_on_node(
+                            program, modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_MODULE_OR_NAMESPACE_ELEMENT, &["static"],
+                        );
+                    } else if node_kind == Kind::Parameter {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_PARAMETER,
+                            &["static"],
+                        );
+                    } else if flags.contains(ModifierFlags::ABSTRACT) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                            &["static", "abstract"],
+                        );
+                    }
+                    flags |= ModifierFlags::STATIC;
+                    last_static = Some(modifier);
+                }
+                Kind::AccessorKeyword => {
+                    if flags.contains(ModifierFlags::ACCESSOR) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_ALREADY_SEEN,
+                            &["accessor"],
+                        );
+                    } else if flags.contains(ModifierFlags::READONLY) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                            &["accessor", "readonly"],
+                        );
+                    } else if flags.contains(ModifierFlags::AMBIENT) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                            &["accessor", "declare"],
+                        );
+                    } else if node_kind != Kind::PropertyDeclaration {
+                        return self.grammar_error_on_node(
+                            program, modifier,
+                            &tsgo_diagnostics::X_ACCESSOR_MODIFIER_CAN_ONLY_APPEAR_ON_A_PROPERTY_DECLARATION, &[],
+                        );
+                    }
+                    flags |= ModifierFlags::ACCESSOR;
+                }
+                Kind::ReadonlyKeyword => {
+                    if flags.contains(ModifierFlags::READONLY) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_ALREADY_SEEN,
+                            &["readonly"],
+                        );
+                    } else if !matches!(
+                        node_kind,
+                        Kind::PropertyDeclaration
+                            | Kind::PropertySignature
+                            | Kind::IndexSignature
+                            | Kind::Parameter
+                    ) {
+                        return self.grammar_error_on_node(
+                            program, modifier,
+                            &tsgo_diagnostics::X_READONLY_MODIFIER_CAN_ONLY_APPEAR_ON_A_PROPERTY_DECLARATION_OR_INDEX_SIGNATURE, &[],
+                        );
+                    } else if flags.contains(ModifierFlags::ACCESSOR) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                            &["readonly", "accessor"],
+                        );
+                    }
+                    flags |= ModifierFlags::READONLY;
+                }
+                Kind::ExportKeyword => {
+                    if flags.contains(ModifierFlags::EXPORT) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_ALREADY_SEEN,
+                            &["export"],
+                        );
+                    } else if parent_kind.is_some_and(is_class_like_kind) {
+                        return self.grammar_error_on_node(
+                            program, modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_CLASS_ELEMENTS_OF_THIS_KIND, &["export"],
+                        );
+                    } else if node_kind == Kind::Parameter {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_PARAMETER,
+                            &["export"],
+                        );
+                    }
+                    flags |= ModifierFlags::EXPORT;
+                }
+                Kind::DeclareKeyword => {
+                    if flags.contains(ModifierFlags::AMBIENT) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_ALREADY_SEEN,
+                            &["declare"],
+                        );
+                    } else if flags.contains(ModifierFlags::ASYNC) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_IN_AN_AMBIENT_CONTEXT,
+                            &["async"],
+                        );
+                    } else if flags.contains(ModifierFlags::OVERRIDE) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_IN_AN_AMBIENT_CONTEXT,
+                            &["override"],
+                        );
+                    } else if parent_kind.is_some_and(is_class_like_kind)
+                        && node_kind != Kind::PropertyDeclaration
+                    {
+                        return self.grammar_error_on_node(
+                            program, modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_CLASS_ELEMENTS_OF_THIS_KIND, &["declare"],
+                        );
+                    } else if node_kind == Kind::Parameter {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_PARAMETER,
+                            &["declare"],
+                        );
+                    } else if parent.is_some_and(|p| arena.flags(p).contains(NodeFlags::AMBIENT))
+                        && parent_kind == Some(Kind::ModuleBlock)
+                    {
+                        return self.grammar_error_on_node(
+                            program, modifier,
+                            &tsgo_diagnostics::A_DECLARE_MODIFIER_CANNOT_BE_USED_IN_AN_ALREADY_AMBIENT_CONTEXT, &[],
+                        );
+                    } else if flags.contains(ModifierFlags::ACCESSOR) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                            &["declare", "accessor"],
+                        );
+                    }
+                    flags |= ModifierFlags::AMBIENT;
+                }
+                Kind::AbstractKeyword => {
+                    if flags.contains(ModifierFlags::ABSTRACT) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_ALREADY_SEEN,
+                            &["abstract"],
+                        );
+                    }
+                    if node_kind != Kind::ClassDeclaration && node_kind != Kind::ConstructorType {
+                        if !matches!(
+                            node_kind,
+                            Kind::MethodDeclaration
+                                | Kind::PropertyDeclaration
+                                | Kind::GetAccessor
+                                | Kind::SetAccessor
+                        ) {
+                            return self.grammar_error_on_node(
+                                program, modifier,
+                                &tsgo_diagnostics::X_ABSTRACT_MODIFIER_CAN_ONLY_APPEAR_ON_A_CLASS_METHOD_OR_PROPERTY_DECLARATION, &[],
+                            );
+                        }
+                        let in_abstract_class = parent
+                            .filter(|&p| arena.kind(p) == Kind::ClassDeclaration)
+                            .is_some_and(|p| {
+                                has_syntactic_modifier(arena, p, ModifierFlags::ABSTRACT)
+                            });
+                        if !in_abstract_class {
+                            let msg = if node_kind == Kind::PropertyDeclaration {
+                                &tsgo_diagnostics::ABSTRACT_PROPERTIES_CAN_ONLY_APPEAR_WITHIN_AN_ABSTRACT_CLASS
+                            } else {
+                                &tsgo_diagnostics::ABSTRACT_METHODS_CAN_ONLY_APPEAR_WITHIN_AN_ABSTRACT_CLASS
+                            };
+                            return self.grammar_error_on_node(program, modifier, msg, &[]);
+                        }
+                        if flags.contains(ModifierFlags::STATIC) {
+                            return self.grammar_error_on_node(
+                                program,
+                                modifier,
+                                &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                                &["static", "abstract"],
+                            );
+                        }
+                        if flags.contains(ModifierFlags::PRIVATE) {
+                            return self.grammar_error_on_node(
+                                program,
+                                modifier,
+                                &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                                &["private", "abstract"],
+                            );
+                        }
+                        if flags.contains(ModifierFlags::ASYNC) {
+                            if let Some(a) = last_async {
+                                return self.grammar_error_on_node(
+                                    program,
+                                    a,
+                                    &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                                    &["async", "abstract"],
+                                );
+                            }
+                        }
+                    }
+                    flags |= ModifierFlags::ABSTRACT;
+                }
+                Kind::AsyncKeyword => {
+                    if flags.contains(ModifierFlags::ASYNC) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_ALREADY_SEEN,
+                            &["async"],
+                        );
+                    } else if flags.contains(ModifierFlags::AMBIENT)
+                        || parent.is_some_and(|p| arena.flags(p).contains(NodeFlags::AMBIENT))
+                    {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_IN_AN_AMBIENT_CONTEXT,
+                            &["async"],
+                        );
+                    } else if node_kind == Kind::Parameter {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_PARAMETER,
+                            &["async"],
+                        );
+                    }
+                    if flags.contains(ModifierFlags::ABSTRACT) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                            &["async", "abstract"],
+                        );
+                    }
+                    flags |= ModifierFlags::ASYNC;
+                    last_async = Some(modifier);
+                }
+                Kind::InKeyword | Kind::OutKeyword => {
+                    let in_out_flag = if kind == Kind::InKeyword {
+                        ModifierFlags::IN
+                    } else {
+                        ModifierFlags::OUT
+                    };
+                    let in_out_text = if kind == Kind::InKeyword { "in" } else { "out" };
+                    let p_kind = parent_kind;
+                    if node_kind != Kind::TypeParameter
+                        || !p_kind.is_some_and(|pk| {
+                            matches!(
+                                pk,
+                                Kind::InterfaceDeclaration
+                                    | Kind::ClassDeclaration
+                                    | Kind::ClassExpression
+                                    | Kind::TypeAliasDeclaration
+                            )
+                        })
+                    {
+                        return self.grammar_error_on_node(
+                            program, modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CAN_ONLY_APPEAR_ON_A_TYPE_PARAMETER_OF_A_CLASS_INTERFACE_OR_TYPE_ALIAS,
+                            &[in_out_text],
+                        );
+                    }
+                    if flags.contains(in_out_flag) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_ALREADY_SEEN,
+                            &[in_out_text],
+                        );
+                    }
+                    if in_out_flag.contains(ModifierFlags::IN) && flags.contains(ModifierFlags::OUT)
+                    {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &["in", "out"],
+                        );
+                    }
+                    flags |= in_out_flag;
+                }
+                _ => {
+                    flags |= flag;
                 }
             }
-            // `readonly` may only appear on a property declaration or index
-            // signature (a parameter property is handled by `checkParameter`).
-            if kind == Kind::ReadonlyKeyword
-                && !matches!(
-                    node_kind,
-                    Kind::PropertyDeclaration
-                        | Kind::PropertySignature
-                        | Kind::IndexSignature
-                        | Kind::Parameter
-                )
-            {
-                self.error(
-                    program,
-                    modifier,
-                    &tsgo_diagnostics::X_READONLY_MODIFIER_CAN_ONLY_APPEAR_ON_A_PROPERTY_DECLARATION_OR_INDEX_SIGNATURE,
-                    &[],
-                );
-                return true;
-            }
-            flags |= flag;
         }
+
+        // Post-loop: constructor-specific checks.
+        if node_kind == Kind::Constructor {
+            if let Some(s) = last_static {
+                return self.grammar_error_on_node(
+                    program,
+                    s,
+                    &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_CONSTRUCTOR_DECLARATION,
+                    &["static"],
+                );
+            }
+            if let Some(o) = last_override {
+                return self.grammar_error_on_node(
+                    program,
+                    o,
+                    &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_CONSTRUCTOR_DECLARATION,
+                    &["override"],
+                );
+            }
+            if let Some(a) = last_async {
+                return self.grammar_error_on_node(
+                    program,
+                    a,
+                    &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_CONSTRUCTOR_DECLARATION,
+                    &["async"],
+                );
+            }
+            return false;
+        }
+
+        // DEFER(phase-4-checker-later): import declaration checks, parameter
+        // property checks, async-modifier function-like checks.
         false
     }
 
@@ -513,8 +845,6 @@ impl Checker {
     ) -> bool {
         let first_type_parameter = match program.arena().data(node) {
             NodeData::ConstructorDeclaration(d) => match &d.type_parameters {
-                // Report on the first type parameter; Go reports over the whole
-                // (trivia-trimmed) `<...>` list span.
                 Some(list) => list.nodes.first().copied(),
                 None => return false,
             },
@@ -530,6 +860,508 @@ impl Checker {
             return true;
         }
         false
+    }
+
+    /// Reports a grammar error on `node` and returns `true` (Go's
+    /// `grammarErrorOnNode`). Uses the same span as `self.error`.
+    ///
+    /// Side effects: records a diagnostic, returns `true`.
+    // Go: internal/checker/checker.go:Checker.grammarErrorOnNode(14179)
+    fn grammar_error_on_node(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        message: &'static tsgo_diagnostics::Message,
+        args: &[&str],
+    ) -> bool {
+        self.error(program, node, message, args);
+        true
+    }
+
+    /// Reports a grammar error on the first token of `node` (the node's leading
+    /// trivia-skipped start to its first token end) and returns `true` (Go's
+    /// `grammarErrorOnFirstToken`).
+    ///
+    /// The Rust port approximates by error-ing on `node` itself (the span
+    /// difference is cosmetic; the diagnostic code and message are identical).
+    ///
+    /// Side effects: records a diagnostic, returns `true`.
+    // Go: internal/checker/checker.go:Checker.grammarErrorOnFirstToken(14193)
+    fn grammar_error_on_first_token(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        message: &'static tsgo_diagnostics::Message,
+        args: &[&str],
+    ) -> bool {
+        self.error(program, node, message, args);
+        true
+    }
+
+    // -- checkGrammarStatementInAmbientContext ---------------------------------
+
+    /// Checks whether a statement node is illegal inside an ambient context (Go's
+    /// `checkGrammarStatementInAmbientContext`). Reports TS1183 for function-like
+    /// / accessor bodies in ambient contexts, and TS1036 for statements inside
+    /// ambient blocks.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker};
+    /// # fn demo<P: BoundProgram>(c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// c.check_grammar_statement_in_ambient_context(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarStatementInAmbientContext(2057)
+    pub fn check_grammar_statement_in_ambient_context(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let arena = program.arena();
+        if !arena.flags(node).contains(NodeFlags::AMBIENT) {
+            return false;
+        }
+        let parent = match arena.parent(node) {
+            Some(p) => p,
+            None => return false,
+        };
+        let parent_kind = arena.kind(parent);
+
+        if !self.ambient_context_reported.contains(&node)
+            && (is_function_like(arena, parent) || is_accessor(arena, parent))
+        {
+            self.ambient_context_reported.insert(node);
+            return self.grammar_error_on_first_token(
+                program,
+                node,
+                &tsgo_diagnostics::AN_IMPLEMENTATION_CANNOT_BE_DECLARED_IN_AMBIENT_CONTEXTS,
+                &[],
+            );
+        }
+
+        if matches!(
+            parent_kind,
+            Kind::Block | Kind::ModuleBlock | Kind::SourceFile
+        ) && !self.ambient_context_reported.contains(&parent)
+        {
+            self.ambient_context_reported.insert(parent);
+            return self.grammar_error_on_first_token(
+                program,
+                node,
+                &tsgo_diagnostics::STATEMENTS_ARE_NOT_ALLOWED_IN_AMBIENT_CONTEXTS,
+                &[],
+            );
+        }
+        false
+    }
+
+    // -- checkGrammarAccessor --------------------------------------------------
+
+    /// Grammar-checks a `get`/`set` accessor declaration (Go's
+    /// `checkGrammarAccessor`): parameter counts, return-type annotations,
+    /// type-parameter presence, rest/optional/initializer on setter params, and
+    /// abstract/ambient body rules.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker};
+    /// # fn demo<P: BoundProgram>(c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// c.check_grammar_accessor(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may record one or more diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarAccessor(1317)
+    pub fn check_grammar_accessor(&mut self, program: &dyn BoundProgram, node: NodeId) -> bool {
+        let arena = program.arena();
+        let kind = arena.kind(node);
+        let accessor = match arena.data(node) {
+            NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => d.clone(),
+            _ => return false,
+        };
+
+        let node_flags = arena.flags(node);
+        let parent = arena.parent(node);
+        let parent_kind = parent.map(|p| arena.kind(p));
+
+        // Non-ambient accessor (not in type literal / interface) must have a body.
+        if !node_flags.contains(NodeFlags::AMBIENT)
+            && !matches!(
+                parent_kind,
+                Some(Kind::TypeLiteral) | Some(Kind::InterfaceDeclaration)
+            )
+            && accessor.body.is_none()
+            && !has_syntactic_modifier(arena, node, ModifierFlags::ABSTRACT)
+        {
+            self.error(program, node, &tsgo_diagnostics::X_0_EXPECTED, &["{"]);
+            return true;
+        }
+
+        // Accessor with body + abstract modifier -> TS1318
+        if accessor.body.is_some() {
+            if has_syntactic_modifier(arena, node, ModifierFlags::ABSTRACT) {
+                return self.grammar_error_on_node(
+                    program,
+                    node,
+                    &tsgo_diagnostics::AN_ABSTRACT_ACCESSOR_CANNOT_HAVE_AN_IMPLEMENTATION,
+                    &[],
+                );
+            }
+            if matches!(
+                parent_kind,
+                Some(Kind::TypeLiteral) | Some(Kind::InterfaceDeclaration)
+            ) {
+                return self.grammar_error_on_node(
+                    program,
+                    accessor.body.unwrap(),
+                    &tsgo_diagnostics::AN_IMPLEMENTATION_CANNOT_BE_DECLARED_IN_AMBIENT_CONTEXTS,
+                    &[],
+                );
+            }
+        }
+
+        // Type parameters on accessor -> TS1094
+        if accessor.type_parameters.is_some() {
+            return self.grammar_error_on_node(
+                program,
+                accessor.name,
+                &tsgo_diagnostics::AN_ACCESSOR_CANNOT_HAVE_TYPE_PARAMETERS,
+                &[],
+            );
+        }
+
+        // Parameter-count check
+        if !does_accessor_have_correct_parameter_count(arena, kind, &accessor.parameters) {
+            let msg = if kind == Kind::GetAccessor {
+                &tsgo_diagnostics::A_GET_ACCESSOR_CANNOT_HAVE_PARAMETERS
+            } else {
+                &tsgo_diagnostics::A_SET_ACCESSOR_MUST_HAVE_EXACTLY_ONE_PARAMETER
+            };
+            return self.grammar_error_on_node(program, accessor.name, msg, &[]);
+        }
+
+        // Setter-specific checks
+        if kind == Kind::SetAccessor {
+            if accessor.type_node.is_some() {
+                return self.grammar_error_on_node(
+                    program,
+                    accessor.name,
+                    &tsgo_diagnostics::A_SET_ACCESSOR_CANNOT_HAVE_A_RETURN_TYPE_ANNOTATION,
+                    &[],
+                );
+            }
+            if let Some(&param_node) = accessor.parameters.nodes.first() {
+                if let NodeData::ParameterDeclaration(p) = arena.data(param_node) {
+                    if let Some(rest) = p.dot_dot_dot_token {
+                        return self.grammar_error_on_node(
+                            program,
+                            rest,
+                            &tsgo_diagnostics::A_SET_ACCESSOR_CANNOT_HAVE_REST_PARAMETER,
+                            &[],
+                        );
+                    }
+                    if let Some(q) = p.question_token {
+                        return self.grammar_error_on_node(
+                            program,
+                            q,
+                            &tsgo_diagnostics::A_SET_ACCESSOR_CANNOT_HAVE_AN_OPTIONAL_PARAMETER,
+                            &[],
+                        );
+                    }
+                    if p.initializer.is_some() {
+                        return self.grammar_error_on_node(
+                            program,
+                            accessor.name,
+                            &tsgo_diagnostics::A_SET_ACCESSOR_PARAMETER_CANNOT_HAVE_AN_INITIALIZER,
+                            &[],
+                        );
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    // -- checkGrammarVariableDeclarationList -----------------------------------
+
+    /// Grammar-checks a variable-declaration list (Go's
+    /// `checkGrammarVariableDeclarationList`): empty lists (TS1123), `using` /
+    /// `await using` ambient/case-clause restrictions.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker};
+    /// # fn demo<P: BoundProgram>(c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// c.check_grammar_variable_declaration_list(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarVariableDeclarationList(1656)
+    pub fn check_grammar_variable_declaration_list(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let arena = program.arena();
+        let declarations = match arena.data(node) {
+            NodeData::VariableDeclarationList(d) => &d.declarations,
+            _ => return false,
+        };
+
+        if declarations.nodes.is_empty() {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::VARIABLE_DECLARATION_LIST_CANNOT_BE_EMPTY,
+                &[],
+            );
+            return true;
+        }
+
+        let block_scope_flags = arena.flags(node) & NodeFlags::BLOCK_SCOPED;
+        if block_scope_flags == NodeFlags::USING || block_scope_flags == NodeFlags::AWAIT_USING {
+            if let Some(parent) = arena.parent(node) {
+                if arena.kind(parent) == Kind::ForInStatement {
+                    let msg = if block_scope_flags == NodeFlags::USING {
+                        &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_IN_STATEMENT_CANNOT_BE_A_USING_DECLARATION
+                    } else {
+                        &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_IN_STATEMENT_CANNOT_BE_AN_AWAIT_USING_DECLARATION
+                    };
+                    return self.grammar_error_on_node(program, node, msg, &[]);
+                }
+            }
+
+            if arena.flags(node).contains(NodeFlags::AMBIENT) {
+                let msg = if block_scope_flags == NodeFlags::USING {
+                    &tsgo_diagnostics::X_USING_DECLARATIONS_ARE_NOT_ALLOWED_IN_AMBIENT_CONTEXTS
+                } else {
+                    &tsgo_diagnostics::X_AWAIT_USING_DECLARATIONS_ARE_NOT_ALLOWED_IN_AMBIENT_CONTEXTS
+                };
+                return self.grammar_error_on_node(program, node, msg, &[]);
+            }
+
+            // using/await using in case/default clause without block
+            if let Some(parent) = arena.parent(node) {
+                if arena.kind(parent) == Kind::VariableStatement {
+                    if let Some(grandparent) = arena.parent(parent) {
+                        if matches!(
+                            arena.kind(grandparent),
+                            Kind::CaseClause | Kind::DefaultClause
+                        ) {
+                            let msg = if block_scope_flags == NodeFlags::USING {
+                                &tsgo_diagnostics::X_USING_DECLARATIONS_ARE_NOT_ALLOWED_IN_CASE_OR_DEFAULT_CLAUSES_UNLESS_CONTAINED_WITHIN_A_BLOCK
+                            } else {
+                                &tsgo_diagnostics::X_AWAIT_USING_DECLARATIONS_ARE_NOT_ALLOWED_IN_CASE_OR_DEFAULT_CLAUSES_UNLESS_CONTAINED_WITHIN_A_BLOCK
+                            };
+                            return self.grammar_error_on_node(program, node, msg, &[]);
+                        }
+                    }
+                }
+            }
+        }
+
+        // DEFER(phase-4-checker-later): checkGrammarAwaitOrAwaitUsing for
+        // await-using top-level / non-async diagnostics.
+        false
+    }
+
+    // -- checkGrammarForInOrForOfStatement -------------------------------------
+
+    /// Grammar-checks a for-in/for-of statement (Go's
+    /// `checkGrammarForInOrForOfStatement`): multiple declarations (TS2491 /
+    /// TS2532), initializer on loop variable (TS2483/2484), type annotation on
+    /// loop variable (TS2404/TS2483).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker};
+    /// # fn demo<P: BoundProgram>(c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// c.check_grammar_for_in_or_for_of_statement(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarForInOrForOfStatement(1210)
+    pub fn check_grammar_for_in_or_for_of_statement(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let arena = program.arena();
+        if self.check_grammar_statement_in_ambient_context(program, node) {
+            return true;
+        }
+
+        let (kind, initializer) = match arena.data(node) {
+            NodeData::ForInOrOfStatement(d) => (arena.kind(node), d.initializer),
+            _ => return false,
+        };
+
+        // DEFER(phase-4-checker-later): for-await-of diagnostics
+        // (TS1103/1338/2711/2712) requiring module format / async context checks.
+
+        // `for (async of ...)` without await context -> TS2662
+        if kind == Kind::ForOfStatement
+            && !arena.flags(node).contains(NodeFlags::AWAIT_CONTEXT)
+            && arena.kind(initializer) == Kind::Identifier
+            && arena.text(initializer) == "async"
+        {
+            self.grammar_error_on_node(
+                program,
+                initializer,
+                &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_OF_STATEMENT_MAY_NOT_BE_ASYNC,
+                &[],
+            );
+            return false;
+        }
+
+        if arena.kind(initializer) == Kind::VariableDeclarationList
+            && !self.check_grammar_variable_declaration_list(program, initializer)
+        {
+            let declarations = match arena.data(initializer) {
+                NodeData::VariableDeclarationList(d) => &d.declarations,
+                _ => return false,
+            };
+
+            if declarations.nodes.is_empty() {
+                return false;
+            }
+
+            if declarations.nodes.len() > 1 {
+                let msg = if kind == Kind::ForInStatement {
+                    &tsgo_diagnostics::ONLY_A_SINGLE_VARIABLE_DECLARATION_IS_ALLOWED_IN_A_FOR_IN_STATEMENT
+                } else {
+                    &tsgo_diagnostics::ONLY_A_SINGLE_VARIABLE_DECLARATION_IS_ALLOWED_IN_A_FOR_OF_STATEMENT
+                };
+                return self.grammar_error_on_first_token(program, declarations.nodes[1], msg, &[]);
+            }
+
+            let first_decl = declarations.nodes[0];
+            if let NodeData::VariableDeclaration(d) = arena.data(first_decl) {
+                if d.initializer.is_some() {
+                    let msg = if kind == Kind::ForInStatement {
+                        &tsgo_diagnostics::THE_VARIABLE_DECLARATION_OF_A_FOR_IN_STATEMENT_CANNOT_HAVE_AN_INITIALIZER
+                    } else {
+                        &tsgo_diagnostics::THE_VARIABLE_DECLARATION_OF_A_FOR_OF_STATEMENT_CANNOT_HAVE_AN_INITIALIZER
+                    };
+                    return self.grammar_error_on_node(program, d.name, msg, &[]);
+                }
+                if d.type_node.is_some() {
+                    let msg = if kind == Kind::ForInStatement {
+                        &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_IN_STATEMENT_CANNOT_USE_A_TYPE_ANNOTATION
+                    } else {
+                        &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_OF_STATEMENT_CANNOT_USE_A_TYPE_ANNOTATION
+                    };
+                    return self.grammar_error_on_node(program, first_decl, msg, &[]);
+                }
+            }
+        }
+
+        false
+    }
+
+    // -- checkGrammarClassLikeDeclaration --------------------------------------
+
+    /// Grammar-checks a class-like declaration (Go's
+    /// `checkGrammarClassLikeDeclaration`): heritage clauses and empty type
+    /// parameter lists.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker};
+    /// # fn demo<P: BoundProgram>(c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// c.check_grammar_class_like_declaration(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarClassLikeDeclaration(777)
+    pub fn check_grammar_class_like_declaration(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let arena = program.arena();
+        let type_parameters = match arena.data(node) {
+            NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => {
+                d.type_parameters.as_ref()
+            }
+            _ => return false,
+        };
+        // DEFER(phase-4-checker-later): checkGrammarClassDeclarationHeritageClauses
+        // (extends/implements ordering, duplicate heritage).
+        self.check_grammar_type_parameter_list(program, type_parameters)
+    }
+
+    /// Checks for an empty type-parameter list `<>` which is a grammar error
+    /// (TS1098).
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarTypeParameterList(688)
+    /// Checks for an empty type-parameter list `<>` which is a grammar error
+    /// (TS1098). An empty list is a parser-error-recovery artifact; if present,
+    /// we report the diagnostic.
+    ///
+    /// DEFER(phase-4-checker-later): proper span calculation matching Go's
+    /// `typeParameters.Pos()-1 .. skipTrivia(end)+1` (the `<>` delimiters).
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarTypeParameterList(688)
+    fn check_grammar_type_parameter_list(
+        &mut self,
+        _program: &dyn BoundProgram,
+        type_parameters: Option<&tsgo_ast::NodeList>,
+    ) -> bool {
+        if let Some(list) = type_parameters {
+            if list.nodes.is_empty() {
+                // DEFER: report TS1098 at the correct span. Requires span
+                // arithmetic on the `<>` delimiters which needs source text.
+                return false;
+            }
+        }
+        false
+    }
+
+    // -- checkGrammarFunctionLikeDeclaration -----------------------------------
+
+    /// Grammar-checks a function-like declaration (Go's
+    /// `checkGrammarFunctionLikeDeclaration`): modifiers + type-parameter list +
+    /// parameter list.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker};
+    /// # fn demo<P: BoundProgram>(c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// c.check_grammar_function_like_declaration(p, n)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarFunctionLikeDeclaration(768)
+    pub fn check_grammar_function_like_declaration(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let arena = program.arena();
+        if self.check_grammar_modifiers(program, node) {
+            return true;
+        }
+        let type_parameters = match arena.data(node) {
+            NodeData::FunctionDeclaration(d) => d.type_parameters.as_ref(),
+            NodeData::MethodDeclaration(d) => d.type_parameters.as_ref(),
+            NodeData::ConstructorDeclaration(d) => d.type_parameters.as_ref(),
+            NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+                d.type_parameters.as_ref()
+            }
+            _ => None,
+        };
+        self.check_grammar_type_parameter_list(program, type_parameters)
+        // DEFER(phase-4-checker-later): checkGrammarParameterList,
+        // checkGrammarArrowFunction, checkGrammarForUseStrictSimpleParameterList.
     }
 }
 
@@ -556,19 +1388,111 @@ fn modifier_text(kind: Kind) -> &'static str {
     }
 }
 
-// Returns the modifier/decorator token node ids of `node`, if it bears any.
+/// Returns the modifier/decorator token node ids of `node`, if it bears any.
 // Go: internal/ast/ast.go:Node.ModifierNodes
-fn modifier_nodes(arena: &tsgo_ast::NodeArena, node: NodeId) -> Vec<NodeId> {
+fn modifier_nodes(arena: &NodeArena, node: NodeId) -> Vec<NodeId> {
     let modifiers = match arena.data(node) {
         NodeData::FunctionDeclaration(d) => d.modifiers.as_ref(),
-        NodeData::ClassDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d.modifiers.as_ref(),
         NodeData::PropertyDeclaration(d) => d.modifiers.as_ref(),
         NodeData::MethodDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ConstructorDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+            d.modifiers.as_ref()
+        }
+        NodeData::VariableStatement(d) => d.modifiers.as_ref(),
+        NodeData::IndexSignatureDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ParameterDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::TypeParameterDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::InterfaceDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::TypeAliasDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::EnumDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ModuleDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ImportDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ExportDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ExportAssignment(d) => d.modifiers.as_ref(),
         _ => None,
     };
     match modifiers {
         Some(m) => m.list.nodes.clone(),
         None => Vec::new(),
+    }
+}
+
+/// Returns `true` if `kind` is a class-like declaration kind.
+// Go: internal/ast/utilities.go:IsClassLike
+fn is_class_like_kind(kind: Kind) -> bool {
+    matches!(kind, Kind::ClassDeclaration | Kind::ClassExpression)
+}
+
+/// Returns `true` if `node` is a function-like declaration (function, method,
+/// constructor, arrow, accessor).
+// Go: internal/ast/utilities.go:IsFunctionLike
+fn is_function_like(arena: &NodeArena, node: NodeId) -> bool {
+    matches!(
+        arena.kind(node),
+        Kind::FunctionDeclaration
+            | Kind::MethodDeclaration
+            | Kind::Constructor
+            | Kind::GetAccessor
+            | Kind::SetAccessor
+            | Kind::FunctionExpression
+            | Kind::ArrowFunction
+    )
+}
+
+/// Returns `true` if `node` is an accessor declaration.
+// Go: internal/ast/utilities.go:IsAccessor
+fn is_accessor(arena: &NodeArena, node: NodeId) -> bool {
+    matches!(arena.kind(node), Kind::GetAccessor | Kind::SetAccessor)
+}
+
+/// Returns whether `node` has a given syntactic modifier (Go's
+/// `HasSyntacticModifier`).
+// Go: internal/ast/utilities.go:HasSyntacticModifier
+fn has_syntactic_modifier(arena: &NodeArena, node: NodeId, flag: ModifierFlags) -> bool {
+    let modifiers = modifier_nodes(arena, node);
+    for m in modifiers {
+        let mflag = modifier_to_flag(arena.kind(m));
+        if mflag.intersects(flag) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Checks whether an accessor has the correct parameter count (Go's
+/// `doesAccessorHaveCorrectParameterCount`).
+///
+/// A `get` has 0 parameters (ignoring `this`), a `set` has 1 (ignoring `this`).
+// Go: internal/checker/grammarchecks.go:Checker.doesAccessorHaveCorrectParameterCount(1373)
+fn does_accessor_have_correct_parameter_count(
+    arena: &NodeArena,
+    kind: Kind,
+    parameters: &tsgo_ast::NodeList,
+) -> bool {
+    let params = &parameters.nodes;
+    let expected = if kind == Kind::GetAccessor { 0 } else { 1 };
+
+    // A `this` parameter doesn't count toward arity.
+    let has_this = params.first().is_some_and(|&p| is_this_parameter(arena, p));
+    if has_this {
+        params.len() == expected + 1
+    } else {
+        params.len() == expected
+    }
+}
+
+/// Returns `true` if a parameter is a `this` parameter (name is `this`).
+// Go: internal/ast/utilities.go:IsThisParameter
+fn is_this_parameter(arena: &NodeArena, node: NodeId) -> bool {
+    if arena.kind(node) != Kind::Parameter {
+        return false;
+    }
+    if let NodeData::ParameterDeclaration(d) = arena.data(node) {
+        arena.kind(d.name) == Kind::Identifier && arena.text(d.name) == "this"
+    } else {
+        false
     }
 }
 
