@@ -980,3 +980,45 @@ fn reference_member_types_are_instantiated_for_relation() {
     // `{ v: string }` is not assignable to `Box<number>`.
     assert!(!c.is_type_assignable_to(&p, str_v, box_num));
 }
+
+// T0-1: When the relation recursion depth reaches 100, the comparison returns
+// `false` instead of overflowing the stack — preventing a crash on deeply nested
+// structural type comparisons.
+// Go: internal/checker/relater.go:recursiveTypeRelatedTo (len(r.sourceStack) == 100)
+#[test]
+fn relation_depth_guard_prevents_overflow() {
+    let p = StubProgram::parse_and_bind("/a.ts", "");
+    let mut c = Checker::new();
+    // Simulate a deeply nested comparison by artificially setting the depth to 100.
+    c.relation_depth = 100;
+    // Two distinct object types that would normally need structural comparison.
+    let a = c.new_object_type(
+        crate::core::types::ObjectFlags::INTERFACE,
+        None,
+        Default::default(),
+    );
+    let b = c.new_object_type(
+        crate::core::types::ObjectFlags::INTERFACE,
+        None,
+        Default::default(),
+    );
+    // At depth 100, the relation returns false (overflow) instead of recursing.
+    assert!(
+        !c.is_type_assignable_to(&p, a, b),
+        "at depth 100, returns false to prevent overflow"
+    );
+}
+
+// GUARD: at normal depth, structurally compatible types still relate correctly.
+// Go: internal/checker/relater.go:recursiveTypeRelatedTo (normal path)
+#[test]
+fn relation_depth_guard_does_not_affect_normal_checks() {
+    let p = StubProgram::parse_and_bind("/a.ts", "");
+    let mut c = Checker::new();
+    // A type is always assignable to itself at normal depth.
+    let s = c.string_type();
+    assert!(c.is_type_assignable_to(&p, s, s));
+    // And to `any`.
+    let any = c.any_type();
+    assert!(c.is_type_assignable_to(&p, s, any));
+}

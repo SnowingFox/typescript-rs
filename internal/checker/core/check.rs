@@ -211,6 +211,17 @@ impl Checker {
     /// Side effects: may record diagnostics and allocate types.
     // Go: internal/checker/checker.go:Checker.checkExpression(7521)/checkExpressionWorker(7699)
     pub fn check_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        // Go: checkExpression saves/restores currentNode and resets
+        // instantiationCount for each expression check.
+        let saved_current_node = self.current_node;
+        self.current_node = Some(node);
+        self.instantiation_count = 0;
+        let result = self.check_expression_worker(program, node);
+        self.current_node = saved_current_node;
+        result
+    }
+
+    fn check_expression_worker(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         match program.arena().kind(node) {
             Kind::Identifier => self.check_identifier(program, node),
             Kind::StringLiteral => {
@@ -4113,6 +4124,12 @@ impl Checker {
     // body checking + expression-body descent.
     // Go: internal/checker/checker.go:Checker.checkSourceElement(2223)
     fn check_statement(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        // Go: checkSourceElement saves/restores currentNode and resets
+        // instantiationCount per statement so deeply recursive types in a single
+        // statement are caught by the count limit.
+        let saved_current_node = self.current_node;
+        self.current_node = Some(node);
+        self.instantiation_count = 0;
         // Go's `checkSourceElement` saves/restores `withinUnreachableCode` around
         // the per-node worker, and `checkSourceElementWorker` reports `TS7027`
         // (gated on `allowUnreachableCode != true`) on the first unreachable
@@ -4404,6 +4421,7 @@ impl Checker {
         // Restore the enclosing reachability state (Go's `checkSourceElement`
         // restores `c.withinUnreachableCode` after the worker returns).
         self.within_unreachable_code = saved_within_unreachable;
+        self.current_node = saved_current_node;
     }
 
     // Checks a function expression (`function (): T { ... }`) appearing in an

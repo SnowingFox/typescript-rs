@@ -234,10 +234,20 @@ pub struct Checker {
     index_infos: IndexInfoArena,
     /// Per-relation result cache (Go's `identityRelation`/`assignableRelation`/...).
     relations: RelationCache,
+    /// Current recursion depth of the structural relation check (Go's
+    /// `len(r.sourceStack)` / `len(r.targetStack)` in the `Relater`). When this
+    /// reaches 100, the comparison bails with `false` and sets `overflow`.
+    // Go: internal/checker/relater.go:Relater.sourceStack / targetStack (len == 100 check)
+    relation_depth: u32,
     /// Current recursive `instantiate_type` depth (Go's `instantiationDepth`).
     instantiation_depth: u32,
     /// Total `instantiate_type` calls for the current statement (Go's `instantiationCount`).
     instantiation_count: u32,
+    /// The AST node currently being type-checked (Go's `c.currentNode`), used
+    /// for diagnostics produced deep in the type system (e.g. TS2589 from
+    /// `instantiate_type`) where no explicit node context is threaded.
+    // Go: internal/checker/checker.go:Checker.currentNode
+    current_node: Option<NodeId>,
     /// Diagnostics recorded while checking, partitioned by the source-file
     /// handle (`BoundProgram::file_handle`) they were produced for, so
     /// [`Checker::get_diagnostics`] returns only one file's diagnostics (Go's
@@ -503,8 +513,10 @@ impl Checker {
             signatures: SignatureArena::new(),
             index_infos: IndexInfoArena::new(),
             relations: RelationCache::default(),
+            relation_depth: 0,
             instantiation_depth: 0,
             instantiation_count: 0,
+            current_node: None,
             diagnostics_by_file: FxHashMap::default(),
             jsx_intrinsic_elements: None,
             emit_resolver: OnceCell::new(),

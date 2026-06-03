@@ -2,7 +2,7 @@
 //! `TypeEraserTransformer`, which strips TypeScript-only syntax so the result
 //! prints as plain JavaScript.
 //!
-//! # Scope (rounds 6b + 6c-prep)
+//! # Scope
 //!
 //! [`type_eraser_visit`] is removal-aware: it returns `Option<NodeId>` where
 //! `None` means "elide this node from its containing list" (Go's `visit`
@@ -12,13 +12,16 @@
 //! [`NodeArena::visit_each_child`](tsgo_ast::NodeArena::visit_each_child).
 //!
 //! Covered: type-annotation / type-parameter / type-argument / return-type
-//! stripping (6b); statement elision of type-only declarations and ambient
-//! (`declare`) statements via [`Kind::NotEmittedStatement`]; type-only modifier,
-//! `implements`-clause, index-signature, `this`-parameter, and overload
-//! elision; and `as`/`satisfies`/`<T>x`/`x!` lowering to
+//! stripping for all function-like nodes (FunctionDeclaration,
+//! FunctionExpression, ArrowFunction, MethodDeclaration, Constructor,
+//! GetAccessor, SetAccessor); statement elision of type-only declarations and
+//! ambient (`declare`) statements via [`Kind::NotEmittedStatement`]; type-only
+//! modifier, `implements`-clause, index-signature, `this`-parameter, and
+//! overload elision; per-specifier `import { type … }` elision; and
+//! `as`/`satisfies`/`<T>x`/`x!` lowering to
 //! [`Kind::PartiallyEmittedExpression`].
 //!
-//! Deferred (see `tstransforms/mod.rs`): import/export elision needing the
+//! Deferred (see `tstransforms/mod.rs`): export specifier elision needing the
 //! checker `EmitResolver`, and the `compilerOptions`-driven branches
 //! (`verbatimModuleSyntax`, `experimentalDecorators`, const-enum preservation).
 
@@ -90,17 +93,69 @@ fn type_eraser_visit(arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
             }
             Some(visit_each_child_erase(arena, node))
         }
-        // `import type x from "m"` (a type-only import clause) is elided wholesale.
-        // (Per-specifier `import { type x }` elision is deferred; see mod.rs.)
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindImportDeclaration
         Kind::ImportDeclaration => {
-            let import_clause = match arena.data(node) {
-                NodeData::ImportDeclaration(d) => d.import_clause,
+            let (import_clause, module_specifier, attributes) = match arena.data(node) {
+                NodeData::ImportDeclaration(d) => {
+                    (d.import_clause, d.module_specifier, d.attributes)
+                }
                 _ => unreachable!("kind/data mismatch"),
             };
-            if is_type_only_import_clause(arena, import_clause) {
-                return Some(arena.new_not_emitted_statement());
+            // Side-effect-only import: `import "foo";` — always keep.
+            let Some(clause) = import_clause else {
+                return Some(node);
+            };
+            // Visit the clause; if it was fully elided, drop the import.
+            let visited_clause = type_eraser_visit(arena, clause);
+            match visited_clause {
+                None => Some(arena.new_not_emitted_statement()),
+                Some(c) => {
+                    let attributes = attributes.map(|a| visit_required(arena, a));
+                    Some(arena.new_import_declaration(None, Some(c), module_specifier, attributes))
+                }
             }
-            Some(visit_each_child_erase(arena, node))
+        }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindImportClause
+        Kind::ImportClause => {
+            let (phase_modifier, name, named_bindings) = match arena.data(node) {
+                NodeData::ImportClause(d) => (d.phase_modifier, d.name, d.named_bindings),
+                _ => unreachable!("kind/data mismatch"),
+            };
+            // `import type ...` is always fully elided.
+            if phase_modifier == Kind::TypeKeyword {
+                return None;
+            }
+            let named_bindings = named_bindings.and_then(|nb| type_eraser_visit(arena, nb));
+            if name.is_none() && named_bindings.is_none() {
+                return None;
+            }
+            Some(arena.new_import_clause(phase_modifier, name, named_bindings))
+        }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindNamedImports
+        Kind::NamedImports => {
+            let elements = match arena.data(node) {
+                NodeData::NamedImports(d) => d.elements.clone(),
+                _ => unreachable!("kind/data mismatch"),
+            };
+            if elements.nodes.is_empty() {
+                return Some(node);
+            }
+            let visited = visit_nodes(arena, &elements);
+            if visited.nodes.is_empty() {
+                return None;
+            }
+            Some(arena.new_named_imports(visited))
+        }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindImportSpecifier
+        Kind::ImportSpecifier => {
+            let is_type_only = match arena.data(node) {
+                NodeData::ImportSpecifier(d) => d.is_type_only,
+                _ => unreachable!("kind/data mismatch"),
+            };
+            if is_type_only {
+                return None;
+            }
+            Some(node)
         }
         Kind::VariableDeclaration => {
             // Drop the `!` definite-assignment token and the type annotation.
@@ -296,15 +351,94 @@ fn type_eraser_visit(arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
                 body,
             ))
         }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindMethodDeclaration
+        Kind::MethodDeclaration => {
+            // A bodyless method is a TypeScript overload signature; elide it.
+            let (modifiers, asterisk_token, name, parameters, body) = match arena.data(node) {
+                NodeData::MethodDeclaration(d) => (
+                    d.modifiers.clone(),
+                    d.asterisk_token,
+                    d.name,
+                    d.parameters.clone(),
+                    d.body,
+                ),
+                _ => unreachable!("kind/data mismatch"),
+            };
+            body?;
+            let modifiers = visit_modifiers(arena, modifiers.as_ref());
+            let name = visit_required(arena, name);
+            let parameters = visit_nodes(arena, &parameters);
+            let body = body.map(|b| visit_required(arena, b));
+            Some(arena.new_method_declaration(
+                modifiers,
+                asterisk_token,
+                name,
+                None,
+                None,
+                parameters,
+                None,
+                None,
+                body,
+            ))
+        }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindConstructor
+        Kind::Constructor => {
+            // A bodyless constructor is a TypeScript overload signature; elide it.
+            let (parameters, body) = match arena.data(node) {
+                NodeData::ConstructorDeclaration(d) => (d.parameters.clone(), d.body),
+                _ => unreachable!("kind/data mismatch"),
+            };
+            body?;
+            let parameters = visit_nodes(arena, &parameters);
+            let body = body.map(|b| visit_required(arena, b));
+            Some(arena.new_constructor_declaration(None, None, parameters, None, None, body))
+        }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindGetAccessor,KindSetAccessor
+        Kind::GetAccessor | Kind::SetAccessor => {
+            let kind = arena.kind(node);
+            let (modifiers, name, parameters, body) = match arena.data(node) {
+                NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+                    (d.modifiers.clone(), d.name, d.parameters.clone(), d.body)
+                }
+                _ => unreachable!("kind/data mismatch"),
+            };
+            let modifiers = visit_modifiers(arena, modifiers.as_ref());
+            let name = visit_required(arena, name);
+            let parameters = visit_nodes(arena, &parameters);
+            let body = body.map(|b| visit_required(arena, b));
+            // Go provides an empty block when the body is missing (non-abstract).
+            let body = body.or_else(|| Some(arena.new_block(NodeList::new(vec![]))));
+            Some(arena.new_accessor_declaration(
+                kind, modifiers, name, None, parameters, None, None, body,
+            ))
+        }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindArrowFunction
+        Kind::ArrowFunction => {
+            // Drop type parameters, return type, and full signature.
+            let (modifiers, parameters, equals_greater_than_token, body) = match arena.data(node) {
+                NodeData::ArrowFunction(d) => (
+                    d.modifiers.clone(),
+                    d.parameters.clone(),
+                    d.equals_greater_than_token,
+                    d.body,
+                ),
+                _ => unreachable!("kind/data mismatch"),
+            };
+            let modifiers = visit_modifiers(arena, modifiers.as_ref());
+            let parameters = visit_nodes(arena, &parameters);
+            let body = visit_required(arena, body);
+            Some(arena.new_arrow_function(
+                modifiers,
+                None,
+                parameters,
+                None,
+                None,
+                equals_greater_than_token,
+                body,
+            ))
+        }
         _ => Some(visit_each_child_erase(arena, node)),
     }
-}
-
-/// Reports whether `clause` is a type-only import clause (`import type ...`).
-fn is_type_only_import_clause(arena: &NodeArena, clause: Option<NodeId>) -> bool {
-    clause.is_some_and(|c| {
-        matches!(arena.data(c), NodeData::ImportClause(d) if d.phase_modifier == Kind::TypeKeyword)
-    })
 }
 
 /// Reports whether parameter `node` is the synthetic `this` parameter

@@ -185,23 +185,38 @@ fn run_api(_args: &[String], sys: &dyn System) -> ExitStatus {
     ExitStatus::NotImplemented
 }
 
+/// Stack size for the compilation thread. Go goroutines grow their stacks
+/// dynamically, but Rust threads have a fixed stack. Deep type instantiation
+/// and relater recursion can exceed the default ~2 MB, so we allocate 8 MB.
+// Go: goroutine stacks grow dynamically; Rust needs an explicit large stack.
+const MAIN_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 // Go: cmd/tsgo/main.go:main
 fn main() {
-    let fs: Arc<dyn Fs + Send + Sync> = Arc::new(tsgo_bundled::wrap_fs(tsgo_vfs::osvfs::fs()));
-    let cwd = match std::env::current_dir() {
-        Ok(dir) => tsgo_tspath::normalize_path(&dir.to_string_lossy()),
-        Err(err) => {
-            eprintln!("Error getting current directory: {err}");
-            std::process::exit(ExitStatus::InvalidProjectOutputsSkipped as i32);
-        }
-    };
-    let sys = OsSystem {
-        fs,
-        current_directory: cwd,
-        default_library_path: tsgo_bundled::lib_path(),
-    };
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let status = run(&args, &sys);
+    let builder = std::thread::Builder::new()
+        .name("tsgo-main".into())
+        .stack_size(MAIN_THREAD_STACK_SIZE);
+    let handle = builder
+        .spawn(|| {
+            let fs: Arc<dyn Fs + Send + Sync> =
+                Arc::new(tsgo_bundled::wrap_fs(tsgo_vfs::osvfs::fs()));
+            let cwd = match std::env::current_dir() {
+                Ok(dir) => tsgo_tspath::normalize_path(&dir.to_string_lossy()),
+                Err(err) => {
+                    eprintln!("Error getting current directory: {err}");
+                    std::process::exit(ExitStatus::InvalidProjectOutputsSkipped as i32);
+                }
+            };
+            let sys = OsSystem {
+                fs,
+                current_directory: cwd,
+                default_library_path: tsgo_bundled::lib_path(),
+            };
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            run(&args, &sys)
+        })
+        .expect("failed to spawn main thread");
+    let status = handle.join().expect("main thread panicked");
     std::process::exit(status as i32);
 }
 

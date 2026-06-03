@@ -599,11 +599,12 @@ impl Checker {
 
     // The cached structural relation check (Go's checkTypeRelatedTo core).
     //
-    // DEFER(phase-4-checker-4e): the `Ternary` (Maybe) recursion machinery and
-    // detailed error reporting. 4d optimistically caches `true` while recursing
-    // to terminate on co-recursive structural types.
-    // blocked-by: the full relater recursion model lands incrementally.
-    // Go: internal/checker/relater.go:Checker.checkTypeRelatedTo
+    // Includes a depth guard: when `relation_depth` reaches 100, the comparison
+    // returns `false` (overflow) instead of recursing further — preventing stack
+    // overflow on deeply recursive structural types.
+    //
+    // Go: internal/checker/relater.go:Checker.checkTypeRelatedTo + recursiveTypeRelatedTo
+    // (len(r.sourceStack) == 100 || len(r.targetStack) == 100 => overflow = true)
     fn check_type_related_to(
         &mut self,
         program: &dyn BoundProgram,
@@ -614,9 +615,16 @@ impl Checker {
         if let Some(cached) = self.relations.get(relation, source, target) {
             return cached;
         }
+        // Go: internal/checker/relater.go:recursiveTypeRelatedTo — when either
+        // stack reaches depth 100, set overflow and return false.
+        if self.relation_depth >= 100 {
+            return false;
+        }
         // Assume related while recursing to break cycles (e.g. `interface A { a: A }`).
         self.relations.set(relation, source, target, true);
+        self.relation_depth += 1;
         let result = self.structured_type_related_to(program, source, target, relation);
+        self.relation_depth -= 1;
         self.relations.set(relation, source, target, result);
         result
     }

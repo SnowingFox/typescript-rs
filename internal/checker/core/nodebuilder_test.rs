@@ -331,3 +331,33 @@ fn type_to_type_node_tuple() {
         })
     );
 }
+
+// T0-3: When type_to_string recurses deeply, the depth guard prevents stack
+// overflow by returning "..." past MAX_TYPE_TO_STRING_DEPTH (50).
+// Go: internal/checker/nodebuilderimpl.go:typeToTypeNodeWorker (recursion identity guard)
+#[test]
+fn type_to_string_depth_guard_prevents_overflow() {
+    use crate::core::nodebuilder::TYPE_TO_STRING_DEPTH;
+    let p = StubProgram::parse_and_bind("/a.ts", "");
+    let mut c = Checker::new();
+    let s = c.string_type();
+    // Manually set the thread-local depth counter to simulate being deeply
+    // nested already, then call type_to_string — it should bail with "...".
+    TYPE_TO_STRING_DEPTH.with(|d| d.set(50));
+    let result = type_to_string(&mut c, &p, s);
+    TYPE_TO_STRING_DEPTH.with(|d| d.set(0)); // restore
+    assert_eq!(result, "...", "at max depth, must return '...'");
+}
+
+// GUARD: a normal (shallow) type does NOT get truncated.
+#[test]
+fn type_to_string_normal_depth_no_truncation() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface Foo {}\ninterface Bar {}");
+    let mut c = Checker::new();
+    let foo = get_declared_type_of_symbol(&mut c, &p, sym(&p, "Foo"), None);
+    let bar = get_declared_type_of_symbol(&mut c, &p, sym(&p, "Bar"), None);
+    let union = c.get_union_type(&[foo, bar]);
+    let result = type_to_string(&mut c, &p, union);
+    assert_eq!(result, "Foo | Bar");
+    assert!(!result.contains("..."));
+}

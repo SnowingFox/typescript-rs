@@ -4096,3 +4096,37 @@ impl EmitResolver {
 - **正确性主要靠 P10**：包内单测仅 `TestGetSymbolAtLocation`（4b）+ `TestTracerPushPreservesEndArgMutations`（4a）+ `BenchmarkNewChecker`（性能，P10）。其余检查行为 **DEFER 到 P10 conformance/fourslash/`.d.ts` baseline 对拍**。每个子阶段在 worklog 里记录其覆盖的 conformance 目录。
 - emit resolver（4k）的消费者是 P5 printer/declaration transformer；node builder 序列化（4j）也主要在 P5 验证。
 - 跨 phase：本包 import `tsgo_tsoptions`（README 列 P6）。同 `modulespecifiers`，存在 P4→P6 依赖倒挂，需在 README 协调（见本包"存疑/偏离"与 phase README）。
+
+## Track 0 — Robustness (relater depth + TS2589 + stack size)
+
+Fix stack overflow crash on deep-types stress tests. tsc gracefully reports
+`TS2589 "Type instantiation is excessively deep and possibly infinite."` instead
+of crashing; this track ports that behavior.
+
+### T0-1: Relater recursion depth guard
+
+- **Rust location**: `internal/checker/core/relations.rs` — `check_type_related_to`
+- **Go anchor**: `internal/checker/relater.go:recursiveTypeRelatedTo` (`len(r.sourceStack) == 100`)
+- Adds `relation_depth: u32` to `Checker` (incremented/decremented around `structured_type_related_to`); when it reaches 100, returns `false` (overflow) instead of recursing.
+- Tests: `relation_depth_guard_prevents_overflow`, `relation_depth_guard_does_not_affect_normal_checks`
+
+### T0-2: TS2589 diagnostic emission
+
+- **Rust location**: `internal/checker/core/mapper.rs` — `instantiate_type` + `report_instantiation_depth_error`
+- **Go anchor**: `internal/checker/checker.go:instantiateTypeWithAlias` (`c.error(c.currentNode, ...)`)
+- Adds `current_node: Option<NodeId>` to `Checker`, set by `check_statement`/`check_expression` (matching Go's `c.currentNode` save/restore pattern). When the instantiation depth (100) or count (5M) limit fires, emits TS2589 on `current_node` via the retained program.
+- Tests: `instantiate_type_emits_ts2589_on_depth_overflow`, `instantiate_type_emits_ts2589_on_count_overflow`, `instantiate_type_normal_depth_does_not_emit_ts2589`
+
+### T0-3: typeToString recursion guard
+
+- **Rust location**: `internal/checker/core/nodebuilder.rs` — `type_to_string` (wrapper) + `type_to_string_inner`
+- **Go anchor**: `internal/checker/nodebuilderimpl.go:typeToTypeNodeWorker` (recursion identity guard)
+- Adds a `thread_local! TYPE_TO_STRING_DEPTH` counter (max 50). Past the limit, returns `"..."` instead of recursing.
+- Tests: `type_to_string_depth_guard_prevents_overflow`, `type_to_string_normal_depth_no_truncation`
+
+### T0-4: Main thread stack size
+
+- **Rust location**: `cmd/tsgo/main.rs` — `main()`
+- **Go anchor**: goroutine stacks grow dynamically; Rust needs explicit `MAIN_THREAD_STACK_SIZE = 8 MB`.
+- `main()` spawns the compilation on a named `"tsgo-main"` thread with 8 MB stack.
+- All existing `main_test.rs` tests pass (they call `run()` directly, not the threaded `main()`).

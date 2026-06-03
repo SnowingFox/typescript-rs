@@ -259,9 +259,9 @@ impl Checker {
         if self.instantiation_depth >= MAX_INSTANTIATION_DEPTH
             || self.instantiation_count >= MAX_INSTANTIATION_COUNT
         {
-            // DEFER(phase-4-checker-4g): Go also reports
-            // `Type_instantiation_is_excessively_deep_and_possibly_infinite`.
-            // blocked-by: diagnostics emission lands in 4g.
+            // Go: internal/checker/checker.go:instantiateTypeWithAlias — emits
+            // TS2589 on `c.currentNode` when the depth/count limit fires.
+            self.report_instantiation_depth_error();
             return self.error_type();
         }
         self.instantiation_count += 1;
@@ -269,6 +269,34 @@ impl Checker {
         let result = self.instantiate_type_worker(t, mapper);
         self.instantiation_depth -= 1;
         result
+    }
+
+    /// Emits TS2589 on `current_node` (the node currently being checked), or
+    /// silently drops if no program/node is available (test-only checker).
+    // Go: internal/checker/checker.go:instantiateTypeWithAlias (c.error(c.currentNode, ...))
+    fn report_instantiation_depth_error(&mut self) {
+        let Some(node) = self.current_node else {
+            return;
+        };
+        let Some(program) = self.retained_program() else {
+            return;
+        };
+        use crate::core::check::Diagnostic;
+        let msg = &tsgo_diagnostics::TYPE_INSTANTIATION_IS_EXCESSIVELY_DEEP_AND_POSSIBLY_INFINITE;
+        let loc = program.arena().loc(node);
+        let diagnostic = Diagnostic {
+            code: msg.code(),
+            category: msg.category(),
+            message: msg.to_string(),
+            start: loc.pos(),
+            length: loc.end() - loc.pos(),
+            related_information: Vec::new(),
+            message_chain: Vec::new(),
+        };
+        self.diagnostics_by_file
+            .entry(program.file_handle())
+            .or_default()
+            .push(diagnostic);
     }
 
     // Go: internal/checker/checker.go:Checker.instantiateTypeWorker

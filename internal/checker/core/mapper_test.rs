@@ -416,3 +416,58 @@ fn instantiate_string_mapping_folds_when_target_resolved() {
     let resolved = c.instantiate_type(sm, &mapper);
     assert_eq!(c.type_to_string(resolved), "\"ABC\"");
 }
+
+// T0-2: When instantiation depth reaches MAX_INSTANTIATION_DEPTH (100), the
+// checker returns error_type() and emits TS2589 "Type instantiation is
+// excessively deep and possibly infinite." — preventing a stack overflow
+// instead of crashing.
+// Go: internal/checker/checker.go:instantiateTypeWithAlias (depth == 100 guard)
+#[test]
+fn instantiate_type_emits_ts2589_on_depth_overflow() {
+    let p = Rc::new(StubProgram::parse_and_bind("/a.ts", "const x = 1;"));
+    let mut c = Checker::new_checker(p.clone());
+    let tp = c.new_type_parameter(None);
+    let mapper = TypeMapper::unary(tp, c.string_type());
+    // Simulate reaching the depth limit by setting depth to 100.
+    c.instantiation_depth = 100;
+    c.current_node = Some(p.root());
+    let result = c.instantiate_type(tp, &mapper);
+    assert_eq!(result, c.error_type(), "must return error_type on overflow");
+    let diagnostics = c.get_diagnostics(p.file_handle());
+    assert!(!diagnostics.is_empty(), "must emit at least one TS2589");
+    assert_eq!(diagnostics[0].code, 2589);
+    assert!(diagnostics[0].message.contains("excessively deep"));
+}
+
+// T0-2: When instantiation COUNT reaches MAX_INSTANTIATION_COUNT (5M), the
+// same TS2589 fires.
+// Go: internal/checker/checker.go:instantiateTypeWithAlias (count >= 5_000_000)
+#[test]
+fn instantiate_type_emits_ts2589_on_count_overflow() {
+    let p = Rc::new(StubProgram::parse_and_bind("/a.ts", "type X = string;"));
+    let mut c = Checker::new_checker(p.clone());
+    let tp = c.new_type_parameter(None);
+    let mapper = TypeMapper::unary(tp, c.string_type());
+    c.instantiation_count = 5_000_000;
+    c.current_node = Some(p.root());
+    let result = c.instantiate_type(tp, &mapper);
+    assert_eq!(result, c.error_type());
+    let diagnostics = c.get_diagnostics(p.file_handle());
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, 2589);
+}
+
+// GUARD: a normal (non-overflowing) instantiation does NOT emit TS2589.
+// Go: internal/checker/checker.go:instantiateTypeWithAlias (happy path)
+#[test]
+fn instantiate_type_normal_depth_does_not_emit_ts2589() {
+    let p = Rc::new(StubProgram::parse_and_bind("/a.ts", "type X = string;"));
+    let mut c = Checker::new_checker(p.clone());
+    let tp = c.new_type_parameter(None);
+    let mapper = TypeMapper::unary(tp, c.string_type());
+    c.current_node = Some(p.root());
+    let result = c.instantiate_type(tp, &mapper);
+    assert_eq!(result, c.string_type());
+    let diagnostics = c.get_diagnostics(p.file_handle());
+    assert!(diagnostics.is_empty(), "no TS2589 for normal depth");
+}

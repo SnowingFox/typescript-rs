@@ -150,3 +150,97 @@ fn type_only_imports_are_elided() {
     // Value imports are preserved (usage-based elision is the checker's job).
     check_erase("import x = require(\"m\");", "import x = require(\"m\");");
 }
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/ArrowFunction
+#[test]
+fn arrow_function_type_params_and_return_erased() {
+    check_erase("const f = (x: string): string => x;", "const f = (x) => x;");
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/MethodDeclaration
+#[test]
+fn method_declaration_type_params_and_return_erased() {
+    check_erase(
+        "class C { m(x: number): string { return \"\"; } }",
+        "class C {\n    m(x) { return \"\"; }\n}",
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/Constructor
+#[test]
+fn constructor_type_annotations_erased() {
+    // `public` is preserved by the type eraser (parameter property modifiers
+    // are handled later by the runtime syntax transformer). Only the type
+    // annotation `: number` is stripped.
+    check_erase(
+        "class C { constructor(public x: number) {} }",
+        "class C {\n    constructor(public x) { }\n}",
+    );
+    // Plain constructor — types stripped, no modifiers.
+    check_erase(
+        "class C { constructor(x: number) {} }",
+        "class C {\n    constructor(x) { }\n}",
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/GetAccessor
+#[test]
+fn get_accessor_return_type_erased() {
+    check_erase(
+        "class C { get x(): number { return 1; } }",
+        "class C {\n    get x() { return 1; }\n}",
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/SetAccessor
+#[test]
+fn set_accessor_param_type_erased() {
+    check_erase(
+        "class C { set x(v: number) {} }",
+        "class C {\n    set x(v) { }\n}",
+    );
+}
+
+// Guard: plain JS with no type annotations passes through unchanged.
+#[test]
+fn no_annotations_unchanged() {
+    check_erase(
+        "function f(a, b) { return a; }",
+        "function f(a, b) { return a; }",
+    );
+    check_erase("const g = (x) => x;", "const g = (x) => x;");
+    check_erase(
+        "class C { m() { return 1; } }",
+        "class C {\n    m() { return 1; }\n}",
+    );
+}
+
+// Guard: method overload with no body is elided.
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/MethodDeclaration#overload
+#[test]
+fn method_overload_is_elided() {
+    check_erase("class C { m(); m() {} }", "class C {\n    m() { }\n}");
+}
+
+// Guard: constructor overload with no body is elided.
+#[test]
+fn constructor_overload_is_elided() {
+    check_erase(
+        "class C { constructor(); constructor() {} }",
+        "class C {\n    constructor() { }\n}",
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/ImportSpecifier
+#[test]
+fn import_type_specifier_elided() {
+    // Per-specifier `type` elision: `type Foo` is removed, `bar` stays.
+    check_erase(
+        "import { type Foo, bar } from \"m\";",
+        "import { bar } from \"m\";",
+    );
+    // All specifiers are type-only → entire import is elided.
+    check_erase("import { type Foo } from \"m\";", "");
+    // Side-effect-only import is preserved.
+    check_erase("import \"m\";", "import \"m\";");
+}

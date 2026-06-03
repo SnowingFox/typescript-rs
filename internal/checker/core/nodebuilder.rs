@@ -17,12 +17,27 @@
 //! adds fixed-arity tuple printing `[A, B]` / `readonly [A, B]` and the
 //! `readonly` adornment on a const object-literal property.)
 
+use std::cell::Cell;
+
 use tsgo_ast::{Kind, SymbolFlags, SymbolId};
 
 use super::declared_types::{get_declared_type_of_symbol, get_type_of_symbol};
 use super::program::BoundProgram;
 use super::types::{LiteralValue, ObjectFlags, TypeData, TypeFlags, TypeId};
 use super::Checker;
+
+/// Maximum recursion depth for [`type_to_string`]. Go uses an identity-based
+/// recursion check (repeated types on the same stack are truncated); we use a
+/// simpler depth cap that prevents stack overflow without changing semantics for
+/// the common case (realistic types never nest > 20 levels deep in their
+/// printed form).
+// Go: internal/checker/nodebuilderimpl.go:typeToTypeNodeWorker (recursion identity guard)
+const MAX_TYPE_TO_STRING_DEPTH: u32 = 50;
+
+thread_local! {
+    /// Tracks current `type_to_string` recursion depth. `pub(crate)` for testing.
+    pub(crate) static TYPE_TO_STRING_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
 
 /// A syntactic *type node* produced for a type by the node builder, serialized
 /// as a closed descriptor the declaration transformer reconstructs into AST.
@@ -166,6 +181,23 @@ pub fn symbol_to_string(program: &dyn BoundProgram, symbol: SymbolId) -> String 
 /// Side effects: may resolve and cache member types.
 // Go: internal/checker/checker.go:Checker.typeToString
 pub fn type_to_string(checker: &mut Checker, program: &dyn BoundProgram, ty: TypeId) -> String {
+    // Depth guard: prevent stack overflow when printing deeply recursive types.
+    // Go: internal/checker/nodebuilderimpl.go:typeToTypeNodeWorker (recursion identity guard)
+    let depth = TYPE_TO_STRING_DEPTH.with(|d| {
+        let v = d.get();
+        d.set(v + 1);
+        v
+    });
+    if depth >= MAX_TYPE_TO_STRING_DEPTH {
+        TYPE_TO_STRING_DEPTH.with(|d| d.set(d.get() - 1));
+        return "...".to_string();
+    }
+    let result = type_to_string_inner(checker, program, ty);
+    TYPE_TO_STRING_DEPTH.with(|d| d.set(d.get() - 1));
+    result
+}
+
+fn type_to_string_inner(checker: &mut Checker, program: &dyn BoundProgram, ty: TypeId) -> String {
     // An enum-like type (enum union, computed enum, or an enum member literal)
     // prints by its symbol, not its structure: an enum member literal prints
     // `E.A` (parent enum `.` member), except when the enum's declared type *is*
