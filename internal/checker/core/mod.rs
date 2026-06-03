@@ -14,6 +14,7 @@ pub mod flow;
 pub mod grammar;
 pub mod inference;
 pub mod jsx;
+pub mod late_binding;
 pub mod mapper;
 pub mod nodebuilder;
 pub mod program;
@@ -201,8 +202,11 @@ pub struct Checker {
     type_aliases_resolving: rustc_hash::FxHashSet<SymbolId>,
     /// Lazily-computed types of value/property symbols.
     value_symbol_links: SymbolLinks<ValueSymbolLinks>,
+    #[allow(dead_code)]
     pub(crate) late_bound_links: SymbolLinks<LateBoundLinks>,
+    #[allow(dead_code)]
     pub(crate) symbol_node_links: FxHashMap<NodeId, SymbolNodeLinks>,
+    #[allow(dead_code)]
     pub(crate) members_and_exports_links: SymbolLinks<MembersAndExportsLinks>,
     /// Resolved alias targets (Go's `aliasSymbolLinks[symbol].aliasTarget`): the
     /// non-alias symbol an `import`/`export` alias resolves to. A present key is

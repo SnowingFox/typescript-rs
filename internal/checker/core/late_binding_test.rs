@@ -22,7 +22,10 @@ fn different_key_type_index_signatures_no_ts2374() {
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
-    assert!(diags.iter().all(|d| d.code != 2374), "no TS2374 for distinct key types");
+    assert!(
+        diags.iter().all(|d| d.code != 2374),
+        "no TS2374 for distinct key types"
+    );
 }
 
 #[test]
@@ -32,7 +35,10 @@ fn single_index_signature_no_ts2374() {
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
-    assert!(diags.iter().all(|d| d.code != 2374), "no TS2374 for single index sig");
+    assert!(
+        diags.iter().all(|d| d.code != 2374),
+        "no TS2374 for single index sig"
+    );
 }
 
 #[test]
@@ -43,16 +49,29 @@ fn class_duplicate_number_index_signatures_reports_ts2374() {
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
     let ts2374: Vec<_> = diags.iter().filter(|d| d.code == 2374).collect();
-    assert_eq!(ts2374.len(), 2, "expected 2 TS2374 for class dup num index sigs");
+    assert_eq!(
+        ts2374.len(),
+        2,
+        "expected 2 TS2374 for class dup num index sigs"
+    );
 }
 
 #[test]
 fn is_late_bindable_ast_computed_property() {
     let text = "declare const sym: unique symbol; interface I { [sym]: number; }";
     let p = StubProgram::parse_and_bind("/a.ts", text);
-    let stmts = match p.arena().data(p.root()) { NodeData::SourceFile(d) => d.statements.nodes.clone(), _ => panic!("sf") };
-    let members = match p.arena().data(stmts[1]) { NodeData::InterfaceDeclaration(d) => d.members.nodes.clone(), _ => panic!("i") };
-    let name = match p.arena().data(members[0]) { NodeData::PropertySignature(d) => d.name, _ => panic!("ps") };
+    let stmts = match p.arena().data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("sf"),
+    };
+    let members = match p.arena().data(stmts[1]) {
+        NodeData::InterfaceDeclaration(d) => d.members.nodes.clone(),
+        _ => panic!("i"),
+    };
+    let name = match p.arena().data(members[0]) {
+        NodeData::PropertySignature(d) => d.name,
+        _ => panic!("ps"),
+    };
     assert!(is_late_bindable_ast(p.arena(), name));
 }
 
@@ -60,9 +79,18 @@ fn is_late_bindable_ast_computed_property() {
 fn is_late_bindable_ast_plain_identifier_is_false() {
     let text = "interface I { x: number; }";
     let p = StubProgram::parse_and_bind("/a.ts", text);
-    let stmts = match p.arena().data(p.root()) { NodeData::SourceFile(d) => d.statements.nodes.clone(), _ => panic!("sf") };
-    let members = match p.arena().data(stmts[0]) { NodeData::InterfaceDeclaration(d) => d.members.nodes.clone(), _ => panic!("i") };
-    let name = match p.arena().data(members[0]) { NodeData::PropertySignature(d) => d.name, _ => panic!("ps") };
+    let stmts = match p.arena().data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("sf"),
+    };
+    let members = match p.arena().data(stmts[0]) {
+        NodeData::InterfaceDeclaration(d) => d.members.nodes.clone(),
+        _ => panic!("i"),
+    };
+    let name = match p.arena().data(members[0]) {
+        NodeData::PropertySignature(d) => d.name,
+        _ => panic!("ps"),
+    };
     assert!(!is_late_bindable_ast(p.arena(), name));
 }
 
@@ -87,7 +115,10 @@ fn get_excluded_symbol_flags_empty() {
 fn get_members_of_declaration_interface() {
     let text = "interface I { x: number; y: string; }";
     let p = StubProgram::parse_and_bind("/a.ts", text);
-    let stmts = match p.arena().data(p.root()) { NodeData::SourceFile(d) => d.statements.nodes.clone(), _ => panic!("sf") };
+    let stmts = match p.arena().data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("sf"),
+    };
     assert_eq!(get_members_of_declaration(&p, stmts[0]).len(), 2);
 }
 
@@ -95,23 +126,32 @@ fn get_members_of_declaration_interface() {
 fn get_members_of_declaration_class() {
     let text = "class C { x: number = 0; }";
     let p = StubProgram::parse_and_bind("/a.ts", text);
-    let stmts = match p.arena().data(p.root()) { NodeData::SourceFile(d) => d.statements.nodes.clone(), _ => panic!("sf") };
+    let stmts = match p.arena().data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("sf"),
+    };
     assert_eq!(get_members_of_declaration(&p, stmts[0]).len(), 1);
 }
 
 #[test]
 fn is_type_usable_as_property_name_string_literal() {
-    assert!(is_type_usable_as_property_name(crate::core::types::TypeFlags::STRING_LITERAL));
+    assert!(is_type_usable_as_property_name(
+        crate::core::types::TypeFlags::STRING_LITERAL
+    ));
 }
 
 #[test]
 fn is_type_usable_as_property_name_number_literal() {
-    assert!(is_type_usable_as_property_name(crate::core::types::TypeFlags::NUMBER_LITERAL));
+    assert!(is_type_usable_as_property_name(
+        crate::core::types::TypeFlags::NUMBER_LITERAL
+    ));
 }
 
 #[test]
 fn is_type_usable_as_property_name_string_not() {
-    assert!(!is_type_usable_as_property_name(crate::core::types::TypeFlags::STRING));
+    assert!(!is_type_usable_as_property_name(
+        crate::core::types::TypeFlags::STRING
+    ));
 }
 
 #[test]

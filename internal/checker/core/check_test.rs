@@ -9752,3 +9752,187 @@ fn export_equals_with_type_only_namespace_reports_no_ts2309() {
         "a type-only (non-instantiated) namespace must not trigger TS2309: {diags:?}"
     );
 }
+
+// -----------------------------------------------------------------------
+// T1-C1: checkTypeForDuplicateIndexSignatures (TS2374)
+// -----------------------------------------------------------------------
+
+// An interface with two string index signatures must report TS2374 on each.
+// Go: internal/checker/checker.go:Checker.checkTypeForDuplicateIndexSignatures
+#[test]
+fn duplicate_index_signatures_interface_reports_ts2374() {
+    let text = "interface I {\n  [a: string]: number;\n  [b: string]: string;\n}";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts2374: Vec<_> = diags.iter().filter(|d| d.code == 2374).collect();
+    assert_eq!(
+        ts2374.len(),
+        2,
+        "expected two TS2374 diagnostics for duplicate string index signatures: {diags:?}"
+    );
+    assert!(
+        ts2374[0].message.contains("string"),
+        "message should mention 'string': {}",
+        ts2374[0].message
+    );
+}
+
+// A class with two number index signatures must report TS2374 on each.
+// Go: internal/checker/checker.go:Checker.checkTypeForDuplicateIndexSignatures
+#[test]
+fn duplicate_index_signatures_class_reports_ts2374() {
+    let text = "class C {\n  [a: number]: string;\n  [b: number]: number;\n}";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts2374: Vec<_> = diags.iter().filter(|d| d.code == 2374).collect();
+    assert_eq!(
+        ts2374.len(),
+        2,
+        "expected two TS2374 diagnostics for duplicate number index signatures: {diags:?}"
+    );
+    assert!(
+        ts2374[0].message.contains("number"),
+        "message should mention 'number': {}",
+        ts2374[0].message
+    );
+}
+
+// GUARD: a single index signature should NOT fire TS2374.
+// Go: internal/checker/checker.go:Checker.checkTypeForDuplicateIndexSignatures
+#[test]
+fn single_index_signature_no_ts2374() {
+    let text = "interface I {\n  [k: string]: number;\n}";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2374),
+        "a single index signature must not trigger TS2374: {diags:?}"
+    );
+}
+
+// GUARD: a string AND number index signature on the same interface is NOT a
+// duplicate — they are different key types.
+// Go: internal/checker/checker.go:Checker.checkTypeForDuplicateIndexSignatures
+#[test]
+fn different_index_signature_key_types_no_ts2374() {
+    let text = "interface I {\n  [k: string]: number;\n  [k: number]: string;\n}";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2374),
+        "different key-type index signatures must not trigger TS2374: {diags:?}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// T1-C3: checkParameter — constructor parameter properties
+// -----------------------------------------------------------------------
+
+// A parameter property modifier (`public x: string`) on a parameter NOT in a
+// constructor with a body must report TS2369.
+// Go: internal/checker/checker.go:Checker.checkParameter (ParameterPropertyModifier arm)
+#[test]
+fn parameter_property_outside_constructor_body_reports_ts2369() {
+    let text = "declare class C { constructor(public x: string); }";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts2369: Vec<_> = diags.iter().filter(|d| d.code == 2369).collect();
+    assert_eq!(
+        ts2369.len(),
+        1,
+        "expected TS2369 for parameter property outside constructor body: {diags:?}"
+    );
+}
+
+// A parameter property named `constructor` must report TS2398.
+// Go: internal/checker/checker.go:Checker.checkParameter (paramName == "constructor")
+#[test]
+fn parameter_property_named_constructor_reports_ts2398() {
+    let text = "class C { constructor(public constructor: string) {} }";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts2398: Vec<_> = diags.iter().filter(|d| d.code == 2398).collect();
+    assert_eq!(
+        ts2398.len(),
+        1,
+        "expected TS2398 for parameter property named 'constructor': {diags:?}"
+    );
+}
+
+// GUARD: a valid `constructor(public x: string) {}` must NOT report TS2369.
+// Go: internal/checker/checker.go:Checker.checkParameter
+#[test]
+fn valid_parameter_property_in_constructor_no_ts2369() {
+    let text = "class C { constructor(public x: string) {} }";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2369),
+        "valid parameter property must not trigger TS2369: {diags:?}"
+    );
+}
+
+// A `this` parameter that's not the first must report TS2680.
+// Go: internal/checker/checker.go:Checker.checkParameter (this/new arm)
+#[test]
+fn this_parameter_not_first_reports_ts2680() {
+    let text = "function f(x: number, this: string) {}";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts2680: Vec<_> = diags.iter().filter(|d| d.code == 2680).collect();
+    assert_eq!(
+        ts2680.len(),
+        1,
+        "expected TS2680 for non-first 'this' parameter: {diags:?}"
+    );
+}
+
+// A `this` parameter in a constructor must report TS2681.
+// Go: internal/checker/checker.go:Checker.checkParameter (constructor arm)
+#[test]
+fn this_parameter_in_constructor_reports_ts2681() {
+    let text = "class C { constructor(this: C) {} }";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts2681: Vec<_> = diags.iter().filter(|d| d.code == 2681).collect();
+    assert_eq!(
+        ts2681.len(),
+        1,
+        "expected TS2681 for 'this' parameter in constructor: {diags:?}"
+    );
+}
+
+// A `this` parameter in an arrow function must report TS2730.
+// Go: internal/checker/checker.go:Checker.checkParameter (arrow function arm)
+#[test]
+fn this_parameter_in_arrow_reports_ts2730() {
+    let text = "const f = (this: string) => {};";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts2730: Vec<_> = diags.iter().filter(|d| d.code == 2730).collect();
+    assert_eq!(
+        ts2730.len(),
+        1,
+        "expected TS2730 for 'this' parameter in arrow function: {diags:?}"
+    );
+}

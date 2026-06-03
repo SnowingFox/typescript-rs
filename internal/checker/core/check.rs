@@ -4194,7 +4194,7 @@ impl Checker {
             if let Some(sym) = program.symbol_of_node(node) {
                 if !self.declared_type_links.get(sym).index_signatures_checked {
                     self.declared_type_links.get(sym).index_signatures_checked = true;
-                    // DEFER(W4): check_type_for_duplicate_index_signatures (T1-C1+C2 incomplete)
+                    self.check_type_for_duplicate_index_signatures(program, node);
                 }
             }
         }
@@ -4407,6 +4407,9 @@ impl Checker {
             // (Go's `checkSignatureDeclaration` -> `checkTypePredicate`) runs for
             // an overload/ambient signature too (no body required).
             self.check_return_type_predicate(program, &params, return_type);
+            for param in &params {
+                self.check_parameter(program, *param);
+            }
             if let Some(body) = body {
                 self.check_statement(program, body);
             }
@@ -4460,6 +4463,10 @@ impl Checker {
         // resolves with its contextual type (4bj).
         self.contextually_check_function_expression(program, node);
         if let NodeData::FunctionExpression(d) = program.arena().data(node) {
+            let params = d.parameters.nodes.clone();
+            for param in params {
+                self.check_parameter(program, param);
+            }
             if let Some(body) = d.body {
                 self.check_statement(program, body);
             }
@@ -4498,7 +4505,11 @@ impl Checker {
         // resolves with its contextual type (4bj).
         self.contextually_check_function_expression(program, node);
         if let NodeData::ArrowFunction(d) = program.arena().data(node) {
+            let params = d.parameters.nodes.clone();
             let body = d.body;
+            for param in params {
+                self.check_parameter(program, param);
+            }
             if program.arena().kind(body) == Kind::Block {
                 self.check_statement(program, body);
             } else {
@@ -4794,7 +4805,7 @@ impl Checker {
         if let Some(sym) = program.symbol_of_node(node) {
             if !self.declared_type_links.get(sym).index_signatures_checked {
                 self.declared_type_links.get(sym).index_signatures_checked = true;
-                // DEFER(W4): check_type_for_duplicate_index_signatures (T1-C1+C2 incomplete)
+                self.check_type_for_duplicate_index_signatures(program, node);
             }
         }
         let Some(symbol) = program.symbol_of_node(node) else {
@@ -4867,6 +4878,79 @@ impl Checker {
     // a symbol with more than one declaration (`len(Declarations) > 1`). State `0`
     // (unseen) records the member kind (`1` = property, `2` = accessor); a second
     // property, or a property after an accessor / an accessor after a property,
+    /// Reports TS2374 ("Duplicate index signature for type '{0}'.") when a type
+    /// contains more than one index signature whose parameter resolves to the
+    /// same key type.
+    ///
+    /// TypeScript 1.0 spec (April 2014):
+    /// - 3.7.4: An object type can contain at most one string index signature
+    ///   and one numeric index signature.
+    /// - 8.5: A class declaration can have at most one string index member
+    ///   declaration and one numeric index member declaration.
+    ///
+    /// Late-bound index signatures (computed property names that resolve to index
+    /// signatures) are intentionally excluded — Go's comment: "allow these to
+    /// duplicate one another and explicit indexes".
+    ///
+    /// # Side effects
+    ///
+    /// Pushes zero or more TS2374 diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkTypeForDuplicateIndexSignatures(4878)
+    fn check_type_for_duplicate_index_signatures(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) {
+        use tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_INDEX;
+
+        let Some(node_symbol) = program.symbol_of_node(node) else {
+            return;
+        };
+        let members = &program.symbol(node_symbol).members;
+        let Some(&index_symbol) = members.get(INTERNAL_SYMBOL_NAME_INDEX) else {
+            return;
+        };
+        let decls = &program.symbol(index_symbol).declarations;
+        if decls.len() <= 1 {
+            return;
+        }
+
+        let globals = program.globals();
+        let mut index_signature_map: std::collections::HashMap<TypeId, Vec<NodeId>> =
+            std::collections::HashMap::new();
+        for &declaration in decls {
+            if let NodeData::IndexSignatureDeclaration(d) = program.arena().data(declaration) {
+                let parameters = &d.parameters.nodes;
+                if parameters.len() == 1 {
+                    let param_type_node = match program.arena().data(parameters[0]) {
+                        NodeData::ParameterDeclaration(p) => p.type_node,
+                        _ => None,
+                    };
+                    if let Some(type_node) = param_type_node {
+                        let key_type = get_type_from_type_node(self, program, type_node, globals);
+                        for t in self.distributed_types(key_type) {
+                            index_signature_map.entry(t).or_default().push(declaration);
+                        }
+                    }
+                }
+            }
+        }
+
+        for (t, declarations) in &index_signature_map {
+            if declarations.len() > 1 {
+                let type_str = super::nodebuilder::type_to_string(self, program, *t);
+                for &decl in declarations {
+                    self.error(
+                        program,
+                        decl,
+                        &tsgo_diagnostics::DUPLICATE_INDEX_SIGNATURE_FOR_TYPE_0,
+                        &[&type_str],
+                    );
+                }
+            }
+        }
+    }
+
     // reports `Duplicate identifier` (TS2300) on EVERY same-named member and then
     // records state `3` (reported). Two SAME-kind accessors / a method colliding
     // with anything are already flagged by the binder's `declareSymbol` excludes
@@ -5037,19 +5121,31 @@ impl Checker {
     fn check_class_member(&mut self, program: &dyn BoundProgram, member: NodeId) {
         match program.arena().data(member) {
             NodeData::MethodDeclaration(d) => {
+                let params = d.parameters.nodes.clone();
+                for param in params {
+                    self.check_parameter(program, param);
+                }
                 if let Some(body) = d.body {
                     self.check_statement(program, body);
                 }
             }
             NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+                let params = d.parameters.nodes.clone();
+                for param in params {
+                    self.check_parameter(program, param);
+                }
                 if let Some(body) = d.body {
                     self.check_statement(program, body);
                 }
             }
             NodeData::ConstructorDeclaration(d) => {
+                let params = d.parameters.nodes.clone();
                 let body = d.body;
                 self.check_grammar_constructor_type_parameters(program, member);
                 self.check_grammar_constructor_type_annotation(program, member);
+                for param in params {
+                    self.check_parameter(program, param);
+                }
                 if let Some(body) = body {
                     self.check_statement(program, body);
                 }
@@ -5105,6 +5201,109 @@ impl Checker {
             )
         {
             self.report_type_not_assignable(program, node, initializer_type, declared);
+        }
+    }
+
+    /// Checks a parameter declaration for constructor parameter-property
+    /// diagnostics and `this`/`new` parameter placement.
+    ///
+    /// # Diagnostics
+    ///
+    /// - TS2369: parameter property outside a constructor implementation.
+    /// - TS2398: parameter property named `constructor`.
+    /// - TS2680: `this`/`new` parameter not in first position.
+    /// - TS2681: `this` parameter in a constructor.
+    /// - TS2730: `this` parameter in an arrow function.
+    /// - TS2784: `this` parameter on an accessor.
+    ///
+    /// # Side effects
+    ///
+    /// May push diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkParameter(2636)
+    fn check_parameter(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let param_data = match program.arena().data(node) {
+            NodeData::ParameterDeclaration(d) => d.clone(),
+            _ => return,
+        };
+
+        let containing_fn = get_containing_function(program, node);
+
+        let param_name = {
+            let name_node = param_data.name;
+            if program.arena().kind(name_node) == Kind::Identifier {
+                program.arena().text(name_node).to_string()
+            } else {
+                String::new()
+            }
+        };
+
+        let mods = modifier_flags_of(program.arena(), node);
+        if mods.intersects(tsgo_ast::ModifierFlags::PARAMETER_PROPERTY_MODIFIER) {
+            if let Some(fn_node) = containing_fn {
+                let is_constructor = program.arena().kind(fn_node) == Kind::Constructor;
+                let has_body = match program.arena().data(fn_node) {
+                    NodeData::ConstructorDeclaration(d) => d.body.is_some(),
+                    _ => false,
+                };
+                if !(is_constructor && has_body) {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::A_PARAMETER_PROPERTY_IS_ONLY_ALLOWED_IN_A_CONSTRUCTOR_IMPLEMENTATION,
+                        &[],
+                    );
+                }
+                if is_constructor && param_name == "constructor" {
+                    self.error(
+                        program,
+                        param_data.name,
+                        &tsgo_diagnostics::X_CONSTRUCTOR_CANNOT_BE_USED_AS_A_PARAMETER_PROPERTY_NAME,
+                        &[],
+                    );
+                }
+            }
+        }
+
+        if param_name == "this" || param_name == "new" {
+            if let Some(fn_node) = containing_fn {
+                let params = function_like_all_parameters(program, fn_node);
+                if params.first().copied() != Some(node) {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::A_0_PARAMETER_MUST_BE_THE_FIRST_PARAMETER,
+                        &[&param_name],
+                    );
+                }
+                let fn_kind = program.arena().kind(fn_node);
+                if fn_kind == Kind::Constructor
+                    || fn_kind == Kind::ConstructSignature
+                    || fn_kind == Kind::ConstructorType
+                {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::A_CONSTRUCTOR_CANNOT_HAVE_A_THIS_PARAMETER,
+                        &[],
+                    );
+                }
+                if fn_kind == Kind::ArrowFunction {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::AN_ARROW_FUNCTION_CANNOT_HAVE_A_THIS_PARAMETER,
+                        &[],
+                    );
+                }
+                if fn_kind == Kind::GetAccessor || fn_kind == Kind::SetAccessor {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::X_GET_AND_SET_ACCESSORS_CANNOT_DECLARE_THIS_PARAMETERS,
+                        &[],
+                    );
+                }
+            }
         }
     }
 
@@ -6598,6 +6797,41 @@ fn get_suggested_lib_for_non_existent_name(name: &str) -> &'static str {
     }
 }
 
+// Returns the nearest enclosing function-like ancestor of `node` (the
+// reachable subset of Go's `ast.GetContainingFunction`). For a parameter node,
+// the parent is the function-like declaration.
+// Go: internal/ast/utilities.go:GetContainingFunction
+fn get_containing_function(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    let arena = program.arena();
+    let mut current = arena.parent(node);
+    while let Some(n) = current {
+        if is_function_like_kind(arena.kind(n)) {
+            return Some(n);
+        }
+        current = arena.parent(n);
+    }
+    None
+}
+
+// Returns the parameter nodes of any function-like declaration (broader than
+// `function_like_parameters` which only covers arrow/function expressions).
+// Go: internal/ast: FunctionLikeData parameters
+fn function_like_all_parameters(program: &dyn BoundProgram, node: NodeId) -> Vec<NodeId> {
+    match program.arena().data(node) {
+        NodeData::ArrowFunction(d) => d.parameters.nodes.clone(),
+        NodeData::FunctionExpression(d) | NodeData::FunctionDeclaration(d) => {
+            d.parameters.nodes.clone()
+        }
+        NodeData::MethodDeclaration(d) => d.parameters.nodes.clone(),
+        NodeData::ConstructorDeclaration(d) => d.parameters.nodes.clone(),
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+            d.parameters.nodes.clone()
+        }
+        NodeData::IndexSignatureDeclaration(d) => d.parameters.nodes.clone(),
+        _ => Vec::new(),
+    }
+}
+
 // Returns the modifier flags of `node` (its `modifiers` list union), or empty
 // when the node bears no modifier list.
 fn modifier_flags_of(arena: &tsgo_ast::NodeArena, node: NodeId) -> tsgo_ast::ModifierFlags {
@@ -6609,6 +6843,8 @@ fn modifier_flags_of(arena: &tsgo_ast::NodeArena, node: NodeId) -> tsgo_ast::Mod
             d.modifiers.as_ref()
         }
         NodeData::ConstructorDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ParameterDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::IndexSignatureDeclaration(d) => d.modifiers.as_ref(),
         _ => None,
     };
     modifiers
@@ -7028,6 +7264,7 @@ fn is_compound_assignment(operator: Kind) -> bool {
 }
 
 // Go: internal/checker/utilities.go:isTypeUsableAsPropertyName
+#[allow(dead_code)]
 pub(crate) fn is_type_usable_as_property_name(flags: TypeFlags) -> bool {
     flags.intersects(TypeFlags::STRING_OR_NUMBER_LITERAL_OR_UNIQUE)
 }
