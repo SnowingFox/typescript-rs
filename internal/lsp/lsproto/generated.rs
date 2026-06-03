@@ -1044,6 +1044,21 @@ lsp_object! {
     }
 }
 
+lsp_object! {
+    /// The result of a `textDocument/linkedEditingRange` request: a set of
+    /// [`Range`]s that can be edited together (they must have identical length
+    /// and identical text content and cannot overlap), plus an optional
+    /// `word_pattern` regular expression describing valid contents for those
+    /// ranges. If no pattern is provided the client's word pattern is used.
+    // Go: internal/lsp/lsproto/lsp_generated.go:LinkedEditingRanges
+    LinkedEditingRanges {
+        ["A list of ranges that can be edited together (identical length + content, non-overlapping)."]
+        reqnn ranges: Vec<Range> => "ranges",
+        ["An optional word pattern (regular expression) describing valid contents for the ranges."]
+        opt word_pattern: String => "wordPattern",
+    }
+}
+
 /// Generates a string-literal type (LSP discriminator literals such as
 /// `"create"`): serializes to the literal and rejects any other value.
 macro_rules! string_literal {

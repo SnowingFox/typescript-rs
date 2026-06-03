@@ -22,6 +22,7 @@ pub mod documenthighlights;
 pub mod folding;
 pub mod hover;
 pub mod inlay_hints;
+pub mod linkedediting;
 pub mod references;
 pub mod rename;
 pub mod selectionranges;

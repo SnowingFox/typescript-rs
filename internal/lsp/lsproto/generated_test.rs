@@ -346,6 +346,53 @@ fn roundtrip_selection_range_no_parent() {
     assert_eq!(v, result);
 }
 
+// Go: lsp/lsproto/lsp_generated.go:LinkedEditingRanges (ranges + word pattern)
+#[test]
+fn roundtrip_linked_editing_ranges_with_word_pattern() {
+    let rng = |sl, sc, el, ec| Range {
+        start: Position {
+            line: sl,
+            character: sc,
+        },
+        end: Position {
+            line: el,
+            character: ec,
+        },
+    };
+    let v = LinkedEditingRanges {
+        ranges: vec![rng(0, 1, 0, 4), rng(0, 7, 0, 10)],
+        word_pattern: Some(r"[a-zA-Z0-9:\-\._$]*".to_string()),
+    };
+    let data = serde_json::to_vec(&v).unwrap();
+    let result: LinkedEditingRanges = serde_json::from_slice(&data).unwrap();
+    assert_eq!(v, result);
+}
+
+// Go: lsp/lsproto/lsp_generated.go:LinkedEditingRanges (wordPattern omitted when absent)
+#[test]
+fn roundtrip_linked_editing_ranges_no_word_pattern() {
+    let v = LinkedEditingRanges {
+        ranges: vec![Range {
+            start: Position {
+                line: 1,
+                character: 2,
+            },
+            end: Position {
+                line: 1,
+                character: 5,
+            },
+        }],
+        word_pattern: None,
+    };
+    let data = serde_json::to_vec(&v).unwrap();
+    // `wordPattern` is omitted when `None` (Go `omitzero`).
+    assert!(!String::from_utf8(data.clone())
+        .unwrap()
+        .contains("wordPattern"));
+    let result: LinkedEditingRanges = serde_json::from_slice(&data).unwrap();
+    assert_eq!(v, result);
+}
+
 // Go: .../Location
 #[test]
 fn roundtrip_location() {
