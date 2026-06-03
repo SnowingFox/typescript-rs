@@ -88,8 +88,9 @@ pub use core::signatures::{
     IndexInfo, IndexInfoArena, IndexInfoId, Signature, SignatureArena, SignatureFlags, SignatureId,
 };
 pub use core::symbols::{
-    resolve_name, skip_alias, AliasSymbolLinks, DeclaredTypeLinks, MergedSymbols,
-    ModuleSymbolLinks, SymbolLinks, SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
+    resolve_name, skip_alias, AliasSymbolLinks, DeclaredTypeLinks, LateBoundLinks,
+    MembersAndExportsLinks, MergedSymbols, ModuleSymbolLinks, SymbolLinks, SymbolNodeLinks,
+    SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
 };
 pub use core::symbols_query::{
     get_resolved_signature, get_symbol_at_location, get_symbol_of_declaration, get_type_at_location,

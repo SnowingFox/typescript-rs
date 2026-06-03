@@ -158,6 +158,22 @@ pub struct DeclaredTypeLinks {
     pub enum_checked: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct LateBoundLinks {
+    pub late_symbol: Option<SymbolId>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SymbolNodeLinks {
+    pub resolved_symbol: Option<SymbolId>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MembersAndExportsLinks {
+    pub resolved_exports: Option<SymbolTable>,
+    pub resolved_members: Option<SymbolTable>,
+}
+
 /// Per-symbol links for a type alias (`type X = ...`).
 ///
 /// DEFER(phase-4-checker-4d): the generic-alias instantiation cache (Go's

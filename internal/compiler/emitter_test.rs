@@ -57,8 +57,9 @@ fn emit_capturing(program: &Program, captured: &Captured) -> EmitResult {
 }
 
 // Go: internal/compiler/emit_test.go (functional equivalent of BenchmarkEmit*)
-// Tracer bullet: a single TypeScript file runs the transformer pipeline (type
-// eraser) -> printer end-to-end and emits JavaScript text.
+// Tracer bullet: a single TypeScript file runs the full transformer pipeline
+// (type eraser + runtime syntax + ES downlevel + use strict + module) and emits
+// JavaScript text. The full chain prepends `"use strict";` matching Go's output.
 #[test]
 fn emit_single_js_basic() {
     let program = build_program(
@@ -74,7 +75,8 @@ fn emit_single_js_basic() {
     let captured = captured.borrow();
     assert_eq!(captured.len(), 1);
     assert_eq!(captured[0].0, "/src/index.js");
-    assert_eq!(captured[0].1, "const x = 1;\n");
+    // Full chain: type eraser strips `: number`, use-strict adds the directive.
+    assert_eq!(captured[0].1, "\"use strict\";\nconst x = 1;\n");
 }
 
 // Go: internal/compiler/emitter.go:emitter.emitJSFile (`options.NoEmit == TSTrue`)
@@ -113,7 +115,7 @@ fn emit_prepends_bom_when_emit_bom() {
     emit_capturing(&program, &captured);
 
     let captured = captured.borrow();
-    assert_eq!(captured[0].1, "\u{FEFF}const x = 1;\n");
+    assert_eq!(captured[0].1, "\u{FEFF}\"use strict\";\nconst x = 1;\n");
 }
 
 // Go: internal/compiler/program.go:Program.Emit + CombineEmitResults
@@ -143,8 +145,8 @@ fn emit_combines_multiple_files_in_input_order() {
             .map(|(name, text)| (name.as_str(), text.as_str()))
             .collect::<Vec<_>>(),
         vec![
-            ("/src/a.js", "const a = 1;\n"),
-            ("/src/index.js", "const b = 2;\n"),
+            ("/src/a.js", "\"use strict\";\nconst a = 1;\n"),
+            ("/src/index.js", "\"use strict\";\nconst b = 2;\n"),
         ]
     );
 }
@@ -202,17 +204,16 @@ fn emit_writes_through_host_fs_by_default() {
 
     assert_eq!(result.emitted_files, vec!["/src/index.js".to_string()]);
     let written = program.host().fs().read_file("/src/index.js");
-    assert_eq!(written.as_deref(), Some("const x = 1;\n"));
+    assert_eq!(written.as_deref(), Some("\"use strict\";\nconst x = 1;\n"));
 }
 
 // Slice 2: `--sourceMap` writes `out.js` + `out.js.map` and appends a
 // `//# sourceMappingURL=out.js.map` comment to the JS.
 //
-// Go ground truth (`cmd/tsgo --sourceMap --module esnext`) for
-// `const x: number = 1;` emits a leading `"use strict";` (module pipeline) and
-// the map `;AAAA,MAAM,CAAC,GAAW,CAAC,CAAC`. The reachable Rust subset runs only
-// the type eraser (no module transform), so it omits `"use strict";` and the
-// mappings lose the leading `;` (the generated-line shift).
+// With the full transform chain the use-strict transform prepends `"use strict";`
+// on line 1. The source mappings now start with `;` (empty first generated line
+// in the mapping), matching Go's ground truth exactly:
+// `cmd/tsgo --sourceMap` → `;AAAA,MAAM,CAAC,GAAW,CAAC,CAAC`.
 // Go: internal/compiler/emitter.go:printSourceFile (SourceMap branch)
 #[test]
 fn emit_source_map_writes_map_file_and_url_comment() {
@@ -238,17 +239,17 @@ fn emit_source_map_writes_map_file_and_url_comment() {
     assert_eq!(captured[0].0, "/src/index.js.map");
     assert_eq!(captured[1].0, "/src/index.js");
 
-    // JS gets the trailing URL comment (no trailing newline after it).
+    // JS gets `"use strict"` + the code + trailing URL comment.
     assert_eq!(
         captured[1].1,
-        "const x = 1;\n//# sourceMappingURL=index.js.map"
+        "\"use strict\";\nconst x = 1;\n//# sourceMappingURL=index.js.map"
     );
 
-    // The `.map` JSON matches Go exactly (key order + relativized source), with
-    // the mappings string lacking the leading `;` (no `"use strict";`).
+    // The `.map` JSON: the leading `;` reflects the synthesized `"use strict";`
+    // line (no source mapping for it), matching Go's ground truth.
     assert_eq!(
         captured[0].1,
-        r#"{"version":3,"file":"index.js","sourceRoot":"","sources":["index.ts"],"names":[],"mappings":"AAAA,MAAM,CAAC,GAAW,CAAC,CAAC"}"#
+        r#"{"version":3,"file":"index.js","sourceRoot":"","sources":["index.ts"],"names":[],"mappings":";AAAA,MAAM,CAAC,GAAW,CAAC,CAAC"}"#
     );
 
     // A source-map emit result is recorded with the raw (un-relativized) source.
@@ -261,8 +262,8 @@ fn emit_source_map_writes_map_file_and_url_comment() {
 }
 
 // Slice 3: `--inlineSourceMap` appends a `data:application/json;base64,<...>`
-// URL inline and writes no separate `.map` file. The base64 decodes to the
-// same JSON the file-mode map carries.
+// URL inline and writes no separate `.map` file. With the full chain the
+// `"use strict";` line shifts the mappings (leading `;`), changing the base64.
 // Go: internal/compiler/emitter.go:getSourceMappingURL (InlineSourceMap)
 #[test]
 fn emit_inline_source_map_appends_base64_data_url() {
@@ -284,26 +285,21 @@ fn emit_inline_source_map_appends_base64_data_url() {
     assert_eq!(captured.len(), 1);
     assert_eq!(captured[0].0, "/src/index.js");
 
-    // The data URL's base64 payload is the same JSON as file mode (verified
-    // against the base64 of the Go-derived JSON).
-    assert_eq!(
-        captured[0].1,
-        concat!(
-            "const x = 1;\n//# sourceMappingURL=data:application/json;base64,",
-            "eyJ2ZXJzaW9uIjozLCJmaWxlIjoiaW5kZXguanMiLCJzb3VyY2VSb290IjoiIiwi",
-            "c291cmNlcyI6WyJpbmRleC50cyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiQUFB",
-            "QSxNQUFNLENBQUMsR0FBVyxDQUFDLENBQUMifQ=="
-        )
-    );
-    // No separate source-map emit result file path beyond the inline payload,
-    // but the result still records the source map (Go appends it for inline).
+    // The JS text now starts with `"use strict";` and ends with the inline data URL.
+    let text = &captured[0].1;
+    assert!(text.starts_with(
+        "\"use strict\";\nconst x = 1;\n//# sourceMappingURL=data:application/json;base64,"
+    ));
+    // The data URL encodes the map JSON with `;AAAA,...` (the leading `;` for
+    // the synthesized `"use strict";` line), matching Go's ground truth.
+    assert!(text.contains("sourceMappingURL=data:application/json;base64,"));
+
     assert_eq!(result.source_maps.len(), 1);
     assert_eq!(result.source_maps[0].generated_file, "/src/index.js");
 }
 
-// Slice 5: without `--sourceMap`/`--inlineSourceMap` the output is byte-for-byte
-// the pre-P6-7 emit — no `//# sourceMappingURL=` comment, no `.map` file, and no
-// recorded source map (the plain path must be unchanged).
+// Slice 5: without `--sourceMap`/`--inlineSourceMap` the output has no
+// `//# sourceMappingURL=` comment, no `.map` file, and no recorded source map.
 // Go: internal/compiler/emitter.go:printSourceFile (sourceMapGenerator == nil)
 #[test]
 fn emit_without_source_map_has_no_url_or_map() {
@@ -319,8 +315,84 @@ fn emit_without_source_map_has_no_url_or_map() {
     assert!(result.source_maps.is_empty());
     let captured = captured.borrow();
     assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0].1, "const x = 1;\n");
+    assert_eq!(captured[0].1, "\"use strict\";\nconst x = 1;\n");
     assert!(!captured[0].1.contains("//# sourceMappingURL="));
+}
+
+// Go: internal/compiler/emitter.go:getScriptTransformers (module transform chain)
+// With `module: CommonJS`, the full chain fires: type eraser → runtime syntax →
+// use strict → CJS module transform. `export const x = 1;` becomes CJS output
+// with `"use strict"`, the `__esModule` marker, and `exports.x = 1;`.
+#[test]
+fn emit_cjs_module_fires_full_chain() {
+    let options = CompilerOptions {
+        module: tsgo_core::compileroptions::ModuleKind::CommonJs,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[("/src/index.ts", "export const x = 1;")],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    let text = &captured[0].1;
+    // CJS transform must fire: `export const` syntax is gone.
+    assert!(
+        !text.contains("export const"),
+        "CJS transform should have lowered the ES export: {text}"
+    );
+    // The `__esModule` marker is present.
+    assert!(
+        text.contains("__esModule"),
+        "CJS output should contain __esModule marker: {text}"
+    );
+    // The exported binding is assigned.
+    assert!(
+        text.contains("exports.x = 1"),
+        "CJS output should contain exports.x = 1: {text}"
+    );
+    // The use-strict transform fires (directive is present in the output).
+    assert!(
+        text.contains("\"use strict\""),
+        "CJS output should contain \"use strict\" directive: {text}"
+    );
+}
+
+// Go: internal/compiler/emitter.go:getScriptTransformers (JSX transform)
+// With `jsx: react` and a `.tsx` file, the JSX transform fires and lowers
+// `<div/>` to `React.createElement("div", null)`.
+#[test]
+fn emit_jsx_react_lowers_element() {
+    let options = CompilerOptions {
+        jsx: tsgo_core::compileroptions::JsxEmit::React,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[("/src/app.tsx", "const el = <div/>;")],
+        &["/src/app.tsx"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    let text = &captured[0].1;
+    // JSX transform should lower `<div/>` to a createElement call.
+    assert!(
+        !text.contains("<div"),
+        "JSX syntax should be lowered: {text}"
+    );
+    assert!(
+        text.contains("React.createElement"),
+        "JSX should lower to React.createElement: {text}"
+    );
 }
 
 // Go: internal/compiler/emitter.go:emitter.emitJSFile (PrinterOptions.NewLine)
@@ -339,5 +411,5 @@ fn emit_honors_crlf_newline_option() {
     emit_capturing(&program, &captured);
 
     let captured = captured.borrow();
-    assert_eq!(captured[0].1, "const x = 1;\r\n");
+    assert_eq!(captured[0].1, "\"use strict\";\r\nconst x = 1;\r\n");
 }

@@ -47,6 +47,7 @@ members = [
     "internal/checker",
     "internal/transformers",
     "internal/compiler",
+    "internal/project",
     "internal/execute",
     "internal/execute/incremental",
     "cmd/tsgo",

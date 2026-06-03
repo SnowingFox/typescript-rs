@@ -1070,6 +1070,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_project"
+version = "0.0.0"
+dependencies = [
+ "dashmap",
+ "serde_json",
+ "tsgo_collections",
+ "tsgo_core",
+ "tsgo_diagnostics",
+ "tsgo_lsproto",
+ "tsgo_tspath",
+]
+
+[[package]]
 name = "tsgo_project_dirty"
 version = "0.0.0"
 dependencies = [

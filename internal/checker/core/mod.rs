@@ -43,7 +43,8 @@ use program::{default_compiler_options, BoundProgram};
 use relations::RelationCache;
 use signatures::{IndexInfo, IndexInfoArena, IndexInfoId, Signature, SignatureArena, SignatureId};
 use symbols::{
-    DeclaredTypeLinks, SymbolLinks, SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
+    DeclaredTypeLinks, LateBoundLinks, MembersAndExportsLinks, SymbolLinks, SymbolNodeLinks,
+    SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
 };
 use types::{
     ConditionalRoot, ConditionalType, IntersectionType, IntrinsicType, LiteralType, LiteralValue,
@@ -200,6 +201,9 @@ pub struct Checker {
     type_aliases_resolving: rustc_hash::FxHashSet<SymbolId>,
     /// Lazily-computed types of value/property symbols.
     value_symbol_links: SymbolLinks<ValueSymbolLinks>,
+    pub(crate) late_bound_links: SymbolLinks<LateBoundLinks>,
+    pub(crate) symbol_node_links: FxHashMap<NodeId, SymbolNodeLinks>,
+    pub(crate) members_and_exports_links: SymbolLinks<MembersAndExportsLinks>,
     /// Resolved alias targets (Go's `aliasSymbolLinks[symbol].aliasTarget`): the
     /// non-alias symbol an `import`/`export` alias resolves to. A present key is
     /// "resolved"; `None` records resolution FAILURE (Go's `unknownSymbol` — a
@@ -505,6 +509,9 @@ impl Checker {
             type_alias_links: SymbolLinks::default(),
             type_aliases_resolving: rustc_hash::FxHashSet::default(),
             value_symbol_links: SymbolLinks::default(),
+            late_bound_links: SymbolLinks::default(),
+            symbol_node_links: FxHashMap::default(),
+            members_and_exports_links: SymbolLinks::default(),
             alias_targets: FxHashMap::default(),
             aliases_resolving: rustc_hash::FxHashSet::default(),
             assignment_declaration_resolving: rustc_hash::FxHashSet::default(),

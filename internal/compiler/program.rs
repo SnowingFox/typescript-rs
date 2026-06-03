@@ -691,8 +691,8 @@ impl Program {
     /// let program = new_program(ProgramOptions { host, config: Arc::new(config), single_threaded: true });
     /// let result = program.emit(EmitOptions::default());
     /// assert_eq!(result.emitted_files, vec!["/src/index.js".to_string()]);
-    /// // The type annotation is erased and the file prints as plain JavaScript.
-    /// assert_eq!(program.host().fs().read_file("/src/index.js").as_deref(), Some("const x = 1;\n"));
+    /// // The type annotation is erased and the full chain prepends "use strict".
+    /// assert_eq!(program.host().fs().read_file("/src/index.js").as_deref(), Some("\"use strict\";\nconst x = 1;\n"));
     /// ```
     ///
     /// Side effects: writes emitted files (through `options.write_file` if set,

@@ -591,7 +591,11 @@ impl Checker {
     // computed names is deferred, so each name is checked once). blocked-by:
     // in-operator computed names + expression-type memoization.
     // Go: internal/checker/checker.go:Checker.checkComputedPropertyName(26619)
-    fn check_computed_property_name(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+    pub(crate) fn check_computed_property_name(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
         let expression = match program.arena().data(node) {
             NodeData::ComputedPropertyName(d) => d.expression,
             _ => return self.error_type,
@@ -4187,6 +4191,12 @@ impl Checker {
             let type_parameters = d.type_parameters.clone();
             self.check_grammar_type_parameter_defaults(program, type_parameters);
             self.check_object_type_for_duplicate_declarations(program, node);
+            if let Some(sym) = program.symbol_of_node(node) {
+                if !self.declared_type_links.get(sym).index_signatures_checked {
+                    self.declared_type_links.get(sym).index_signatures_checked = true;
+                    // DEFER(W4): check_type_for_duplicate_index_signatures (T1-C1+C2 incomplete)
+                }
+            }
         }
         // A `{ ... }` block checks each contained statement (Go's `checkBlock` ->
         // `checkSourceElements`).
@@ -4781,6 +4791,12 @@ impl Checker {
         // whether the declared type resolves).
         // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4279)
         self.check_object_type_for_duplicate_declarations(program, node);
+        if let Some(sym) = program.symbol_of_node(node) {
+            if !self.declared_type_links.get(sym).index_signatures_checked {
+                self.declared_type_links.get(sym).index_signatures_checked = true;
+                // DEFER(W4): check_type_for_duplicate_index_signatures (T1-C1+C2 incomplete)
+            }
+        }
         let Some(symbol) = program.symbol_of_node(node) else {
             return;
         };
@@ -7009,6 +7025,11 @@ fn is_compound_assignment(operator: Kind) -> bool {
             | Kind::BarBarEqualsToken
             | Kind::QuestionQuestionEqualsToken
     )
+}
+
+// Go: internal/checker/utilities.go:isTypeUsableAsPropertyName
+pub(crate) fn is_type_usable_as_property_name(flags: TypeFlags) -> bool {
+    flags.intersects(TypeFlags::STRING_OR_NUMBER_LITERAL_OR_UNIQUE)
 }
 
 #[cfg(test)]
