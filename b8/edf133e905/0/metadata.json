@@ -1,0 +1,50 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "b8edf133e905",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-03T10:24:52.795089Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "internal/ls/lib.rs",
+    "internal/lsp/lsproto/generated.rs",
+    "internal/lsp/lsproto/generated_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-opus-4-8-thinking-xhigh",
+  "turn_id": "246555350ded",
+  "session_metrics": {
+    "turn_count": 26,
+    "context_tokens": 933669,
+    "context_window_size": 1000000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-03T10:24:52.678442Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 726,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 726,
+    "total_lines_changed": 726,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 565,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "internal/ls/lib.rs": 2,
+        "internal/ls/linkedediting.rs": 295,
+        "internal/ls/linkedediting_test.rs": 141,
+        "internal/lsp/lsproto/generated.rs": 32,
+        "internal/lsp/lsproto/generated_test.rs": 95
+      }
+    }
+  ]
+}
