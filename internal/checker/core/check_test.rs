@@ -4,6 +4,8 @@ use crate::core::test_support::{MultiFileProgram, StubProgram};
 use crate::core::types::{ObjectFlags, ObjectType};
 use crate::core::Checker;
 use tsgo_ast::NodeData;
+use tsgo_core::compileroptions::CompilerOptions;
+use tsgo_core::tristate::Tristate;
 
 fn empty() -> StubProgram {
     StubProgram::parse_and_bind("/a.ts", "")
@@ -9934,5 +9936,124 @@ fn this_parameter_in_arrow_reports_ts2730() {
         ts2730.len(),
         1,
         "expected TS2730 for 'this' parameter in arrow function: {diags:?}"
+    );
+}
+
+// ---------- T1-C5: Unused locals/parameters (TS6133/TS6196) ----------
+
+// Go: internal/checker/checker.go:checkUnusedLocalsAndParameters
+// (noUnusedLocals -> TS6133 for unused variable in function body)
+#[test]
+fn unused_local_in_function_reports_6133() {
+    let mut opts = CompilerOptions::default();
+    opts.no_unused_locals = Tristate::True;
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "function f() { const x = 1; }",
+        opts,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let unused = diags.iter().find(|d| d.code == 6133);
+    assert!(
+        unused.is_some(),
+        "expected TS6133 for unused 'x'; got: {:?}",
+        diags
+    );
+    assert!(
+        unused.unwrap().message.contains("'x'"),
+        "expected message to mention 'x'; got: {}",
+        unused.unwrap().message
+    );
+}
+
+// Go: internal/checker/checker.go:checkUnusedLocalsAndParameters
+// (noUnusedParameters -> TS6133 for unused parameter)
+#[test]
+fn unused_parameter_reports_6133() {
+    let mut opts = CompilerOptions::default();
+    opts.no_unused_parameters = Tristate::True;
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "function f(x: number) {}",
+        opts,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let unused = diags.iter().find(|d| d.code == 6133);
+    assert!(
+        unused.is_some(),
+        "expected TS6133 for unused parameter 'x'; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/checker.go:isUnreferencedVariableDeclaration
+// (parameter starting with _ -> no unused report)
+#[test]
+fn underscore_parameter_suppresses_unused_report() {
+    let mut opts = CompilerOptions::default();
+    opts.no_unused_parameters = Tristate::True;
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "function f(_x: number) {}",
+        opts,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let unused = diags.iter().find(|d| d.code == 6133);
+    assert!(
+        unused.is_none(),
+        "parameter starting with _ should suppress TS6133; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/checker.go:reportUnusedVariables
+// (all variables unused -> TS6199 "All variables are unused.")
+#[test]
+fn all_variables_unused_reports_6199() {
+    let mut opts = CompilerOptions::default();
+    opts.no_unused_locals = Tristate::True;
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "function f() { const a = 1, b = 2; }",
+        opts,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let all_unused = diags.iter().find(|d| d.code == 6199);
+    assert!(
+        all_unused.is_some(),
+        "expected TS6199 for all unused variables; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/checker.go:checkUnusedLocalsAndParameters
+// (referenced variable -> no error)
+#[test]
+fn referenced_local_no_unused_error() {
+    let mut opts = CompilerOptions::default();
+    opts.no_unused_locals = Tristate::True;
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "function f() { const x = 1; return x; }",
+        opts,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let unused = diags
+        .iter()
+        .find(|d| d.code == 6133 || d.code == 6196 || d.code == 6199);
+    assert!(
+        unused.is_none(),
+        "referenced variable should not trigger unused; got: {:?}",
+        diags
     );
 }

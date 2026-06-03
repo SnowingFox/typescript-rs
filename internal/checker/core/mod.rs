@@ -276,6 +276,11 @@ pub struct Checker {
     /// `sourceFileLinks.typeChecked`). Keeps diagnostics from doubling when a
     /// file is checked then re-requested through [`Checker::get_diagnostics`].
     checked_files: FxHashSet<NodeId>,
+    /// Container nodes registered for unused-identifiers checking (Go's
+    /// `sourceFileLinks.identifierCheckNodes`). Populated during the statement
+    /// walk; drained by [`check_unused_identifiers`] after the check completes.
+    // Go: internal/checker/checker.go:sourceFileLinks.identifierCheckNodes
+    unused_identifier_nodes: Vec<NodeId>,
     /// Whether the statement currently being checked is inside an
     /// already-reported unreachable region (Go's `c.withinUnreachableCode`).
     /// Saved/restored around each statement so the FIRST unreachable statement
@@ -533,6 +538,7 @@ impl Checker {
             emit_resolver: OnceCell::new(),
             program: None,
             checked_files: FxHashSet::default(),
+            unused_identifier_nodes: Vec::new(),
             within_unreachable_code: false,
             reported_unreachable_nodes: FxHashSet::default(),
             resolved_signatures: FxHashMap::default(),

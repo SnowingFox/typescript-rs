@@ -21,6 +21,7 @@
 
 use std::rc::Rc;
 
+use rustc_hash::FxHashSet;
 use tsgo_ast::symbol::{INTERNAL_SYMBOL_NAME_COMPUTED, INTERNAL_SYMBOL_NAME_EXPORT_EQUALS};
 use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags, SymbolId, SymbolTable};
 use tsgo_core::compileroptions::ScriptTarget;
@@ -333,6 +334,10 @@ impl Checker {
             NodeData::ObjectLiteralExpression(d) => d.list.nodes.clone(),
             _ => return self.error_type,
         };
+        // DEFER(phase-4-checker-C5+): `ast.IsAssignmentTarget(node)` to detect
+        // destructuring patterns. blocked-by: Rust-side `is_assignment_target`.
+        let in_destructuring = false;
+        self.check_grammar_object_literal_expression(program, node, in_destructuring);
         // In a const context (`{ a: 1 } as const`) every property is readonly:
         // Go sets `checkFlags = CheckFlagsReadonly` when `isConstContext(node)`
         // and passes it to `newSymbolEx` for each member, and makes the index
@@ -1279,6 +1284,12 @@ impl Checker {
                 // so its type/declarations must be read from the linked
                 // `export_symbol` (the real exported enum/class/function/const).
                 let symbol = get_export_symbol_of_value_symbol_if_exported(program, symbol);
+                // Go: `markLinkedReferences(node, ReferenceHintIdentifier)` ->
+                // accumulates `referenceKinds` for unused checking. The reachable
+                // subset marks every successfully-resolved identifier as a
+                // `VARIABLE` reference.
+                // Go: internal/checker/checker.go:Checker.checkIdentifier -> markLinkedReferences
+                self.mark_symbol_referenced(symbol, SymbolFlags::VARIABLE);
                 let declared = get_type_of_symbol(self, program, symbol, globals);
                 self.get_flow_type_of_reference(program, node, declared)
             }
@@ -3960,7 +3971,14 @@ impl Checker {
         // `check_external_module_exports`.)
         if let Some(module_symbol) = view.symbol_of_node(root) {
             self.check_external_module_exports(view.as_ref(), module_symbol);
+            // Go: if IsExternalOrCommonJSModule(sourceFile) { registerForUnusedIdentifiersCheck(sourceFile) }
+            self.register_for_unused_identifiers_check(root);
         }
+        // Run the post-check unused-identifiers analysis (Go runs this after
+        // checkSourceFileWorker completes, gated on `checkUnused`; the Rust port
+        // always runs it since unused errors depend only on the compiler options).
+        // Go: internal/checker/checker.go:checkSourceFile -> checkUnusedIdentifiers
+        self.check_unused_identifiers(view.as_ref());
     }
 
     // Reports `TS2309` when a module that has an `export =` (export-equals) ALSO
@@ -4205,6 +4223,10 @@ impl Checker {
             for statement in statements {
                 self.check_statement(program, statement);
             }
+            // Go: checkBlock -> if len(node.Locals()) != 0 { registerForUnusedIdentifiersCheck }
+            if program.locals(node).is_some() {
+                self.register_for_unused_identifiers_check(node);
+            }
         }
         // An `if` statement checks its condition then descends into the then/else
         // branches (Go's `checkIfStatement` -> `checkSourceElement`), so nested
@@ -4257,6 +4279,10 @@ impl Checker {
                 self.check_expression(program, incrementor);
             }
             self.check_statement(program, statement);
+            // Go: checkForStatement -> if node.Locals() != nil { registerForUnusedIdentifiersCheck }
+            if program.locals(node).is_some() {
+                self.register_for_unused_identifiers_check(node);
+            }
         }
         // A `try` statement descends into its `try` block, the `catch` clause's
         // block, and the `finally` block (Go's `checkTryStatement` ->
@@ -4369,6 +4395,11 @@ impl Checker {
                     self.check_expression(program, initializer);
                 }
                 self.check_statement(program, statement);
+                // Go: checkForInStatement / checkForOfStatement ->
+                // if node.Locals() != nil { registerForUnusedIdentifiersCheck }
+                if program.locals(node).is_some() {
+                    self.register_for_unused_identifiers_check(node);
+                }
             }
         }
         // A `throw` statement checks its thrown expression (Go's
@@ -4413,6 +4444,8 @@ impl Checker {
             if let Some(body) = body {
                 self.check_statement(program, body);
             }
+            // Go: checkFunctionDeclaration -> registerForUnusedIdentifiersCheck
+            self.register_for_unused_identifiers_check(node);
         }
         // A `return <expr>` statement checks the returned expression so nested
         // diagnostics surface, and (where the enclosing function has an explicit
@@ -6643,6 +6676,458 @@ impl Checker {
             .entry(program.file_handle())
             .or_default()
             .push(diagnostic);
+    }
+
+    // -- Unused-identifiers subsystem (T1-C5) ---------------------------------
+
+    /// Registers `node` for post-check unused-identifiers analysis (Go's
+    /// `registerForUnusedIdentifiersCheck`).
+    ///
+    /// Side effects: appends `node` to the checker's deferred-check list.
+    // Go: internal/checker/checker.go:Checker.registerForUnusedIdentifiersCheck(7008)
+    pub(crate) fn register_for_unused_identifiers_check(&mut self, node: NodeId) {
+        self.unused_identifier_nodes.push(node);
+    }
+
+    /// Runs the unused-identifiers check over all nodes registered during the
+    /// statement walk (Go's `checkUnusedIdentifiers`).
+    ///
+    /// DEFER(phase-4-checker-C5+): class-member, type-parameter, and infer-type
+    /// unused checking. blocked-by: class-member unused detection, type
+    /// parameter reference tracking.
+    ///
+    /// Side effects: may record TS6133/TS6196/TS6199 diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkUnusedIdentifiers(7014)
+    fn check_unused_identifiers(&mut self, program: &dyn BoundProgram) {
+        let nodes: Vec<NodeId> = std::mem::take(&mut self.unused_identifier_nodes);
+        for node in nodes {
+            let kind = program.arena().kind(node);
+            match kind {
+                Kind::SourceFile
+                | Kind::Block
+                | Kind::CaseBlock
+                | Kind::ForStatement
+                | Kind::ForInStatement
+                | Kind::ForOfStatement => {
+                    self.check_unused_locals_and_parameters(program, node);
+                }
+                Kind::Constructor
+                | Kind::FunctionExpression
+                | Kind::FunctionDeclaration
+                | Kind::ArrowFunction
+                | Kind::MethodDeclaration
+                | Kind::GetAccessor
+                | Kind::SetAccessor => {
+                    if function_like_body(program, node).is_some() {
+                        self.check_unused_locals_and_parameters(program, node);
+                    }
+                    // DEFER: checkUnusedTypeParameters
+                }
+                // DEFER: ClassDeclaration, ClassExpression -> checkUnusedClassMembers +
+                // checkUnusedTypeParameters; MethodSignature, CallSignature, etc. ->
+                // checkUnusedTypeParameters; InferType -> checkUnusedInferTypeParameter.
+                _ => {}
+            }
+        }
+    }
+
+    /// Iterates the `Locals` table of `node` and reports unused local variables
+    /// and parameters (Go's `checkUnusedLocalsAndParameters`).
+    ///
+    /// DEFER(phase-4-checker-C5+): import-clause aggregation, type-parameter
+    /// union-flag fast-path. blocked-by: import tracking, full symbol merging.
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkUnusedLocalsAndParameters(7108)
+    fn check_unused_locals_and_parameters(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let locals = match program.locals(node) {
+            Some(locals) => locals.clone(),
+            None => return,
+        };
+        let mut variable_parents: FxHashSet<NodeId> = FxHashSet::default();
+
+        for &symbol_id in locals.values() {
+            let sym = program.symbol(symbol_id);
+            let reference_kinds = self
+                .symbol_reference_links
+                .try_get(&symbol_id)
+                .map(|l| l.reference_kinds)
+                .unwrap_or_else(SymbolFlags::empty);
+
+            // Skip type parameters that have been referenced as types (the
+            // value-side may still be unreferenced). Also skip symbols that are
+            // exported or are namespace-exports.
+            if sym.flags.intersects(SymbolFlags::TYPE_PARAMETER)
+                && (!sym.flags.intersects(SymbolFlags::VARIABLE)
+                    || reference_kinds.intersects(SymbolFlags::VARIABLE))
+            {
+                continue;
+            }
+            if !sym.flags.intersects(SymbolFlags::TYPE_PARAMETER)
+                && (!reference_kinds.is_empty()
+                    || sym.export_symbol.is_some()
+                    || sym.flags.intersects(SymbolFlags::MODULE_EXPORTS))
+            {
+                continue;
+            }
+
+            for decl in &sym.declarations {
+                let decl = *decl;
+                let decl_kind = program.arena().kind(decl);
+                if matches!(
+                    decl_kind,
+                    Kind::VariableDeclaration | Kind::Parameter | Kind::BindingElement
+                ) {
+                    let root = get_root_declaration(program, decl);
+                    if let Some(parent) = program.arena().parent(root) {
+                        variable_parents.insert(parent);
+                    }
+                } else if !matches!(
+                    decl_kind,
+                    Kind::TypeParameter
+                        | Kind::ImportClause
+                        | Kind::ImportSpecifier
+                        | Kind::NamespaceImport
+                ) && !is_ambient_module(program, decl)
+                {
+                    self.report_unused_local(program, decl, &sym.name);
+                }
+            }
+        }
+
+        for declaration in variable_parents {
+            let kind = program.arena().kind(declaration);
+            if kind == Kind::VariableDeclarationList {
+                self.report_unused_variables(program, declaration);
+            } else {
+                self.report_unused_parameters(program, declaration);
+            }
+        }
+        // DEFER: import-clause unused aggregation.
+    }
+
+    /// Reports a single unused local (non-variable, non-parameter).
+    // Go: internal/checker/checker.go:Checker.reportUnusedLocal(7149)
+    fn report_unused_local(&mut self, program: &dyn BoundProgram, node: NodeId, name: &str) {
+        let is_type_decl = is_type_declaration(program, node);
+        let message = if is_type_decl {
+            &tsgo_diagnostics::X_0_IS_DECLARED_BUT_NEVER_USED
+        } else {
+            &tsgo_diagnostics::X_0_IS_DECLARED_BUT_ITS_VALUE_IS_NEVER_READ
+        };
+        let name_node = name_of_node(program, node).unwrap_or(node);
+        let diag = self.diagnostic_for_node(program, name_node, message, &[name]);
+        self.report_unused(program, UnusedKind::Local, diag);
+    }
+
+    /// Reports a variable-list or binding-pattern where ALL declarations are
+    /// unused (TS6199 "All variables are unused.").
+    // Go: internal/checker/checker.go:Checker.reportUnusedVariables(7154)
+    fn report_unused_variables(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let declarations = match program.arena().data(node) {
+            NodeData::VariableDeclarationList(d) => d.declarations.nodes.clone(),
+            _ => return,
+        };
+        if declarations.len() > 1
+            && declarations
+                .iter()
+                .all(|&d| self.is_unreferenced_variable_declaration(program, d))
+        {
+            let diag = self.diagnostic_for_node(
+                program,
+                node,
+                &tsgo_diagnostics::ALL_VARIABLES_ARE_UNUSED,
+                &[],
+            );
+            self.report_unused_variable(program, node, diag);
+        } else {
+            self.report_unused_variable_declarations(program, &declarations);
+        }
+    }
+
+    /// Reports unused parameters of a function.
+    // Go: internal/checker/checker.go:Checker.reportUnusedParameters(7163)
+    fn report_unused_parameters(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let params = function_like_all_parameters(program, node);
+        self.report_unused_variable_declarations(program, &params);
+    }
+
+    /// Reports individual unused variable/parameter declarations.
+    // Go: internal/checker/checker.go:Checker.reportUnusedVariableDeclarations(7176)
+    fn report_unused_variable_declarations(
+        &mut self,
+        program: &dyn BoundProgram,
+        declarations: &[NodeId],
+    ) {
+        for &declaration in declarations {
+            let Some(name) = name_of_node(program, declaration) else {
+                continue;
+            };
+            if is_parameter_property_declaration(program, declaration) {
+                continue;
+            }
+            if is_this_parameter(program, declaration) {
+                continue;
+            }
+            // DEFER: binding-pattern recursion (reportUnusedBindingElements).
+            if self.is_unreferenced_variable_declaration(program, declaration) {
+                let name_text = program.arena().text(name);
+                let diag = self.diagnostic_for_node(
+                    program,
+                    name,
+                    &tsgo_diagnostics::X_0_IS_DECLARED_BUT_ITS_VALUE_IS_NEVER_READ,
+                    &[name_text],
+                );
+                self.report_unused_variable(program, declaration, diag);
+            }
+        }
+    }
+
+    /// Walks up from a binding element to the enclosing variable statement or
+    /// parameter and routes to the correct unused-kind.
+    // Go: internal/checker/checker.go:Checker.reportUnusedVariable(7052)
+    fn report_unused_variable(
+        &mut self,
+        program: &dyn BoundProgram,
+        mut location: NodeId,
+        diagnostic: Diagnostic,
+    ) {
+        while matches!(
+            program.arena().kind(location),
+            Kind::BindingElement | Kind::ArrayBindingPattern | Kind::ObjectBindingPattern
+        ) {
+            if let Some(parent) = program.arena().parent(location) {
+                location = parent;
+            } else {
+                break;
+            }
+        }
+        let kind = if is_parameter_declaration(program, location) {
+            UnusedKind::Parameter
+        } else {
+            UnusedKind::Local
+        };
+        self.report_unused(program, kind, diagnostic);
+    }
+
+    /// Routes an unused diagnostic as error or suggestion depending on
+    /// compiler options.
+    // Go: internal/checker/checker.go:Checker.reportUnused(7059)
+    fn report_unused(
+        &mut self,
+        program: &dyn BoundProgram,
+        kind: UnusedKind,
+        diagnostic: Diagnostic,
+    ) {
+        // Go: `if location.Flags&(NodeFlagsAmbient|NodeFlagsThisNodeOrAnySubNodesHasError) == 0`
+        // DEFER: the ambient/error flag check (needs NodeFlags wiring for
+        // declarations). For now, always emit.
+        let is_error = self.unused_is_error(kind);
+        if is_error {
+            self.add_diagnostic(program, diagnostic);
+        }
+        // DEFER: suggestion diagnostics collection (non-error unused).
+    }
+
+    /// Whether an unused-`kind` diagnostic should be an error (vs. suggestion).
+    // Go: internal/checker/checker.go:Checker.unusedIsError(7072)
+    fn unused_is_error(&self, kind: UnusedKind) -> bool {
+        match kind {
+            UnusedKind::Local => self.compiler_options().no_unused_locals.is_true(),
+            UnusedKind::Parameter => self.compiler_options().no_unused_parameters.is_true(),
+        }
+    }
+
+    /// Reports whether a variable/parameter/binding-element declaration is
+    /// unreferenced (Go's `isUnreferencedVariableDeclaration`).
+    // Go: internal/checker/checker.go:Checker.isUnreferencedVariableDeclaration(7189)
+    fn is_unreferenced_variable_declaration(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let Some(name) = name_of_node(program, node) else {
+            return true;
+        };
+        let name_kind = program.arena().kind(name);
+        // DEFER: binding-pattern recursion.
+        if matches!(
+            name_kind,
+            Kind::ObjectBindingPattern | Kind::ArrayBindingPattern
+        ) {
+            return false;
+        }
+        let sym = program.symbol_of_node(node);
+        let referenced = sym.is_some_and(|s| {
+            self.symbol_reference_links
+                .try_get(&s)
+                .map(|l| l.reference_kinds.intersects(SymbolFlags::VARIABLE))
+                .unwrap_or(false)
+        });
+        if referenced {
+            return false;
+        }
+        // Parameters or variables starting with `_` suppress unused reporting.
+        let is_param = is_parameter_declaration(program, node);
+        if is_param && is_identifier_that_starts_with_underscore(program, name) {
+            return false;
+        }
+        true
+    }
+}
+
+/// The kind of unused diagnostic: local variable or parameter (Go's
+/// `UnusedKind` iota).
+// Go: internal/checker/checker.go:UnusedKind
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnusedKind {
+    Local,
+    Parameter,
+}
+
+// Walks up from a declaration to the root (non-binding-element) declaration.
+// Go: internal/ast/utilities.go:GetRootDeclaration
+fn get_root_declaration(program: &dyn BoundProgram, mut node: NodeId) -> NodeId {
+    while program.arena().kind(node) == Kind::BindingElement {
+        if let Some(parent) = program.arena().parent(node) {
+            if matches!(
+                program.arena().kind(parent),
+                Kind::ObjectBindingPattern | Kind::ArrayBindingPattern
+            ) {
+                if let Some(grandparent) = program.arena().parent(parent) {
+                    node = grandparent;
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    node
+}
+
+// Reports whether `node` is a parameter declaration.
+// Go: internal/ast/utilities.go:IsParameterDeclaration
+fn is_parameter_declaration(program: &dyn BoundProgram, node: NodeId) -> bool {
+    let root = get_root_declaration(program, node);
+    program.arena().kind(root) == Kind::Parameter
+}
+
+// Reports whether `node` is a `this: T` parameter.
+// Go: internal/ast/ast.go:IsThisParameter
+fn is_this_parameter(program: &dyn BoundProgram, node: NodeId) -> bool {
+    if program.arena().kind(node) != Kind::Parameter {
+        return false;
+    }
+    if let Some(name) = name_of_node(program, node) {
+        program.arena().kind(name) == Kind::Identifier && program.arena().text(name) == "this"
+    } else {
+        false
+    }
+}
+
+// Reports whether `node` is a parameter property (has accessibility modifier).
+// Go: internal/ast/utilities.go:IsParameterPropertyDeclaration
+fn is_parameter_property_declaration(program: &dyn BoundProgram, node: NodeId) -> bool {
+    if program.arena().kind(node) != Kind::Parameter {
+        return false;
+    }
+    let Some(parent) = program.arena().parent(node) else {
+        return false;
+    };
+    program.arena().kind(parent) == Kind::Constructor
+        && has_syntactic_modifier(
+            program,
+            node,
+            tsgo_ast::ModifierFlags::PARAMETER_PROPERTY_MODIFIER,
+        )
+}
+
+// Reports whether `node` has the given syntactic modifier.
+// Go: internal/ast/utilities.go:HasSyntacticModifier
+fn has_syntactic_modifier(
+    program: &dyn BoundProgram,
+    node: NodeId,
+    flag: tsgo_ast::ModifierFlags,
+) -> bool {
+    get_syntactic_modifier_flags(program, node).intersects(flag)
+}
+
+// Collects the modifier flags from a node's modifier list.
+// Go: internal/ast/utilities.go:GetSyntacticModifierFlags
+fn get_syntactic_modifier_flags(
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> tsgo_ast::ModifierFlags {
+    let modifiers = match program.arena().data(node) {
+        NodeData::ParameterDeclaration(d) => d.modifiers.as_ref().map(|m| &m.list.nodes),
+        _ => None,
+    };
+    let Some(modifiers) = modifiers else {
+        return tsgo_ast::ModifierFlags::empty();
+    };
+    let mut flags = tsgo_ast::ModifierFlags::empty();
+    for &m in modifiers {
+        flags |= tsgo_ast::utilities::modifier_to_flag(program.arena().kind(m));
+    }
+    flags
+}
+
+// Reports whether `node` is a type declaration (type alias, interface, enum).
+// Go: internal/ast/utilities.go:IsTypeDeclaration
+fn is_type_declaration(program: &dyn BoundProgram, node: NodeId) -> bool {
+    matches!(
+        program.arena().kind(node),
+        Kind::TypeAliasDeclaration | Kind::InterfaceDeclaration | Kind::EnumDeclaration
+    )
+}
+
+// Reports whether `node` is an ambient module (`declare module "foo" { ... }`).
+// Go: internal/ast/utilities.go:IsAmbientModule
+fn is_ambient_module(program: &dyn BoundProgram, node: NodeId) -> bool {
+    if program.arena().kind(node) != Kind::ModuleDeclaration {
+        return false;
+    }
+    if let NodeData::ModuleDeclaration(d) = program.arena().data(node) {
+        program.arena().kind(d.name) == Kind::StringLiteral
+            || is_global_scope_augmentation(program, node)
+    } else {
+        false
+    }
+}
+
+// Go: internal/ast/utilities.go:IsGlobalScopeAugmentation
+// DEFER(phase-4-checker-C5+): the GLOBAL_AUGMENTATION NodeFlag is not yet in
+// the Rust AST. blocked-by: NodeFlags porting. Always returns false for now.
+fn is_global_scope_augmentation(_program: &dyn BoundProgram, _node: NodeId) -> bool {
+    false
+}
+
+// Reports whether an identifier node starts with `_` (used to suppress unused
+// reports for intentionally-discarded bindings).
+// Go: internal/checker/checker.go:isIdentifierThatStartsWithUnderscore(7235)
+fn is_identifier_that_starts_with_underscore(program: &dyn BoundProgram, node: NodeId) -> bool {
+    if program.arena().kind(node) != Kind::Identifier {
+        return false;
+    }
+    let text = program.arena().text(node);
+    !text.is_empty() && text.starts_with('_')
+}
+
+// Extracts the name node of a declaration, if it has one.
+// Go: internal/ast/ast.go:Node.Name()
+fn name_of_node(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    match program.arena().data(node) {
+        NodeData::VariableDeclaration(d) => Some(d.name),
+        NodeData::ParameterDeclaration(d) => Some(d.name),
+        NodeData::FunctionDeclaration(d) => d.name,
+        NodeData::ClassDeclaration(d)
+        | NodeData::ClassExpression(d)
+        | NodeData::InterfaceDeclaration(d) => d.name,
+        NodeData::TypeAliasDeclaration(d) => Some(d.name),
+        NodeData::EnumDeclaration(d) => Some(d.name),
+        NodeData::ModuleDeclaration(d) => Some(d.name),
+        NodeData::BindingElement(d) => d.name,
+        _ => None,
     }
 }
 

@@ -9,11 +9,26 @@
 //! matrix, parameter properties, and source/strict-mode-context checks that
 //! depend on `compilerOptions`.
 
+use rustc_hash::FxHashMap;
 use tsgo_ast::utilities::modifier_to_flag;
 use tsgo_ast::{Kind, ModifierFlags, NodeData, NodeFlags, NodeId};
 
 use super::program::BoundProgram;
 use super::Checker;
+
+bitflags::bitflags! {
+    /// Property-kind classification for object-literal duplicate-name detection
+    /// (Go's `DeclarationMeaning`).
+    // Go: internal/checker/checker.go:DeclarationMeaning
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct DeclarationMeaning: u32 {
+        const GET_ACCESSOR       = 1 << 0;
+        const SET_ACCESSOR       = 1 << 1;
+        const PROPERTY_ASSIGNMENT = 1 << 2;
+        const METHOD             = 1 << 3;
+        const GET_OR_SET_ACCESSOR = Self::GET_ACCESSOR.bits() | Self::SET_ACCESSOR.bits();
+    }
+}
 
 impl Checker {
     /// Checks the modifiers of `node`, recording a diagnostic and returning
@@ -241,6 +256,126 @@ impl Checker {
         false
     }
 
+    /// Checks an object literal expression for duplicate property names,
+    /// reporting TS1117 (duplicate properties), TS1118 (duplicate get/set
+    /// accessors), TS1119 (property + accessor), and TS2300 (duplicate methods).
+    ///
+    /// `in_destructuring` suppresses the duplicate-name detection because
+    /// destructuring patterns may repeat the same name (as an alias).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::{BoundProgram, Checker};
+    /// # fn demo<P: BoundProgram>(c: &mut Checker, p: &P, n: tsgo_ast::NodeId) -> bool {
+    /// c.check_grammar_object_literal_expression(p, n, false)
+    /// # }
+    /// ```
+    ///
+    /// Side effects: may record one or more diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarObjectLiteralExpression(1026)
+    pub fn check_grammar_object_literal_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        in_destructuring: bool,
+    ) -> bool {
+        let properties = match program.arena().data(node) {
+            NodeData::ObjectLiteralExpression(d) => d.list.nodes.clone(),
+            _ => return false,
+        };
+        let mut seen: FxHashMap<String, DeclarationMeaning> = FxHashMap::default();
+        let arena = program.arena();
+
+        for prop in &properties {
+            let prop = *prop;
+            let kind = arena.kind(prop);
+
+            // DEFER(phase-4-checker-C5+): spread-assignment rest-destructuring
+            // check, computed-property-name grammar, shorthand-initializer
+            // grammar, private-identifier grammar, modifier grammar,
+            // exclamation/question-mark, numeric/bigint grammar.
+            if kind == Kind::SpreadAssignment {
+                continue;
+            }
+
+            let name_node = match arena.data(prop) {
+                NodeData::PropertyAssignment(d) => d.name,
+                NodeData::ShorthandPropertyAssignment(d) => d.name,
+                NodeData::MethodDeclaration(d) => d.name,
+                NodeData::GetAccessorDeclaration(d) => d.name,
+                NodeData::SetAccessorDeclaration(d) => d.name,
+                _ => continue,
+            };
+
+            let current_kind = match kind {
+                Kind::ShorthandPropertyAssignment | Kind::PropertyAssignment => {
+                    DeclarationMeaning::PROPERTY_ASSIGNMENT
+                }
+                Kind::MethodDeclaration => DeclarationMeaning::METHOD,
+                Kind::GetAccessor => DeclarationMeaning::GET_ACCESSOR,
+                Kind::SetAccessor => DeclarationMeaning::SET_ACCESSOR,
+                _ => continue,
+            };
+
+            if !in_destructuring {
+                let effective_name = effective_property_name(arena, name_node);
+                let Some(effective_name) = effective_name else {
+                    continue;
+                };
+                let name_text = arena.text(name_node);
+
+                if let Some(&existing_kind) = seen.get(&effective_name) {
+                    if current_kind.intersects(DeclarationMeaning::METHOD)
+                        && existing_kind.intersects(DeclarationMeaning::METHOD)
+                    {
+                        self.error(
+                            program,
+                            name_node,
+                            &tsgo_diagnostics::DUPLICATE_IDENTIFIER_0,
+                            &[name_text],
+                        );
+                    } else if current_kind.intersects(DeclarationMeaning::PROPERTY_ASSIGNMENT)
+                        && existing_kind.intersects(DeclarationMeaning::PROPERTY_ASSIGNMENT)
+                    {
+                        self.error(
+                            program,
+                            name_node,
+                            &tsgo_diagnostics::AN_OBJECT_LITERAL_CANNOT_HAVE_MULTIPLE_PROPERTIES_WITH_THE_SAME_NAME,
+                            &[],
+                        );
+                    } else if current_kind.intersects(DeclarationMeaning::GET_OR_SET_ACCESSOR)
+                        && existing_kind.intersects(DeclarationMeaning::GET_OR_SET_ACCESSOR)
+                    {
+                        if existing_kind != DeclarationMeaning::GET_OR_SET_ACCESSOR
+                            && current_kind != existing_kind
+                        {
+                            seen.insert(effective_name, current_kind | existing_kind);
+                        } else {
+                            self.error(
+                                program,
+                                name_node,
+                                &tsgo_diagnostics::AN_OBJECT_LITERAL_CANNOT_HAVE_MULTIPLE_GET_SLASHSET_ACCESSORS_WITH_THE_SAME_NAME,
+                                &[],
+                            );
+                            return true;
+                        }
+                    } else {
+                        self.error(
+                            program,
+                            name_node,
+                            &tsgo_diagnostics::AN_OBJECT_LITERAL_CANNOT_HAVE_PROPERTY_AND_ACCESSOR_WITH_THE_SAME_NAME,
+                            &[],
+                        );
+                        return true;
+                    }
+                } else {
+                    seen.insert(effective_name, current_kind);
+                }
+            }
+        }
+        false
+    }
+
     /// Checks that a constructor declaration `node` has no return type
     /// annotation (Go's `checkGrammarConstructorTypeAnnotation`): one present is
     /// `1093`.
@@ -434,6 +569,37 @@ fn modifier_nodes(arena: &tsgo_ast::NodeArena, node: NodeId) -> Vec<NodeId> {
     match modifiers {
         Some(m) => m.list.nodes.clone(),
         None => Vec::new(),
+    }
+}
+
+/// Extracts the effective property name from a property-name node for
+/// duplicate-name checking.
+///
+/// Returns `None` for computed names whose value cannot be statically resolved
+/// (the full Go path through `getEffectivePropertyNameForPropertyNameNode` +
+/// `tryGetNameFromType` is deferred until late-bound members land).
+// Go: internal/ast/utilities.go:GetPropertyNameForPropertyNameNode +
+//     internal/checker/checker.go:getEffectivePropertyNameForPropertyNameNode
+fn effective_property_name(arena: &tsgo_ast::NodeArena, name_node: NodeId) -> Option<String> {
+    match arena.kind(name_node) {
+        Kind::Identifier
+        | Kind::StringLiteral
+        | Kind::NumericLiteral
+        | Kind::PrivateIdentifier
+        | Kind::NoSubstitutionTemplateLiteral
+        | Kind::BigIntLiteral => {
+            let text = arena.text(name_node);
+            if text.is_empty() {
+                return None;
+            }
+            Some(text.to_string())
+        }
+        Kind::ComputedPropertyName => {
+            // DEFER(phase-4-checker-C5+): resolve computed names via
+            // getTypeOfExpression -> tryGetNameFromType.
+            None
+        }
+        _ => None,
     }
 }
 

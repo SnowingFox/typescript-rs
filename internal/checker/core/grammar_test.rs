@@ -198,3 +198,103 @@ fn constructor_with_type_parameters_reports_diagnostic() {
         "Type parameters cannot appear on a constructor declaration."
     );
 }
+
+// Go: internal/checker/grammarchecks.go:checkGrammarObjectLiteralExpression
+// (duplicate property assignment -> TS1117)
+#[test]
+fn object_literal_duplicate_property_reports_1117() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = { a: 1, a: 2 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let dup = diags.iter().find(|d| d.code == 1117);
+    assert!(
+        dup.is_some(),
+        "expected TS1117 for duplicate property; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarObjectLiteralExpression
+// (duplicate get accessor -> TS1118)
+#[test]
+fn object_literal_duplicate_getter_reports_1118() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = { get a() { return 1; }, get a() { return 2; } };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let dup = diags.iter().find(|d| d.code == 1118);
+    assert!(
+        dup.is_some(),
+        "expected TS1118 for duplicate getter; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarObjectLiteralExpression
+// (property + accessor -> TS1119)
+#[test]
+fn object_literal_property_and_accessor_reports_1119() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = { a: 1, get a() { return 2; } };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let dup = diags.iter().find(|d| d.code == 1119);
+    assert!(
+        dup.is_some(),
+        "expected TS1119 for property+accessor; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarObjectLiteralExpression
+// (get + set pair -> no error, valid pairing)
+#[test]
+fn object_literal_get_set_pair_no_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = { get a() { return 1; }, set a(v: number) {} };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let dup = diags.iter().find(|d| d.code == 1118);
+    assert!(
+        dup.is_none(),
+        "get+set pair should NOT report TS1118; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarObjectLiteralExpression
+// (duplicate methods -> TS2300)
+#[test]
+fn object_literal_duplicate_method_reports_2300() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = { m() {}, m() {} };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let dup = diags.iter().find(|d| d.code == 2300);
+    assert!(
+        dup.is_some(),
+        "expected TS2300 for duplicate method; got: {:?}",
+        diags
+    );
+}
