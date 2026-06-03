@@ -23,12 +23,27 @@ use tsgo_tspath::{get_base_file_name, get_normalized_absolute_path, ComparePaths
 
 use crate::{
     categorize_failure, extract_compiler_settings, make_units_from_test, CaseDiff,
-    CategoryHistogram, Runner, SRC_FOLDER,
+    CategoryHistogram, RawCompilerSettings, Runner, SRC_FOLDER,
 };
 
 /// The harness newline sequence (`\r\n`) used throughout the baselines.
 // Go: internal/testutil/tsbaseline/error_baseline.go:harnessNewLine
 const HARNESS_NEW_LINE: &str = "\r\n";
+
+/// The substring whose presence in the LAST test unit marks it as the sole
+/// compiler entry point (a CommonJS `require(...)` call), so the remaining
+/// units are treated as referenced files on the file system.
+// Go: internal/testrunner/compiler_runner.go:requireStr
+const REQUIRE_STR: &str = "require(";
+
+/// Matches a `/// <reference path .../>` directive (`reference` followed by one
+/// whitespace character then `path`) in the LAST test unit — the other trigger
+/// that marks it as the sole compiler entry point.
+// Go: internal/testrunner/compiler_runner.go:referencesRegex
+fn references_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"reference\spath").expect("valid regex"))
+}
 
 /// Which compiler test suite a runner serves.
 ///
@@ -101,7 +116,65 @@ pub fn error_baseline_for_test(code: &str, file_name: &str) -> String {
     if result.diagnostics().is_empty() {
         return tsgo_testutil_baseline::NO_CONTENT.to_string();
     }
-    get_error_baseline(&input_files, result.diagnostics(), false)
+    // Render the per-file sections in Go's `toBeCompiled` ++ `otherFiles` order
+    // (NOT source order). The compile above stays all-files-as-root, so the
+    // diagnostics are unchanged — only the baseline's file-section ORDER moves
+    // to match Go byte-for-byte.
+    let ordered = baseline_file_order(&input_files, &settings);
+    get_error_baseline(&ordered, result.diagnostics(), false)
+}
+
+/// Reorders the test units into Go's baseline-render order — the
+/// `toBeCompiled` group followed by the `otherFiles` group.
+///
+/// Ports the non-`tsConfig` branch of Go's `newCompilerTest` file split, then
+/// `verifyDiagnostics`'s `core.Concatenate(toBeCompiled, otherFiles)`: if the
+/// LAST unit pulls the others in — a CommonJS `require(...)` call, a
+/// `/// <reference path .../>` directive, or an explicit `noImplicitReferences`
+/// setting — it is the sole entry point (`toBeCompiled`) and renders FIRST,
+/// with the remaining units (the referenced `otherFiles`) after it in source
+/// order. Otherwise every unit is compiled together and rendered in source
+/// order. (The `tsConfigFiles` group is deferred with the rest of the in-test
+/// `tsconfig.json` support; with no config there is none to prepend.)
+///
+/// # Examples
+/// ```
+/// use tsgo_testrunner::{baseline_file_order, RawCompilerSettings};
+/// use tsgo_testutil_harnessutil::TestFile;
+/// let a = TestFile { unit_name: "a.ts".into(), content: "export const x = 1;".into() };
+/// let b = TestFile { unit_name: "b.ts".into(), content: "import a = require(\"./a\");".into() };
+/// let files = vec![a.clone(), b.clone()];
+/// // The require-bearing last unit (`b.ts`) renders first.
+/// let ordered = baseline_file_order(&files, &RawCompilerSettings::new());
+/// assert_eq!(ordered[0].unit_name, "b.ts");
+/// assert_eq!(ordered[1].unit_name, "a.ts");
+/// ```
+///
+/// Side effects: none (pure).
+// Go: internal/testrunner/compiler_runner.go:newCompilerTest (toBeCompiled/otherFiles split)
+//     + internal/testrunner/compiler_runner.go:compilerTest.verifyDiagnostics (Concatenate)
+pub fn baseline_file_order(
+    input_files: &[TestFile],
+    settings: &RawCompilerSettings,
+) -> Vec<TestFile> {
+    if input_files.len() < 2 {
+        return input_files.to_vec();
+    }
+    let last = &input_files[input_files.len() - 1];
+    let no_implicit_references = settings
+        .get("noimplicitreferences")
+        .is_some_and(|v| !v.is_empty());
+    if no_implicit_references
+        || last.content.contains(REQUIRE_STR)
+        || references_regex().is_match(&last.content)
+    {
+        let mut ordered = Vec::with_capacity(input_files.len());
+        ordered.push(last.clone());
+        ordered.extend(input_files[..input_files.len() - 1].iter().cloned());
+        ordered
+    } else {
+        input_files.to_vec()
+    }
 }
 
 /// Produces the `.errors.txt` baseline string for `diagnostics` against

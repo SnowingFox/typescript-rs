@@ -4536,3 +4536,190 @@ dump. Not committed (left to the parent).
 - **Byte-exact corpus PASS for cases 4/10** — blocked by the harness multi-file
   `.errors.txt` file-ORDERING gap (Go's `toBeCompiled`/`otherFiles` split) +
   (case 10) the deferred `TS2702`. blocked-by: a testrunner harness round.
+
+# Round 32 — harness multi-file .errors.txt file ordering
+
+Round goal: fix the wall Round 31 hit — multi-file `.errors.txt` baselines were
+rendered in SOURCE order, while Go (and `tsc`) render the per-file sections in
+the `toBeCompiled` ++ `otherFiles` order, so a case whose last unit pulls the
+others in via `require(` (or a `/// <reference path .../>` / `noImplicitReferences`)
+listed its file blocks in the WRONG order and failed the byte-exact compare even
+when its diagnostics were byte-correct. SOLO lane, strict `/tdd` red→green
+vertical slices; the only allowed behavior change is FILE ORDERING (no diagnostic
+content change).
+
+## Step 0 — diagnose + measure leverage (before the fix)
+
+A TEMP `#[ignore]`d, fix-INDEPENDENT diagnostic
+(`temp_round32_ordering_only_dump`, since REMOVED) split every FAILED multi-file
+case's produced and committed baselines into (top-compact-list+global header,
+the `==== file (N errors) ====` section blocks) and flagged a case as
+ORDERING-ONLY iff the header was byte-identical AND the section MULTISET was
+identical AND the order differed. Result over the full corpus (222 cases):
+
+- **ORDERING-ONLY failures: 1 — `exportAssignmentMerging4.ts`.**
+- **SAME-SECTIONS-but-header-differs: 0** (no case needs reorder PLUS another
+  fix, so the reorder cannot partially change any other case).
+
+Per-case analysis of the `exportAssignmentMerging*` family confirms why only
+case 4 is ordering-only:
+
+| case | last unit | split trigger | render order vs source | ordering-only? |
+|---|---|---|---|---|
+| 4 | `b.ts` does `import a = require("./a")` | `require(` | `[b.ts, a.ts]` ≠ source `[a.ts, b.ts]` | **YES** (diagnostics already byte-correct) |
+| 10 | `b.ts` `import { Base } from "./a"` | none | `[a.ts, b.ts]` == source | no — also misses deferred `TS2702` (header differs) |
+| 7 | `b.ts` `import { Bar } from "./a"` | none | `[a.ts, b.ts]` == source | no — needs deferred alias-following `TS2309` + `TS2305` (header differs) |
+| 3, 9 | — | — | — | no — missing `TS2309` entirely (header differs) |
+
+So the honest leverage of THIS fix is **+1 byte-exact PASS** (`exportAssignmentMerging4`).
+The fix is still the right, faithful port: it makes the rendered baseline
+byte-faithful to Go's file order for ALL multi-file cases, so future checker
+fixes (e.g. case 10's `TS2702`, case 7's alias-following) won't re-hit this wall.
+
+## Go ground truth (read + `// Go:`-anchored)
+
+- **`internal/testrunner/compiler_runner.go:newCompilerTest(263-359)`** — the
+  non-`tsConfig` branch: `lastUnit := units[len(units)-1]`; if
+  `configuration["noimplicitreferences"] != ""` OR `strings.Contains(lastUnit.content, "require(")`
+  OR `referencesRegex.MatchString(lastUnit.content)` (`reference\spath`), then
+  `toBeCompiled = [lastUnit]` and `otherFiles = units[:len(units)-1]` (source
+  order); otherwise `toBeCompiled = core.Map(units, …)` (every unit, source
+  order) and `otherFiles = nil`.
+- **`internal/testrunner/compiler_runner.go:compilerTest.verifyDiagnostics(361)`**
+  — the baseline's file iteration list is
+  `core.Concatenate(c.tsConfigFiles, core.Concatenate(c.toBeCompiled, c.otherFiles))`,
+  i.e. `tsConfigFiles` then `toBeCompiled` then `otherFiles`. (No in-test
+  `tsconfig.json` in this round → no `tsConfigFiles` to prepend.)
+- **`internal/testutil/tsbaseline/error_baseline.go:iterateErrorBaseline(72)`** —
+  the diagnostics are SORTED (`CompareASTDiagnostics`: file, pos, len, code) for
+  the top compact list and the global (file-less) section, but the PER-FILE
+  sections are emitted by iterating `inputFiles` in the GIVEN order — so the
+  baseline's file-section order is exactly the `verifyDiagnostics` concat order.
+  The global/no-file section sits between the top compact list and the first
+  `==== file ====` header, unaffected by file order.
+
+## The Rust gap + fix
+
+`compiler_runner.rs:error_baseline_for_test` built `input_files` from the parsed
+units in SOURCE order and rendered the baseline over that source-ordered list —
+it never ported the `toBeCompiled`/`otherFiles` split. The fix is a single new
+pure helper plus a one-line reorder at the render site; the COMPILE call is
+unchanged (all units stay roots, `other_files = []`), so the produced diagnostics
+are identical — only the render order moves:
+
+- `compiler_runner.rs`:
+  - new `const REQUIRE_STR = "require("` + `references_regex()` (`reference\spath`,
+    a `OnceLock<Regex>`), mirroring Go's `requireStr` / `referencesRegex`.
+  - new `pub fn baseline_file_order(input_files, settings) -> Vec<TestFile>` —
+    ports `newCompilerTest`'s split + `verifyDiagnostics`'s `Concatenate`: a
+    `len < 2` identity short-circuit; else if the LAST unit has `require(`, a
+    `reference\spath`, or `noImplicitReferences != ""`, return `[last, ..rest]`;
+    else source order.
+  - `error_baseline_for_test` now renders over `baseline_file_order(&input_files,
+    &settings)` (compile still over the source-order `input_files`).
+
+## RED→GREEN + guard tests (`compiler_runner_test.rs`, +6)
+
+- `multi_file_require_baseline_orders_entry_file_first` (RED→GREEN headline,
+  byte-exact) — drives the real `exportAssignmentMerging4` source through
+  `error_baseline_for_test` and asserts byte-equality with the committed
+  `exportAssignmentMerging4.errors.txt`. RED before the fix (sections rendered
+  `a.ts` then `b.ts`, top list + section bytes otherwise identical); GREEN after
+  (`b.ts` entry file first).
+- `multi_file_require_last_unit_renders_first` (GUARD) — a hand-built 2-file
+  inline case whose last unit has `require(` renders that section first
+  (independent of any committed corpus).
+- `multi_file_without_require_keeps_source_order` (GUARD, no regression) — a
+  2-file case whose last unit pulls nothing in keeps SOURCE order (`a.ts` before
+  `b.ts`), exercising the `toBeCompiled = all units` branch.
+- `baseline_file_order_single_file_is_identity` (GUARD, single-file unchanged) —
+  a one-unit case is never reordered even with a `require(` (the `len < 2`
+  short-circuit).
+- `baseline_file_order_branches` (branch coverage) — `require(` / `reference path`
+  / `noImplicitReferences` each trigger last-unit-first; a plain last unit and an
+  EMPTY `noImplicitReferences` value keep source order.
+- `global_errors_render_before_file_sections_in_given_order` (GUARD, global
+  placement) — a hand-built file-less (global) diagnostic renders BETWEEN the top
+  compact list and the first `==== file ====` header, and the per-file sections
+  follow the given (reordered) order — proving the reorder only moves file
+  sections, never the global block.
+
+## Measurement — full corpus BEFORE→AFTER (`tests/cases/compiler`, 222 ran)
+
+| metric | BEFORE | AFTER | Δ |
+|---|---|---|---|
+| **passed** | 127 (57.2%) | **128 (57.7%)** | **+1** |
+| failed | 94 | 93 | −1 |
+| errored | 1 | 1 | 0 |
+| no_baseline_but_errors | 16 | 16 | 0 |
+| missing_all_errors | 61 | 61 | 0 |
+| **divergent** | **17** | **16** | **−1** |
+| every extra / missing / wrong_code code count | — | — | **byte-IDENTICAL** |
+
+`tests/cases/conformance` (19 ran): passed 13 → 13 (no regression; categories +
+top extra/missing UNCHANGED).
+
+**Proof it is ORDERING-ONLY:** the full `extra` histogram (`TS2339 ×16`,
+`TS7026 ×12`, `TS2304 ×10`, `TS2345 ×8`, `TS2322 ×3`, `TS1005 ×2`, `TS2495 ×2`,
+`TS2344/2591/2769/5108/18048 ×1`), the full `missing` histogram (`TS2300 ×30`,
+… `TS2309 ×3`, …), and the lone `wrong_code` pair (`TS2552 -> TS2304 ×1`) are ALL
+byte-identical BEFORE and AFTER — no diagnostic content changed. `passed` rose
+monotonically by exactly 1; the flipped case (`exportAssignmentMerging4`) left
+`divergent` (17 → 16) for PASS; `missing_all_errors`/`no_baseline_but_errors`/
+`errored` are unchanged. No PASS→FAIL anywhere.
+
+## 150-subset + 30-case BEFORE→AFTER
+
+`expanded_compiler_subset_parity_smoke`: **94/56/0 → 95/55/0** (+1 pass).
+`exportAssignmentMerging4` (16 lines, in the ≤25-line / 150 cap) flips
+`divergent` → PASS, so `divergent 9 → 8`; `missing_all_errors` (40) and
+`no_baseline_but_errors` (7) are unchanged, and every pinned `extra`/`missing`
+assertion (`top_extra=[(2339,5),(2304,4)]`, `extra 2339==5`, `2583==None`,
+`2769==1`, `1005/1003/1155==None`, `2451==None`, `top_missing=[(2874,7)]`,
+`7026 extra/missing==None`, `missing 2300==None`) re-asserted UNCHANGED (an
+ordering-only flip removes no `missing`/`extra` mismatch). The snapshot was
+updated to the actual `passed=95`/`failed=55`/`divergent=8`. The 30-case
+`curated_compiler_subset_parity_smoke` (21/9/0) is UNCHANGED (it has no
+`exportAssignmentMerging` case).
+
+## Honest flip count
+
+**+1 byte-exact PASS flip: `exportAssignmentMerging4`** (the ONE case whose only
+defect was file-section ordering). Cases 10/7/3/9 remain FAILED for header-content
+reasons OUTSIDE ordering (deferred `TS2702` / alias-following `TS2309` + `TS2305`
+/ missing `TS2309`), so they are correctly NOT flipped by this round. The fix is
+ordering infrastructure: it byte-aligns the file order for EVERY multi-file case,
+unblocking those future checker rounds from re-hitting this wall.
+
+## Gate results (Round 32)
+
+- `cargo test -p tsgo_testrunner --lib` — GREEN (57 lib [+6] + 2 ignored
+  [full-corpus measurement + … ]; both subset snapshots re-pinned: 150-subset
+  95/55/0 with `divergent=8`, 30-case 21/9/0; temp dump REMOVED).
+- `cargo test -p tsgo_compiler` — GREEN (lib + 11 doctests; sibling suite kept
+  green — no diagnostic content changed).
+- `cargo clippy -p tsgo_testrunner --all-targets -- -D warnings` — clean (the
+  `last.content.contains(REQUIRE_STR)` uses `str::contains` — no `manual_contains`).
+  `cargo fmt` then `cargo fmt -- --check` — clean.
+  `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; additive/surgical (two new constants/helpers + a one-line
+reorder at the render site); the compile path is UNCHANGED so the change is
+provably ordering-only; no test weakened/deleted; no new dependency (`Cargo.lock`
+untouched). Tree clean — only `compiler_runner.rs` + `compiler_runner_test.rs`
+modified, plus this worklog; no temp dump. Not committed (left to the parent).
+
+## DEFER list (blocked-by) — Round 32
+
+- **`tsConfigFiles` group in the render order** — Go prepends `c.tsConfigFiles`
+  to the concat; the port has no in-test `tsconfig.json` yet, so there is nothing
+  to prepend. blocked-by: `tsconfig.json` unit parsing +
+  `tsConfig.ParsedConfig.FileNames`-based `toBeCompiled`/`otherFiles` split (the
+  `tsConfig != nil` branch of `newCompilerTest`).
+- **Compiling `otherFiles` as non-root (Go's `CompileFiles(toBeCompiled,
+  otherFiles, …)`)** — this round keeps the compile all-files-as-root to
+  guarantee an ordering-ONLY change (the targeted cases already produce
+  byte-correct diagnostics that way). Faithfully splitting root vs non-root at
+  compile time could change WHICH diagnostics are produced (module-resolution
+  reachability), so it is deferred to a round that can verify it against the
+  corpus. blocked-by: a measurement confirming root/non-root compile parity.

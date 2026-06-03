@@ -129,6 +129,216 @@ fn error_baseline_matches_committed_reference() {
     assert_eq!(baseline, reference);
 }
 
+// Round 32 (RED->GREEN headline): a multi-file case whose LAST unit pulls the
+// others in via `require(` renders its `.errors.txt` file sections in Go's
+// `toBeCompiled`/`otherFiles` order (the require-bearing entry file FIRST, then
+// the referenced files), so the produced baseline matches the committed
+// reference byte-for-byte. `exportAssignmentMerging4` is the corpus case whose
+// ONLY remaining defect is this file-section ordering (its diagnostics are
+// already byte-correct), so it is the end-to-end fixture: RED before the order
+// port (sections rendered in source order, `a.ts` first); GREEN after.
+// Go: internal/testrunner/compiler_runner.go:newCompilerTest (toBeCompiled/otherFiles)
+//     + compilerTest.verifyDiagnostics (core.Concatenate(toBeCompiled, otherFiles))
+#[test]
+fn multi_file_require_baseline_orders_entry_file_first() {
+    let testdata = Path::new(tsgo_repo::test_data_path());
+    let case_path = testdata
+        .join("tests")
+        .join("cases")
+        .join("compiler")
+        .join("exportAssignmentMerging4.ts");
+    let reference_path = testdata
+        .join("baselines")
+        .join("reference")
+        .join("compiler")
+        .join("exportAssignmentMerging4.errors.txt");
+    let source = std::fs::read_to_string(&case_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", case_path.display()));
+    let reference = std::fs::read_to_string(&reference_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", reference_path.display()));
+
+    let baseline = error_baseline_for_test(&source, "exportAssignmentMerging4.ts");
+
+    assert_eq!(
+        baseline, reference,
+        "the require-bearing entry file (b.ts) must render before the referenced \
+         file (a.ts), matching Go's toBeCompiled/otherFiles order"
+    );
+}
+
+// Round 32 (GUARD): a hand-built multi-file inline case whose LAST unit has a
+// `require(` renders that unit's section FIRST (independent of any committed
+// corpus baseline) — the reorder behavior exercised through the public
+// `error_baseline_for_test`.
+#[test]
+fn multi_file_require_last_unit_renders_first() {
+    let code = concat!(
+        "// @filename: a.ts\n",
+        "var x: number = \"s\";\n",
+        "// @filename: b.ts\n",
+        "var y = require(\"./a\");\n",
+    );
+    let baseline = error_baseline_for_test(code, "case.ts");
+    let a_idx = baseline.find("==== a.ts").expect("a.ts section present");
+    let b_idx = baseline.find("==== b.ts").expect("b.ts section present");
+    assert!(
+        b_idx < a_idx,
+        "the require-bearing last unit (b.ts) renders before a.ts; baseline:\n{baseline}"
+    );
+}
+
+// Round 32 (GUARD, no regression): a multi-file case whose last unit does NOT
+// pull the others in keeps SOURCE order (Go's `toBeCompiled = all units`
+// branch) — a.ts before b.ts.
+#[test]
+fn multi_file_without_require_keeps_source_order() {
+    let code = concat!(
+        "// @filename: a.ts\n",
+        "var x: number = \"s\";\n",
+        "// @filename: b.ts\n",
+        "var y: number = \"t\";\n",
+    );
+    let baseline = error_baseline_for_test(code, "case.ts");
+    let a_idx = baseline.find("==== a.ts").expect("a.ts section present");
+    let b_idx = baseline.find("==== b.ts").expect("b.ts section present");
+    assert!(
+        a_idx < b_idx,
+        "without a require/reference last unit, source order is kept; baseline:\n{baseline}"
+    );
+}
+
+// Round 32 (GUARD, single-file unchanged): a one-unit case is never reordered
+// even when it contains a `require(` — the `len < 2` short-circuit of Go's
+// split.
+#[test]
+fn baseline_file_order_single_file_is_identity() {
+    let files = vec![TestFile {
+        unit_name: "/.src/a.ts".to_string(),
+        content: "var r = require(\"x\");".to_string(),
+    }];
+    let ordered = baseline_file_order(&files, &RawCompilerSettings::new());
+    assert_eq!(ordered, files, "a single unit is rendered unchanged");
+}
+
+// Round 32 (branch coverage): `baseline_file_order` triggers the last-unit-first
+// split on a `require(`, a `/// <reference path .../>`, OR `noImplicitReferences`,
+// and otherwise preserves source order.
+// Go: internal/testrunner/compiler_runner.go:newCompilerTest (toBeCompiled/otherFiles)
+#[test]
+fn baseline_file_order_branches() {
+    let a = TestFile {
+        unit_name: "a.ts".to_string(),
+        content: "export const x = 1;".to_string(),
+    };
+    let b_plain = TestFile {
+        unit_name: "b.ts".to_string(),
+        content: "var y = 1;".to_string(),
+    };
+    let b_ref = TestFile {
+        unit_name: "b.ts".to_string(),
+        content: "/// <reference path=\"a.ts\" />".to_string(),
+    };
+
+    // No trigger -> source order.
+    let ordered = baseline_file_order(&[a.clone(), b_plain.clone()], &RawCompilerSettings::new());
+    assert_eq!(ordered[0].unit_name, "a.ts");
+    assert_eq!(ordered[1].unit_name, "b.ts");
+
+    // `/// <reference path .../>` in the last unit -> last unit first.
+    let ordered = baseline_file_order(&[a.clone(), b_ref], &RawCompilerSettings::new());
+    assert_eq!(
+        ordered[0].unit_name, "b.ts",
+        "reference-path last unit first"
+    );
+    assert_eq!(ordered[1].unit_name, "a.ts");
+
+    // `noImplicitReferences` forces the split even with a plain last unit.
+    let mut settings = RawCompilerSettings::new();
+    settings.insert("noimplicitreferences".to_string(), "true".to_string());
+    let ordered = baseline_file_order(&[a.clone(), b_plain.clone()], &settings);
+    assert_eq!(
+        ordered[0].unit_name, "b.ts",
+        "noImplicitReferences forces last-unit-first"
+    );
+
+    // An EMPTY `noImplicitReferences` value does NOT trigger (Go's `!= ""`).
+    let mut empty = RawCompilerSettings::new();
+    empty.insert("noimplicitreferences".to_string(), String::new());
+    let ordered = baseline_file_order(&[a.clone(), b_plain.clone()], &empty);
+    assert_eq!(
+        ordered[0].unit_name, "a.ts",
+        "an empty noImplicitReferences value keeps source order"
+    );
+}
+
+// Round 32 (GUARD, global section placement): file-less (global) diagnostics
+// render BETWEEN the top compact list and the first `==== file ====` section,
+// and the per-file sections follow the GIVEN file order (proving the reorder
+// only moves file sections, never the global block).
+// Go: internal/testutil/tsbaseline/error_baseline.go:iterateErrorBaseline (global before files)
+#[test]
+fn global_errors_render_before_file_sections_in_given_order() {
+    let a = Rc::new(HarnessFile::new(
+        "/.src/a.ts".to_string(),
+        "var x = 1;".to_string(),
+    ));
+    let b = Rc::new(HarnessFile::new(
+        "/.src/b.ts".to_string(),
+        "var y = 1;".to_string(),
+    ));
+    let global = HarnessDiagnostic::new(
+        None,
+        5055,
+        Category::Error,
+        "Global problem.".to_string(),
+        0,
+        0,
+    );
+    let in_a = HarnessDiagnostic::new(
+        Some(a),
+        2300,
+        Category::Error,
+        "A problem.".to_string(),
+        0,
+        3,
+    );
+    let in_b = HarnessDiagnostic::new(
+        Some(b),
+        2300,
+        Category::Error,
+        "B problem.".to_string(),
+        0,
+        3,
+    );
+    // Pass the files in b-then-a order: the file sections must follow it.
+    let files = vec![
+        TestFile {
+            unit_name: "/.src/b.ts".to_string(),
+            content: "var y = 1;".to_string(),
+        },
+        TestFile {
+            unit_name: "/.src/a.ts".to_string(),
+            content: "var x = 1;".to_string(),
+        },
+    ];
+    let baseline = get_error_baseline(&files, &[global, in_a, in_b], false);
+
+    let global_idx = baseline
+        .find("!!! error TS5055: Global problem.")
+        .expect("global error line present");
+    let first_header = baseline.find("==== ").expect("a file header present");
+    assert!(
+        global_idx < first_header,
+        "global errors precede the first file section; baseline:\n{baseline}"
+    );
+    let b_idx = baseline.find("==== b.ts").expect("b.ts header");
+    let a_idx = baseline.find("==== a.ts").expect("a.ts header");
+    assert!(
+        b_idx < a_idx,
+        "file sections follow the given (reordered) order; baseline:\n{baseline}"
+    );
+}
+
 // `remove_test_path_prefixes` strips the harness virtual-path prefixes.
 // Go: internal/testutil/tsbaseline/util.go:removeTestPathPrefixes
 #[test]
@@ -814,11 +1024,24 @@ fn expanded_compiler_subset_parity_smoke() {
     // (full-corpus passed 125 -> 127, `missing TS1225 ×2 -> ×0`). No `extra` pin
     // moves (the flipped case was a pure `missing TS1225`), and the binding-
     // pattern guard prevents over-firing.
+    //
+    // Round 32 (harness multi-file `.errors.txt` file ordering): the runner now
+    // renders the per-file sections in Go's `toBeCompiled` ++ `otherFiles` order
+    // (`newCompilerTest`'s split + `verifyDiagnostics`'s `core.Concatenate`)
+    // instead of source order — the `require(`-bearing / `/// <reference>` /
+    // `noImplicitReferences` last unit renders FIRST. `exportAssignmentMerging4`
+    // (whose `b.ts` does `import a = require("./a")`) was the ONE subset case
+    // whose ONLY defect was this ordering (its diagnostics already byte-matched
+    // after Round 31's TS2309), so it flips `divergent` -> PASS (passed 94 -> 95,
+    // divergent 9 -> 8). The change is ORDERING-ONLY: the compile stays
+    // all-files-as-root, so NO diagnostic content changed and no `extra`/`missing`
+    // pin moves; `missing_all_errors` (40) and `no_baseline_but_errors` (7) are
+    // unchanged.
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 94,
-            failed: 56,
+            passed: 95,
+            failed: 55,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -914,8 +1137,15 @@ fn expanded_compiler_subset_parity_smoke() {
     // misses the deferred TS2702. CRUCIALLY there is NO `extra TS2309` anywhere
     // (the type-only guards hold), so `passed` is UNCHANGED at 94 — unlike the
     // prior over-firing attempt which regressed this subset 94 -> 92.
+    //
+    // Round 32 (harness multi-file `.errors.txt` file ordering):
+    // `exportAssignmentMerging4` was ordering-only divergent — its diagnostics
+    // already byte-matched, only the file-section order differed. The
+    // `toBeCompiled`/`otherFiles` render order flips it to PASS, so `divergent`
+    // drops 9 -> 8; `missing_all_errors` (40) is unchanged (an ordering-only
+    // flip removes no `missing`/`extra` mismatch).
     assert_eq!(hist.missing_all_errors, 40);
-    assert_eq!(hist.divergent, 9);
+    assert_eq!(hist.divergent, 8);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare
