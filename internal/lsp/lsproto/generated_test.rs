@@ -3786,3 +3786,44 @@ fn text_document_edit_annotated_edit_in_vec() {
     );
     assert_eq!(serde_json::to_string(&v).unwrap(), json);
 }
+
+// Headline (real RED -> GREEN): the `textDocument/_vs_onAutoInsert` response
+// item (the result of the auto-close-JSX-tag provider) carries the text-edit
+// format and the snippet edit; it round-trips byte-for-byte in Go field order.
+// Go: lsp_generated.go:VsOnAutoInsertResponseItem
+#[test]
+fn vs_on_auto_insert_response_item_round_trip() {
+    let v = VsOnAutoInsertResponseItem {
+        vs_text_edit_format: InsertTextFormat::SNIPPET,
+        vs_text_edit: TextEdit {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 5,
+                },
+                end: Position {
+                    line: 0,
+                    character: 5,
+                },
+            },
+            new_text: "$0</div>".to_string(),
+        },
+    };
+    let json = r#"{"_vs_textEditFormat":2,"_vs_textEdit":{"range":{"start":{"line":0,"character":5},"end":{"line":0,"character":5}},"newText":"$0</div>"}}"#;
+    assert_eq!(serde_json::to_string(&v).unwrap(), json);
+    let back: VsOnAutoInsertResponseItem = serde_json::from_str(json).unwrap();
+    assert_eq!(v, back);
+}
+
+// green-on-arrival: `_vs_textEdit` is a non-nullable pointer in Go (it rejects
+// an explicit `null`), and both fields are required.
+// Go: lsp_generated.go:VsOnAutoInsertResponseItem.UnmarshalJSONFrom
+#[test]
+fn vs_on_auto_insert_response_item_rejects_null_text_edit_and_requires_fields() {
+    let null_edit = r#"{"_vs_textEditFormat":2,"_vs_textEdit":null}"#;
+    assert!(serde_json::from_str::<VsOnAutoInsertResponseItem>(null_edit).is_err());
+    let missing_edit = r#"{"_vs_textEditFormat":2}"#;
+    assert!(serde_json::from_str::<VsOnAutoInsertResponseItem>(missing_edit).is_err());
+    let missing_format = r#"{"_vs_textEdit":{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"newText":"x"}}"#;
+    assert!(serde_json::from_str::<VsOnAutoInsertResponseItem>(missing_format).is_err());
+}

@@ -15,6 +15,7 @@
 mod host;
 mod languageservice;
 
+pub mod autoinsert;
 pub mod completions;
 pub mod definition;
 pub mod diagnostics;

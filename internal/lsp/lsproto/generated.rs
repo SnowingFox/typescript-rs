@@ -2135,6 +2135,24 @@ lsp_object! {
 }
 
 lsp_object! {
+    /// Response item for the `textDocument/_vs_onAutoInsert` request: the format
+    /// of the edit ([`InsertTextFormat`]) plus the [`TextEdit`] to apply (e.g.
+    /// the auto-inserted JSX closing tag/fragment).
+    ///
+    /// Go models `_vs_textEdit` as a required, non-nullable `*TextEdit` (it
+    /// rejects an explicit `null`); the auto-insert response is this item or
+    /// `null` (`VsOnAutoInsertResponseItemOrNull`), which the language service
+    /// surfaces as an `Option<VsOnAutoInsertResponseItem>`.
+    // Go: internal/lsp/lsproto/lsp_generated.go:VsOnAutoInsertResponseItem
+    VsOnAutoInsertResponseItem {
+        ["The format of the text edit (plaintext or snippet)."]
+        req vs_text_edit_format: InsertTextFormat => "_vs_textEditFormat",
+        ["The text edit to apply for the auto-insertion."]
+        reqnn vs_text_edit: TextEdit => "_vs_textEdit",
+    }
+}
+
+lsp_object! {
     /// Document-highlight request options.
     // Go: internal/lsp/lsproto/lsp_generated.go:DocumentHighlightOptions
     DocumentHighlightOptions {
@@ -3780,8 +3798,12 @@ impl<'de> Deserialize<'de> for CompletionItemKind {
 
 /// Whether completion insert text is plain text or a snippet
 /// (LSP `InsertTextFormat`, an integer enum).
+///
+/// `Default` is the integer zero value (matching Go's `uint32` zero value),
+/// present so the type can be a required field of a derived-`Default` LSP
+/// object such as [`VsOnAutoInsertResponseItem`].
 // Go: internal/lsp/lsproto/lsp_generated.go:InsertTextFormat
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InsertTextFormat(pub u32);
 
 impl InsertTextFormat {
