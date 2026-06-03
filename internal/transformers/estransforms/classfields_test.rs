@@ -16,16 +16,11 @@ fn check_downlevel(input: &str, expected: &str) {
 // Go: internal/transformers/estransforms/classfields.go:transformClassMembers (instance fields)
 // Tracer bullet: a plain instance field initializer is hoisted into a
 // synthesized constructor as a `this.x = ...` assignment.
-//
-// The synthesized constructor body prints on a single line because Go's
-// `Block.MultiLine` flag is not yet carried by the Rust AST (a documented
-// printer `TODO(port)`); the lowering itself (field -> `this.x = 1`) is the
-// behavior under test.
 #[test]
 fn instance_field_initializer_moves_to_constructor() {
     check_downlevel(
         "class C { x = 1 }",
-        "class C {\n    constructor() { this.x = 1; }\n}",
+        "class C {\n    constructor() {\n        this.x = 1;\n    }\n}",
     );
 }
 
@@ -36,7 +31,7 @@ fn instance_field_initializer_moves_to_constructor() {
 fn multiple_instance_fields_move_to_constructor() {
     check_downlevel(
         "class C { x = 1; y = 2 }",
-        "class C {\n    constructor() { this.x = 1; this.y = 2; }\n}",
+        "class C {\n    constructor() {\n        this.x = 1;\n        this.y = 2;\n    }\n}",
     );
 }
 
@@ -47,7 +42,7 @@ fn multiple_instance_fields_move_to_constructor() {
 fn field_inits_prepend_to_existing_constructor() {
     check_downlevel(
         "class C { x = 1; constructor() { this.y = 2; } }",
-        "class C {\n    constructor() { this.x = 1; this.y = 2; }\n}",
+        "class C {\n    constructor() {\n        this.x = 1;\n        this.y = 2;\n    }\n}",
     );
 }
 
@@ -58,7 +53,7 @@ fn field_inits_prepend_to_existing_constructor() {
 fn derived_class_synthesizes_constructor_with_super() {
     check_downlevel(
         "class C extends B { x = 1 }",
-        "class C extends B {\n    constructor() { super(...arguments); this.x = 1; }\n}",
+        "class C extends B {\n    constructor() {\n        super(...arguments);\n        this.x = 1;\n    }\n}",
     );
 }
 
@@ -69,7 +64,7 @@ fn derived_class_synthesizes_constructor_with_super() {
 fn field_inits_inserted_after_super_call() {
     check_downlevel(
         "class C extends B { x = 1; constructor() { super(); this.y = 2; } }",
-        "class C extends B {\n    constructor() { super(); this.x = 1; this.y = 2; }\n}",
+        "class C extends B {\n    constructor() {\n        super();\n        this.x = 1;\n        this.y = 2;\n    }\n}",
     );
 }
 
@@ -91,7 +86,7 @@ fn static_field_becomes_assignment_after_class() {
 fn private_field_initializer_uses_weakmap_set() {
     check_downlevel(
         "class C { #x = 1 }",
-        "var _C_x = new WeakMap();\nclass C {\n    constructor() { _C_x.set(this, 1); }\n}",
+        "var _C_x = new WeakMap();\nclass C {\n    constructor() {\n        _C_x.set(this, 1);\n    }\n}",
     );
 }
 
@@ -102,7 +97,7 @@ fn private_field_initializer_uses_weakmap_set() {
 fn private_field_read_uses_weakmap_get() {
     check_downlevel(
         "class C { #x = 1; m() { return this.#x; } }",
-        "var _C_x = new WeakMap();\nclass C {\n    constructor() { _C_x.set(this, 1); }\n    m() { return _C_x.get(this); }\n}",
+        "var _C_x = new WeakMap();\nclass C {\n    constructor() {\n        _C_x.set(this, 1);\n    }\n    m() { return _C_x.get(this); }\n}",
     );
 }
 
@@ -113,7 +108,7 @@ fn private_field_read_uses_weakmap_get() {
 fn private_field_write_uses_weakmap_set() {
     check_downlevel(
         "class C { #x = 1; m(v) { this.#x = v; } }",
-        "var _C_x = new WeakMap();\nclass C {\n    constructor() { _C_x.set(this, 1); }\n    m(v) { _C_x.set(this, v); }\n}",
+        "var _C_x = new WeakMap();\nclass C {\n    constructor() {\n        _C_x.set(this, 1);\n    }\n    m(v) { _C_x.set(this, v); }\n}",
     );
 }
 
@@ -125,7 +120,7 @@ fn private_field_write_uses_weakmap_set() {
 fn computed_field_name_is_hoisted_to_temp() {
     check_downlevel(
         "class C { [k] = 1 }",
-        "var _a = k;\nclass C {\n    constructor() { this[_a] = 1; }\n}",
+        "var _a = k;\nclass C {\n    constructor() {\n        this[_a] = 1;\n    }\n}",
     );
 }
 
@@ -138,7 +133,7 @@ fn computed_field_name_is_hoisted_to_temp() {
 fn class_expression_instance_field_moves_to_constructor() {
     check_downlevel(
         "const C = class { x = 1 };",
-        "const C = class {\n    constructor() { this.x = 1; }\n};",
+        "const C = class {\n    constructor() {\n        this.x = 1;\n    }\n};",
     );
 }
 
@@ -239,7 +234,7 @@ fn class_expression_multiple_static_fields_share_one_temp() {
 fn class_expression_instance_and_static_fields_lower_together() {
     check_downlevel(
         "const C = class { x = 1; static y = 2 };",
-        "var _a;\nconst C = (_a = class {\n    constructor() { this.x = 1; }\n}, _a.y = 2, _a);",
+        "var _a;\nconst C = (_a = class {\n    constructor() {\n        this.x = 1;\n    }\n}, _a.y = 2, _a);",
     );
 }
 

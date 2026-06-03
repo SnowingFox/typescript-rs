@@ -948,6 +948,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_lsp"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tsgo_core",
+ "tsgo_jsonrpc",
+ "tsgo_lsproto",
+ "tsgo_tspath",
+]
+
+[[package]]
 name = "tsgo_lsproto"
 version = "0.0.0"
 dependencies = [

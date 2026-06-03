@@ -68,6 +68,7 @@ use tsgo_ast::{
     Kind, ModifierFlags, NodeArena, NodeData, NodeFlags, NodeId, NodeList, VisitOptions,
 };
 use tsgo_printer::emitcontext::AutoGenerateOptions;
+use tsgo_printer::emitflags::EmitFlags;
 use tsgo_printer::EmitContext;
 
 /// Builds a [`Transformer`] that lowers class fields, sharing the pipeline's
@@ -124,7 +125,7 @@ fn class_fields_visit_ec(ec: &mut EmitContext, node: NodeId) -> NodeId {
             if let Some(lowered) = try_lower_class_expression(ec, node) {
                 return lowered;
             }
-        } else if let Some(lowered) = try_lower_simple_class(ec.arena_mut(), node) {
+        } else if let Some(lowered) = try_lower_simple_class_ec(ec, node) {
             return lowered;
         }
     }
@@ -228,6 +229,10 @@ struct ClassLoweringParts {
     /// The rebuilt class node (declaration or expression, per the input kind),
     /// with instance fields moved into a constructor and static fields removed.
     class: NodeId,
+    /// The synthesized/updated constructor body block, if any. Callers with
+    /// emit-context access set `EmitFlags::MULTI_LINE` on this node so the
+    /// printer formats it with newlines (matching Go's `Block.MultiLine`).
+    constructor_body: Option<NodeId>,
     /// Statements that must be hoisted *before* the class: computed-name temp
     /// caches (`var _a = k;`) then `var _C_x = new WeakMap();` brand declarations.
     pre_statements: Vec<NodeId>,
@@ -369,31 +374,32 @@ fn lower_class_parts(arena: &mut NodeArena, node: NodeId) -> Option<ClassLowerin
 
     // A constructor is only synthesized/updated when there are instance field
     // initializers to move or a constructor already exists.
-    let new_members = if !field_assignments.is_empty() || existing_constructor.is_some() {
-        let is_derived = heritage_has_extends(arena, heritage_clauses.as_ref());
-        let body =
-            build_constructor_body(arena, existing_constructor, is_derived, field_assignments);
-        let parameters = match existing_constructor {
-            Some(constructor) => match arena.data(constructor) {
-                NodeData::ConstructorDeclaration(d) => d.parameters.clone(),
-                _ => NodeList::new(vec![]),
-            },
-            None => NodeList::new(vec![]),
+    let (new_members, constructor_body) =
+        if !field_assignments.is_empty() || existing_constructor.is_some() {
+            let is_derived = heritage_has_extends(arena, heritage_clauses.as_ref());
+            let body =
+                build_constructor_body(arena, existing_constructor, is_derived, field_assignments);
+            let parameters = match existing_constructor {
+                Some(constructor) => match arena.data(constructor) {
+                    NodeData::ConstructorDeclaration(d) => d.parameters.clone(),
+                    _ => NodeList::new(vec![]),
+                },
+                None => NodeList::new(vec![]),
+            };
+            let constructor =
+                arena.new_constructor_declaration(None, None, parameters, None, None, Some(body));
+            let mut members = Vec::with_capacity(1 + member_plan.len());
+            if existing_constructor.is_none() {
+                members.push(constructor);
+            }
+            for plan in member_plan {
+                members.push(plan.unwrap_or(constructor));
+            }
+            (members, Some(body))
+        } else {
+            // Static fields only: no constructor; keep the remaining members.
+            (member_plan.into_iter().flatten().collect(), None)
         };
-        let constructor =
-            arena.new_constructor_declaration(None, None, parameters, None, None, Some(body));
-        let mut members = Vec::with_capacity(1 + member_plan.len());
-        if existing_constructor.is_none() {
-            members.push(constructor);
-        }
-        for plan in member_plan {
-            members.push(plan.unwrap_or(constructor));
-        }
-        members
-    } else {
-        // Static fields only: no constructor; keep the remaining members.
-        member_plan.into_iter().flatten().collect()
-    };
 
     let class = arena.new_class_like(
         kind,
@@ -412,6 +418,7 @@ fn lower_class_parts(arena: &mut NodeArena, node: NodeId) -> Option<ClassLowerin
     }
     Some(ClassLoweringParts {
         class,
+        constructor_body,
         pre_statements,
         static_fields,
     })
@@ -435,18 +442,48 @@ fn try_lower_simple_class(arena: &mut NodeArena, node: NodeId) -> Option<NodeId>
     };
     let parts = lower_class_parts(arena, node)?;
     if parts.pre_statements.is_empty() && parts.static_fields.is_empty() {
-        // Instance-field-only (round 6o for class expressions): no hoist needed.
         return Some(parts.class);
     }
     if kind == Kind::ClassExpression {
-        // A class *expression* that needs statement hoisting is wrapped in a comma
-        // sequence with a temp by `try_lower_class_expression` (round 6r); this
-        // arena-only path only builds the statement-position `SyntaxList`.
         return None;
     }
-    // `static x = 1` -> `C.x = 1;` after the class declaration. An anonymous
-    // declaration would need a generated class name -> deferred.
     let class_name = name?;
+    let mut statements =
+        Vec::with_capacity(parts.pre_statements.len() + 1 + parts.static_fields.len());
+    statements.extend(parts.pre_statements);
+    statements.push(parts.class);
+    for (field_name, initializer) in parts.static_fields {
+        statements.push(make_static_assignment(
+            arena,
+            class_name,
+            field_name,
+            initializer,
+        ));
+    }
+    Some(arena.new_syntax_list(NodeList::new(statements)))
+}
+
+/// Emit-context-aware variant of [`try_lower_simple_class`] that also sets
+/// `EmitFlags::MULTI_LINE` on the synthesized constructor body, matching Go's
+/// `Block.MultiLine = len(statements) > 0`.
+fn try_lower_simple_class_ec(ec: &mut EmitContext, node: NodeId) -> Option<NodeId> {
+    let kind = ec.arena().kind(node);
+    let name = match ec.arena().data(node) {
+        NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d.name,
+        _ => return None,
+    };
+    let parts = lower_class_parts(ec.arena_mut(), node)?;
+    if let Some(body) = parts.constructor_body {
+        ec.set_emit_flags(body, EmitFlags::MULTI_LINE);
+    }
+    if parts.pre_statements.is_empty() && parts.static_fields.is_empty() {
+        return Some(parts.class);
+    }
+    if kind == Kind::ClassExpression {
+        return None;
+    }
+    let class_name = name?;
+    let arena = ec.arena_mut();
     let mut statements =
         Vec::with_capacity(parts.pre_statements.len() + 1 + parts.static_fields.len());
     statements.extend(parts.pre_statements);
@@ -491,6 +528,10 @@ fn try_lower_simple_class(arena: &mut NodeArena, node: NodeId) -> Option<NodeId>
 // Go: internal/transformers/estransforms/classfields.go:visitClassExpressionInNewClassLexicalEnvironment
 fn try_lower_class_expression(ec: &mut EmitContext, node: NodeId) -> Option<NodeId> {
     let parts = lower_class_parts(ec.arena_mut(), node)?;
+    // Go sets `Block.MultiLine = true` when the constructor body has statements.
+    if let Some(body) = parts.constructor_body {
+        ec.set_emit_flags(body, EmitFlags::MULTI_LINE);
+    }
     if parts.pre_statements.is_empty() && parts.static_fields.is_empty() {
         // Instance-field-only (round 6o): the class expression is rebuilt in
         // place with a constructor; no statement hoisting is needed.

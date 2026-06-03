@@ -478,6 +478,219 @@ fn emit_esnext_export_default_function_is_preserved() {
     );
 }
 
+// Go: internal/compiler/emitter.go:getScriptTransformers (JSX react + children + attrs)
+// With `jsx: react`, `<div className="x">hello</div>` lowers to
+// `React.createElement("div", { className: "x" }, "hello")` with `"use strict"`.
+// Go ground truth: `cmd/tsgo --noCheck --jsx react`
+#[test]
+fn emit_jsx_react_with_attrs_and_text_child() {
+    let options = CompilerOptions {
+        jsx: tsgo_core::compileroptions::JsxEmit::React,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[("/src/app.tsx", "<div className=\"x\">hello</div>")],
+        &["/src/app.tsx"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0].1,
+        "\"use strict\";\nReact.createElement(\"div\", { className: \"x\" }, \"hello\");\n"
+    );
+}
+
+// Go: internal/compiler/emitter.go:getScriptTransformers (JSX react-jsx automatic runtime)
+// With `jsx: react-jsx`, `<div/>` lowers to the automatic runtime:
+// Go output: `import { jsx as _jsx } from "react/jsx-runtime";\n_jsx("div", {});\n`
+// The Rust JSX transform lowers to the `jsx(...)` call form but the runtime
+// import injection (`import { jsx as _jsx }`) is DEFER'd (blocked-by: emit
+// resolver `SetReferencedImportDeclaration`). The current output uses the bare
+// `jsx` identifier and no import. We assert the reachable subset here; the
+// full automatic-runtime import injection is tracked in jsxtransforms/jsx.rs.
+#[test]
+fn emit_jsx_react_jsx_automatic_runtime() {
+    let options = CompilerOptions {
+        jsx: tsgo_core::compileroptions::JsxEmit::ReactJsx,
+        ..Default::default()
+    };
+    let program = build_program(&[("/src/app.tsx", "<div/>;")], &["/src/app.tsx"], options);
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    let text = &captured[0].1;
+    // The automatic runtime lowers to a `jsx(...)` call (not `React.createElement`).
+    assert!(
+        text.contains("jsx(\"div\""),
+        "automatic runtime should produce jsx(...) call: {text}"
+    );
+    // Props is `{}` (not `null`) in the automatic runtime.
+    assert!(
+        text.contains("{}"),
+        "automatic runtime props should be {{}} not null: {text}"
+    );
+    // DEFER: Go injects `import { jsx as _jsx } from "react/jsx-runtime"` and
+    // renames to `_jsx`; the Rust transform uses bare `jsx` until the import
+    // injection is ported. Assert no `React.createElement` leak.
+    assert!(
+        !text.contains("React.createElement"),
+        "automatic runtime should NOT use React.createElement: {text}"
+    );
+}
+
+// Go: internal/compiler/emitter.go:getScriptTransformers (JSX preserve)
+// With `jsx: preserve`, no JSX transform fires and JSX syntax is emitted
+// unchanged. The output file extension is `.jsx`. The use-strict transform
+// still fires (default target/module implies script context).
+// Go ground truth: `"use strict";\n<div />;\n` → `/src/app.jsx`
+#[test]
+fn emit_jsx_preserve_keeps_jsx_syntax() {
+    let options = CompilerOptions {
+        jsx: tsgo_core::compileroptions::JsxEmit::Preserve,
+        ..Default::default()
+    };
+    let program = build_program(&[("/src/app.tsx", "<div/>;")], &["/src/app.tsx"], options);
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    // Preserve mode emits `.jsx`, not `.js`.
+    assert_eq!(captured[0].0, "/src/app.jsx");
+    let text = &captured[0].1;
+    // JSX syntax is preserved — no createElement call.
+    assert!(
+        !text.contains("React.createElement"),
+        "preserve mode should NOT lower JSX: {text}"
+    );
+    assert!(
+        text.contains("<div"),
+        "preserve mode should keep JSX syntax: {text}"
+    );
+}
+
+// Go: internal/compiler/emitter.go:getScriptTransformers (ES classFields downlevel)
+// With `target: ES2020`, `class C { x = 1; }` lowers the instance field to a
+// constructor assignment: `class C { constructor() { this.x = 1; } }`.
+// Go ground truth: `cmd/tsgo --noCheck --target es2020`
+#[test]
+fn emit_es_class_fields_lowers_to_constructor() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es2020,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[("/src/index.ts", "class C { x = 1; }")],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0].1,
+        "\"use strict\";\nclass C {\n    constructor() {\n        this.x = 1;\n    }\n}\n"
+    );
+}
+
+// Go: internal/compiler/emitter.go:getScriptTransformers (ES optionalChain downlevel)
+// With `target: ES2019`, `a?.b` lowers to the null-guard conditional:
+// `a === null || a === void 0 ? void 0 : a.b`.
+// Go ground truth: `cmd/tsgo --noCheck --target es2019`
+#[test]
+fn emit_es_optional_chain_lowers_to_null_guard() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es2019,
+        ..Default::default()
+    };
+    let program = build_program(&[("/src/index.ts", "a?.b")], &["/src/index.ts"], options);
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0].1,
+        "\"use strict\";\na === null || a === void 0 ? void 0 : a.b;\n"
+    );
+}
+
+// Go: internal/compiler/emitter.go:getScriptTransformers (ES async downlevel)
+// With `target: ES2016`, `async function f() { await 1; }` lowers to an
+// `__awaiter` wrapper with a generator body.
+// Go ground truth: `cmd/tsgo --noCheck --target es2016`
+#[test]
+fn emit_es_async_lowers_to_awaiter() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es2016,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[("/src/index.ts", "async function f() { await 1; }")],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    let text = &captured[0].1;
+    // The __awaiter helper definition is emitted.
+    assert!(
+        text.contains("__awaiter"),
+        "async downlevel should emit __awaiter helper: {text}"
+    );
+    // The body becomes a generator: `yield 1` instead of `await 1`.
+    assert!(
+        text.contains("yield 1"),
+        "async downlevel should convert await to yield: {text}"
+    );
+    // The original `async` keyword is gone.
+    assert!(
+        !text.contains("async function"),
+        "async downlevel should remove async keyword: {text}"
+    );
+    // The function body wraps into `return __awaiter(this, void 0, void 0, function* () { ... })`.
+    assert!(
+        text.contains("function*"),
+        "async downlevel should produce a generator: {text}"
+    );
+}
+
+// Go: internal/compiler/emitter.go:getScriptTransformers (ES exponentiation downlevel)
+// With `target: ES2015`, `2 ** 3` lowers to `Math.pow(2, 3)`.
+// Go ground truth: `cmd/tsgo --noCheck --target es2015`
+#[test]
+fn emit_es_exponentiation_lowers_to_math_pow() {
+    let options = CompilerOptions {
+        target: tsgo_core::compileroptions::ScriptTarget::Es2015,
+        ..Default::default()
+    };
+    let program = build_program(&[("/src/index.ts", "2 ** 3")], &["/src/index.ts"], options);
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].1, "\"use strict\";\nMath.pow(2, 3);\n");
+}
+
 // Go: internal/compiler/emitter.go:emitter.emitJSFile (PrinterOptions.NewLine)
 #[test]
 fn emit_honors_crlf_newline_option() {
