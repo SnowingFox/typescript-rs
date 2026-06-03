@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_support::{emit, parse_shared};
+use crate::test_support::{emit, parse_shared, parse_shared_tsx};
 use std::rc::Rc;
 
 // Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/VariableDeclaration2
@@ -136,6 +136,14 @@ fn type_assertions_lower_to_inner_expression() {
     check_erase("x satisfies T", "x;");
 }
 
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/TypeAssertionExpression#2,AsExpression#2,SatisfiesExpression#2
+#[test]
+fn parenthesized_assertion_drops_parens() {
+    check_erase("(<T>x).c", "x.c;");
+    check_erase("(x as T).c", "x.c;");
+    check_erase("(x satisfies T).c", "x.c;");
+}
+
 // Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/FunctionDeclaration2
 #[test]
 fn function_overload_signature_is_elided() {
@@ -199,6 +207,164 @@ fn set_accessor_param_type_erased() {
         "class C { set x(v: number) {} }",
         "class C {\n    set x(v) { }\n}",
     );
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/TaggedTemplateExpression
+#[test]
+fn tagged_template_expression_type_args_erased() {
+    check_erase("f<T>``", "f ``;");
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/JsxSelfClosingElement
+#[test]
+fn jsx_self_closing_element_type_args_erased() {
+    let input = "<x<T> />";
+    let (ec, source_file) = parse_shared_tsx(input);
+    let mut tx = new_type_eraser_transformer(&TransformOptions {
+        context: Some(Rc::clone(&ec)),
+        ..Default::default()
+    });
+    let result = tx.transform_source_file(source_file);
+    assert_eq!(emit(&ec, result, input), "<x />;");
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/JsxOpeningElement
+#[test]
+fn jsx_opening_element_type_args_erased() {
+    let input = "<x<T>></x>";
+    let (ec, source_file) = parse_shared_tsx(input);
+    let mut tx = new_type_eraser_transformer(&TransformOptions {
+        context: Some(Rc::clone(&ec)),
+        ..Default::default()
+    });
+    let result = tx.transform_source_file(source_file);
+    assert_eq!(emit(&ec, result, input), "<x></x>;");
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/IndexSignature
+#[test]
+fn index_signature_in_class_is_elided() {
+    check_erase("class C { [key: string]: number; }", "class C {\n}");
+}
+
+// Go: internal/transformers/tstransforms/typeeraser.go:visit/KindGetAccessor,KindSetAccessor (abstract)
+// Abstract accessors with no body are elided entirely.
+// The `abstract` keyword on the class is also stripped (TypeScript-only).
+#[test]
+fn abstract_accessors_are_elided() {
+    check_erase(
+        "abstract class C { abstract get x(): number; }",
+        "class C {\n}",
+    );
+    check_erase(
+        "abstract class C { abstract set x(v: number); }",
+        "class C {\n}",
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeeraser.go:visit/KindEnumDeclaration
+// Const enums pass through unchanged (preserved for the runtime transformer).
+// Regular enums get visitEachChild.
+#[test]
+fn enum_declaration_handling() {
+    // A `const enum` is returned unchanged.
+    check_erase("const enum E { A }", "const enum E {\n    A\n}");
+    // A regular enum is visited but kept (members have no types to strip).
+    check_erase("enum E { A }", "enum E {\n    A\n}");
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/UninstantiatedNamespace1..3
+#[test]
+fn uninstantiated_namespace_is_elided() {
+    check_erase("namespace N {}", "");
+    check_erase("namespace N { export interface I {} }", "");
+    check_erase("namespace N { export type T = U; }", "");
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/ExportDeclaration#1..#7
+#[test]
+fn export_declaration_elision() {
+    // Non-type re-exports are preserved.
+    check_erase("export * from \"m\";", "export * from \"m\";");
+    check_erase("export * as x from \"m\";", "export * as x from \"m\";");
+    check_erase("export { x } from \"m\";", "export { x } from \"m\";");
+    // Type-only exports are fully elided.
+    check_erase("export type * from \"m\";", "");
+    check_erase("export type * as x from \"m\";", "");
+    check_erase("export type { x } from \"m\";", "");
+    // Per-specifier `type` elision — all specifiers type-only → entire export elided.
+    check_erase("export { type x } from \"m\";", "");
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/ConstructorDeclaration2
+#[test]
+fn public_constructor_accessibility_stripped() {
+    check_erase(
+        "class C { public constructor() {} }",
+        "class C {\n    constructor() { }\n}",
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/MethodDeclaration2,3
+#[test]
+fn method_modifiers_erased() {
+    check_erase(
+        "class C { public m<T>(): U {} }",
+        "class C {\n    m() { }\n}",
+    );
+    check_erase(
+        "class C { public static m<T>(): U {} }",
+        "class C {\n    static m() { }\n}",
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/GetAccessorDeclaration2,3
+#[test]
+fn get_accessor_modifiers_erased() {
+    check_erase(
+        "class C { public get m<T>(): U {} }",
+        "class C {\n    get m() { }\n}",
+    );
+    check_erase(
+        "class C { public static get m<T>(): U {} }",
+        "class C {\n    static get m() { }\n}",
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/SetAccessorDeclaration2,3
+#[test]
+fn set_accessor_modifiers_erased() {
+    check_erase(
+        "class C { public set m<T>(v): U {} }",
+        "class C {\n    set m(v) { }\n}",
+    );
+    check_erase(
+        "class C { public static set m<T>(v): U {} }",
+        "class C {\n    static set m(v) { }\n}",
+    );
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/ImportEqualsDeclaration#3,#4
+#[test]
+fn import_equals_entity_name() {
+    check_erase("import x = y;", "import x = y;");
+    check_erase("import type x = y;", "");
+}
+
+// Go: internal/transformers/tstransforms/typeeraser_test.go:TestTypeEraser/ImportDeclaration#2..#5,#7
+#[test]
+fn import_declaration_various_forms() {
+    check_erase(
+        "import * as x from \"m\"; x;",
+        "import * as x from \"m\";\nx;",
+    );
+    check_erase("import x from \"m\"; x;", "import x from \"m\";\nx;");
+    check_erase(
+        "import { x } from \"m\"; x;",
+        "import { x } from \"m\";\nx;",
+    );
+    check_erase("import type * as x from \"m\";", "");
+    check_erase("import type { x } from \"m\";", "");
 }
 
 // Guard: plain JS with no type annotations passes through unchanged.

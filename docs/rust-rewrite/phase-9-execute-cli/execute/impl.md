@@ -135,8 +135,8 @@ execute 的并行点（必须保确定性输出）：
 
 ### `tsc/mod.rs`（Go: `tsc/compile.go`）
 
-- [ ] `pub trait System` — 8 方法（writer/fs/default_library_path/cwd/tty/width/env/now/since_start）　`// Go: compile.go:System`
-- [ ] `#[repr(i32)] pub enum ExitStatus`（6 值，数值对齐）　`// Go: compile.go:ExitStatus`
+- [x] `pub trait System` — 7 方法（fs/default_library_path/get_current_directory/now/write/write_output_is_tty/get_environment_variable）　`// Go: compile.go:System`（done in sys.rs, committed; `width`/`since_start` DEFER）
+- [x] `#[repr(i32)] pub enum ExitStatus`（Success/DiagnosticsPresent_OutputsSkipped/DiagnosticsPresent_OutputsGenerated/InvalidProject_OutputsSkipped/ProjectReferenceCycle_OutputsSkipped/NotImplemented）　`// Go: compile.go:ExitStatus`（done in lib.rs, committed）
 - [ ] `pub trait Watcher { fn do_cycle(&self); }`　`// Go: compile.go:Watcher`
 - [ ] `pub struct CommandLineResult { status, watcher: Option<...> }`　`// Go: compile.go:CommandLineResult`
 - [ ] `pub trait CommandLineTesting`（11 钩子）　`// Go: compile.go:CommandLineTesting`
@@ -233,10 +233,10 @@ execute 的并行点（必须保确定性输出）：
 
 ### 根模块 实现 TODO
 
-- [ ] `pub fn command_line(sys, args, testing) -> CommandLineResult` — `-b/--build` → 构建；否则 `tscCompilation`　`// Go: tsc.go:CommandLine`
+- [x] `pub fn execute(sys, args) -> CommandLineResult` — version/help/build dispatch + `tsc_compilation`　`// Go: tsc.go:CommandLine`（done in lib.rs, committed; `--build` DEFER）
 - [ ] `fn tsc_build_compilation(...)`（build 错误/pprof/help/Orchestrator.Start）　`// Go: tsc.go:tscBuildCompilation`
-- [ ] `fn tsc_compilation(...)` — 错误/pprof/init/version/help/all/watch+listFilesOnly 冲突/project/找 config/showConfig/watch/incremental/普通 分发　`// Go: tsc.go:tscCompilation`
-- [ ] `fn perform_compilation` / `fn perform_incremental_compilation`（host/tracing/program/incremental/emit）　`// Go: tsc.go:performCompilation/performIncrementalCompilation`
+- [x] `pub fn tsc_compilation(sys, parsed) -> CommandLineResult` — error reporting + `perform_compilation`　`// Go: tsc.go:tscCompilation`（done in lib.rs, committed; version/help/config DEFER to cmd/tsgo）
+- [x] `pub fn perform_compilation(sys, parsed) -> CommandLineResult` — host→NewProgram→check→emit→diagnostics　`// Go: tsc.go:performCompilation`（done in lib.rs, committed; incremental DEFER）
 - [ ] `fn find_config_file`（向上找 tsconfig.json）　`// Go: tsc.go:findConfigFile`
 - [ ] `fn show_config`（ConvertToTSConfig + JSON 缩进）　`// Go: tsc.go:showConfig`
 - [ ] `fn fmt_main`（`-f` 格式化，目前 NotImplemented 路径）　`// Go: tsc.go:fmtMain`

@@ -11,19 +11,20 @@
 //! to drop the `None`s; the default arm recurses unchanged via
 //! [`NodeArena::visit_each_child`](tsgo_ast::NodeArena::visit_each_child).
 //!
-//! Covered: type-annotation / type-parameter / type-argument / return-type
-//! stripping for all function-like nodes (FunctionDeclaration,
-//! FunctionExpression, ArrowFunction, MethodDeclaration, Constructor,
-//! GetAccessor, SetAccessor); statement elision of type-only declarations and
-//! ambient (`declare`) statements via [`Kind::NotEmittedStatement`]; type-only
-//! modifier, `implements`-clause, index-signature, `this`-parameter, and
-//! overload elision; per-specifier `import { type … }` elision; and
-//! `as`/`satisfies`/`<T>x`/`x!` lowering to
-//! [`Kind::PartiallyEmittedExpression`].
+//! Covered (1:1 with Go): every `case` in the Go `visit` switch is ported.
+//! Type-annotation / type-parameter / type-argument / return-type stripping for
+//! all function-like nodes; statement elision of type-only declarations,
+//! ambient (`declare`) statements, non-instantiated namespaces, and type-only
+//! imports/exports; type-only modifier, `implements`-clause, index-signature,
+//! `this`-parameter, abstract accessor, and overload elision; per-specifier
+//! `import { type … }` / `export { type … }` elision; tagged-template,
+//! JSX, and call/new type-argument stripping; parenthesized-assertion
+//! unwrapping; `as`/`satisfies`/`<T>x`/`x!` lowering to
+//! [`Kind::PartiallyEmittedExpression`]; `const enum` passthrough; and
+//! `EnumDeclaration` `visitEachChild`.
 //!
-//! Deferred (see `tstransforms/mod.rs`): export specifier elision needing the
-//! checker `EmitResolver`, and the `compilerOptions`-driven branches
-//! (`verbatimModuleSyntax`, `experimentalDecorators`, const-enum preservation).
+//! Deferred (see `tstransforms/mod.rs`): the `compilerOptions`-driven branches
+//! (`verbatimModuleSyntax`, `experimentalDecorators`, `preserveConstEnums`).
 
 use crate::{new_transformer, TransformOptions, Transformer};
 use tsgo_ast::utilities::modifier_to_flag;
@@ -76,8 +77,55 @@ fn type_eraser_visit(arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
         | Kind::ConstKeyword
         | Kind::DeclareKeyword
         | Kind::ReadonlyKeyword => None,
+        // TypeScript type nodes, type keywords, and index signatures are erased.
+        Kind::ArrayType
+        | Kind::TupleType
+        | Kind::OptionalType
+        | Kind::RestType
+        | Kind::TypeLiteral
+        | Kind::TypePredicate
+        | Kind::TypeParameter
+        | Kind::AnyKeyword
+        | Kind::UnknownKeyword
+        | Kind::BooleanKeyword
+        | Kind::StringKeyword
+        | Kind::NumberKeyword
+        | Kind::NeverKeyword
+        | Kind::VoidKeyword
+        | Kind::SymbolKeyword
+        | Kind::ConstructorType
+        | Kind::FunctionType
+        | Kind::TypeQuery
+        | Kind::TypeReference
+        | Kind::UnionType
+        | Kind::IntersectionType
+        | Kind::ConditionalType
+        | Kind::ParenthesizedType
+        | Kind::ThisType
+        | Kind::TypeOperator
+        | Kind::IndexedAccessType
+        | Kind::MappedType
+        | Kind::LiteralType
+        | Kind::IndexSignature => None,
+        // Reparsed CommonJS imports are elided.
+        Kind::JSImportDeclaration => None,
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindModuleDeclaration
+        Kind::ModuleDeclaration => {
+            let (name, body) = match arena.data(node) {
+                NodeData::ModuleDeclaration(d) => (d.name, d.body),
+                _ => unreachable!("kind/data mismatch"),
+            };
+            if arena.kind(name) != Kind::Identifier
+                || !is_instantiated_module(arena, node)
+                || get_innermost_module_body(arena, node).is_none()
+            {
+                return Some(arena.new_not_emitted_statement());
+            }
+            let _ = body;
+            Some(visit_each_child_erase(arena, node))
+        }
         // TypeScript type-only declarations are elided.
-        Kind::InterfaceDeclaration | Kind::TypeAliasDeclaration => {
+        Kind::InterfaceDeclaration | Kind::TypeAliasDeclaration | Kind::JSTypeAliasDeclaration => {
             Some(arena.new_not_emitted_statement())
         }
         // `export as namespace N;` (UMD global) has no runtime form.
@@ -157,6 +205,64 @@ fn type_eraser_visit(arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
             }
             Some(node)
         }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindExportDeclaration
+        Kind::ExportDeclaration => {
+            let (is_type_only, export_clause, module_specifier, attributes) = match arena.data(node)
+            {
+                NodeData::ExportDeclaration(d) => (
+                    d.is_type_only,
+                    d.export_clause,
+                    d.module_specifier,
+                    d.attributes,
+                ),
+                _ => unreachable!("kind/data mismatch"),
+            };
+            if is_type_only {
+                return Some(arena.new_not_emitted_statement());
+            }
+            let export_clause = match export_clause {
+                Some(ec) => match type_eraser_visit(arena, ec) {
+                    None => return Some(arena.new_not_emitted_statement()),
+                    Some(c) => Some(c),
+                },
+                None => None,
+            };
+            let module_specifier = module_specifier.map(|ms| visit_required(arena, ms));
+            let attributes = attributes.map(|a| visit_required(arena, a));
+            Some(arena.new_export_declaration(
+                None,
+                false,
+                export_clause,
+                module_specifier,
+                attributes,
+            ))
+        }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindNamedExports
+        Kind::NamedExports => {
+            let elements = match arena.data(node) {
+                NodeData::NamedExports(d) => d.elements.clone(),
+                _ => unreachable!("kind/data mismatch"),
+            };
+            if elements.nodes.is_empty() {
+                return Some(node);
+            }
+            let visited = visit_nodes(arena, &elements);
+            if visited.nodes.is_empty() {
+                return None;
+            }
+            Some(arena.new_named_exports(visited))
+        }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindExportSpecifier
+        Kind::ExportSpecifier => {
+            let is_type_only = match arena.data(node) {
+                NodeData::ExportSpecifier(d) => d.is_type_only,
+                _ => unreachable!("kind/data mismatch"),
+            };
+            if is_type_only {
+                return None;
+            }
+            Some(node)
+        }
         Kind::VariableDeclaration => {
             // Drop the `!` definite-assignment token and the type annotation.
             let (name, initializer) = match arena.data(node) {
@@ -179,6 +285,15 @@ fn type_eraser_visit(arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
             let expression = visit_required(arena, expression);
             let arguments = visit_nodes(arena, &arguments);
             Some(arena.new_call_expression(expression, question_dot_token, None, arguments, flags))
+        }
+        Kind::TaggedTemplateExpression => {
+            let (tag, question_dot_token, template) = match arena.data(node) {
+                NodeData::TaggedTemplateExpression(d) => (d.tag, d.question_dot_token, d.template),
+                _ => unreachable!("kind/data mismatch"),
+            };
+            let tag = visit_required(arena, tag);
+            let template = visit_required(arena, template);
+            Some(arena.new_tagged_template_expression(tag, question_dot_token, None, template))
         }
         Kind::NewExpression => {
             // Drop the type arguments.
@@ -402,6 +517,13 @@ fn type_eraser_visit(arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
                 }
                 _ => unreachable!("kind/data mismatch"),
             };
+            // Abstract accessors without a body are elided entirely.
+            let is_abstract = modifiers
+                .as_ref()
+                .is_some_and(|m| m.modifier_flags.contains(ModifierFlags::ABSTRACT));
+            if body.is_none() && is_abstract {
+                return None;
+            }
             let modifiers = visit_modifiers(arena, modifiers.as_ref());
             let name = visit_required(arena, name);
             let parameters = visit_nodes(arena, &parameters);
@@ -436,6 +558,54 @@ fn type_eraser_visit(arena: &mut NodeArena, node: NodeId) -> Option<NodeId> {
                 equals_greater_than_token,
                 body,
             ))
+        }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindEnumDeclaration
+        Kind::EnumDeclaration => {
+            if is_enum_const(arena, node) {
+                return Some(node);
+            }
+            Some(visit_each_child_erase(arena, node))
+        }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindJsxSelfClosingElement,KindJsxOpeningElement
+        Kind::JsxSelfClosingElement | Kind::JsxOpeningElement => {
+            let kind = arena.kind(node);
+            let (tag_name, attributes) = match arena.data(node) {
+                NodeData::JsxSelfClosingElement(d) | NodeData::JsxOpeningElement(d) => {
+                    (d.tag_name, d.attributes)
+                }
+                _ => unreachable!("kind/data mismatch"),
+            };
+            let tag_name = visit_required(arena, tag_name);
+            let attributes = visit_required(arena, attributes);
+            if kind == Kind::JsxSelfClosingElement {
+                Some(arena.new_jsx_self_closing_element(tag_name, None, attributes))
+            } else {
+                Some(arena.new_jsx_opening_element(tag_name, None, attributes))
+            }
+        }
+        // Go: internal/transformers/tstransforms/typeeraser.go:visit/KindParenthesizedExpression
+        Kind::ParenthesizedExpression => {
+            let expression = match arena.data(node) {
+                NodeData::ParenthesizedExpression(d) => d.expression,
+                _ => unreachable!("kind/data mismatch"),
+            };
+            // Skip through nested parens to find the innermost content.
+            let mut inner = expression;
+            while arena.kind(inner) == Kind::ParenthesizedExpression {
+                inner = match arena.data(inner) {
+                    NodeData::ParenthesizedExpression(d) => d.expression,
+                    _ => break,
+                };
+            }
+            if matches!(
+                arena.kind(inner),
+                Kind::TypeAssertionExpression | Kind::AsExpression | Kind::SatisfiesExpression
+            ) {
+                let visited = visit_required(arena, expression);
+                Some(arena.new_partially_emitted_expression(visited))
+            } else {
+                Some(visit_each_child_erase(arena, node))
+            }
         }
         _ => Some(visit_each_child_erase(arena, node)),
     }
@@ -511,6 +681,61 @@ fn visit_modifiers(
         list,
         modifier_flags,
     })
+}
+
+/// Reports whether `node` is a `const enum` declaration.
+// Go: internal/ast/utilities.go:IsEnumConst
+fn is_enum_const(arena: &NodeArena, node: NodeId) -> bool {
+    arena.kind(node) == Kind::EnumDeclaration
+        && match arena.data(node) {
+            NodeData::EnumDeclaration(d) => d
+                .modifiers
+                .as_ref()
+                .is_some_and(|m| m.modifier_flags.contains(ModifierFlags::CONST)),
+            _ => false,
+        }
+}
+
+/// Reports whether a module declaration is "instantiated" — i.e. its body
+/// contains at least one runtime (non-type-only) statement.
+// Go: internal/ast/utilities.go:IsInstantiatedModule / getModuleInstanceState
+fn is_instantiated_module(arena: &NodeArena, node: NodeId) -> bool {
+    let body = match arena.data(node) {
+        NodeData::ModuleDeclaration(d) => d.body,
+        _ => return true,
+    };
+    let Some(body) = body else {
+        return true;
+    };
+    match arena.data(body) {
+        NodeData::ModuleBlock(d) => d.statements.nodes.iter().any(|&s| {
+            !matches!(
+                arena.kind(s),
+                Kind::InterfaceDeclaration | Kind::TypeAliasDeclaration
+            )
+        }),
+        _ => true,
+    }
+}
+
+/// Walks through nested/dotted module declarations (`namespace A.B.C`)
+/// to find the innermost body. Returns `None` if any module in the chain
+/// has no body.
+// Go: internal/transformers/tstransforms/runtimesyntax.go:getInnermostModuleDeclarationFromDottedModule
+fn get_innermost_module_body(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
+    let mut current = node;
+    loop {
+        let body = match arena.data(current) {
+            NodeData::ModuleDeclaration(d) => d.body,
+            _ => return None,
+        };
+        let body = body?;
+        if arena.kind(body) == Kind::ModuleDeclaration {
+            current = body;
+        } else {
+            return Some(body);
+        }
+    }
 }
 
 /// Recurses through children with the eraser, dropping elided list elements.

@@ -85,22 +85,22 @@ Go 用文件级 build tag；Rust 用 `#[cfg(...)]`，文件名同名（用户要
 
 ### `main.rs`（Go: `cmd/tsgo/main.go`）
 
-- [ ] `fn main()` — `std::process::exit(run_main())`　`// Go: main.go:main`
-- [ ] `fn run_main() -> i32` — `core::apply_debug_stack_limit()`；`#[cfg(windows)] enable_vt_processing()`（替代 Go init）；取 args；`--lsp`→`run_lsp`、`--api`→`run_api`、否则 `execute::command_line(new_system(), args, None).status as i32`　`// Go: main.go:runMain`
-- [ ] `mod sys; mod lsp; mod api;` + 平台 `#[cfg] mod isprocessalive_*; #[cfg(windows)] mod enablevtprocessing_windows;`
+- [x] `fn main()` — large stack thread spawn + `std::process::exit(status as i32)`　`// Go: main.go:main`（done in cmd/tsgo/main.rs, committed）
+- [x] `fn run(args, sys) -> ExitStatus` — `core::apply_debug_stack_limit()`；`--lsp`→stub, `--api`→stub, otherwise `command_line(sys, args)`　`// Go: main.go:runMain`（done, `--lsp`/`--api` stub to P8）
+- [ ] `mod sys; mod lsp; mod api;` + 平台 `#[cfg] mod isprocessalive_*; #[cfg(windows)] mod enablevtprocessing_windows;`（partially done: `OsSystem` inline in main.rs, `--lsp`/`--api` stubs inline; platform modules DEFER）
 - [ ] 非 Windows 的 `enable_vt_processing()` 空实现（`#[cfg(not(windows))]`）。
 
 ### `sys.rs`（Go: `cmd/tsgo/sys.go`）
 
-- [ ] `struct OsSys { writer, fs, default_library_path, cwd, start }`　`// Go: sys.go:osSys`
-- [ ] `impl tsc::System for OsSys`：
+- [x] `struct OsSystem { fs, current_directory, default_library_path }`　`// Go: sys.go:osSys`（done in main.rs, committed）
+- [x] `impl System for OsSystem`（fs/default_library_path/get_current_directory/now/write/write_output_is_tty/get_environment_variable）：
   - [ ] `since_start` / `now`　`// Go: sys.go:SinceStart/Now`
   - [ ] `fs` → `&dyn vfs::FS`　`// Go: sys.go:FS`
   - [ ] `default_library_path` / `get_current_directory` / `writer`　`// Go: sys.go:DefaultLibraryPath/GetCurrentDirectory/Writer`
   - [ ] `write_output_is_tty` → `stdout().is_terminal()`　`// Go: sys.go:WriteOutputIsTTY`
   - [ ] `get_width_of_terminal` → `terminal_size`　`// Go: sys.go:GetWidthOfTerminal`
   - [ ] `get_environment_variable` → `env::var`　`// Go: sys.go:GetEnvironmentVariable`
-- [ ] `fn new_system() -> OsSys` — `current_dir`→`normalize_path`（失败 `exit(ExitStatusInvalidProject_OutputsSkipped)`）；`fs = bundled::wrap_fs(osvfs::fs())`；`default_library_path = bundled::lib_path()`；`writer = stdout`；`start = now`　`// Go: sys.go:newSystem`
+- [x] `fn new_system() -> OsSystem` — `current_dir`→`normalize_path`（失败 `exit(InvalidProjectOutputsSkipped)`）；`fs = bundled::wrap_fs(osvfs::fs())`；`default_library_path = bundled::lib_path()`；`writer = stdout`　`// Go: sys.go:newSystem`（done in main.rs `main()`, committed）
 
 ### `lsp.rs`（Go: `cmd/tsgo/lsp.go`）
 

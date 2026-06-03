@@ -178,7 +178,7 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 
 ### `tstransforms`（重点：被测 2 stage 先行）
 
-- [ ] `pub struct TypeEraserTransformer` + `pub fn new_type_eraser_transformer(opt) -> Transformer`　`// Go: typeeraser.go:NewTypeEraserTransformer`（**先做：过 TestTypeEraser**）
+- [x] `pub struct TypeEraserTransformer` + `pub fn new_type_eraser_transformer(opt) -> Transformer`　`// Go: typeeraser.go:NewTypeEraserTransformer`（done in 6b+6c-prep, committed; see file status table）
 - [x] `pub fn new_import_elision_transformer(opt, resolver) -> Transformer`（6af+6ag+6ah 子集）+ 移除式 `import_elision_visit`　`// Go: importelision.go:NewImportElisionTransformer`。消费 checker `EmitResolver`（经 additive `EmitReferenceResolver`）：6af 作用域正确未引用 value import 省略；6ag export specifier 侧（`is_value_alias_declaration`）；6ah external-module `import x = require("m")`（`is_referenced_alias_declaration`）+ `export =`（`is_value_alias_declaration`）。DEFER：entity-name `import x = a.b`（需 `IsTopLevelValueImportEqualsWithEntityName`）、跨模块 re-export（需 `resolveExternalModuleSymbol`）、type-only 位置续命、策略变体、`TestImportElision` 全表（~20 子用例）
 - [x] `new_runtime_syntax_transformer`（6n 子集：enum → IIFE + instantiated namespace → IIFE；见 6n worklog）　`// Go: runtimesyntax.go:NewRuntimeSyntaxTransformer`
 - [x] `new_legacy_decorators_transformer` / `new_legacy_decorators_transformer_with_resolver`（6al 子集：属性装饰器 + `design:type` 元数据，消费 4at `serialize_type_node_for_metadata`；metadata 注入折入单遍，见 6al worklog；**6an** 加 `TypeReference design:type` 分流——`serialize_type_node`/`serialize_type_reference_node` 消费 4aw `get_type_reference_serialization_kind`，class→类标识符、interface/unresolved→`Object`；**6ao** 加**方法装饰器** lowering——`rebuild_method_without_decorators` + `append_type_metadata` method 臂：`__decorate([…], C.prototype/C, "m", null)`（第 4 参 `null`）+ `design:type=Function`（硬编码）+ `design:returntype`（恒发，注解经 checker 序列化/否则 `void 0`）；**6ap** 加 `design:paramtypes`（`serialize_parameter_types`，逐参序列化/无注解→`Object`/0 参→`[]`）+ 参数装饰器 `__param(i, dec)`（`PARAM_HELPER`/`append_param_decorators`/`member_is_decorated`/`rebuild_parameter_without_decorators`）；**6aq** 加**访问器（get/set）装饰器** lowering——`rebuild_accessor_without_decorators` + `accessor_owns_decoration`（`getAllAccessorDeclarations` 配对 + `firstAccessorWithDecorators` 归属，get/set 对合并为**单** `__decorate([…], C.prototype/C, "x", null)`，第 4 参 `null`）+ `append_type_metadata` 访问器臂：`design:type`（`accessor_type_node`：setter value 参类型 / getter 返回类型，无注解→`Object`）**且** `design:paramtypes`（`serialize_accessor_parameter_types`：getter 借 setter 参 / 自身参，无参→`[]`），**无** `design:returntype`（`shouldAddReturnTypeMetadata` 仅 method））；**6ar** 加 **class 装饰器** lowering——`transform_class_declaration_with_class_decorators`（`let C = class C {…}`（保名）绑定 + 成员装饰语句 + 尾随 class `__decorate`）+ `get_constructor_decoration_statement`/`generate_constructor_decoration_expression`（class 装饰器 ++ 构造参 `__param` ++ class `design:paramtypes` metadata）+ `ClassOrConstructorParameterIsDecorated` 路由（构造参装饰类也走包裹）+ `rebuild_constructor_without_decorators`　`// Go: legacydecorators.go:NewLegacyDecoratorsTransformer / getAllDecoratorsOfAccessors / transformClassDeclarationWithClassDecorators / getConstructorDecorationStatement / metadata.go:getOldTypeMetadata / getAccessorTypeNode / typeserializer.go:serializeParameterTypesOfNode`。DEFER：class-alias 自引用改写、`export`/`default` 装饰类、计算/私有访问器名、accessor 参数装饰器、`this`-参数体擦除 + rest-参数类型、async 方法/访问器 `Promise` 返回、`TypeReference` 的 lib-globals/qualified-name 类
@@ -187,14 +187,14 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 
 ### `estransforms`
 
-- [ ] `pub fn get_es_transformer(opts) -> Option<Transformer>` + 版本链常量 `NewESNext/ES2021/ES2020/ES2019/ES2018/ES2017/ES2016Transformer`（`Chain` 组合）　`// Go: definitions.go:GetESTransformer`
-- [ ] 各 stage 构造器（逐文件）：`new_async/new_class_fields/new_es_decorator/new_exponentiation/new_forawait/new_logical_assignment/new_nullish_coalescing/new_object_rest_spread/new_optional_catch/new_optional_chain/new_tagged_template_lift_restriction/new_use_strict/new_using_declaration` + `classthis`/`namedevaluation`/`utilities` 辅助　`// Go: estransforms/*.go:new*`
+- [ ] `pub fn get_es_transformer(opts) -> Option<Transformer>` + 版本链常量 `NewESNext/ES2021/ES2020/ES2019/ES2018/ES2017/ES2016Transformer`（`Chain` 组合）　`// Go: definitions.go:GetESTransformer`（chain dispatch still TODO; individual stages mostly done）
+- [x] 各 stage 构造器（逐文件）：`new_async`(6d-3+6m)/`new_class_fields`(6c-1..6r)/`new_exponentiation`(6c-1+6c-3+6i)/`new_forawait`(6y+6z)/`new_named_evaluation`(6d-2)/`new_object_rest_spread`(6d+6g)/`new_optional_chain`(6d+6h+6i+6s+6t)/`new_spread`(6aa) + `utilities` 辅助　`// Go: estransforms/*.go:new*`（done: 8 of 13 stages committed; DEFER: `new_es_decorator`/`new_logical_assignment`/`new_nullish_coalescing`/`new_optional_catch`/`new_tagged_template_lift_restriction`/`new_use_strict`/`new_using_declaration`/`classthis`）
 
 ### `moduletransforms` / `jsxtransforms` / `inliners`
 
-- [ ] `new_commonjs_module_transformer/new_esmodule_transformer/new_implied_module_transformer` + `externalModuleInfo`　`// Go: moduletransforms/*.go`
-- [ ] `new_jsx_transformer`　`// Go: jsxtransforms/jsx.go:NewJSXTransformer`
-- [ ] `new_const_enum_inlining_transformer`　`// Go: inliners/constenum.go:NewConstEnumInliningTransformer`
+- [x] `new_commonjs_module_transformer/new_esmodule_transformer/new_implied_module_transformer` + `externalModuleInfo`　`// Go: moduletransforms/*.go`（done: CJS 6e-2/6e-3+6ai-6ak, ESM 6u+6ab, implied 6ac, externalmoduleinfo 6e, system 6ae; committed）
+- [x] `new_jsx_transformer`　`// Go: jsxtransforms/jsx.go:NewJSXTransformer`（done in 6f+6e-3: classic React.createElement + automatic runtime selection; committed）
+- [ ] `new_const_enum_inlining_transformer`　`// Go: inliners/constenum.go:NewConstEnumInliningTransformer`（still TODO, blocked-by checker const-enum value evaluation）
 
 ### `declarations`
 
@@ -213,7 +213,7 @@ Go 里 `internal/transformers/<sub>` 每个都是独立 package、各有不同 i
 
 - [x] 单 `Cargo.toml`（`tsgo_transformers`，已 scaffold + workspace member）　**[6a]**
 - [x] 根 `lib.rs` 聚合：`pub mod transformer/chain/modifiervisitor/utilities;` + `SharedEmitContext` 别名 + `#[cfg(test)] test_support`；`pub use` 导出公共面　**[6a]**
-- [ ] 后续轮追加 `pub mod tstransforms/estransforms/moduletransforms/jsxtransforms/inliners/declarations;`（各 `<subpkg>/mod.rs`）　**[6b–6f]**
+- [x] 后续轮追加 `pub mod tstransforms/estransforms/moduletransforms/jsxtransforms/declarations;`（各 `<subpkg>/mod.rs`）　**[6b–6f]**（done: all submodules declared in lib.rs; `inliners` not yet a separate mod）
 
 ## 6a worklog（red→green 推进记录）
 
