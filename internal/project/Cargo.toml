@@ -12,6 +12,9 @@ tsgo_core = { path = "../core" }
 tsgo_diagnostics = { path = "../diagnostics" }
 tsgo_lsproto = { path = "../lsp/lsproto" }
 tsgo_tspath = { path = "../tspath" }
+tsgo_vfs = { path = "../vfs" }
+tsgo_project_dirty = { path = "dirty" }
+tsgo_project_logging = { path = "logging" }
 dashmap = "6.2.1"
 serde_json = "1.0.150"
 

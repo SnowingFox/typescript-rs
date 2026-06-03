@@ -4,12 +4,21 @@
 //! their lifecycle, caches, and the bridge between the LSP protocol layer
 //! and the compiler/language-service layer.
 //!
-//! This crate currently contains the P8 Slice 1 leaf modules — pure-function
-//! and data-structure types with no external state dependencies.
+//! This crate contains:
+//! - **Slice 1** (W3): leaf modules — `kind`, `background`, `refcountcache`,
+//!   `filechange`, `client`, `parsecache`.
+//! - **Slice 2** (W4): FS layer — `overlayfs`, `configfileregistry`.
+//! - **Slice 3** (W4): project core — `project`, `compilerhost`,
+//!   `projectcollection`.
 
 pub mod background;
 pub mod client;
+pub mod compilerhost;
+pub mod configfileregistry;
 pub mod filechange;
 pub mod kind;
+pub mod overlayfs;
 pub mod parsecache;
+pub mod project;
+pub mod projectcollection;
 pub mod refcountcache;

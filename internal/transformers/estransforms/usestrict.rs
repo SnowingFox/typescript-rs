@@ -28,7 +28,7 @@
 //!   `getEmitModuleFormatOfFile` (needs the resolver / module format analysis).
 
 use crate::{new_transformer, TransformOptions, Transformer};
-use tsgo_ast::{Kind, NodeArena, NodeData, NodeId, NodeList};
+use tsgo_ast::{Kind, ModifierFlags, NodeArena, NodeData, NodeId, NodeList};
 use tsgo_core::compileroptions::{CompilerOptions, ModuleKind};
 use tsgo_core::scriptkind::ScriptKind;
 use tsgo_printer::EmitContext;
@@ -71,7 +71,7 @@ fn use_strict_visit(ec: &mut EmitContext, options: &CompilerOptions, node: NodeI
 /// Side effects: may rebuild the source file with a leading directive.
 // Go: internal/transformers/estransforms/usestrict.go:useStrictTransformer.visitSourceFile
 fn transform_use_strict(ec: &mut EmitContext, options: &CompilerOptions, node: NodeId) -> NodeId {
-    let (file_name, script_kind, language_variant, statements, end_of_file_token, is_external) =
+    let (file_name, script_kind, language_variant, statements, end_of_file_token) =
         match ec.arena().data(node) {
             NodeData::SourceFile(d) => (
                 d.file_name.clone(),
@@ -79,7 +79,6 @@ fn transform_use_strict(ec: &mut EmitContext, options: &CompilerOptions, node: N
                 d.language_variant,
                 d.statements.clone(),
                 d.end_of_file_token,
-                d.external_module_indicator.is_some(),
             ),
             _ => unreachable!("kind checked by caller"),
         };
@@ -87,6 +86,13 @@ fn transform_use_strict(ec: &mut EmitContext, options: &CompilerOptions, node: N
     if script_kind == ScriptKind::Json {
         return node;
     }
+
+    // Detect external-module-ness from statements: `external_module_indicator`
+    // may be lost when earlier transforms rebuild the source file (the arena
+    // `new_source_file` initializes it to `None`). Scanning for import/export
+    // statements mirrors Go's `isAnExternalModuleIndicatorNode`.
+    // Go: internal/parser/parser.go:isAnExternalModuleIndicatorNode
+    let is_external = has_module_indicator(ec.arena(), &statements.nodes);
 
     // ESM is always strict. If the file is an external module emitted as ESM,
     // skip adding `"use strict"`. The exact per-file `format` gating is deferred
@@ -105,6 +111,50 @@ fn transform_use_strict(ec: &mut EmitContext, options: &CompilerOptions, node: N
         NodeList::new(new_statements),
         end_of_file_token,
     )
+}
+
+/// Reports whether any statement in the source file is an external module
+/// indicator (import/export declaration, export modifier), mirroring Go's
+/// `isAnExternalModuleIndicatorNode`. This replaces reading
+/// `external_module_indicator` which may be lost when a prior transform
+/// rebuilds the source-file node.
+///
+/// Side effects: none (reads the arena).
+// Go: internal/parser/parser.go:isAnExternalModuleIndicatorNode (subset)
+fn has_module_indicator(arena: &NodeArena, statements: &[NodeId]) -> bool {
+    for &stmt in statements {
+        match arena.kind(stmt) {
+            Kind::ImportDeclaration | Kind::ExportDeclaration | Kind::ExportAssignment => {
+                return true;
+            }
+            Kind::ImportEqualsDeclaration => return true,
+            _ => {
+                if has_export_modifier(arena, stmt) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Reports whether `node` has an `export` modifier.
+///
+/// Side effects: none (reads the arena).
+fn has_export_modifier(arena: &NodeArena, node: NodeId) -> bool {
+    let modifiers = match arena.data(node) {
+        NodeData::FunctionDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ClassDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::VariableStatement(d) => d.modifiers.as_ref(),
+        NodeData::InterfaceDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::TypeAliasDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::EnumDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ModuleDeclaration(d) => d.modifiers.as_ref(),
+        _ => None,
+    };
+    modifiers
+        .map(|m| m.modifier_flags.contains(ModifierFlags::EXPORT))
+        .unwrap_or(false)
 }
 
 /// Ensures `"use strict"` is the first statement: returns the statements

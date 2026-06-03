@@ -395,6 +395,89 @@ fn emit_jsx_react_lowers_element() {
     );
 }
 
+// Go: internal/compiler/emitter.go:getScriptTransformers (module transform chain)
+// With `module: CommonJS`, `import { x } from "./m"; console.log(x);` lowers the
+// import to `require("./m")` and rewrites the use-site `x` to `m_1.x` (the CJS
+// module transform's textual name-match fallback, since no resolver is threaded
+// through the emitter yet). `"use strict"` is prepended (module < ES2015).
+#[test]
+fn emit_cjs_import_and_use_lowers_to_require_and_member_access() {
+    let options = CompilerOptions {
+        module: tsgo_core::compileroptions::ModuleKind::CommonJs,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[(
+            "/src/index.ts",
+            "import { x } from \"./m\";\nconsole.log(x);",
+        )],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    let text = &captured[0].1;
+    // CJS transform fires: `import` syntax is gone.
+    assert!(
+        !text.contains("import {"),
+        "CJS transform should have lowered the ES import: {text}"
+    );
+    // A `require("./m")` call is present.
+    assert!(
+        text.contains("require(\"./m\")"),
+        "CJS output should contain require(\"./m\"): {text}"
+    );
+    // The use-site `x` is rewritten to a qualified member access on the alias.
+    assert!(
+        text.contains(".x"),
+        "CJS output should rewrite the use of `x` to a member access: {text}"
+    );
+    // `"use strict"` is prepended (module < ES2015).
+    assert!(
+        text.contains("\"use strict\""),
+        "CJS output should contain \"use strict\" directive: {text}"
+    );
+}
+
+// Go: internal/compiler/emitter.go:getScriptTransformers (ESM passthrough)
+// With `module: EsNext`, `export default function() {}` is preserved as-is: the
+// implied module transformer dispatches to the ES module transform which is a
+// passthrough for simple exports. `"use strict"` is skipped because the file is
+// an external module emitted as ESM (module >= ES2015).
+#[test]
+fn emit_esnext_export_default_function_is_preserved() {
+    let options = CompilerOptions {
+        module: tsgo_core::compileroptions::ModuleKind::EsNext,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[("/src/index.ts", "export default function() {}")],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    assert_eq!(captured.len(), 1);
+    let text = &captured[0].1;
+    // ESM passthrough: `export default` syntax is preserved.
+    assert!(
+        text.contains("export default function"),
+        "ESM passthrough should preserve export default function: {text}"
+    );
+    // No `"use strict"` — ESM is implicitly strict (module >= ES2015 + external module).
+    assert!(
+        !text.contains("\"use strict\""),
+        "ESM output should NOT contain \"use strict\" (ESM is implicitly strict): {text}"
+    );
+}
+
 // Go: internal/compiler/emitter.go:emitter.emitJSFile (PrinterOptions.NewLine)
 #[test]
 fn emit_honors_crlf_newline_option() {

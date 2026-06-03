@@ -1079,7 +1079,10 @@ dependencies = [
  "tsgo_core",
  "tsgo_diagnostics",
  "tsgo_lsproto",
+ "tsgo_project_dirty",
+ "tsgo_project_logging",
  "tsgo_tspath",
+ "tsgo_vfs",
 ]
 
 [[package]]
