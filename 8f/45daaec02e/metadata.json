@@ -1,0 +1,18 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "8f45daaec02e",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "internal/testrunner/compiler_runner_test.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/8f/45daaec02e/0/metadata.json",
+      "transcript": "/8f/45daaec02e/0/full.jsonl",
+      "content_hash": "/8f/45daaec02e/0/content_hash.txt",
+      "prompt": "/8f/45daaec02e/0/prompt.txt"
+    }
+  ]
+}
