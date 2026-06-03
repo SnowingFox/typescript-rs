@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "9d6c6631172a",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-03T06:21:37.820168Z",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/rust-rewrite/phase-10-conformance-parity/worklog-p10-corpus-runner.md",
+    "internal/testrunner/compiler_runner.rs",
+    "internal/testrunner/compiler_runner_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-opus-4-8-thinking-xhigh",
+  "turn_id": "57e822ddb349",
+  "checkpoint_transcript_start": 1367,
+  "transcript_lines_at_start": 1367,
+  "session_metrics": {
+    "turn_count": 23,
+    "context_tokens": 933669,
+    "context_window_size": 1000000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-03T06:21:37.739624Z",
+    "agent_lines": 495,
+    "agent_removed": 5,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 495,
+    "total_lines_changed": 500,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
