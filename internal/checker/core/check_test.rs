@@ -9600,3 +9600,155 @@ fn type_predicate_naming_binding_element_reports_ts1230_not_ts1225() {
         "A type predicate cannot reference element 'value' in a binding pattern."
     );
 }
+
+// Round 31 (TS2309, export-assignment conflict — headline flip): a module that
+// has an `export =` AND another *value* export reports `TS2309` on the
+// `export =` statement (Go's `checkExternalModuleExports` ->
+// `hasExportedMembersOfKind(moduleSymbol, Value)`). Mirrors the corpus
+// `exportAssignmentMerging4` shape (`export const x` + `export = { ... }`).
+// The span is the whole `export = { a: 1 };` statement (the export-assignment
+// node, whose `end` includes the trailing `;`), trivia-skipped — matching
+// `tsc`'s `a.ts(6,1)` baseline byte-for-byte.
+// Go: internal/checker/checker.go:Checker.checkExternalModuleExports(5663)
+#[test]
+fn export_equals_with_value_export_reports_ts2309() {
+    let text = "export const x = 42;\nexport = { a: 1 };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts2309: Vec<_> = diags.iter().filter(|d| d.code == 2309).collect();
+    assert_eq!(
+        ts2309.len(),
+        1,
+        "expected exactly one TS2309, got {diags:?}"
+    );
+    assert_eq!(
+        ts2309[0].message,
+        "An export assignment cannot be used in a module with other exported elements."
+    );
+    // The reported span is the entire `export = { a: 1 };` statement (offset 21,
+    // 18 bytes incl. the trailing `;`), trivia-skipped to the `export` keyword.
+    assert_eq!(ts2309[0].start, 21, "span starts at the `export` keyword");
+    assert_eq!(
+        ts2309[0].length, 18,
+        "span covers the whole export-assignment statement incl. the `;`"
+    );
+}
+
+// Round 31 (a CLASS value export also conflicts): mirrors the corpus
+// `exportAssignmentMerging10` shape (`export class Base` + `export = Foo`) —
+// a class is a value (`SymbolFlags::CLASS`), so `hasExportedMembersOfKind`
+// counts it and TS2309 fires.
+// Go: internal/checker/checker.go:Checker.checkExternalModuleExports(5663)
+#[test]
+fn export_equals_with_class_export_reports_ts2309() {
+    let text = "export class C {}\nexport = { a: 1 };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts2309: Vec<_> = diags.iter().filter(|d| d.code == 2309).collect();
+    assert_eq!(
+        ts2309.len(),
+        1,
+        "a class value export conflicts with `export =`: {diags:?}"
+    );
+}
+
+// Round 31 (faithfulness: an INSTANTIATED namespace counts as a value): a
+// namespace that has a runtime form (`export const v`) is bound by Go as a
+// `ValueModule` (Go's `declareModuleSymbol`: ValueModule iff
+// `GetModuleInstanceState != NonInstantiated`), so it IS a value member and
+// TS2309 fires. This proves the membership gate distinguishes an instantiated
+// (value) namespace from a type-only one, rather than blanket-excluding modules.
+// Go: internal/checker/checker.go:Checker.hasExportedMembersOfKind(5708)
+#[test]
+fn export_equals_with_instantiated_namespace_reports_ts2309() {
+    let text = "export namespace N { export const v = 1; }\nexport = { a: 1 };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts2309: Vec<_> = diags.iter().filter(|d| d.code == 2309).collect();
+    assert_eq!(
+        ts2309.len(),
+        1,
+        "an instantiated (value) namespace conflicts with `export =`: {diags:?}"
+    );
+}
+
+// Round 31 (GUARD, sole export — NO over-fire): an `export =` that is the ONLY
+// export reports NO TS2309 (Go's `hasExportedMembersOfKind` returns false — the
+// only export is the export-equals symbol itself, which is skipped by name).
+// Go: internal/checker/checker.go:Checker.hasExportedMembersOfKind (skip InternalSymbolNameExportEquals)
+#[test]
+fn export_equals_sole_export_reports_no_ts2309() {
+    let text = "export = { a: 1 };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2309),
+        "a sole `export =` must not report TS2309: {diags:?}"
+    );
+}
+
+// Round 31 (GUARD, type-only export — NO over-fire): `export type T` is type-only
+// (`SymbolFlags::TYPE_ALIAS`, not `Value`), so it does NOT count as an "other
+// exported element" — mirrors the corpus `exportAssignmentMerging8`
+// (`export = Foo` + `export { SomeTypeAlias }`) which `tsc` does NOT flag.
+// Go: internal/checker/checker.go:Checker.hasExportedMembersOfKind (kind = Value)
+#[test]
+fn export_equals_with_type_alias_only_reports_no_ts2309() {
+    let text = "export type T = { x: number };\nexport = { a: 1 };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2309),
+        "a type-only export must not trigger TS2309: {diags:?}"
+    );
+}
+
+// Round 31 (GUARD, interface-only export — NO over-fire): `export interface I`
+// is type-only (`SymbolFlags::INTERFACE`), so it is not a value member.
+// Go: internal/checker/checker.go:Checker.hasExportedMembersOfKind (kind = Value)
+#[test]
+fn export_equals_with_interface_only_reports_no_ts2309() {
+    let text = "export interface I { x: number }\nexport = { a: 1 };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2309),
+        "an interface-only export must not trigger TS2309: {diags:?}"
+    );
+}
+
+// Round 31 (GUARD, type-only NAMESPACE — the critical over-fire trap): a
+// namespace that contains ONLY types (`export interface Baz`) is type-only.
+// Go's binder gives it `NamespaceModule` (not a `Value`), so it does NOT count.
+// The Rust binder over-assigns `ValueModule` to EVERY namespace (the
+// instance-state split is DEFERRED there), so `hasExportedMembersOfKind` MUST
+// re-derive the module instance state and exclude the non-instantiated
+// namespace — otherwise it over-fires on the corpus `exportAssignmentMerging1`
+// (`export type Foo` + `export namespace Bar { export interface Baz }` +
+// `export = { ... }`), which `tsc` does NOT flag.
+// Go: internal/checker/checker.go:Checker.hasExportedMembersOfKind +
+//     internal/binder/binder.go:Binder.declareModuleSymbol (ValueModule iff instantiated)
+#[test]
+fn export_equals_with_type_only_namespace_reports_no_ts2309() {
+    let text = "export namespace Bar { export interface Baz { y: number } }\nexport = { a: 1 };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", text));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2309),
+        "a type-only (non-instantiated) namespace must not trigger TS2309: {diags:?}"
+    );
+}

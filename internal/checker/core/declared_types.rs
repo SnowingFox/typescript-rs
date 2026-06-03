@@ -1352,7 +1352,10 @@ fn is_alias_symbol_declaration(arena: &NodeArena, node: NodeId) -> bool {
 /// `getDeclarationOfAliasSymbol`): the first declaration that is an
 /// import/export alias declaration.
 // Go: internal/checker/checker.go:Checker.getDeclarationOfAliasSymbol
-fn get_declaration_of_alias_symbol(program: &dyn BoundProgram, symbol: SymbolId) -> Option<NodeId> {
+pub(crate) fn get_declaration_of_alias_symbol(
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> Option<NodeId> {
     program
         .symbol(symbol)
         .declarations

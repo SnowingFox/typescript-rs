@@ -900,8 +900,22 @@ fn expanded_compiler_subset_parity_smoke() {
     // Round 29: `assertsPredicateParameterMismatch.ts` flips out of
     // missing_all_errors (43 -> 42) as its type-predicate parameter-name check
     // now emits the committed `TS1225`.
-    assert_eq!(hist.missing_all_errors, 42);
-    assert_eq!(hist.divergent, 7);
+    // Round 31 (TS2309, export-assignment conflict): a module with an `export =`
+    // AND a value export now reports `TS2309` on the `export =` statement (Go's
+    // `checkExternalModuleExports` -> `hasExportedMembersOfKind(_, Value)`). In
+    // this subset `exportAssignmentMerging4` (`export const x` + `export = {…}`)
+    // and `exportAssignmentMerging10` (`export class Base` + `export = Foo`) each
+    // now emit the committed TS2309 (`a.ts(6,1)` / `a.ts(13,1)`), so both leave
+    // `missing_all_errors` (42 -> 40). They land in `divergent` (7 -> 9) rather
+    // than PASS only because the multi-file `.errors.txt` lists its file blocks
+    // in source order while `tsc` lists the `require`-bearing entry file first
+    // (Go's harness `toBeCompiled`/`otherFiles` split — a pre-existing harness
+    // file-ORDERING gap, independent of TS2309); case 10 additionally still
+    // misses the deferred TS2702. CRUCIALLY there is NO `extra TS2309` anywhere
+    // (the type-only guards hold), so `passed` is UNCHANGED at 94 — unlike the
+    // prior over-firing attempt which regressed this subset 94 -> 92.
+    assert_eq!(hist.missing_all_errors, 40);
+    assert_eq!(hist.divergent, 9);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare

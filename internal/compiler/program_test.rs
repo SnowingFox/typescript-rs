@@ -2363,3 +2363,71 @@ fn correct_type_predicate_no_ts1225_with_real_lib() {
         "a correct predicate (name matches a parameter) must not report TS1225: {diags:?}"
     );
 }
+
+/// End to end with the REAL bundled lib (Round 31, mirroring the corpus
+/// `exportAssignmentMerging4`): a module that has an `export =` AND a *value*
+/// export (`export const x`) reports exactly one `TS2309: An export assignment
+/// cannot be used in a module with other exported elements.` on the `export =`
+/// statement (Go's `checkExternalModuleExports` ->
+/// `hasExportedMembersOfKind(moduleSymbol, Value)`). Before Round 31 the port
+/// never ran the external-module-exports check, so this was a `missing TS2309`
+/// false negative in the full-corpus map.
+// Go: internal/checker/checker.go:Checker.checkExternalModuleExports(5663)
+#[test]
+fn export_assignment_with_value_export_reports_ts2309_with_real_lib() {
+    let options = CompilerOptions {
+        module: tsgo_core::compileroptions::ModuleKind::CommonJs,
+        ..Default::default()
+    };
+    let src = "export const x = 42;\nexport = { a: 1, b: \"hello\" };\n";
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", src)],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    let ts2309: Vec<_> = diags.iter().filter(|d| d.code == 2309).collect();
+    assert_eq!(
+        ts2309.len(),
+        1,
+        "a value export alongside `export =` -> exactly one TS2309: {diags:?}"
+    );
+    assert_eq!(
+        ts2309[0].message,
+        "An export assignment cannot be used in a module with other exported elements."
+    );
+}
+
+/// GUARD with the REAL bundled lib (no over-fire, mirroring the corpus
+/// `exportAssignmentMerging1`): a module whose ONLY non-`export =` exports are a
+/// type alias and a TYPE-ONLY namespace reports NO `TS2309` — `tsc` does not
+/// flag it (the type alias is not a value, and a type-only namespace is Go's
+/// `NamespaceModule`, not a value). The Rust binder over-assigns `VALUE_MODULE`
+/// to EVERY namespace, so this exercises the instance-state gate that re-derives
+/// the binder's `ValueModule`-vs-`NamespaceModule` classification — without it
+/// the type-only `namespace Bar` would over-fire TS2309.
+// Go: internal/checker/checker.go:Checker.hasExportedMembersOfKind (kind = Value)
+#[test]
+fn export_assignment_with_type_only_exports_no_ts2309_with_real_lib() {
+    let options = CompilerOptions {
+        module: tsgo_core::compileroptions::ModuleKind::CommonJs,
+        ..Default::default()
+    };
+    let src = "export type Foo = { x: string };\n\
+               export namespace Bar { export interface Baz { y: number } }\n\
+               export = { a: 1, b: \"hello\" };\n";
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.ts", src)],
+        "/src",
+        &["/src/index.ts"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2309),
+        "type-only exports (type alias + type-only namespace) must not trigger TS2309: {diags:?}"
+    );
+}

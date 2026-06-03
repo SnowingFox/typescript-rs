@@ -21,7 +21,7 @@
 
 use std::rc::Rc;
 
-use tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_COMPUTED;
+use tsgo_ast::symbol::{INTERNAL_SYMBOL_NAME_COMPUTED, INTERNAL_SYMBOL_NAME_EXPORT_EQUALS};
 use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags, SymbolId, SymbolTable};
 use tsgo_core::compileroptions::ScriptTarget;
 use tsgo_diagnostics::{Category, Message};
@@ -29,13 +29,14 @@ use tsgo_diagnostics::{Category, Message};
 use super::contextual::ContextFlags;
 use super::declared_types::{
     fill_missing_type_arguments, get_apparent_type, get_constraint_of_type_parameter,
-    get_declared_type_of_symbol, get_indexed_access_type, get_min_type_argument_count,
-    get_property_of_type, get_type_from_type_node, get_type_of_property_of_type,
-    get_type_of_symbol, resolve_alias,
+    get_declaration_of_alias_symbol, get_declared_type_of_symbol, get_indexed_access_type,
+    get_min_type_argument_count, get_property_of_type, get_type_from_type_node,
+    get_type_of_property_of_type, get_type_of_symbol, resolve_alias,
 };
 use super::inference::{InferenceContext, InferencePriority};
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
+use super::reachability::module_is_value_module;
 use super::relations::RelationKind;
 use super::signatures::{IndexInfo, IndexInfoId, Signature, SignatureFlags, SignatureId};
 use super::symbols::resolve_name;
@@ -3934,6 +3935,165 @@ impl Checker {
         for statement in statements {
             self.check_statement(view.as_ref(), statement);
         }
+        // Go: `if ast.IsExternalOrCommonJSModule(sourceFile) {
+        // c.checkExternalModuleExports(sourceFile.AsNode()) }` at the tail of
+        // `checkSourceFile`. The binder assigns the source file a module symbol
+        // (`VALUE_MODULE`) iff it is an external/CommonJS module, so the presence
+        // of that file symbol is the gate; a script file has no file symbol and
+        // is a no-op. (Go's other call site — `checkExportAssignment` for an
+        // `export =` nested in an ambient `declare module "…"` — is DEFERRED; see
+        // `check_external_module_exports`.)
+        if let Some(module_symbol) = view.symbol_of_node(root) {
+            self.check_external_module_exports(view.as_ref(), module_symbol);
+        }
+    }
+
+    // Reports `TS2309` when a module that has an `export =` (export-equals) ALSO
+    // exports other VALUE members — the reachable core of Go's
+    // `checkExternalModuleExports`. The error is reported on the export-assignment
+    // declaration (`export = X;`), whose `GetErrorRangeForNode` span is the whole
+    // statement (its `end` includes the trailing `;`), trivia-skipped.
+    //
+    // DEFER(phase-4-checker): (1) the `hasShadowedNamespace(exportEqualsSymbol)`
+    // arm — an `export = <namespace-alias>` whose aliased namespace exports
+    // type/namespace members (Go's `exportAssignmentMerging3`); it needs the
+    // export-equals symbol's `NamespaceModule|Alias` shape + `resolveAlias` over a
+    // local namespace. (2) Go's `links.exportsChecked` guard is subsumed here by
+    // the single (per-file-idempotent) source-file call site — Go needs the guard
+    // because it ALSO calls this from `checkExportAssignment` (for an `export =`
+    // nested in an ambient `declare module "…"`, the `exportAssignmentMerging9`
+    // shape), which this round does not wire. blocked-by: ExportSpecifier/
+    // namespace-alias resolution + module-declaration-body descent.
+    // Go: internal/checker/checker.go:Checker.checkExternalModuleExports(5663)
+    fn check_external_module_exports(
+        &mut self,
+        program: &dyn BoundProgram,
+        module_symbol: SymbolId,
+    ) {
+        // exportEqualsSymbol := moduleSymbol.Exports[InternalSymbolNameExportEquals]
+        let Some(export_equals_symbol) = program
+            .symbol(module_symbol)
+            .exports
+            .get(INTERNAL_SYMBOL_NAME_EXPORT_EQUALS)
+            .copied()
+        else {
+            return;
+        };
+        // An export assignment is in error if the module exports value members
+        // (Go's condition (a); condition (b), `hasShadowedNamespace`, DEFERRED).
+        if !self.has_exported_members_of_kind(program, module_symbol, SymbolFlags::VALUE) {
+            return;
+        }
+        // declaration := OrElse(getDeclarationOfAliasSymbol(export=),
+        //                       exportEqualsSymbol.ValueDeclaration)
+        let Some(declaration) = get_declaration_of_alias_symbol(program, export_equals_symbol)
+            .or_else(|| program.symbol(export_equals_symbol).value_declaration)
+        else {
+            return;
+        };
+        // Go guards with `!isTopLevelInExternalModuleAugmentation(declaration)`
+        // (the export= must not be a top-level statement of an external module
+        // augmentation). For THIS source-file call site that guard is provably a
+        // no-op: the file symbol's `export=` entry always comes from a top-level
+        // `export = X` whose parent is the `SourceFile` (a ModuleBlock-nested
+        // export= belongs to a namespace/`declare module` symbol, not the file
+        // symbol), and `isTopLevelInExternalModuleAugmentation` requires a
+        // ModuleBlock parent. It will be wired with the DEFERRED
+        // `checkExportAssignment` ambient-module call site (`declare module "…"`).
+        //
+        // The export-assignment node is NOT in `GetErrorRangeForNode`'s
+        // declaration-narrowing group, so its span is `skipTrivia(pos)..end` over
+        // the whole `export = X;` statement — trivia-skipped to the `export`
+        // keyword so it byte-matches `tsc`'s `a.ts(6,1)` baseline.
+        self.error_skipping_leading_trivia(
+            program,
+            declaration,
+            &tsgo_diagnostics::AN_EXPORT_ASSIGNMENT_CANNOT_BE_USED_IN_A_MODULE_WITH_OTHER_EXPORTED_ELEMENTS,
+            &[],
+        );
+    }
+
+    // Reports whether `module_symbol` has any exported member of `kind` OTHER than
+    // the export-equals symbol itself (Go's `hasExportedMembersOfKind`). For the
+    // TS2309 conflict check `kind` is `SymbolFlags::VALUE`, so a type-only export
+    // (`export type T` / `export interface I`) does NOT count — matching `tsc`
+    // (the corpus `exportAssignmentMerging1`/`8` are NOT flagged).
+    //
+    // The Rust binder over-assigns `VALUE_MODULE` to EVERY namespace (the
+    // `ValueModule`-vs-`NamespaceModule` instance-state split is DEFERRED there),
+    // so a namespace whose ONLY `kind`-contributing flag is the module bit is
+    // counted only when its declaration is actually instantiated — re-deriving
+    // Go's binder classification (`declareModuleSymbol`: ValueModule iff
+    // `GetModuleInstanceState != NonInstantiated`). This keeps a type-only
+    // namespace (`export namespace Bar { export interface Baz {} }`, the
+    // `exportAssignmentMerging1` trap) from over-firing while an instantiated
+    // namespace still counts.
+    // Go: internal/checker/checker.go:Checker.hasExportedMembersOfKind(5708)
+    fn has_exported_members_of_kind(
+        &self,
+        program: &dyn BoundProgram,
+        module_symbol: SymbolId,
+        kind: SymbolFlags,
+    ) -> bool {
+        for (name, &symbol) in program.symbol(module_symbol).exports.iter() {
+            if name.as_str() == INTERNAL_SYMBOL_NAME_EXPORT_EQUALS {
+                continue;
+            }
+            let flags = self.get_symbol_flags(program, symbol);
+            if !flags.intersects(kind) {
+                continue;
+            }
+            // Undo the binder's over-broad `VALUE_MODULE`: when the only
+            // `kind`-contributing flag is a module bit, require the namespace to
+            // be a ValueModule (instantiated).
+            let non_module_kind = flags & kind & !SymbolFlags::MODULE;
+            if non_module_kind.is_empty()
+                && flags.intersects(SymbolFlags::MODULE)
+                && !self.symbol_has_value_module_declaration(program, symbol)
+            {
+                continue;
+            }
+            return true;
+        }
+        false
+    }
+
+    // The effective `SymbolFlags` of `symbol` (Go's `getSymbolFlags` /
+    // `getSymbolFlagsEx(symbol, false, false)`).
+    //
+    // Reachable subset: returns the binder-assigned flags directly. Go also
+    // FOLLOWS alias targets (`for symbol.Flags&Alias { flags |= resolveAlias(…)
+    // .Flags }`) so an exported alias that resolves to a value counts; the only
+    // alias EXPORTS in the reachable set are `export { x }` specifiers whose
+    // target resolution is itself DEFERRED (`getTargetOfAliasDeclaration` returns
+    // `None` for `ExportSpecifier`), so following them adds nothing — and doing so
+    // here would risk emitting alias-resolution diagnostics (TS2305/TS2307) out of
+    // order during the export-conflict scan. So the port reads the declared flags.
+    // (Consequence: the `export { Bar }` value re-export of `exportAssignmentMerging7`
+    // is not yet counted; that flip is DEFERRED with the ExportSpecifier target
+    // resolution, but the symmetric `export { SomeTypeAlias }` trap correctly does
+    // NOT over-fire.) blocked-by: ExportSpecifier alias-target resolution.
+    // Go: internal/checker/checker.go:Checker.getSymbolFlags(16222)
+    fn get_symbol_flags(&self, program: &dyn BoundProgram, symbol: SymbolId) -> SymbolFlags {
+        program.symbol(symbol).flags
+    }
+
+    // Reports whether `symbol` has any `ModuleDeclaration` declaration the binder
+    // would classify as a `ValueModule` (an instantiated, runtime namespace) —
+    // used to undo the Rust binder's over-broad `VALUE_MODULE` assignment in the
+    // TS2309 membership predicate.
+    // Go: internal/binder/binder.go:Binder.declareModuleSymbol (instantiated boolean)
+    fn symbol_has_value_module_declaration(
+        &self,
+        program: &dyn BoundProgram,
+        symbol: SymbolId,
+    ) -> bool {
+        let arena = program.arena();
+        program
+            .symbol(symbol)
+            .declarations
+            .iter()
+            .any(|&d| arena.kind(d) == Kind::ModuleDeclaration && module_is_value_module(arena, d))
     }
 
     // Checks a single statement (Go's `checkSourceElement` dispatch). Covers

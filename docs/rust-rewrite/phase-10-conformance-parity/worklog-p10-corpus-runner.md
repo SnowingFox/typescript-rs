@@ -4333,3 +4333,206 @@ code modifications — `check.rs`, `check_test.rs`, `program_test.rs`,
   (the two corpus flips). blocked-by: wiring `check_return_type_predicate` into
   `check_class_member` (methods) / `check_function_expression` /
   `check_arrow_function`; no current corpus case needs it.
+
+# Round 31 — TS2309 export-assignment conflict (`checkExternalModuleExports`)
+
+Round goal: implement `TS2309 An export assignment cannot be used in a module
+with other exported elements.` (Go's `checkExternalModuleExports`) to flip the
+`exportAssignmentMerging*` corpus cases. A PRIOR attempt (discarded; HEAD is the
+clean `9efb0611`) implemented the happy path but OVER-FIRED (`extra TS2309 ×3`),
+regressing the 150-subset 94→92. THE PRIMARY CONSTRAINT THIS ROUND WAS ZERO
+OVER-FIRE: TS2309 must fire EXACTLY where `tsc` does and nowhere else. SOLO lane,
+strict `/tdd` red→green vertical slices.
+
+## Go ground truth (read + `// Go:`-anchored)
+
+- **`internal/checker/checker.go:checkExternalModuleExports(5663)`** — at the
+  tail of `checkSourceFile` (for an external/CommonJS module) and from
+  `checkExportAssignment`. `exportEqualsSymbol := moduleSymbol.Exports["export="]`;
+  if it exists AND (`hasExportedMembersOfKind(moduleSymbol, Value)` OR
+  `hasShadowedNamespace(exportEqualsSymbol)`), report TS2309 on
+  `OrElse(getDeclarationOfAliasSymbol(export=), export=.ValueDeclaration)` unless
+  `isTopLevelInExternalModuleAugmentation(declaration)`.
+- **`internal/checker/checker.go:hasExportedMembersOfKind(5708)`** — THE CRUX
+  predicate: `for symbol := range moduleSymbol.Exports { if symbol.Name !=
+  "export=" && c.getSymbolFlags(symbol)&kind != 0 { return true } }`. For TS2309
+  `kind == SymbolFlagsValue`. So it counts an export (OTHER than the export=
+  symbol, skipped by name) iff its EFFECTIVE flags (`getSymbolFlags`, which
+  follows aliases) include a VALUE meaning. Type-only exports (`type`/`interface`)
+  are NOT values; a type-only namespace is bound `NamespaceModule` (NOT in
+  `SymbolFlagsValue`), so it does NOT count.
+- **`internal/binder/binder.go:declareModuleSymbol(820)`** — the binder picks a
+  namespace's flag by `instantiated := GetModuleInstanceState(node) !=
+  NonInstantiated` → `ValueModule` (a value) vs `NamespaceModule` (type-only).
+  This is what makes `hasExportedMembersOfKind` treat a type-only namespace as a
+  non-value.
+- The span: `c.error(declaration, …)` → `GetErrorRangeForNode` → the
+  export-assignment node is NOT in the declaration-narrowing group, so the span is
+  `skipTrivia(pos)..end` over the whole `export = X;` statement (the parser's
+  `parseExportAssignment` consumes the `;` BEFORE `finishNode`, so `end` includes
+  it) — matching `a.ts(6,1)` + 30 tildes for `export = { a: 1, b: "hello" };`.
+
+## The over-fire traps (per-case `exportAssignmentMerging*` analysis)
+
+Read EVERY committed `.errors.txt` + `.ts` source. FLIP targets (tsc reports
+TS2309): cases 3, 4, 7, 9, 10. OVER-FIRE traps (tsc does NOT): cases 1, 2, 5, 6, 8.
+
+| case | non-`export=` exports | tsc TS2309? | why |
+|---|---|---|---|
+| 1 | `export type Foo`, `export namespace Bar { export interface Baz }` | NO | only a type alias + a TYPE-ONLY namespace; neither is a `Value` |
+| 2 | `export type Foo`, `export namespace Bar` (type-only); `export = mod` (mod = values-only LOCAL ns) | NO | no value EXPORTS; `mod` is local; `hasShadowedNamespace` false (mod has no type/ns members) |
+| 3 | same + `export = mod` where mod ALSO has `export type Foo` | **YES** | `hasShadowedNamespace`: mod has a type member |
+| 4 | `export type Foo`, `export namespace Bar`, **`export const x`** | **YES** | `export const x` is a Value |
+| 5 | JS `@typedef Foo`; `module.exports = {…}` | NO | type-only; JS `module.exports` is not an `export=` ExportAssignment |
+| 6 | JS `@typedef`, `export const x`; `module.exports` | NO (TS2591/2339) | JS `module.exports` forms no export= symbol |
+| 7 | `class Foo`/`class Bar` local, `export = Foo`, **`export { Bar }`** | **YES** | `export { Bar }` re-export resolves to a class (Value) |
+| 8 | `type SomeTypeAlias`, `class Foo`, `export = Foo`, **`export { SomeTypeAlias }`** | NO | the re-export resolves to a TYPE → not a Value |
+| 9 | `declare module "m" { export class Base; export = value }` | **YES** | `export class Base` is a Value (ambient module symbol) |
+| 10 | `class Foo`, **`export class Base`**, `export = Foo` | **YES** | `export class Base` is a Value |
+
+WHY the prior attempt over-fired (×3): it counted any non-export= member as an
+"other element" rather than only `SymbolFlagsValue` ones — so it fired on the
+TYPE-only cases 1 and 8 (which PASS), and added a 3rd spurious TS2309 to the
+already-failing case 2. The fix is to restrict the membership to `Value`.
+
+The SUBTLEST trap (the one that bites the Rust port specifically): the Rust
+binder DEFERS the `ValueModule`-vs-`NamespaceModule` instance-state split and
+assigns `VALUE_MODULE` to EVERY namespace. `VALUE_MODULE` ∈ `SymbolFlags::VALUE`,
+so a naive `flags & Value` would count case 1's type-only `namespace Bar` as a
+value → over-fire on a PASSING case. The membership predicate therefore re-derives
+the binder's classification at the check site: when an export's only
+`Value`-contributing flag is a MODULE bit, it counts only if its declaration is a
+ValueModule (`module_instance_state(decl) != NonInstantiated`).
+
+## Rust landing
+
+- `internal/checker/core/check.rs`:
+  - `check_source_file` tail now calls `check_external_module_exports(view, module_symbol)`
+    when the source file has a module symbol (the binder's external/CommonJS-module
+    gate; a script file has no file symbol → no-op).
+  - `check_external_module_exports` — ports the reachable core: get the `export=`
+    symbol, fire TS2309 (via `error_skipping_leading_trivia`, so the span is the
+    trivia-skipped whole `export = X;` statement) on
+    `get_declaration_of_alias_symbol(export=).or(export=.value_declaration)` iff
+    `has_exported_members_of_kind(_, Value)`.
+  - `has_exported_members_of_kind` — Go's predicate: skip the `export=` entry by
+    name; count an export iff `get_symbol_flags & kind != 0`, with the
+    VALUE_MODULE-correction gate (above) via `symbol_has_value_module_declaration`.
+  - `get_symbol_flags` — reachable subset of Go's `getSymbolFlagsEx` (returns the
+    binder-assigned flags; alias-following DEFERRED, see below).
+- `internal/checker/core/reachability.rs`: new `pub(crate) module_is_value_module`
+  = `module_instance_state(node) != NonInstantiated`, mirroring the binder's
+  `declareModuleSymbol` boolean (reuses the existing `module_instance_state` port).
+- `internal/checker/core/declared_types.rs`: `get_declaration_of_alias_symbol`
+  made `pub(crate)`.
+
+## RED→GREEN + guard tests
+
+Checker (`internal/checker/core/check_test.rs`, +7):
+- `export_equals_with_value_export_reports_ts2309` (RED→GREEN headline) —
+  `export const x` + `export = {…}` → exactly one TS2309 at the export= span
+  (asserts start=21,length=18 → trivia-skipped whole statement incl. `;`).
+- `export_equals_with_class_export_reports_ts2309` (RED→GREEN, case-10 shape) —
+  `export class C` is a Value → TS2309.
+- `export_equals_with_instantiated_namespace_reports_ts2309` (RED→GREEN,
+  faithfulness) — an INSTANTIATED `namespace N { export const v }` IS a Value
+  (binder `ValueModule`) → TS2309; proves the gate distinguishes instantiated
+  from type-only namespaces rather than blanket-excluding modules.
+- `export_equals_sole_export_reports_no_ts2309` (GUARD) — sole `export =` → none.
+- `export_equals_with_type_alias_only_reports_no_ts2309` (GUARD, case-8 shape).
+- `export_equals_with_interface_only_reports_no_ts2309` (GUARD).
+- `export_equals_with_type_only_namespace_reports_no_ts2309` (GUARD — THE critical
+  binder-`VALUE_MODULE` trap; case-1 shape) → none.
+
+Compiler real-lib (`internal/compiler/program_test.rs`, +2):
+- `export_assignment_with_value_export_reports_ts2309_with_real_lib` (mirrors
+  `exportAssignmentMerging4`: exactly one TS2309 through the real pipeline).
+- `export_assignment_with_type_only_exports_no_ts2309_with_real_lib` (GUARD,
+  mirrors `exportAssignmentMerging1`: type alias + type-only namespace → none;
+  exercises the instance-state gate end-to-end).
+
+## Measurement — full corpus BEFORE→AFTER (`tests/cases/compiler`, 222 ran)
+
+| metric | BEFORE | AFTER | Δ |
+|---|---|---|---|
+| passed | 127 (57.2%) | 127 (57.2%) | 0 |
+| failed | 94 | 94 | 0 |
+| errored | 1 | 1 | 0 |
+| no_baseline_but_errors | 16 | 16 | 0 |
+| missing_all_errors | 63 | 61 | −2 |
+| divergent | 15 | 17 | +2 |
+| **missing TS2309** | **×5** | **×3** | **−2** |
+| **extra TS2309** | **×0** | **×0** | **0 (ZERO over-fire)** |
+| every other extra/missing code | — | — | UNCHANGED |
+
+`tests/cases/conformance` (19): passed 13→13 (no regression).
+
+150-subset (`expanded_compiler_subset_parity_smoke`): **94/56/0 → 94/56/0 (NO
+DROP)**; `missing_all_errors 42→40`, `divergent 7→9`, `no_baseline_but_errors 7`
+unchanged; subset `missing TS2309 ×4→×2`; subset extra histogram UNCHANGED
+(`TS2339 ×5, TS2304 ×4, …`) with NO `extra TS2309`. All pinned extra/missing
+assertions (`top_extra=[(2339,5),(2304,4)]`, `extra 2339==5`, `2583==None`,
+`2769==Some(1)`, `1005/1003/1155==None`, `2451==None`, `top_missing=[(2874,7)]`,
+`7026 extra/missing==None`, `missing 2300==None`) re-asserted UNCHANGED. The
+snapshot was updated to the ACTUAL measured `missing_all_errors=40`/`divergent=9`.
+The 30-case `curated_compiler_subset_parity_smoke` (21/9/0) is UNCHANGED (it has
+no `exportAssignmentMerging` case).
+
+## Honest flip count
+
+**+0 byte-exact PASS flips, but +2 cases now emit the byte-correct committed
+TS2309** (`exportAssignmentMerging4` `a.ts(6,1)`, `exportAssignmentMerging10`
+`a.ts(13,1)`), moving both from `missing_all_errors` → `divergent`, with **ZERO
+over-fire** and ZERO regression. The two cases do NOT reach byte-exact PASS for
+reasons OUTSIDE the TS2309 diagnostic:
+- Both: the produced multi-file `.errors.txt` lists its file blocks in source
+  order, while `tsc` lists the `require`-bearing entry file first (Go's harness
+  `toBeCompiled`/`otherFiles` split, `compiler_runner.go:319-364`, NOT ported to
+  the Rust runner). This is a pre-existing HARNESS file-ORDERING gap that the
+  correct new diagnostic merely EXPOSED (case 4 previously produced NO errors, so
+  the multi-file baseline was never built). It is the same wall the prior attempt
+  hit; out of scope for a checker-feature round (changing the harness ordering
+  touches every multi-file baseline). The TS2309 LINE itself byte-matches.
+- Case 10 additionally still misses the deferred `TS2702`.
+
+The win over the prior attempt: identical correct TS2309 emission, but ZERO
+over-fire — so the 150-subset stays 94 (the prior attempt regressed it 94→92).
+
+## Gate results (Round 31)
+
+- `cargo test -p tsgo_checker` — GREEN (lib [+7] + 180 doctests).
+- `cargo test -p tsgo_compiler` — GREEN (136 lib [+2 real-lib] + 11 doctests).
+- `cargo test -p tsgo_testrunner --lib` — GREEN (51 lib + 1 ignored full-corpus;
+  both subset snapshots re-pinned: 150-subset 94/56/0 with
+  `missing_all_errors=40`/`divergent=9`, 30-case 21/9/0).
+- `cargo test -p tsgo_ls -p tsgo_execute` — GREEN (no ls/execute snapshot churn).
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner --all-targets
+  -- -D warnings` — clean. `cargo fmt` then `cargo fmt -- --check` — clean.
+  `cargo build --workspace --all-targets` — clean.
+
+No `--no-verify`; additive/surgical (one new `check_source_file` tail call + four
+checker helpers + one `pub(crate)` reachability helper + one visibility change);
+no test weakened/deleted; ZERO over-fire; no new dependency (`Cargo.lock`
+untouched). Tree clean — only the 6 intended source files + this worklog; no temp
+dump. Not committed (left to the parent).
+
+## DEFER list (blocked-by) — Round 31
+
+- **`hasShadowedNamespace` (case 3)** — `export = <namespace-alias>` whose aliased
+  LOCAL namespace exports type/namespace members. blocked-by: the export= symbol's
+  `NamespaceModule|Alias` shape + `resolveAlias` over a local namespace + a
+  `hasExportedMembersOfKind(target, Type|Namespace)` recursion.
+- **The `checkExportAssignment` ambient-module call site (case 9)** — `export =`
+  nested in `declare module "m"`, plus `isTopLevelInExternalModuleAugmentation`'s
+  `IsExternalModuleAugmentation` arm. blocked-by: module-declaration-body descent
+  + `IsAmbientModule`/`IsModuleAugmentationExternal`.
+- **Alias-following in `get_symbol_flags` (case 7's `export { Bar }` value
+  re-export)** — Go follows aliases so an `export { Bar }` re-export of a class is
+  counted; the port reads declared flags because `ExportSpecifier` target
+  resolution is itself DEFERRED (returns unresolved either way) and resolving
+  during the export scan would risk emitting TS2305/TS2307 out of order. The
+  symmetric type trap (`export { SomeTypeAlias }`, case 8) correctly does NOT
+  over-fire. blocked-by: `ExportSpecifier` alias-target resolution.
+- **Byte-exact corpus PASS for cases 4/10** — blocked by the harness multi-file
+  `.errors.txt` file-ORDERING gap (Go's `toBeCompiled`/`otherFiles` split) +
+  (case 10) the deferred `TS2702`. blocked-by: a testrunner harness round.

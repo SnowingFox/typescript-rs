@@ -237,6 +237,24 @@ enum ModuleInstanceState {
     Instantiated,
 }
 
+/// Reports whether a `ModuleDeclaration` `node` is bound by the binder as a
+/// `ValueModule` (a runtime "value" namespace) rather than a type-only
+/// `NamespaceModule`.
+///
+/// Mirrors the binder's `declareModuleSymbol` classification, which uses
+/// `instantiated := GetModuleInstanceState(node) != NonInstantiated` to pick
+/// `ValueModule` vs `NamespaceModule` — so a const-enum-only module is a
+/// ValueModule too (independent of `preserveConstEnums`, unlike the emit-time
+/// [`is_instantiated_module`]). The TS2309 export-conflict membership predicate
+/// uses this to undo the Rust binder's over-broad `VALUE_MODULE` assignment
+/// (the `ValueModule`-vs-`NamespaceModule` split is DEFERRED in the binder).
+///
+/// Side effects: none (reads the arena).
+// Go: internal/binder/binder.go:Binder.declareModuleSymbol (instantiated boolean)
+pub(crate) fn module_is_value_module(arena: &NodeArena, node: NodeId) -> bool {
+    module_instance_state(arena, node) != ModuleInstanceState::NonInstantiated
+}
+
 /// Reports whether `node` (a `ModuleDeclaration`) produces a runtime form (Go's
 /// `IsInstantiatedModule`): instantiated, or const-enum-only under
 /// `preserve_const_enums`.
