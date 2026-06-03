@@ -1,0 +1,111 @@
+还有多少 todo，把 todo list 列出来，以及 ToDo tool 是不是不见了？
+
+---
+
+后面还不能并发做吗？
+
+---
+
+记得更新一下 todo list tool
+
+---
+
+话说能用了吗？现在，纯 CLI 的功能
+
+---
+
+话说 checker 做完了吗？还是后面有很多
+
+---
+
+整个 subagent 看看，为什么 rust 检查的 error 就这么一点？你真的还原了吗？你在起 subagent 之前大白话告诉我，等所有的 todo 推进完之后，能直接生产级别吗？
+
+# 3) 看 Rust 到底报了几条、报了什么
+./target/release/tsgo --noEmit /tmp/lib.dom.copy.d.ts 2>&1
+echo "Rust 行数: $(./target/release/tsgo --noEmit /tmp/lib.dom.copy.d.ts 2>&1 | wc -l)"
+
+# 4) 对比 Go（应远多于 2 条）
+/tmp/tsgo-go --noEmit /tmp/lib.dom.copy.d.ts 2>&1 | head -20
+echo "Go 行数: $(/tmp/tsgo-go --noEmit /tmp/lib.dom.copy.d.ts 2>&1 | wc -l)"
+
+# 5) 对比 tsc（可选）
+npx -p typescript tsc --noEmit /tmp/lib.dom.copy.d.ts 2>&1 | head -20
+echo "tsc 行数: $(npx -p typescript tsc --noEmit /tmp/lib.dom.copy.d.ts 2>&1 | wc -l)"
+
+---
+
+除了 checker 其他的也得继续对齐吧🤔，以及 checker 的修复是不是不影响后续的流程，以及我想重新评估一下后续的流程的 todo，是不是现在的就可以了？包括这种，我是真的想做一个真实的 tsc，生产级别可用的，然后我在把 tsgo -> rust 的 tsgo
+
+➜  typescript-go git:(main) ✗ ./target/release/tsgo --noEmit /Users/bytedance/Downloads/tsc-stress-test.ts                       
+
+thread 'main' (29386606) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+[1]    43103 abort      ./target/release/tsgo --noEmit /Users/bytedance/Downloads/tsc-stress-test.ts
+➜  typescript-go git:(main) ✗ npx tsc --noEmit /Users/bytedance/Downloads/tsc-stress-test.ts 
+Need to install the following packages:
+tsc@2.0.4
+Ok to proceed? (y) 
+npm error canceled
+npm error A complete log of this run can be found in: /Users/bytedance/.npm/_logs/2026-06-03T11_44_22_021Z-debug-0.log
+➜  typescript-go git:(main) ✗ 
+➜  typescript-go git:(main) ✗ bunx tsc --noEmit /Users/bytedance/Downloads/tsc-stress-test.ts                        
+../../Downloads/tsc-stress-test.ts:1385:10 - error TS2589: Type instantiation is excessively deep and possibly infinite.
+
+1385   return errors.length === 0 ? Ok(value as InferSchema<S>) : Err(errors);
+              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+../../Downloads/tsc-stress-test.ts:1728:5 - error TS2353: Object literal may only specify known properties, and 'text' does not exist in type '{ image: (v: ImageMessage) => string; }'.
+
+1728     text: (m) => `Text: ${m.body}`,
+         ~~~~
+
+../../Downloads/tsc-stress-test.ts:1728:12 - error TS7006: Parameter 'm' implicitly has an 'any' type.
+
+1728     text: (m) => `Text: ${m.body}`,
+                ~
+
+../../Downloads/tsc-stress-test.ts:1730:13 - error TS7006: Parameter 'm' implicitly has an 'any' type.
+
+1730     video: (m) => `Video: ${m.duration}s`,
+                 ~
+
+../../Downloads/tsc-stress-test.ts:1731:13 - error TS7006: Parameter 'm' implicitly has an 'any' type.
+
+1731     audio: (m) => `Audio: ${m.duration}s`,
+                 ~
+
+../../Downloads/tsc-stress-test.ts:1732:16 - error TS7006: Parameter 'm' implicitly has an 'any' type.
+
+1732     location: (m) => `Location: ${m.label ?? "Unknown"}`,
+                    ~
+
+../../Downloads/tsc-stress-test.ts:1733:12 - error TS7006: Parameter 'm' implicitly has an 'any' type.
+
+1733     file: (m) => `File: ${m.filename}`,
+                ~
+
+../../Downloads/tsc-stress-test.ts:1734:14 - error TS7006: Parameter 'm' implicitly has an 'any' type.
+
+1734     system: (m) => `System: ${m.body}`,
+                  ~
+
+
+Found 8 errors in the same file, starting at: ../../Downloads/tsc-stress-test.ts:1385
+
+---
+
+todo 是不是太少了啊？还有后续的呢？除了 checker，其他的是不是也要持续推进？遵循 /tdd 和 docs/rust-rewrite/README.md
+
+---
+
+todo 是不是太少了啊？还有后续的呢？除了 checker，其他的是不是也要持续推进？遵循 /tdd 和 docs/rust-rewrite/README.md ，以及尽量能并行
+
+---
+
+以及我觉得，我们是函数级别的 copy，当然也要视情况而定，不过最终的目标都是推进完全完成为止，一直干，干到完成为止，如果你发现 todo 太过宏大，也可以继续拆解，但是要合理，每个 subagent 要遵循 /tdd 吧还有 docs/rust-rewrite/README.md，以及用 opus4.6 ，也就是直接继承现有的模型，而不是用 composer-2.5-fast
+
+最终完成生产级别的 tsgo-rust
+
+---
+
+这些做完能是生产级别的吗？

@@ -1,0 +1,94 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "97936d0efd16",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-03T12:05:22.198802Z",
+  "branch": "main",
+  "checkpoints_count": 9,
+  "files_touched": [
+    "docs/rust-rewrite/phase-7-language-service/ls/worklog-p7-ls-autoinsert.md",
+    "internal/astnav/lib.rs",
+    "internal/astnav/lib_test.rs",
+    "internal/ls/autoinsert.rs",
+    "internal/ls/autoinsert_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-opus-4-8-thinking-xhigh",
+  "turn_id": "ef4822144a9e",
+  "session_metrics": {
+    "turn_count": 35,
+    "context_tokens": 933669,
+    "context_window_size": 1000000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-03T12:05:22.105415Z",
+    "agent_lines": 862,
+    "agent_removed": 2,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 862,
+    "total_lines_changed": 864,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 131,
+      "agent_lines_removed": 56
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 131,
+      "agent_lines_removed": 56
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 292,
+      "agent_lines_removed": 108
+    },
+    {
+      "checkpoint_number": 6,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 292,
+      "agent_lines_removed": 108
+    },
+    {
+      "checkpoint_number": 7,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 292,
+      "agent_lines_removed": 108
+    },
+    {
+      "checkpoint_number": 8,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 292,
+      "agent_lines_removed": 108
+    },
+    {
+      "checkpoint_number": 9,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 292,
+      "agent_lines_removed": 108
+    }
+  ]
+}
