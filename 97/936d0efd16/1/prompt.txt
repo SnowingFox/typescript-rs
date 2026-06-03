@@ -1,0 +1,38 @@
+/session-handoff 有 benchmark 吗？现在
+
+---
+
+试试跑一下 benchmark 然后看看速度和 go 和 tsc 的相比是多少
+
+---
+
+试试跑一下大点的 benchmark 然后看看速度和 go 和 tsc 的相比是多少
+
+---
+
+Rust tsgo
+0.098 s
+1.00×
+~2 行（几乎没做完整语义检查）
+
+为啥呢？这是，你给我命令我跑跑看
+
+---
+
+是因为 checker 还在做吗？为啥，我看不是做完了吗？现在进度如何
+
+---
+
+直接会打扮
+
+---
+
+直接回答吧
+
+---
+
+核心切片 4a–4p（及后续 4q/4r/4ab 等深化）在推，不是从零；全量 parity 未达，真的吗？你怎么确定？
+
+---
+
+/Users/bytedance/.cursor/projects/Users-bytedance-dev-typescript-go/agent-transcripts/44fd81ae-d320-4036-b320-e8ebd028f6d2/44fd81ae-d320-4036-b320-e8ebd028f6d2.jsonl你看看这个
