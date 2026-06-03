@@ -15,6 +15,7 @@
 //! resolution, and the real `JSX.Element`/`JSX.ElementType` constraints.
 
 use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags};
+use tsgo_core::compileroptions::JsxEmit;
 
 use super::declared_types::{
     get_declared_type_of_symbol, get_property_of_type, get_type_of_property_of_type,
@@ -158,8 +159,83 @@ impl Checker {
         tag_name: NodeId,
         attributes: NodeId,
     ) {
+        // Go marks the JSX factory namespace (`React`) as referenced and, for
+        // classic React emit, reports TS2874 when it is not in scope — BEFORE
+        // resolving the tag/attributes.
+        self.mark_jsx_alias_referenced(program, tag_name);
         let attributes_type = self.resolve_jsx_tag(program, element_node, tag_name);
         self.check_jsx_attributes(program, attributes, attributes_type);
+    }
+
+    // For classic `jsx: react` emit, reports TS2874 when the JSX factory
+    // namespace (`React` by default) is not in scope, so the emitted
+    // `React.createElement(...)` call would reference an unresolved name. Mirrors
+    // the diagnostic arm of Go's `markJsxAliasReferenced`: `jsxFactoryRefErr` is
+    // set only when `compilerOptions.Jsx == JsxEmitReact`, and the factory
+    // namespace is resolved at the tag-name location.
+    //
+    // The reachable subset:
+    //   * Go's `getJsxNamespaceContainerForImplicitImport` early-return is the
+    //     automatic-runtime (`react-jsx`) implicit-import path; for classic React
+    //     it is always nil (no jsx-runtime import specifier), so the
+    //     classic-react gate below subsumes it.
+    //   * the alias/used marking (`symbolReferenced` / `markAliasSymbolAsReferenced`)
+    //     is emit-elision bookkeeping with no diagnostic effect and is DEFERRED.
+    //   * opening FRAGMENTS (`<>`) also call this in Go; the port's
+    //     `check_jsx_fragment` does not resolve a factory yet (the `"null"`
+    //     fragment-namespace special case + fragment factory), so fragment
+    //     TS2874 is DEFERRED.
+    //
+    // The namespace is resolved with `VALUE | ALIAS` (a conservative superset of
+    // Go's `Value` meaning): an `import React` / `import * as React` alias counts
+    // as in scope, so the port never over-fires where Go's alias-aware
+    // `resolveName` would succeed.
+    // Go: internal/checker/checker.go:Checker.markJsxAliasReferenced(28178)
+    fn mark_jsx_alias_referenced(&mut self, program: &dyn BoundProgram, tag_name: NodeId) {
+        if self.compiler_options().jsx != JsxEmit::React {
+            return;
+        }
+        let namespace = self.get_jsx_namespace(program);
+        let resolved = resolve_name(
+            program,
+            tag_name,
+            &namespace,
+            SymbolFlags::VALUE | SymbolFlags::ALIAS,
+            false,
+            program.globals(),
+        );
+        if resolved.is_none() {
+            self.error(
+                program,
+                tag_name,
+                &tsgo_diagnostics::THIS_JSX_TAG_REQUIRES_0_TO_BE_IN_SCOPE_BUT_IT_COULD_NOT_BE_FOUND,
+                &[namespace.as_str()],
+            );
+        }
+    }
+
+    // The JSX factory namespace name (Go's `getJsxNamespace`): the per-file
+    // `@jsx <factory>` pragma's first identifier, else the `jsxFactory` option's
+    // first identifier, else the `reactNamespace` option, else `"React"`.
+    //
+    // DEFER(phase-4-checker): Go also memoizes `_jsxFactoryEntity` (the full
+    // `React.createElement` entity used by the emitter); only the namespace name
+    // is needed for TS2874, so the entity is not built here.
+    // Go: internal/checker/jsx.go:Checker.getJsxNamespace(1340)
+    fn get_jsx_namespace(&self, program: &dyn BoundProgram) -> String {
+        if let Some(local) = get_local_jsx_namespace(program) {
+            return local;
+        }
+        let options = self.compiler_options();
+        if !options.jsx_factory.is_empty() {
+            if let Some(first) = first_identifier(&options.jsx_factory) {
+                return first;
+            }
+        }
+        if !options.react_namespace.is_empty() {
+            return options.react_namespace.clone();
+        }
+        "React".to_string()
     }
 
     // Checks each attribute value against its declared property on the element's
@@ -351,6 +427,80 @@ impl Checker {
             return self.error_type;
         }
         get_declared_type_of_symbol(self, program, type_symbol, program.globals())
+    }
+}
+
+/// The per-file `@jsx <factory>` pragma's namespace (first identifier), if the
+/// file declares one (Go's `getLocalJsxNamespace`).
+///
+/// TODO(port): the full pragma collection lives in the parser's
+/// `processCommentPragmas` (the comment-pragma subsystem, P3 backlog). Until it
+/// lands this reads the `@jsx` pragma directly from the comments leading the
+/// file's first token — which is exactly the scope `tsc`/Go collect file-level
+/// pragmas from (`getLeadingCommentRanges(text, 0)`), so the resolved namespace
+/// is the same.
+///
+/// Side effects: none (reads the program's source text).
+// Go: internal/checker/jsx.go:Checker.getLocalJsxNamespace(1389)
+fn get_local_jsx_namespace(program: &dyn BoundProgram) -> Option<String> {
+    let text = program.source_text()?;
+    for range in tsgo_scanner::get_leading_comment_ranges(text, 0) {
+        let comment = text.get(range.loc.pos() as usize..range.loc.end() as usize)?;
+        if let Some(factory) = jsx_factory_from_comment(comment) {
+            return first_identifier(&factory);
+        }
+    }
+    None
+}
+
+/// Extracts the `@jsx <factory>` pragma argument from a single comment's text.
+///
+/// Matches a bare `@jsx` followed by whitespace then a non-whitespace factory
+/// token, so the longer pragmas `@jsxImportSource` / `@jsxFrag` / `@jsxRuntime`
+/// (no whitespace after `jsx`) are not mistaken for it. The returned string is
+/// the raw factory token (e.g. `h` or `React.createElement`).
+///
+/// Side effects: none (pure).
+fn jsx_factory_from_comment(comment: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(rel) = comment[from..].find("@jsx") {
+        let idx = from + rel;
+        let rest = &comment[idx + "@jsx".len()..];
+        let mut chars = rest.char_indices();
+        if let Some((_, first)) = chars.next() {
+            if first.is_whitespace() {
+                let token: String = rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                if !token.is_empty() {
+                    return Some(token);
+                }
+            }
+        }
+        from = idx + "@jsx".len();
+    }
+    None
+}
+
+/// The first identifier of an entity-name string (the part before the first
+/// `.`), restricted to leading identifier characters (Go's
+/// `GetFirstIdentifier(parseIsolatedEntityName(name))`).
+///
+/// Returns `None` when `name` does not start with an identifier character.
+///
+/// Side effects: none (pure).
+fn first_identifier(name: &str) -> Option<String> {
+    let ident: String = name
+        .trim_start()
+        .chars()
+        .take_while(|&c| c.is_alphanumeric() || c == '_' || c == '$')
+        .collect();
+    if ident.is_empty() {
+        None
+    } else {
+        Some(ident)
     }
 }
 

@@ -4723,3 +4723,142 @@ modified, plus this worklog; no temp dump. Not committed (left to the parent).
   compile time could change WHICH diagnostics are produced (module-resolution
   reachability), so it is deferred to a round that can verify it against the
   corpus. blocked-by: a measurement confirming root/non-root compile parity.
+
+# Round 33 — classic-react JSX factory-in-scope check (TS2874)
+
+Round goal: fix the single highest sole-flip-per-effort remaining compiler-corpus
+gap. SOLO lane, strict `/tdd` red→green vertical slices; checker-only change,
+NO `tsgo_checker`→`tsgo_binder` production dependency.
+
+## Step 0 — measure + pick (sole-flip per cluster)
+
+A TEMP `#[ignore]`d, fix-INDEPENDENT dump (`sole_flip_dump` + a small
+`jsx_react_case_status` probe, both since REMOVED) walked the full corpus and,
+for every FAILED case, computed the multiset of `(kind, code)` mismatches, then
+grouped cases whose ENTIRE mismatch set is one homogeneous `(kind, code)` (a
+"sole-flip": fixing that one cluster flips the case). Top homogeneous sole-flip
+clusters (full corpus, 222 ran):
+
+| cluster | sole-flips | tractable here? |
+|---|---|---|
+| `miss TS2688` (Cannot find type definition file) ×4 | 4 | NO — needs the unported file-include-reasons + automatic-type-directive subsystem (`includeprocessor.go`/`fileInclude.go`) |
+| `miss TS2874` (JSX tag requires `React` in scope) ×3 | 3 | **YES — classic `jsx: react`, checker-only** |
+| `extra TS2345` ×3 / `miss TS2345` ×3 | 3 each | NO — three distinct deep inference roots each (not one cluster) |
+| `miss TS2322` ×3 | 3 | NO — 2 are the relations recursion-depth limit (`#3426`), 1 is enum-NaN identity |
+| `miss TS7006` (implicit-any parameter) ×3 | 3 | NO — needs the contextual-typing/widening subsystem; high over-fire risk |
+| `miss TS2882` (side-effect import) ×2 | 2 | NO — needs module-resolution failure signals (over-fire risk) |
+
+Chosen cluster: **`miss TS2874` ×3** — the largest cluster that is a coherent,
+self-contained checker rule needing no subsystem and no checker→binder reach.
+
+The three flips (all classic `// @jsx: react`):
+`jsxElementTypeUnexpectedType.tsx` and `jsxLibraryManagedAttributesUnexpectedType.tsx`
+(each `missing_all_errors` with a single `miss TS2874`) and
+`jsxEntityDecoderAfterNonEntityAmpersand.tsx` (`divergent`: its 10 TS7026 already
+byte-match, only the 5 `miss TS2874` remained).
+
+Over-fire surface = the 6 corpus classic-`jsx: react` `.tsx` cases. The other 3
+already PASS and MUST NOT regress: `contextuallyTypedJsxChildren2` (`React` via
+`import * as React`), `jsxNestedIndentation` (`declare var React`),
+`jsxPragmaAfterTags` (`@jsx h` pragma → factory namespace `h`, not `React`).
+
+## Go ground truth (read + `// Go:`-anchored)
+
+- **`internal/checker/checker.go:markJsxAliasReferenced(28178)`** — early-returns
+  on `getJsxNamespaceContainerForImplicitImport` (the automatic-runtime implicit
+  import; nil for classic React, so a no-op here);
+  `jsxFactoryRefErr := IfElse(Jsx == JsxEmitReact, This_JSX_tag_requires_0_to_be_in_scope_but_it_could_not_be_found, nil)`;
+  resolves `jsxFactoryNamespace` at `node.TagName()` with `resolveName(..., Value,
+  jsxFactoryRefErr, ...)` — a not-found reports TS2874 with the namespace as `{0}`.
+- **`internal/checker/jsx.go:getJsxNamespace(1340)`** — per-file `@jsx <factory>`
+  pragma (`getLocalJsxNamespace`), else the `jsxFactory` option's first
+  identifier, else `reactNamespace`, else `"React"`.
+- **`internal/checker/jsx.go:getLocalJsxNamespace(1389)`** — reads the `@jsx`
+  pragma from `file.Pragmas` (collected by the parser from the comments leading
+  the file's first token).
+
+## Rust landing (`internal/checker/core/jsx.rs`)
+
+- `check_jsx_opening_like` now calls **`mark_jsx_alias_referenced(program, tag_name)`**
+  before tag/attribute resolution (Go's call order). It gates on
+  `compiler_options().jsx == JsxEmit::React`, computes the factory namespace via
+  **`get_jsx_namespace`**, and resolves it with `resolve_name(VALUE | ALIAS)` —
+  a conservative superset of Go's `Value` meaning so an `import React` /
+  `import * as React` alias (or a `declare var React`) counts as in scope; a
+  not-found reports `THIS_JSX_TAG_REQUIRES_0_TO_BE_IN_SCOPE_BUT_IT_COULD_NOT_BE_FOUND`
+  on the tag name with the namespace as `{0}`.
+- **`get_jsx_namespace`** = `get_local_jsx_namespace` (pragma) ?? `jsxFactory`
+  first-id ?? `reactNamespace` ?? `"React"`.
+- **`get_local_jsx_namespace`** reads the `@jsx <factory>` pragma from the file's
+  leading comments via `tsgo_scanner::get_leading_comment_ranges(text, 0)` — the
+  exact scope `tsc`/Go collect file-level pragmas from — so it is faithful
+  without the full pragma-collection subsystem (a `TODO(port)` notes that the
+  parser's `processCommentPragmas` is the eventual home).
+- Fires for intrinsic tags too (`<div>` → TS2874 on `div` PLUS the existing
+  TS7026), matching Go (the emitted `React.createElement("div", …)` still needs
+  `React`). Fragments (`<>`) keep their existing DEFER (the `"null"`
+  fragment-namespace special case + fragment factory).
+
+## RED→GREEN + guard tests (`jsx_test.rs`, +8)
+
+- RED→GREEN tracer: `classic_react_value_element_without_react_reports_ts2874`.
+- span: `ts2874_span_is_the_tag_name` (underlines just the tag name).
+- pragma: `jsx_pragma_overrides_factory_namespace_no_ts2874` (RED→GREEN for the
+  `@jsx h` read) + `jsx_pragma_factory_missing_reports_ts2874_with_pragma_name`
+  (the arg reflects the pragma factory `h`).
+- GUARDS (no over-fire): `classic_react_with_react_var_in_scope_reports_no_ts2874`,
+  `classic_react_with_namespace_import_alias_reports_no_ts2874`,
+  `preserve_mode_value_element_reports_no_ts2874`,
+  `classic_react_intrinsic_element_without_react_reports_ts2874_and_ts7026`.
+
+Real-lib compiler tests (`program_test.rs`, +3, mirroring corpus cases):
+`jsx_classic_react_value_element_without_react_reports_ts2874_with_real_lib`
+(mirrors `jsxElementTypeUnexpectedType`),
+`jsx_classic_react_intrinsic_reports_ts2874_and_ts7026_with_real_lib`
+(mirrors `jsxEntityDecoderAfterNonEntityAmpersand`),
+`jsx_classic_react_with_react_in_scope_reports_no_ts2874_with_real_lib`
+(mirrors the passing `jsxNestedIndentation`). The pre-existing `jsx: preserve`
+real-lib tests (exact TS7026 counts) double as over-fire guards.
+
+## Measurement — full corpus + subsets BEFORE→AFTER (`tests/cases/compiler`, 222 ran)
+
+- **Full corpus: passed 128 → 131 (+3)**, failed 93 → 90, errored 1 (unchanged).
+  All three flips are the `miss TS2874` sole-flip cases; the entire corpus
+  `missing TS2874` set was these three cases. No case regressed (the change is
+  gated to classic `jsx: react`; the 3 other classic-react cases stay PASS).
+- **150-subset: passed 95 → 98 (+3)**; `missing_all_errors` 40 → 38,
+  `divergent` 8 → 7; `no_baseline_but_errors` 7 unchanged; `top_extra` unchanged
+  `[(2339,5),(2304,4)]`; `top_missing` `(2874,7)` → `(2339,5)` (all 7
+  subset `missing TS2874` were the flipped cases).
+- **30-case curated subset: passed 21 (unchanged)** — it contains no classic
+  `jsx: react` case.
+
+## Honest flip count
+
+**+3 byte-exact PASS** (`jsxElementTypeUnexpectedType`,
+`jsxLibraryManagedAttributesUnexpectedType`, `jsxEntityDecoderAfterNonEntityAmpersand`),
+NO regression. No `extra`/`wrong` pin moved (the flipped cases contributed only
+`missing TS2874`).
+
+## Gate results (Round 33)
+
+- `cargo test -p tsgo_checker` ✅ (839 lib + 180 doctests)
+- `cargo test -p tsgo_compiler` ✅ (real-lib; incl. the 3 new TS2874 tests)
+- `cargo test -p tsgo_testrunner` ✅ (curated 21, expanded 98)
+- `cargo test -p tsgo_ls -p tsgo_execute` ✅
+- `cargo clippy -p tsgo_checker -p tsgo_compiler -p tsgo_testrunner --all-targets -- -D warnings` ✅
+- `cargo fmt -- --check` ✅, `cargo build --workspace --all-targets` ✅
+- No `tsgo_checker`→`tsgo_binder` production dep (binder stays `[dev-dependencies]`;
+  the namespace pragma read uses `tsgo_scanner`, an existing production dep).
+
+## DEFER list (blocked-by) — Round 33
+
+- **Automatic-runtime TS2875** (`react-jsx`/`react-jsxdev`: "requires the module
+  path '…' to exist") — needs `getJsxNamespaceContainerForImplicitImport` +
+  `resolveExternalModule` (the implicit jsx-runtime import). blocked-by:
+  `GetJSXRuntimeImportSpecifier` + module resolution.
+- **Fragment (`<>`) TS2874** — the `"null"` fragment-namespace special case +
+  fragment factory entity. blocked-by: fragment factory resolution.
+- **Full `@jsx` pragma collection** — interim reads the pragma from file-leading
+  comments. blocked-by: the parser's `processCommentPragmas` (pragma subsystem,
+  P3 backlog).

@@ -1455,6 +1455,111 @@ fn jsx_intrinsic_paired_reports_two_ts7026_with_real_lib() {
     );
 }
 
+/// End to end with the REAL bundled lib (mirrors the corpus case
+/// `jsxElementTypeUnexpectedType.tsx`): under classic `jsx: react` emit, a JSX
+/// element whose factory namespace `React` is NOT in scope reports TS2874 on the
+/// tag name. A resolved value component `<C/>` leaves TS2874 as the SOLE
+/// diagnostic (no TS7026 — it is not an intrinsic tag), matching tsc's committed
+/// baseline.
+// Go: internal/checker/checker.go:Checker.markJsxAliasReferenced (jsx == JsxEmitReact -> TS2874)
+#[test]
+fn jsx_classic_react_value_element_without_react_reports_ts2874_with_real_lib() {
+    let options = CompilerOptions {
+        jsx: tsgo_core::compileroptions::JsxEmit::React,
+        target: tsgo_core::compileroptions::ScriptTarget::Es2015,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[(
+            "/src/index.tsx",
+            "declare namespace JSX {\n  enum ElementType {}\n}\ndeclare const C: () => any;\nconst x = <C />;\n",
+        )],
+        "/src",
+        &["/src/index.tsx"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert_eq!(
+        diags.len(),
+        1,
+        "classic-react value element with no React in scope -> exactly one TS2874: {diags:?}"
+    );
+    assert_eq!(diags[0].code, 2874);
+    assert_eq!(
+        diags[0].message,
+        "This JSX tag requires 'React' to be in scope, but it could not be found."
+    );
+}
+
+/// End to end with the REAL bundled lib (mirrors the corpus case
+/// `jsxEntityDecoderAfterNonEntityAmpersand.tsx`): under classic `jsx: react`
+/// emit, an intrinsic `<div>...</div>` with no `React` AND no
+/// `JSX.IntrinsicElements` reports TS2874 ONCE (the opening tag) plus the two
+/// existing TS7026 (opening + closing element) — matching tsc's per-element
+/// span/count.
+// Go: internal/checker/checker.go:Checker.markJsxAliasReferenced + jsx.go:getIntrinsicTagSymbol
+#[test]
+fn jsx_classic_react_intrinsic_reports_ts2874_and_ts7026_with_real_lib() {
+    let options = CompilerOptions {
+        jsx: tsgo_core::compileroptions::JsxEmit::React,
+        target: tsgo_core::compileroptions::ScriptTarget::Es2015,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[("/src/index.tsx", "const a = <div></div>;\n")],
+        "/src",
+        &["/src/index.tsx"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    let ts2874 = diags.iter().filter(|d| d.code == 2874).count();
+    let ts7026 = diags.iter().filter(|d| d.code == 7026).count();
+    assert_eq!(
+        ts2874, 1,
+        "TS2874 fires once on the opening element's tag: {diags:?}"
+    );
+    assert_eq!(
+        ts7026, 2,
+        "the intrinsic still reports TS7026 on the opening AND closing element: {diags:?}"
+    );
+    assert!(
+        diags.iter().all(|d| d.code == 2874 || d.code == 7026),
+        "no spurious diagnostics beyond TS2874 + the two TS7026: {diags:?}"
+    );
+}
+
+/// End to end with the REAL bundled lib (mirrors the corpus case
+/// `jsxNestedIndentation.tsx`): under classic `jsx: react` emit, a `declare var
+/// React` in scope makes the factory namespace resolvable, so NO TS2874 — proving
+/// the check resolves the real namespace rather than blanket-firing on classic
+/// react.
+// Go: internal/checker/checker.go:Checker.markJsxAliasReferenced (resolveName succeeds)
+#[test]
+fn jsx_classic_react_with_react_in_scope_reports_no_ts2874_with_real_lib() {
+    let options = CompilerOptions {
+        jsx: tsgo_core::compileroptions::JsxEmit::React,
+        target: tsgo_core::compileroptions::ScriptTarget::EsNext,
+        ..Default::default()
+    };
+    let mut program = program_with_bundled_libs(
+        &[(
+            "/src/index.tsx",
+            "declare var React: any;\ndeclare function Child(props: { children?: any }): any;\nfunction Test() {\n    return <Child></Child>;\n}\n",
+        )],
+        "/src",
+        &["/src/index.tsx"],
+        options,
+        true,
+    );
+    let diags = program.semantic_diagnostics();
+    assert!(
+        diags.iter().all(|d| d.code != 2874),
+        "React in scope must suppress TS2874 end-to-end: {diags:?}"
+    );
+}
+
 /// End to end with the REAL bundled lib (the path the P10 corpus parity runner
 /// exercises): a CommonJS `module.exports = X` assignment in a checked JS file
 /// makes the binder declare `module`/`exports` as file locals, so they resolve

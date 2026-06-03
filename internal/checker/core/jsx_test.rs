@@ -2,9 +2,19 @@ use crate::core::declared_types::get_declared_type_of_symbol;
 use crate::core::program::BoundProgram;
 use crate::core::test_support::StubProgram;
 use crate::core::Checker;
+use std::rc::Rc;
 use tsgo_ast::{NodeData, NodeId, SymbolId};
-use tsgo_core::compileroptions::CompilerOptions;
+use tsgo_core::compileroptions::{CompilerOptions, JsxEmit};
 use tsgo_core::tristate::Tristate;
+
+/// All-defaults options with classic `jsx: react` emit (the only mode that
+/// requires the JSX factory namespace in scope, i.e. reports TS2874).
+fn react_options() -> CompilerOptions {
+    CompilerOptions {
+        jsx: JsxEmit::React,
+        ..CompilerOptions::default()
+    }
+}
 
 fn sym(p: &StubProgram, name: &str) -> SymbolId {
     *p.locals(p.root())
@@ -251,6 +261,184 @@ fn intrinsic_element_without_no_implicit_any_reports_no_ts7026() {
     assert!(
         diags.iter().all(|d| d.code != 7026),
         "noImplicitAny disabled must suppress TS7026; got {diags:?}"
+    );
+}
+
+// RED->GREEN (TS2874 tracer) — Go: internal/checker/checker.go:Checker.markJsxAliasReferenced.
+// Under classic `jsx: react` emit, a JSX element whose factory namespace
+// (`React`) is NOT in scope reports TS2874 on the tag name. A resolved value
+// component `<C/>` (so no TS2304 / TS7026) leaves TS2874 as the sole diagnostic.
+#[test]
+fn classic_react_value_element_without_react_reports_ts2874() {
+    let p = Rc::new(StubProgram::parse_and_bind_tsx_with_options(
+        "/a.tsx",
+        "declare const C: any;\n<C/>;",
+        react_options(),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected only TS2874; got {diags:?}");
+    assert_eq!(diags[0].code, 2874);
+    assert_eq!(
+        diags[0].message,
+        "This JSX tag requires 'React' to be in scope, but it could not be found."
+    );
+}
+
+// The TS2874 span is the TAG NAME (Go's `jsxFactoryLocation = node.TagName()`),
+// not the whole element: `<Component/>` underlines just `Component`.
+#[test]
+fn ts2874_span_is_the_tag_name() {
+    let src = "declare const Component: any;\n<Component/>;";
+    let p = Rc::new(StubProgram::parse_and_bind_tsx_with_options(
+        "/a.tsx",
+        src,
+        react_options(),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 2874).expect("TS2874");
+    let start = src.find("Component/>").expect("tag") as i32;
+    assert_eq!(d.start, start, "span starts at the tag name");
+    assert_eq!(d.length, "Component".len() as i32, "span is the tag name");
+}
+
+// GUARD — Go: `resolveName(..., namespace, Value, ...)` succeeds. A `declare var
+// React` in scope makes the factory namespace resolvable, so NO TS2874.
+#[test]
+fn classic_react_with_react_var_in_scope_reports_no_ts2874() {
+    let p = Rc::new(StubProgram::parse_and_bind_tsx_with_options(
+        "/a.tsx",
+        "declare var React: any;\ndeclare const C: any;\n<C/>;",
+        react_options(),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2874),
+        "React in scope must suppress TS2874; got {diags:?}"
+    );
+}
+
+// GUARD — Go: a namespace-import alias (`import * as React`) counts as the
+// factory namespace being in scope (the port resolves with `VALUE | ALIAS`), so
+// NO TS2874 even though the alias target module is unresolved here.
+#[test]
+fn classic_react_with_namespace_import_alias_reports_no_ts2874() {
+    let p = Rc::new(StubProgram::parse_and_bind_tsx_with_options(
+        "/a.tsx",
+        "import * as React from \"react\";\ndeclare const C: any;\n<C/>;",
+        react_options(),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2874),
+        "an `import * as React` alias must suppress TS2874; got {diags:?}"
+    );
+}
+
+// GUARD — Go: `jsxFactoryRefErr := IfElse(Jsx == JsxEmitReact, ...)`. Under
+// `jsx: preserve` (and react-native / the automatic runtime) the classic factory
+// namespace is not required, so a missing `React` does NOT report TS2874.
+#[test]
+fn preserve_mode_value_element_reports_no_ts2874() {
+    let options = CompilerOptions {
+        jsx: JsxEmit::Preserve,
+        ..CompilerOptions::default()
+    };
+    let p = Rc::new(StubProgram::parse_and_bind_tsx_with_options(
+        "/a.tsx",
+        "declare const C: any;\n<C/>;",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2874),
+        "non-classic-react emit must not report TS2874; got {diags:?}"
+    );
+}
+
+// GUARD — Go: `markJsxAliasReferenced` runs for intrinsic tags too (the factory
+// `React.createElement("div", ...)` still needs `React` in scope). A classic
+// `<div/>` with no `React` reports BOTH TS2874 (on the `div` tag) and the
+// existing TS7026 (no `JSX.IntrinsicElements`).
+#[test]
+fn classic_react_intrinsic_element_without_react_reports_ts2874_and_ts7026() {
+    let p = Rc::new(StubProgram::parse_and_bind_tsx_with_options(
+        "/a.tsx",
+        "<div/>;",
+        react_options(),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let ts2874: Vec<_> = diags.iter().filter(|d| d.code == 2874).collect();
+    assert_eq!(
+        ts2874.len(),
+        1,
+        "one TS2874 on the intrinsic tag; got {diags:?}"
+    );
+    assert_eq!(
+        ts2874[0].message,
+        "This JSX tag requires 'React' to be in scope, but it could not be found."
+    );
+    assert!(
+        diags.iter().any(|d| d.code == 7026),
+        "the intrinsic still reports TS7026; got {diags:?}"
+    );
+}
+
+// GUARD — Go: `getLocalJsxNamespace` reads the per-file `@jsx <factory>` pragma.
+// A `/** @jsx h */` pragma sets the factory namespace to `h`; with `declare var
+// h` in scope the namespace resolves, so NO TS2874 (even though `React` is
+// absent).
+#[test]
+fn jsx_pragma_overrides_factory_namespace_no_ts2874() {
+    let p = Rc::new(StubProgram::parse_and_bind_tsx_with_options(
+        "/a.tsx",
+        "/** @jsx h */\ndeclare var h: any;\ndeclare const C: any;\n<C/>;",
+        react_options(),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2874),
+        "the `@jsx h` pragma factory `h` resolves; no TS2874; got {diags:?}"
+    );
+}
+
+// GUARD — the `@jsx <factory>` pragma is reflected in the TS2874 ARGUMENT: with
+// `@jsx h` but no `h` in scope, the error names `h` (not `React`).
+#[test]
+fn jsx_pragma_factory_missing_reports_ts2874_with_pragma_name() {
+    let p = Rc::new(StubProgram::parse_and_bind_tsx_with_options(
+        "/a.tsx",
+        "/** @jsx h */\ndeclare const C: any;\n<C/>;",
+        react_options(),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 2874).expect("TS2874");
+    assert_eq!(
+        d.message,
+        "This JSX tag requires 'h' to be in scope, but it could not be found."
     );
 }
 

@@ -1037,11 +1037,31 @@ fn expanded_compiler_subset_parity_smoke() {
     // all-files-as-root, so NO diagnostic content changed and no `extra`/`missing`
     // pin moves; `missing_all_errors` (40) and `no_baseline_but_errors` (7) are
     // unchanged.
+    //
+    // Round 33 (classic-react JSX factory-in-scope check, TS2874): under classic
+    // `jsx: react` emit, a JSX element whose factory namespace `React` is NOT in
+    // scope now reports `TS2874 This JSX tag requires 'React' to be in scope, but
+    // it could not be found.` on the tag name (Go's `markJsxAliasReferenced`, the
+    // `jsxFactoryRefErr := IfElse(Jsx == JsxEmitReact, ...)` arm). THREE subset
+    // cases flip: `jsxElementTypeUnexpectedType` and
+    // `jsxLibraryManagedAttributesUnexpectedType` (each `missing_all_errors` with
+    // a single `miss TS2874` -> PASS, missing_all_errors 40 -> 38) and
+    // `jsxEntityDecoderAfterNonEntityAmpersand` (`divergent`: its 10 byte-matching
+    // TS7026 already matched, only the 5 `miss TS2874` remained -> PASS, divergent
+    // 8 -> 7), so passed 95 -> 98. The factory namespace is resolved with
+    // `VALUE | ALIAS` (an `import * as React` alias / `declare var React` counts as
+    // in scope) and honors the per-file `@jsx <factory>` pragma, so the three
+    // passing classic-react cases (`contextuallyTypedJsxChildren2` via
+    // `import * as React`, `jsxNestedIndentation` via `declare var React`,
+    // `jsxPragmaAfterTags` via the `@jsx h` pragma) do NOT regress. All 7 of the
+    // subset's `missing TS2874` came from the three flipped cases, so the top
+    // false-negative is now `TS2339 ×5` (see `top_missing` below). NO `extra`
+    // pin moves (the flipped cases contributed only `missing` mismatches).
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 95,
-            failed: 55,
+            passed: 98,
+            failed: 52,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -1144,8 +1164,12 @@ fn expanded_compiler_subset_parity_smoke() {
     // `toBeCompiled`/`otherFiles` render order flips it to PASS, so `divergent`
     // drops 9 -> 8; `missing_all_errors` (40) is unchanged (an ordering-only
     // flip removes no `missing`/`extra` mismatch).
-    assert_eq!(hist.missing_all_errors, 40);
-    assert_eq!(hist.divergent, 8);
+    // Round 33: the two `miss TS2874` `missing_all_errors` cases
+    // (`jsxElementTypeUnexpectedType`, `jsxLibraryManagedAttributesUnexpectedType`)
+    // flip to PASS (40 -> 38), and the one `divergent` `miss TS2874 ×5` case
+    // (`jsxEntityDecoderAfterNonEntityAmpersand`) flips to PASS (8 -> 7).
+    assert_eq!(hist.missing_all_errors, 38);
+    assert_eq!(hist.divergent, 7);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare
@@ -1292,13 +1316,23 @@ fn expanded_compiler_subset_parity_smoke() {
          parser fix; histogram:\n{}",
         hist.report()
     );
-    // The JSX intrinsic-element false negative (`missing TS7026 ×15`) is cleared;
-    // the top remaining false negative is `TS2874 ×7` (the React-in-scope check,
-    // DEFERRED). There must be NO `extra TS7026` (over-firing) anywhere.
+    // The JSX intrinsic-element false negative (`missing TS7026 ×15`) is cleared.
+    // Round 33: the classic-react factory-in-scope check lands `TS2874`, clearing
+    // the entire `missing TS2874 ×7` false negative (all 7 came from the three
+    // flipped cases), so the top remaining false negative is now `TS2339 ×5` (the
+    // object-literal expando / require-this member-resolution backlog). There must
+    // be NO `extra TS7026` (over-firing) anywhere.
     assert_eq!(
         hist.top_missing(1),
-        vec![(2874, 7)],
+        vec![(2339, 5)],
         "top missing (false-negative) code; histogram:\n{}",
+        hist.report()
+    );
+    assert_eq!(
+        hist.missing.get(&2874),
+        None,
+        "the classic-react factory-in-scope check clears missing TS2874 (was 7); \
+         histogram:\n{}",
         hist.report()
     );
     assert_eq!(
