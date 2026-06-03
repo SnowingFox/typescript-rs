@@ -30,6 +30,15 @@ fn parse_js(text: &str) -> SourceFile {
     SourceFile::new(r.arena, r.source_file, text.to_string())
 }
 
+/// Parses `text` as TSX and wraps it in a navigation [`SourceFile`].
+fn parse_tsx(text: &str) -> SourceFile {
+    let opts = SourceFileParseOptions {
+        file_name: "/file.tsx".to_string(),
+    };
+    let r = parse_source_file(opts, text, ScriptKind::Tsx);
+    SourceFile::new(r.arena, r.source_file, text.to_string())
+}
+
 /// Returns the first top-level statement id.
 fn first_statement(file: &SourceFile) -> NodeId {
     match file.arena().data(file.root()) {
@@ -495,6 +504,53 @@ fn synthesized_token_id_does_not_collide_with_real_nodes() {
     let aliased_real = NodeId(semi.0 & !SYNTHESIZED_NODE_TAG);
     assert_eq!(aliased_real.0 & SYNTHESIZED_NODE_TAG, 0);
     assert_ne!(file.kind(aliased_real), Kind::SemicolonToken);
+}
+
+// Keystone: a synthesized punctuation token must carry a queryable parent, so
+// ancestor walks (the language service's `>`-auto-close, JSX linked editing,
+// signature help) work for scanner-synthesized tokens. The `>` ending an
+// unclosed `<div>` opening element is not a standalone parsed node, so a
+// preceding-token query synthesizes it; its parent must be the enclosing
+// `JsxOpeningElement` (mirroring Go's `GetOrCreateToken` setting
+// `token.Parent = parent`).
+// Go: internal/ast/ast.go:SourceFile.GetOrCreateToken (token.Parent = parent)
+#[test]
+fn synthesized_greater_than_token_reports_jsx_opening_element_parent() {
+    // `const x = <div> text ;` — the `>` of `<div>` is byte [14,15).
+    let file = parse_tsx("const x = <div> text ;");
+    // Cursor right after the `>` (byte 15): the preceding token is the
+    // synthesized `>` punctuation token.
+    let token = file
+        .find_preceding_token(15)
+        .expect("a preceding token exists at the `>`");
+    assert_eq!(file.kind(token), Kind::GreaterThanToken);
+    // The token is synthesized (not a real arena node): its id is high-bit
+    // tagged.
+    assert_ne!(
+        token.0 & SYNTHESIZED_NODE_TAG,
+        0,
+        "the `>` token must be synthesized"
+    );
+    // Its parent is the enclosing `<div>` opening element.
+    let parent = file
+        .parent(token)
+        .expect("a synthesized token carries its parent");
+    assert_eq!(file.kind(parent), Kind::JsxOpeningElement);
+}
+
+// Guard: `parent` on a genuinely-parentless node (the root source file) returns
+// `None` without panicking, and a real child still reports its real arena
+// parent — the synthesized-token resolution must not disturb real-node lookups.
+#[test]
+fn parent_resolves_real_nodes_and_root_has_none() {
+    let file = parse_ts("a.b");
+    // The root source file has no parent.
+    assert_eq!(file.parent(file.root()), None);
+    // A real identifier's parent is its real arena parent (here the
+    // property-access expression), matching `arena().parent`.
+    let ident = get_first_identifier(&file);
+    assert_eq!(file.parent(ident), file.arena().parent(ident));
+    assert!(file.parent(ident).is_some());
 }
 
 /// Returns the kind of the token at `pos` via the owned `&mut` API.

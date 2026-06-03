@@ -1,4 +1,3 @@
-use tsgo_ast::NodeId;
 use tsgo_lsproto::{InsertTextFormat, Position, Range, TextEdit, VsOnAutoInsertResponseItem};
 
 use crate::test_support::build_service;
@@ -34,6 +33,21 @@ fn provide_on_auto_insert_unclosed_element_inserts_closing_tag() {
     // Cursor on the `x` of ` text ` (byte 18), inside the JSX text node.
     let result = ls.provide_on_auto_insert("/m.tsx", pos(0, 18), ">");
     assert_eq!(result, Some(snippet_at(pos(0, 18), "$0</div>")));
+}
+
+// Go: internal/ls/autoinsert.go:ProvideOnAutoInsert — typing `>` with the
+// cursor RIGHT AFTER the `>` of an UNCLOSED `<div>` (the common case) inserts
+// `</div>`. The preceding token is the synthesized `>` punctuation token whose
+// parent is the `JsxOpeningElement` (the `token.Kind == KindGreaterThanToken &&
+// IsJsxOpeningElement(token.Parent)` branch). Ground truth: fourslash
+// `autoCloseTag` marker /5 (`<div>|` -> `</div>`).
+#[test]
+fn provide_on_auto_insert_greater_than_token_inserts_closing_tag() {
+    let ls = build_service(&[("/m.tsx", "const x = <div> text ;")], "/", &["/m.tsx"]);
+    // Cursor right after the `>` of `<div>` (byte 15): the preceding token is
+    // the synthesized `>`, whose parent is the `<div>` opening element.
+    let result = ls.provide_on_auto_insert("/m.tsx", pos(0, 15), ">");
+    assert_eq!(result, Some(snippet_at(pos(0, 15), "$0</div>")));
 }
 
 // Go: internal/ls/autoinsert.go:ProvideOnAutoInsert — typing `>` with the
@@ -163,14 +177,4 @@ fn escape_snippet_text_escapes_dollar_only() {
     assert_eq!(super::escape_snippet_text("</$Foo>"), "</\\$Foo>");
     assert_eq!(super::escape_snippet_text("$a$b"), "\\$a\\$b");
     assert_eq!(super::escape_snippet_text(""), "");
-}
-
-// `is_synthesized_token` mirrors astnav's high-bit tag: a small (real) arena id
-// is not synthesized; an id with the high bit set is.
-#[test]
-fn is_synthesized_token_detects_high_bit() {
-    assert!(!super::is_synthesized_token(NodeId(0)));
-    assert!(!super::is_synthesized_token(NodeId(123)));
-    assert!(super::is_synthesized_token(NodeId(1 << 31)));
-    assert!(super::is_synthesized_token(NodeId((1 << 31) | 5)));
 }

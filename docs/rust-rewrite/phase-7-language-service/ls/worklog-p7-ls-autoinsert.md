@@ -161,3 +161,107 @@ This round adds the fifth purely-syntactic LS feature (after folding, document
 symbols, selection ranges, and linked editing); it reuses the checker-free
 AST-walk + `Converters` pattern and adds the new
 `lsproto::VsOnAutoInsertResponseItem` result type.
+
+---
+
+# P7/astnav — synthesized-token parent + autoinsert `>`-branch enable
+
+> Follow-up SOLO round. Keystone: give `astnav`'s scanner-synthesized tokens a
+> **queryable parent**, then re-enable the highest-value blocked LS branch (the
+> autoinsert `>`-token branch, `<div>|` -> `</div>` — the common case) as the
+> consumer + validation.
+
+## Step 0 — feasibility verdict
+
+**SMALL accessor addition** (not a big refactor). The synthesized-token side
+store (`SynthesizedTokenStore` in `internal/astnav/lib.rs`) already received the
+`parent` `NodeId` at synthesis time — it was used as part of the `TokenCacheKey`
+(`{parent, pos, end}`) for pointer-equality but **thrown away** afterwards (the
+`SynthesizedToken` struct stored only `kind`/`loc`). Go's
+`ast.go:SourceFile.GetOrCreateToken` sets `token.Parent = parent`, so a
+synthesized token in Go always carries its parent; the LS reads it via
+`token.Parent`. The faithful fix is therefore tiny: **store** the `parent` on
+the `SynthesizedToken` entry and **expose** it through a new
+`NavEngine::parent` accessor that spans both the real arena and the side store.
+No structural change, no new deps, fully additive.
+
+## astnav change (the root-cause fix)
+
+| File | What |
+|---|---|
+| `internal/astnav/lib.rs` | `SynthesizedToken` gains a `parent: NodeId` field (recorded in `SynthesizedTokenStore::get_or_create`, exactly the `parent`/`current`/`containingNode` the scanner was walking — the value Go assigns to `token.Parent`). New **`pub fn NavEngine::parent(&self, id) -> Option<NodeId>`**: for a synthesized id it returns `Some(stored_parent)`; for a real id it returns `self.arena().parent(id)` (so the root yields `None`). `// Go:` anchored to `SourceFile.GetOrCreateToken`. |
+| `internal/astnav/lib_test.rs` | `parse_tsx` helper; **2 new unit tests** (see below). |
+
+The accessor is purely additive — every existing `astnav` consumer (checker,
+other LS providers) is unaffected; the previous `arena().parent(id)` calls keep
+working unchanged.
+
+## LS branch re-enabled vs still DEFERRED
+
+**Re-enabled (this round):** `internal/ls/autoinsert.rs` — the two **`>`-token**
+branches (`token.Kind == KindGreaterThanToken &&
+IsJsxOpeningElement/Fragment(token.Parent)`). The provider now resolves the
+preceding token's kind/parent through `nav.kind(token)` / `nav.parent(token)`
+(which span the real arena + the synthesized-token side store) instead of
+`arena.kind`/`arena.parent`, and the old `is_synthesized_token(token) -> None`
+guard + the local `is_synthesized_token`/`SYNTHESIZED_NODE_TAG` workaround are
+**removed** (Go's `autoinsert.go` has no such concept — it just reads
+`token.Parent`). The four Go branches are now all reachable; the module doc's
+`# DEFER` section became `# Reachable branches`.
+
+**Still DEFERRED (notes only, now unblockable):** `linkedediting.rs`'s
+JSX-fragment branch and `signaturehelp.rs`'s synthesized-`(`/`,` branch keep
+their own `is_synthesized_token` guards for now. The shared root cause (no
+parent on synthesized tokens) is fixed, so those modules can flip on by the
+same `nav.parent` swap in a follow-up; left untouched here to keep the diff
+surgical and avoid unproven position ground-truth for those providers.
+
+## RED → GREEN slices (one behavior at a time)
+
+1. **astnav — synthesized `>` token reports its `JsxOpeningElement` parent.**
+   `const x = <div> text ;`, `find_preceding_token(15)` (cursor right after the
+   `>`). RED: a temporary `parent` stub returned `None` for synthesized ids →
+   the test failed at "a synthesized token carries its parent" (the `kind ==
+   GreaterThanToken` + high-bit-tagged assertions already passed, confirming the
+   parse/position). GREEN: added `SynthesizedToken.parent` + returned
+   `Some(stored)`.
+2. **ls autoinsert — `<div>|` + `>` inserts `$0</div>`.** Same file, cursor at
+   byte 15. RED: the existing synthesized-token guard returned `None`. GREEN:
+   removed the guard and wired the branch to `nav.kind`/`nav.parent`; the
+   `>`-token element branch + `isUnclosedTag` + `EntityNameToString` now fire.
+3. **Guards (no regression / no panic).** New astnav unit test:
+   `parent` on the root source file is `None` (genuinely-parentless edge) and a
+   real identifier's `parent` equals `arena().parent` (no corruption); plus a
+   `NavEngine::parent` doctest asserting `nav.parent(nav.root()) == None`. The
+   pre-existing astnav suite, the autoinsert `IsJsxText` tests, and the
+   `linkedediting` tests all stay green.
+
+## Test deltas
+
+- `tsgo_astnav`: **35 → 37** unit tests (+2:
+  `synthesized_greater_than_token_reports_jsx_opening_element_parent`,
+  `parent_resolves_real_nodes_and_root_has_none`); **26 → 27** doctests (+1: the
+  `NavEngine::parent` example).
+- `tsgo_ls`: **166 → 166** unit tests (net 0: **+1**
+  `provide_on_auto_insert_greater_than_token_inserts_closing_tag`; **−1** the
+  `is_synthesized_token_detects_high_bit` unit test, which pinned a now-deleted
+  local workaround helper — its removal tracks the helper, not behavior). All
+  autoinsert behavior tests (incl. both `IsJsxText` branches and all guards)
+  remain.
+
+No behavioral test weakened; the only removed test covered the deleted
+`is_synthesized_token` helper.
+
+## Gates (all GREEN; never `--no-verify`)
+
+```
+cargo test  -p tsgo_astnav                                # 37 unit + 27 doctest; 0 failed
+cargo test  -p tsgo_ls                                    # 166 unit + 1 doctest; 0 failed
+cargo clippy -p tsgo_astnav -p tsgo_ls --all-targets -- -D warnings   # clean
+cargo fmt && cargo fmt -- --check                         # clean
+cargo build --workspace --all-targets                     # ok (astnav is upstream; parser/checker/compiler/ls/fourslash all rebuilt clean)
+```
+
+Tree carries exactly four edited files (`astnav/lib.rs`, `astnav/lib_test.rs`,
+`ls/autoinsert.rs`, `ls/autoinsert_test.rs`); `Cargo.lock` unchanged; no new
+deps. No downstream regression.

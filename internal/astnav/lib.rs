@@ -84,14 +84,17 @@ struct TokenCacheKey {
 
 /// A token synthesized by the scanner and kept in the side store.
 ///
-/// Only `kind`/`loc` are needed to resolve later queries; the parent is part of
-/// the cache key, not read back, so it is not stored.
+/// Stores `kind`/`loc` to resolve later queries, plus `parent` — the containing
+/// node the scanner was walking when the token was synthesized. Mirrors Go's
+/// `GetOrCreateToken`, which sets `token.Parent = parent`; the parent is read
+/// back by [`NavEngine::parent`] so ancestor walks work for synthesized tokens.
 ///
 /// Side effects: none (pure value type).
 #[derive(Clone, Copy)]
 struct SynthesizedToken {
     kind: Kind,
     loc: TextRange,
+    parent: NodeId,
 }
 
 /// The synthesized-token side store: tokens plus the `(parent, pos, end)` cache
@@ -122,6 +125,7 @@ impl SynthesizedTokenStore {
         self.tokens.push(SynthesizedToken {
             kind,
             loc: TextRange::new(pos, end),
+            parent,
         });
         self.cache.insert(key, id);
         id
@@ -388,6 +392,37 @@ impl<A: Borrow<NodeArena>> NavEngine<A> {
             self.synth.borrow().token(id).loc.end()
         } else {
             self.arena().loc(id).end()
+        }
+    }
+
+    /// Returns the parent of node `id`, resolving real and synthesized ids.
+    ///
+    /// For a real arena node this is [`NodeArena::parent`]. For a synthesized
+    /// token (which lives in the side store, not the arena) this is the parent
+    /// recorded at synthesis time — the containing node the scanner was walking
+    /// — mirroring Go's `GetOrCreateToken` setting `token.Parent = parent`. A
+    /// synthesized token always carries a parent, so the result is `Some`; a
+    /// real node returns `None` only at the root.
+    ///
+    /// # Examples
+    /// ```
+    /// # use tsgo_astnav::NavSourceFile;
+    /// # use tsgo_parser::{parse_source_file, SourceFileParseOptions};
+    /// # use tsgo_core::scriptkind::ScriptKind;
+    /// let text = "a + b;";
+    /// let r = parse_source_file(SourceFileParseOptions::default(), text, ScriptKind::Ts);
+    /// let nav = NavSourceFile::from_borrowed_arena(&r.arena, r.source_file, text.to_string());
+    /// // The root source file has no parent.
+    /// assert_eq!(nav.parent(nav.root()), None);
+    /// ```
+    ///
+    /// Side effects: none (pure read; may borrow the side store).
+    // Go: internal/ast/ast.go:SourceFile.GetOrCreateToken (token.Parent = parent)
+    pub fn parent(&self, id: NodeId) -> Option<NodeId> {
+        if SynthesizedTokenStore::is_synthesized(id) {
+            Some(self.synth.borrow().token(id).parent)
+        } else {
+            self.arena().parent(id)
         }
     }
 

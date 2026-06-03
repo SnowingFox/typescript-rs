@@ -11,25 +11,21 @@
 //! converts positions with the project [`Converters`](tsgo_ls_lsconv::Converters)
 //! — the same `&self` pattern as `linkedediting.rs` / `selectionranges.rs`.
 //!
-//! # DEFER
+//! # Reachable branches
 //!
-//! DEFER(phase-7-ls): the two **`>`-token** branches (Go's
-//! `token.Kind == ast.KindGreaterThanToken && ast.IsJsxOpeningElement/Fragment(token.Parent)`).
-//! Those branches handle the common "cursor right after the just-typed `>`"
-//! case (`<div>|` -> `</div>`), but they reach `token.Parent` on a
-//! `FindPrecedingToken` result that is the synthesized `>` punctuation token.
-//! `tsgo_astnav` synthesizes such tokens into a side store that carries **no
-//! parent pointer** (so [`NodeArena::parent`](tsgo_ast::NodeArena::parent)
-//! cannot be called on them — the same root cause as `linkedediting.rs`'s
-//! fragment branch and `signaturehelp.rs`'s synthesized-`(`/`,` note). This
-//! module therefore guards with [`is_synthesized_token`] and treats a
-//! synthesized preceding token as "no auto-insert here" (`None`); the two
-//! `>`-token branches are **ported faithfully but inert**. The two
-//! **`IsJsxText`** branches are fully reachable: when the cursor sits in the
-//! JSX text/children of an unclosed element/fragment (`<div> text|`,
-//! `<> text|`), the preceding token is the real `JsxText` node, whose arena
-//! parent is the enclosing element/fragment. blocked-by: a parent-carrying
-//! synthesized-token store in `tsgo_astnav`.
+//! All four Go branches are reachable. The two **`>`-token** branches (Go's
+//! `token.Kind == ast.KindGreaterThanToken && ast.IsJsxOpeningElement/Fragment(token.Parent)`)
+//! handle the common "cursor right after the just-typed `>`" case
+//! (`<div>|` -> `</div>`, `<>|` -> `</>`): the preceding token is the
+//! synthesized `>` punctuation token. `tsgo_astnav` now records that token's
+//! parent (the enclosing `JsxOpeningElement`/`JsxOpeningFragment`) and exposes
+//! it via [`NavEngine::parent`](tsgo_astnav::NavEngine::parent), so this module
+//! resolves the token's kind/parent through `nav` (which spans both the real
+//! arena and the synthesized-token side store) exactly as Go reads
+//! `token.Kind`/`token.Parent`. The two **`IsJsxText`** branches cover the
+//! cursor sitting in the JSX text/children of an unclosed element/fragment
+//! (`<div> text|`, `<> text|`), where the preceding token is the real `JsxText`
+//! node whose arena parent is the enclosing element/fragment.
 
 use tsgo_ast::{Kind, NodeArena, NodeData, NodeFlags, NodeId};
 use tsgo_astnav::NavSourceFile;
@@ -44,8 +40,7 @@ impl LanguageService {
     ///
     /// `None` when `ch` is not `>`, there is no such file, the preceding token
     /// is not adjacent to an unclosed JSX element/fragment, or the tag is
-    /// already closed (see the module DEFER for which trigger positions are
-    /// reachable).
+    /// already closed.
     ///
     /// # Examples
     ///
@@ -81,14 +76,15 @@ impl LanguageService {
 
         // Go: `token := astnav.FindPrecedingToken(...); if token == nil { return empty }`.
         let token = nav.find_preceding_token(offset)?;
-        // A synthesized `>` punctuation token has no arena parent (see module
-        // DEFER), so the two `>`-token branches below are unreachable for it.
-        if is_synthesized_token(token) {
-            return None;
-        }
         let arena = nav.arena();
-        let token_kind = arena.kind(token);
-        let token_parent = arena.parent(token);
+        // Resolve the token's kind/parent through `nav`, which transparently
+        // handles synthesized punctuation tokens (the common `<div>|` case: the
+        // preceding token is the synthesized `>`, whose parent is the
+        // `JsxOpeningElement`) as well as real arena nodes (the `IsJsxText`
+        // case). Go reads `token.Kind` / `token.Parent` directly; the parent is
+        // the one `astnav` recorded at synthesis time.
+        let token_kind = nav.kind(token);
+        let token_parent = nav.parent(token);
 
         // Go: pick the enclosing JSX element (the `>`-token branch's
         // grandparent, or the `IsJsxText` branch's parent).
@@ -319,22 +315,6 @@ fn tag_names_are_equivalent(arena: &NodeArena, lhs: NodeId, rhs: NodeId) -> bool
 // Go: internal/ls/completions.go:escapeSnippetText
 fn escape_snippet_text(text: &str) -> String {
     text.replace('$', "\\$")
-}
-
-/// The high-bit tag `tsgo_astnav` sets on a synthesized-token [`NodeId`]
-/// (mirrors `internal/astnav/lib.rs`'s private `SYNTHESIZED_NODE_TAG`).
-const SYNTHESIZED_NODE_TAG: u32 = 1 << 31;
-
-/// Reports whether `node` is a synthesized navigation token (a scanner-produced
-/// punctuation/keyword token that lives in `astnav`'s side store, not the
-/// parsed arena, and therefore has no arena parent).
-///
-/// Mirrors `linkedediting.rs`'s `is_synthesized_token`; duplicated because the
-/// tag is `astnav`-internal, not part of its public API.
-///
-/// Side effects: none (pure).
-fn is_synthesized_token(node: NodeId) -> bool {
-    node.0 & SYNTHESIZED_NODE_TAG != 0
 }
 
 #[cfg(test)]
