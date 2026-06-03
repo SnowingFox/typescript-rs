@@ -1,0 +1,29 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "f467c58af02e",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/tsgo/main.rs",
+    "docs/rust-rewrite/phase-4-checker/tracing/impl.md",
+    "internal/checker/core/check.rs",
+    "internal/checker/core/mapper.rs",
+    "internal/checker/core/mapper_test.rs",
+    "internal/checker/core/mod.rs",
+    "internal/checker/core/nodebuilder.rs",
+    "internal/checker/core/nodebuilder_test.rs",
+    "internal/checker/core/relations.rs",
+    "internal/checker/core/relations_test.rs",
+    "internal/transformers/tstransforms/typeeraser.rs",
+    "internal/transformers/tstransforms/typeeraser_test.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f4/67c58af02e/0/metadata.json",
+      "transcript": "/f4/67c58af02e/0/full.jsonl",
+      "content_hash": "/f4/67c58af02e/0/content_hash.txt",
+      "prompt": "/f4/67c58af02e/0/prompt.txt"
+    }
+  ]
+}

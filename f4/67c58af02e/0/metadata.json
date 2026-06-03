@@ -1,0 +1,106 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "f467c58af02e",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-03T13:00:32.032378Z",
+  "branch": "main",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/tsgo/main.rs",
+    "docs/rust-rewrite/phase-4-checker/tracing/impl.md",
+    "internal/checker/core/check.rs",
+    "internal/checker/core/mapper.rs",
+    "internal/checker/core/mapper_test.rs",
+    "internal/checker/core/mod.rs",
+    "internal/checker/core/nodebuilder.rs",
+    "internal/checker/core/nodebuilder_test.rs",
+    "internal/checker/core/relations.rs",
+    "internal/checker/core/relations_test.rs",
+    "internal/transformers/tstransforms/typeeraser.rs",
+    "internal/transformers/tstransforms/typeeraser_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-4.6-opus-max-thinking",
+  "turn_id": "e283243e3d9d",
+  "session_metrics": {
+    "turn_count": 40,
+    "context_tokens": 933669,
+    "context_window_size": 1000000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-03T13:00:31.95262Z",
+    "agent_lines": 199,
+    "agent_removed": 69,
+    "human_added": 402,
+    "human_modified": 85,
+    "human_removed": 0,
+    "total_committed": 610,
+    "total_lines_changed": 755,
+    "agent_percentage": 35.496688741721854,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 109,
+      "user_lines_removed": 3,
+      "agent_lines_added": 93,
+      "agent_lines_removed": 67,
+      "user_added_per_file": {
+        "internal/checker/core/check.rs": 18,
+        "internal/checker/core/mapper.rs": 28,
+        "internal/checker/core/mod.rs": 6,
+        "internal/checker/core/nodebuilder.rs": 31,
+        "internal/transformers/tstransforms/typeeraser.rs": 26
+      },
+      "user_removed_per_file": {
+        "internal/checker/core/mapper.rs": 3
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 6,
+      "user_lines_removed": 3,
+      "agent_lines_added": 221,
+      "agent_lines_removed": 75,
+      "user_added_per_file": {
+        "internal/checker/core/mapper.rs": 6
+      },
+      "user_removed_per_file": {
+        "internal/checker/core/mapper.rs": 3
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 9,
+      "user_lines_removed": 0,
+      "agent_lines_added": 224,
+      "agent_lines_removed": 75,
+      "user_added_per_file": {
+        "internal/transformers/tstransforms/typeeraser_test.rs": 9
+      }
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 119,
+      "user_lines_removed": 0,
+      "agent_lines_added": 335,
+      "agent_lines_removed": 75,
+      "user_added_per_file": {
+        "internal/checker/core/nodebuilder_test.rs": 37,
+        "internal/transformers/tstransforms/typeeraser.rs": 82
+      }
+    },
+    {
+      "checkpoint_number": 6,
+      "user_lines_added": 9,
+      "user_lines_removed": 0,
+      "agent_lines_added": 454,
+      "agent_lines_removed": 75,
+      "user_added_per_file": {
+        "internal/transformers/tstransforms/typeeraser_test.rs": 9
+      }
+    }
+  ]
+}
