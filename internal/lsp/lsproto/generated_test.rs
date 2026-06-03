@@ -298,6 +298,54 @@ fn roundtrip_foldingrange_all() {
     assert_eq!(v, result);
 }
 
+// Go: lsp/lsproto/lsp_generated.go:SelectionRange (nested parent chain)
+#[test]
+fn roundtrip_selection_range_nested() {
+    let rng = |sl, sc, el, ec| Range {
+        start: Position {
+            line: sl,
+            character: sc,
+        },
+        end: Position {
+            line: el,
+            character: ec,
+        },
+    };
+    let v = SelectionRange {
+        range: rng(0, 1, 0, 2),
+        parent: Some(Box::new(SelectionRange {
+            range: rng(0, 0, 0, 5),
+            parent: None,
+        })),
+    };
+    let data = serde_json::to_vec(&v).unwrap();
+    let result: SelectionRange = serde_json::from_slice(&data).unwrap();
+    assert_eq!(v, result);
+}
+
+// Go: lsp/lsproto/lsp_generated.go:SelectionRange (parent omitted when absent)
+#[test]
+fn roundtrip_selection_range_no_parent() {
+    let v = SelectionRange {
+        range: Range {
+            start: Position {
+                line: 2,
+                character: 3,
+            },
+            end: Position {
+                line: 2,
+                character: 7,
+            },
+        },
+        parent: None,
+    };
+    let data = serde_json::to_vec(&v).unwrap();
+    // `parent` is omitted when `None` (Go `omitzero`).
+    assert!(!String::from_utf8(data.clone()).unwrap().contains("parent"));
+    let result: SelectionRange = serde_json::from_slice(&data).unwrap();
+    assert_eq!(v, result);
+}
+
 // Go: .../Location
 #[test]
 fn roundtrip_location() {

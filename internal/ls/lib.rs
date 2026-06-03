@@ -24,6 +24,7 @@ pub mod hover;
 pub mod inlay_hints;
 pub mod references;
 pub mod rename;
+pub mod selectionranges;
 pub mod semantictokens;
 pub mod signaturehelp;
 pub mod symbols;

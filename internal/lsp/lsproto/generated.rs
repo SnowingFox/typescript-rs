@@ -1027,6 +1027,23 @@ lsp_object! {
     }
 }
 
+lsp_object! {
+    /// A nested selection range: a [`Range`] plus an optional `parent` selection
+    /// range that fully contains it.
+    ///
+    /// The `textDocument/selectionRange` result is one of these chains per
+    /// requested position — walking the `parent` pointers expands the selection
+    /// outward (innermost first), so `parent.range` always contains `this.range`.
+    /// `parent` is boxed because the type is self-referential.
+    // Go: internal/lsp/lsproto/lsp_generated.go:SelectionRange
+    SelectionRange {
+        ["The range of this selection range."]
+        req range: Range => "range",
+        ["The parent selection range containing this range (so `parent.range` contains `range`)."]
+        opt parent: Box<SelectionRange> => "parent",
+    }
+}
+
 /// Generates a string-literal type (LSP discriminator literals such as
 /// `"create"`): serializes to the literal and rejects any other value.
 macro_rules! string_literal {
