@@ -10,6 +10,7 @@
 //! - **Slice 2** (W4): FS layer — `overlayfs`, `configfileregistry`.
 //! - **Slice 3** (W4): project core — `project`, `compilerhost`,
 //!   `projectcollection`.
+//! - **Slice 4** (W7): snapshot + session basics — `snapshot`, `session`.
 
 pub mod background;
 pub mod client;
@@ -22,3 +23,5 @@ pub mod parsecache;
 pub mod project;
 pub mod projectcollection;
 pub mod refcountcache;
+pub mod session;
+pub mod snapshot;
