@@ -537,6 +537,41 @@ fn scoped_non_exported_local_use_stays_bare() {
     check_cjs_scoped("const y = 1;\ny;", "const y = 1;\ny;");
 }
 
+// -- T2-6 verification tests: the specific CJS patterns from the task brief --
+
+// T2-6 slice 1: a simple named function export. `export function foo() {}`
+// becomes the kept local `function foo() { }` (export modifier stripped) plus a
+// hoisted `exports.foo = foo;` assignment. The `__esModule` marker precedes both
+// because the module has a value export.
+#[test]
+fn named_function_export_becomes_cjs_exports_assignment() {
+    check_cjs(
+        "export function foo() {}",
+        "Object.defineProperty(exports, \"__esModule\", { value: true });\nexports.foo = foo;\nfunction foo() { }",
+    );
+}
+
+// T2-6 slice 2: a default expression export. `export default "hello"` becomes
+// `exports.default = "hello";` with the `__esModule` marker.
+#[test]
+fn default_expression_export_becomes_cjs_exports_default() {
+    check_cjs(
+        "export default \"hello\";",
+        "Object.defineProperty(exports, \"__esModule\", { value: true });\nexports.default = \"hello\";",
+    );
+}
+
+// T2-6 slice 3: a named import + value use. `import { bar } from "baz"; bar;`
+// becomes `const baz_1 = require("baz"); baz_1.bar;` — the import is lowered to
+// a `require` binding and the use is rewritten to a member access.
+#[test]
+fn import_statement_becomes_cjs_require() {
+    check_cjs(
+        "import { bar } from \"baz\";\nbar;",
+        "const baz_1 = require(\"baz\");\nbaz_1.bar;",
+    );
+}
+
 // Track 2 branch: when `module` is not CommonJS, the transform is a passthrough.
 #[test]
 fn non_commonjs_module_kind_is_passthrough() {

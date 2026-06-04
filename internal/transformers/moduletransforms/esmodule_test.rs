@@ -161,3 +161,27 @@ fn namespace_reexport_as_default_rewrites_to_export_default_under_es2015() {
         "import * as default_1 from \"m\";\nexport default default_1;",
     );
 }
+
+// -- T2-6 verification tests: ESM pass-through behavior --
+
+// T2-6 Part 3, slice 1: under `module: esnext`, a named function export passes
+// through unchanged (ESM keeps `export` syntax — no CJS lowering).
+#[test]
+fn named_function_export_passes_through_under_esm() {
+    check_esm(
+        "export function foo() { return 1; }",
+        ModuleKind::EsNext,
+        "export function foo() { return 1; }",
+    );
+}
+
+// T2-6 Part 3, slice 2: under `module: esnext`, an import + use passes through
+// unchanged (no `require` lowering), and a default export also passes through.
+#[test]
+fn import_and_default_export_pass_through_under_esm() {
+    check_esm(
+        "import { bar } from \"baz\";\nexport default bar;",
+        ModuleKind::EsNext,
+        "import { bar } from \"baz\";\nexport default bar;",
+    );
+}

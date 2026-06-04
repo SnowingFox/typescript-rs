@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_support::{build_reference_resolver, emit, parse_shared};
+use crate::tstransforms::typeeraser::new_type_eraser_transformer;
 use std::rc::Rc;
 
 // Runs the import-elision transform over `input` (with a scope-correct resolver
@@ -184,4 +185,54 @@ fn value_export_equals_is_kept() {
         "function f() {}\nexport = f;",
         "function f() { }\nexport = f;",
     );
+}
+
+// -- Pipeline tests: type eraser + import elision (matching Go's chained transform) --
+
+/// Runs type eraser → import elision over `input` (matching Go's chained
+/// `TypeEraserTransformer → ImportElisionTransformer` pipeline) and asserts the
+/// emitted JS. The scope-correct resolver is built from the same source.
+fn check_elision_pipeline(input: &str, expected: &str) {
+    let (ec, source_file) = parse_shared(input);
+    let resolver = build_reference_resolver(input);
+    let opts = TransformOptions {
+        context: Some(Rc::clone(&ec)),
+        ..Default::default()
+    };
+    let mut te = new_type_eraser_transformer(&opts);
+    let after_type_erase = te.transform_source_file(source_file);
+    let mut ie = new_import_elision_transformer(&opts, resolver);
+    let result = ie.transform_source_file(after_type_erase);
+    assert_eq!(emit(&ec, result, input), expected, "pipeline({input:?})");
+}
+
+// Go: TestImportElision (chained type eraser + import elision). An inline
+// type-only import specifier `import { type Foo }` is dropped by the type
+// eraser (the `is_type_only` flag on the specifier); the named-imports clause
+// then empties, the import clause has nothing left, and the whole import
+// declaration is removed. Matches tsc `--module esnext` output.
+#[test]
+fn inline_type_only_import_specifier_is_completely_elided() {
+    check_elision_pipeline("import { type Foo } from \"bar\";", "");
+}
+
+// Go: TestImportElision (chained type eraser + import elision). A mixed import
+// `import { Foo, type Bar }` has the `type Bar` specifier stripped by the type
+// eraser; `Foo` is referenced as a value, so the import elision keeps it. The
+// result is `import { Foo } from "bar";` — only the value binding survives.
+#[test]
+fn mixed_value_and_type_import_keeps_only_value_specifier() {
+    check_elision_pipeline(
+        "import { Foo, type Bar } from \"bar\";\nFoo;",
+        "import { Foo } from \"bar\";\nFoo;",
+    );
+}
+
+// Go: TestImportElision (chained type eraser + import elision). A full type-only
+// import `import type { Foo }` has the whole import clause elided by the type
+// eraser (its `phase_modifier == TypeKeyword`), so the import declaration is
+// removed entirely before import elision even runs.
+#[test]
+fn full_type_only_import_is_completely_elided() {
+    check_elision_pipeline("import type { Foo } from \"bar\";", "");
 }
