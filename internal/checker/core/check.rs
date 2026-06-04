@@ -4088,6 +4088,243 @@ impl Checker {
         self.check_unused_identifiers(view.as_ref());
     }
 
+    // -- resolveEntityName -------------------------------------------------------
+
+    /// Resolves an entity name (identifier, qualified name, or property access)
+    /// to its symbol through the scope chain. Reports a diagnostic when
+    /// `!ignore_errors` and the name cannot be found.
+    ///
+    /// This is the checker-level entry point that wraps the declared-types
+    /// `resolve_entity_name` (silent) with error reporting and alias resolution.
+    ///
+    /// DEFER(phase-4-checker): the full alias-resolution loop
+    /// (`!dont_resolve_alias && symbol.flags & Alias != 0` chain), the
+    /// `markSymbolOfAliasDeclarationIfTypeOnly` call, and the
+    /// `PropertyAccessExpression` entity path. blocked-by:
+    /// `resolveAlias` / `getTargetOfAliasDeclaration`.
+    // Go: internal/checker/checker.go:Checker.resolveEntityName(15646)
+    pub(crate) fn resolve_entity_name(
+        &mut self,
+        program: &dyn BoundProgram,
+        name: NodeId,
+        meaning: SymbolFlags,
+        ignore_errors: bool,
+        _dont_resolve_alias: bool,
+        location: Option<NodeId>,
+    ) -> Option<SymbolId> {
+        let arena = program.arena();
+        if arena.text(name).is_empty() && arena.loc(name).end() == arena.loc(name).pos() {
+            return None;
+        }
+        match arena.kind(name) {
+            Kind::Identifier => {
+                let resolve_location = location.unwrap_or(name);
+                let text = arena.text(name).to_string();
+                let result = resolve_name(
+                    program,
+                    resolve_location,
+                    &text,
+                    meaning,
+                    false,
+                    program.globals().as_ref().copied(),
+                );
+                if result.is_none() && !ignore_errors {
+                    let msg = if meaning == SymbolFlags::NAMESPACE {
+                        &tsgo_diagnostics::CANNOT_FIND_NAMESPACE_0
+                    } else {
+                        &tsgo_diagnostics::CANNOT_FIND_NAME_0
+                    };
+                    self.error(program, name, msg, &[&text]);
+                }
+                result
+            }
+            Kind::QualifiedName => {
+                let (left, right) = match arena.data(name) {
+                    NodeData::QualifiedName(d) => (d.left, d.right),
+                    _ => return None,
+                };
+                let namespace = self.resolve_entity_name(
+                    program,
+                    left,
+                    SymbolFlags::NAMESPACE,
+                    ignore_errors,
+                    false,
+                    location,
+                )?;
+                let right_text = arena.text(right).to_string();
+                let exports = &program.symbol(namespace).exports;
+                let symbol = exports
+                    .get(&right_text)
+                    .copied()
+                    .filter(|&sid| program.symbol(sid).flags.intersects(meaning));
+                if symbol.is_none() && !ignore_errors {
+                    let ns_name = program.symbol(namespace).name.clone();
+                    self.error(
+                        program,
+                        right,
+                        &tsgo_diagnostics::NAMESPACE_0_HAS_NO_EXPORTED_MEMBER_1,
+                        &[&ns_name, &right_text],
+                    );
+                }
+                symbol
+            }
+            Kind::PropertyAccessExpression => {
+                let (expression, prop_name) = match arena.data(name) {
+                    NodeData::PropertyAccessExpression(d) => (d.expression, d.name),
+                    _ => return None,
+                };
+                let namespace = self.resolve_entity_name(
+                    program,
+                    expression,
+                    SymbolFlags::NAMESPACE,
+                    ignore_errors,
+                    false,
+                    location,
+                )?;
+                let prop_text = arena.text(prop_name).to_string();
+                let exports = &program.symbol(namespace).exports;
+                let symbol = exports
+                    .get(&prop_text)
+                    .copied()
+                    .filter(|&sid| program.symbol(sid).flags.intersects(meaning));
+                if symbol.is_none() && !ignore_errors {
+                    let ns_name = program.symbol(namespace).name.clone();
+                    self.error(
+                        program,
+                        prop_name,
+                        &tsgo_diagnostics::NAMESPACE_0_HAS_NO_EXPORTED_MEMBER_1,
+                        &[&ns_name, &prop_text],
+                    );
+                }
+                symbol
+            }
+            _ => None,
+        }
+    }
+
+    // -- checkExportSpecifier ----------------------------------------------------
+
+    /// Validates an export specifier (`{ x }` / `{ x as y }`). When no module
+    /// specifier is present (`export { x }` — not `export { x } from "m"`),
+    /// ensures the exported name resolves in the local scope; reports TS2304
+    /// when it cannot be found.
+    ///
+    /// DEFER(phase-4-checker): `checkAliasSymbol`, `checkModuleExportName`,
+    /// `markLinkedReferences`, `checkExternalEmitHelpers`, and the
+    /// `Cannot_export_0_Only_local_declarations_can_be_exported` path.
+    /// blocked-by: alias-target resolution + emit helpers + global source file
+    /// detection.
+    // Go: internal/checker/checker.go:Checker.checkExportSpecifier(5525)
+    fn check_export_specifier(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        has_module_specifier: bool,
+    ) {
+        let (property_name, name) = match program.arena().data(node) {
+            NodeData::ExportSpecifier(d) => (d.property_name, d.name),
+            _ => return,
+        };
+
+        if has_module_specifier {
+            return;
+        }
+
+        let exported_name = property_name.unwrap_or(name);
+        if program.arena().kind(exported_name) == Kind::StringLiteral {
+            return;
+        }
+
+        let text = program.arena().text(exported_name).to_string();
+        let meaning =
+            SymbolFlags::VALUE | SymbolFlags::TYPE | SymbolFlags::NAMESPACE | SymbolFlags::ALIAS;
+        let result = resolve_name(
+            program,
+            exported_name,
+            &text,
+            meaning,
+            false,
+            program.globals().as_ref().copied(),
+        );
+        if result.is_none() {
+            self.error(
+                program,
+                exported_name,
+                &tsgo_diagnostics::CANNOT_FIND_NAME_0,
+                &[&text],
+            );
+        }
+    }
+
+    // -- checkExportAssignment --------------------------------------------------
+
+    /// Validates an `export = X` / `export default X` assignment: context
+    /// checks (namespace restriction) and expression checking.
+    ///
+    /// DEFER(phase-4-checker): `checkGrammarModuleElementContext`,
+    /// `shouldCheckErasableSyntax`, `verbatimModuleSyntax` checks,
+    /// `isolatedModules` re-export type-only diagnostics, and the
+    /// `isIllegalExportDefaultInCJS` path. blocked-by: module format
+    /// detection + type-only alias declarations.
+    // Go: internal/checker/checker.go:Checker.checkExportAssignment(5549)
+    fn check_export_assignment(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        is_export_equals: bool,
+        expression: NodeId,
+    ) {
+        let arena = program.arena();
+        let container = arena.parent(node);
+        let container = container.and_then(|c| {
+            if arena.kind(c) == Kind::SourceFile {
+                Some(c)
+            } else {
+                arena.parent(c)
+            }
+        });
+
+        if let Some(container) = container {
+            if arena.kind(container) == Kind::ModuleDeclaration
+                && !arena
+                    .flags(container)
+                    .contains(tsgo_ast::NodeFlags::AMBIENT)
+            {
+                if is_export_equals {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::AN_EXPORT_ASSIGNMENT_CANNOT_BE_USED_IN_A_NAMESPACE,
+                        &[],
+                    );
+                } else {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::A_DEFAULT_EXPORT_CAN_ONLY_BE_USED_IN_AN_ECMASCRIPT_STYLE_MODULE,
+                        &[],
+                    );
+                }
+                return;
+            }
+        }
+
+        // Go: `if isIdentifier(node.Expression()) { ... } else { checkExpressionCached }`
+        if program.arena().kind(expression) == Kind::Identifier {
+            let _sym = self.resolve_entity_name(
+                program,
+                expression,
+                SymbolFlags::ALL,
+                true, // ignoreErrors
+                true, // dontResolveAlias
+                Some(node),
+            );
+            // DEFER(phase-4-checker): getExportSymbolOfValueSymbolIfExported,
+            // verbatimModuleSyntax checks, isolatedModules re-export checks.
+        }
+        self.check_expression(program, expression);
+    }
+
     // Reports `TS2309` when a module that has an `export =` (export-equals) ALSO
     // exports other VALUE members — the reachable core of Go's
     // `checkExternalModuleExports`. The error is reported on the export-assignment
@@ -4573,6 +4810,52 @@ impl Checker {
             if let Some(expression) = d.expression {
                 self.check_return_statement_expression(program, node, expression);
             }
+        }
+        // A `namespace N { ... }` / `module "m" { ... }` declaration descends
+        // into its body (Go's `checkModuleDeclaration` -> `checkSourceElement(body)`),
+        // so nested export-assignment / grammar diagnostics surface.
+        // DEFER(phase-4-checker): the full `checkModuleDeclaration` (ambient checks,
+        // non-identifier name checks, augmentation merge checks).
+        // Go: internal/checker/checker.go:Checker.checkModuleDeclaration(5365)
+        if let NodeData::ModuleDeclaration(d) = program.arena().data(node) {
+            if let Some(body) = d.body {
+                self.check_statement(program, body);
+            }
+        }
+        // A `ModuleBlock` (the `{ ... }` body of a namespace/module) descends
+        // into its child statements.
+        // Go: internal/checker/checker.go:Checker.checkModuleDeclaration -> body
+        if let NodeData::ModuleBlock(d) = program.arena().data(node) {
+            let statements = d.statements.nodes.clone();
+            for statement in statements {
+                self.check_statement(program, statement);
+            }
+        }
+        // An `export { x, y }` declaration checks each specifier (Go's
+        // `checkExportDeclaration` -> `forEach(exportClause.elements,
+        // checkExportSpecifier)`). With a module specifier (`export { x } from
+        // "m"`), no local-scope check is needed.
+        // DEFER(phase-4-checker): `checkGrammarModuleElementContext`,
+        // `checkGrammarExportDeclaration`, and re-export alias resolution.
+        // Go: internal/checker/checker.go:Checker.checkExportDeclaration(5460)
+        if let NodeData::ExportDeclaration(d) = program.arena().data(node) {
+            let has_module_specifier = d.module_specifier.is_some();
+            if let Some(export_clause) = d.export_clause {
+                if let NodeData::NamedExports(ne) = program.arena().data(export_clause) {
+                    let specifiers = ne.elements.nodes.clone();
+                    for specifier in specifiers {
+                        self.check_export_specifier(program, specifier, has_module_specifier);
+                    }
+                }
+            }
+        }
+        // An `export = X` / `export default X` assignment checks the exported
+        // expression and validates the context (Go's `checkExportAssignment`).
+        // Go: internal/checker/checker.go:Checker.checkExportAssignment(5549)
+        if let NodeData::ExportAssignment(d) = program.arena().data(node) {
+            let is_export_equals = d.is_export_equals;
+            let expression = d.expression;
+            self.check_export_assignment(program, node, is_export_equals, expression);
         }
 
         // Restore the enclosing reachability state (Go's `checkSourceElement`

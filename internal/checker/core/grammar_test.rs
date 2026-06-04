@@ -792,6 +792,48 @@ fn for_of_variable_with_type_annotation_reports_2483() {
     );
 }
 
+// Go: internal/checker/grammarchecks.go:checkGrammarForInOrForOfStatement
+// Valid for-of statement -> no grammar error
+#[test]
+fn for_of_valid_no_grammar_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "for (const x of [1, 2, 3]) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let grammar_diag = diags.iter().find(|d| {
+        d.code == 1188 || d.code == 1189 || d.code == 1190 || d.code == 2404 || d.code == 2483
+    });
+    assert!(
+        grammar_diag.is_none(),
+        "valid for-of should not produce for-in/for-of grammar errors; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarForInOrForOfStatement
+// Multiple declarations in for-of -> TS1188
+#[test]
+fn for_of_multiple_declarations_reports_1188() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "for (let x, y of []) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1188);
+    assert!(
+        d.is_some(),
+        "expected TS1188 (only single variable in for-of); got: {:?}",
+        diags
+    );
+}
+
 // ========== T1-D9: checkGrammarMetaProperty ==========
 
 // Go: internal/checker/grammarchecks.go:checkGrammarMetaProperty

@@ -10212,3 +10212,173 @@ fn satisfies_expression_compatible_no_error() {
         diags
     );
 }
+
+// ---------------------------------------------------------------------------
+// C6: Checker::resolve_entity_name
+// ---------------------------------------------------------------------------
+
+// Go: internal/checker/checker.go:Checker.resolveEntityName
+// Resolve a locally declared variable through resolveEntityName (single identifier).
+#[test]
+fn resolve_entity_name_resolves_local_variable() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const x = 1;\nx;");
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let x_ref = match arena.data(stmts[1]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expression statement"),
+    };
+    assert_eq!(arena.kind(x_ref), tsgo_ast::Kind::Identifier);
+    let mut c = Checker::new();
+    let result = c.resolve_entity_name(
+        &p,
+        x_ref,
+        tsgo_ast::SymbolFlags::VALUE,
+        false, // ignore_errors
+        false, // dont_resolve_alias
+        None,  // location
+    );
+    assert!(result.is_some(), "should resolve local 'x'");
+    assert_eq!(p.symbol(result.unwrap()).name, "x");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveEntityName
+// Resolve an identifier from an enclosing (outer) scope.
+#[test]
+fn resolve_entity_name_resolves_from_outer_scope() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const outer = 1;\nfunction f() { outer; }");
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    // stmts[1] = function f() { outer; }
+    let body = match arena.data(stmts[1]) {
+        NodeData::FunctionDeclaration(d) => d.body.expect("function body"),
+        _ => panic!("function declaration"),
+    };
+    let body_stmts = match arena.data(body) {
+        NodeData::Block(d) => d.list.nodes.clone(),
+        _ => panic!("block"),
+    };
+    let outer_ref = match arena.data(body_stmts[0]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expression statement"),
+    };
+    assert_eq!(arena.kind(outer_ref), tsgo_ast::Kind::Identifier);
+    let mut c = Checker::new();
+    let result = c.resolve_entity_name(
+        &p,
+        outer_ref,
+        tsgo_ast::SymbolFlags::VALUE,
+        false,
+        false,
+        None,
+    );
+    assert!(
+        result.is_some(),
+        "should resolve 'outer' from enclosing scope"
+    );
+    assert_eq!(p.symbol(result.unwrap()).name, "outer");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveEntityName
+// An unresolved identifier with ignore_errors=false should report TS2304.
+#[test]
+fn resolve_entity_name_unresolved_reports_2304() {
+    // Note: this test is separate from check_identifier 2304 tests — it verifies
+    // the Checker::resolve_entity_name method's error-reporting path directly.
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "missing;"));
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let missing_ref = match arena.data(stmts[0]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expression statement"),
+    };
+    assert_eq!(arena.kind(missing_ref), tsgo_ast::Kind::Identifier);
+    let mut c = Checker::new_checker(p.clone());
+    let result = c.resolve_entity_name(
+        p.as_ref(),
+        missing_ref,
+        tsgo_ast::SymbolFlags::VALUE,
+        false, // ignore_errors = false -> should report
+        false,
+        None,
+    );
+    assert!(result.is_none(), "should not resolve 'missing'");
+    let root = p.root();
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 2304);
+    assert!(
+        d.is_some(),
+        "expected TS2304 from resolve_entity_name; got: {:?}",
+        diags
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C7: checkExportSpecifier + checkExportAssignment
+// ---------------------------------------------------------------------------
+
+// Go: internal/checker/checker.go:Checker.checkExportSpecifier
+// A valid export specifier referencing a locally declared name → no error.
+#[test]
+fn check_export_specifier_valid_no_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = 1;\nexport { x };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 2304);
+    assert!(
+        d.is_none(),
+        "valid export specifier should produce no TS2304; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkExportSpecifier
+// Exporting a name that does not exist in the local scope → TS2304.
+#[test]
+fn check_export_specifier_nonexistent_name_reports_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "export { missing };"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 2304);
+    assert!(
+        d.is_some(),
+        "expected TS2304 for non-existent export specifier; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkExportAssignment
+// `export =` inside a namespace → TS1063.
+#[test]
+fn check_export_assignment_in_namespace_reports_1063() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace N {\n  export = 1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1063);
+    assert!(
+        d.is_some(),
+        "expected TS1063 (export= cannot be used in namespace); got: {:?}",
+        diags
+    );
+}
