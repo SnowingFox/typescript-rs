@@ -276,6 +276,9 @@ impl Checker {
                 };
                 self.check_expression(program, inner)
             }
+            Kind::TypeOfExpression => self.check_typeof_expression(program, node),
+            Kind::VoidExpression => self.check_void_expression(program, node),
+            Kind::DeleteExpression => self.check_delete_expression(program, node),
             // DEFER(phase-4-checker-4h+): remaining expression kinds are added in
             // later 4g slices / sub-phases.
             _ => self.error_type,
@@ -708,6 +711,7 @@ impl Checker {
         program: &dyn BoundProgram,
         node: NodeId,
     ) -> TypeId {
+        self.check_grammar_computed_property_name(program, node);
         let expression = match program.arena().data(node) {
             NodeData::ComputedPropertyName(d) => d.expression,
             _ => return self.error_type,
@@ -2476,14 +2480,17 @@ impl Checker {
     // signatures, and `getApparentType`/lib globals (P6).
     // Go: internal/checker/checker.go:Checker.checkCallExpression(8289)
     fn check_call_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
-        let (callee, args, type_argument_nodes) = match program.arena().data(node) {
-            NodeData::CallExpression(d) => (
-                d.expression,
-                d.arguments.nodes.clone(),
-                d.type_arguments.as_ref().map(|l| l.nodes.clone()),
-            ),
-            _ => return self.error_type,
-        };
+        let (callee, args, type_argument_nodes, type_arguments_ref) =
+            match program.arena().data(node) {
+                NodeData::CallExpression(d) => (
+                    d.expression,
+                    d.arguments.nodes.clone(),
+                    d.type_arguments.as_ref().map(|l| l.nodes.clone()),
+                    d.type_arguments.as_ref(),
+                ),
+                _ => return self.error_type,
+            };
+        self.check_grammar_type_arguments(program, node, type_arguments_ref);
         let func_type = self.check_expression(program, callee);
         // Go's `resolveCallExpression` types the callee through
         // `checkNonNullTypeWithReporter` with the cannot-invoke reporter: a
@@ -3091,6 +3098,7 @@ impl Checker {
                 }
             }
             Kind::TypeOperator => {
+                self.check_grammar_type_operator_node(program, node);
                 if let NodeData::TypeOperator(d) = program.arena().data(node) {
                     let operand = d.type_node;
                     self.check_type_node(program, operand);
@@ -4065,6 +4073,7 @@ impl Checker {
         // file-view-local, so the set must not leak across files.
         self.within_unreachable_code = false;
         self.reported_unreachable_nodes.clear();
+        self.check_grammar_source_file(view.as_ref(), root);
         for statement in statements {
             self.check_statement(view.as_ref(), statement);
         }
@@ -4509,7 +4518,21 @@ impl Checker {
             self.within_unreachable_code = true;
         }
 
-        self.check_grammar_modifiers(program, node);
+        // Grammar-check modifiers for statement nodes that don't have a
+        // dedicated function-like handler (which calls check_grammar_modifiers
+        // internally via check_grammar_function_like_declaration).
+        if !matches!(
+            program.arena().kind(node),
+            Kind::FunctionDeclaration
+                | Kind::ArrowFunction
+                | Kind::FunctionExpression
+                | Kind::MethodDeclaration
+                | Kind::Constructor
+                | Kind::GetAccessor
+                | Kind::SetAccessor
+        ) {
+            self.check_grammar_modifiers(program, node);
+        }
         // Class members carry their own modifiers (e.g. accessibility), so run
         // the grammar checks on each, then check each member (4r descends into
         // method/accessor/constructor bodies and checks property initializers so
@@ -4552,8 +4575,17 @@ impl Checker {
         // Go: internal/checker/checker.go:Checker.checkInterfaceDeclaration(4990)
         if let NodeData::InterfaceDeclaration(d) = program.arena().data(node) {
             let type_parameters = d.type_parameters.clone();
+            let members = d.members.nodes.clone();
             self.check_grammar_type_parameter_defaults(program, type_parameters);
             self.check_object_type_for_duplicate_declarations(program, node);
+            for member in &members {
+                let member_kind = program.arena().kind(*member);
+                if member_kind == Kind::IndexSignature {
+                    self.check_grammar_index_signature(program, *member);
+                } else if member_kind == Kind::PropertySignature {
+                    self.check_grammar_property(program, *member);
+                }
+            }
             if let Some(sym) = program.symbol_of_node(node) {
                 self.check_type_parameter_lists_identical(program, sym);
                 if !self.declared_type_links.get(sym).index_signatures_checked {
@@ -4751,25 +4783,77 @@ impl Checker {
             }
         }
         // A `throw` statement checks its thrown expression (Go's
-        // `checkThrowStatement` -> `c.checkExpression(throwExpr)`), so diagnostics
-        // inside it surface.
-        // DEFER(phase-4-checker-4p+): the ambient-context and empty-identifier
-        // line-break grammar checks. blocked-by: `checkGrammarStatementInAmbientContext`
-        // + grammar position helpers.
+        // `checkThrowStatement` -> `c.checkExpression(throwExpr)`), and validates
+        // grammar (ambient context, line-break before expression).
+        // Go: internal/checker/checker.go:Checker.checkThrowStatement(4198)
         if let NodeData::ThrowStatement(d) = program.arena().data(node) {
             let expression = d.expression;
+            if !self.check_grammar_statement_in_ambient_context(program, node)
+                && program.arena().kind(expression) == Kind::Identifier
+                && program.arena().text(expression).is_empty()
+            {
+                self.grammar_error_on_first_token(
+                    program,
+                    node,
+                    &tsgo_diagnostics::LINE_BREAK_NOT_PERMITTED_HERE,
+                    &[],
+                );
+            }
             self.check_expression(program, expression);
         }
-        // A labeled statement descends into its labeled statement (Go's
-        // `checkLabeledStatement` -> `checkSourceElement(statement)`), so
-        // diagnostics inside it surface.
-        // DEFER(phase-4-checker-4p+): the duplicate-label grammar diagnostic
-        // (`Duplicate_label_0`, needs a parent walk) and the unused-label
-        // suggestion (`Unused_label`, needs `NodeFlagsUnreachable`/flow).
-        // blocked-by: grammar parent-walk + flow reachability flags.
+        // A labeled statement checks for duplicate labels in enclosing scopes
+        // (Go's `checkLabeledStatement` -> parent walk for `Duplicate_label_0`
+        // 1114), then descends into its body.
+        // Go: internal/checker/checker.go:Checker.checkLabeledStatement(4180)
         if let NodeData::LabeledStatement(d) = program.arena().data(node) {
-            let statement = d.statement;
+            let (label, statement) = (d.label, d.statement);
+            if !self.check_grammar_statement_in_ambient_context(program, node) {
+                let label_text = program.arena().text(label).to_string();
+                let mut current = program.arena().parent(node);
+                while let Some(cur) = current {
+                    if is_function_like_kind(program.arena().kind(cur)) {
+                        break;
+                    }
+                    if let NodeData::LabeledStatement(ld) = program.arena().data(cur) {
+                        if program.arena().text(ld.label) == label_text {
+                            self.grammar_error_on_node(
+                                program,
+                                label,
+                                &tsgo_diagnostics::DUPLICATE_LABEL_0,
+                                &[&label_text],
+                            );
+                            break;
+                        }
+                    }
+                    current = program.arena().parent(cur);
+                }
+            }
             self.check_statement(program, statement);
+        }
+        // A `with` statement reports TS2410 (the with statement is not supported)
+        // and checks its expression.
+        // Go: internal/checker/checker.go:Checker.checkWithStatement(4129)
+        if let NodeData::WithStatement(d) = program.arena().data(node) {
+            let (expression, statement) = (d.expression, d.statement);
+            if !self.check_grammar_statement_in_ambient_context(program, node) {
+                self.error(
+                    program,
+                    node,
+                    &tsgo_diagnostics::THE_WITH_STATEMENT_IS_NOT_SUPPORTED_ALL_SYMBOLS_IN_A_WITH_BLOCK_WILL_HAVE_TYPE_ANY,
+                    &[],
+                );
+            }
+            self.check_expression(program, expression);
+            self.check_statement(program, statement);
+        }
+        // A `break` or `continue` statement validates its grammar (ambient
+        // context check). Full label-target validation (1107/1104/1115) is deferred
+        // pending flow analysis.
+        // Go: internal/checker/checker.go:Checker.checkBreakOrContinueStatement(4056)
+        if let NodeData::BreakStatement(_) | NodeData::ContinueStatement(_) =
+            program.arena().data(node)
+        {
+            self.check_grammar_statement_in_ambient_context(program, node);
         }
         // A function declaration's body is descended into so nested diagnostics
         // surface (Go's `checkFunctionDeclaration` -> `checkFunctionOrMethod
@@ -4781,6 +4865,7 @@ impl Checker {
         // blocked-by: signature checking + flow implicit-return + expression-body
         // descent.
         if let NodeData::FunctionDeclaration(d) = program.arena().data(node) {
+            self.check_grammar_function_like_declaration(program, node);
             let (params, return_type, body) = (d.parameters.nodes.clone(), d.type_node, d.body);
             // The return-type annotation's type-predicate parameter-name check
             // (Go's `checkSignatureDeclaration` -> `checkTypePredicate`) runs for
@@ -4927,6 +5012,7 @@ impl Checker {
     // anonymous function typing + signature/`this` machinery + awaited types (P6).
     // Go: internal/checker/checker.go:Checker.checkArrowFunction / checkFunctionExpressionOrObjectLiteralMethodDeferred
     fn check_arrow_function(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        self.check_grammar_function_like_declaration(program, node);
         // Assign contextual parameter types to un-annotated parameters before the
         // body is descended into, so a body reference to such a parameter
         // resolves with its contextual type (4bj).
@@ -5182,6 +5268,53 @@ impl Checker {
             current = program.arena().parent(id);
         }
         None
+    }
+
+    // Checks a `typeof expr` expression. The result type is `string` (Go's
+    // `typeofType` is the union of typeof literal strings, but for checking
+    // purposes it is always a subtype of `string`; the simplified port returns
+    // `string`).
+    // Go: internal/checker/checker.go:Checker.checkTypeOfExpression(10577)
+    fn check_typeof_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let expression = match program.arena().data(node) {
+            NodeData::TypeOfExpression(d) => d.expression,
+            _ => return self.error_type,
+        };
+        self.check_expression(program, expression);
+        self.string_type
+    }
+
+    // Checks a `void expr` expression. The expression is checked for side-effect
+    // diagnostics, and the result is always `undefined`.
+    // Go: internal/checker/checker.go:Checker.checkVoidExpression(10799)
+    fn check_void_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let expression = match program.arena().data(node) {
+            NodeData::VoidExpression(d) => d.expression,
+            _ => return self.error_type,
+        };
+        self.check_expression(program, expression);
+        self.undefined_type()
+    }
+
+    // Checks a `delete expr` expression. Validates that the operand is a
+    // property access or element access, then returns `boolean`.
+    // Go: internal/checker/checker.go:Checker.checkDeleteExpression(10763)
+    fn check_delete_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let expression = match program.arena().data(node) {
+            NodeData::DeleteExpression(d) => d.expression,
+            _ => return self.error_type,
+        };
+        self.check_expression(program, expression);
+        let expr = skip_parentheses(program, expression);
+        if !is_access_expression(program.arena().kind(expr)) {
+            self.error(
+                program,
+                expr,
+                &tsgo_diagnostics::THE_OPERAND_OF_A_DELETE_OPERATOR_MUST_BE_A_PROPERTY_REFERENCE,
+                &[],
+            );
+        }
+        self.boolean_type
     }
 
     // Checks a class-like declaration's heritage relations (the reachable
@@ -5723,6 +5856,7 @@ impl Checker {
                 self.check_statement(program, body);
             }
             NodeData::PropertyDeclaration(_) => {
+                self.check_grammar_property(program, member);
                 self.check_property_declaration(program, member);
             }
             _ => {}
@@ -8315,6 +8449,28 @@ fn type_parameter_nodes(arena: &tsgo_ast::NodeArena, node: NodeId) -> Vec<NodeId
         _ => None,
     };
     list.map(|l| l.nodes.clone()).unwrap_or_default()
+}
+
+/// Returns `true` if `kind` is an access expression (`PropertyAccessExpression`
+/// or `ElementAccessExpression`).
+// Go: internal/ast/utilities.go:IsAccessExpression
+fn is_access_expression(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::PropertyAccessExpression | Kind::ElementAccessExpression
+    )
+}
+
+/// Skips parenthesized expressions, returning the innermost non-parenthesized
+/// child.
+// Go: internal/ast/utilities.go:SkipParentheses
+fn skip_parentheses(program: &dyn BoundProgram, mut node: NodeId) -> NodeId {
+    loop {
+        match program.arena().data(node) {
+            NodeData::ParenthesizedExpression(d) => node = d.expression,
+            _ => return node,
+        }
+    }
 }
 
 /// Returns `true` if `node` is a dynamic `import()` call (the callee is the

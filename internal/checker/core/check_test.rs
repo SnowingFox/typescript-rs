@@ -10382,3 +10382,517 @@ fn check_export_assignment_in_namespace_reports_1063() {
         diags
     );
 }
+
+// ============================================================================
+// checkTypeOfExpression — `typeof x` returns string type
+// ============================================================================
+
+// Go: internal/checker/checker.go:Checker.checkTypeOfExpression(10577)
+#[test]
+fn check_typeof_expression_returns_string_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: number;\ntypeof x;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let s = c.string_type();
+    assert_eq!(c.check_expression(&p, usage), s);
+}
+
+#[test]
+fn check_typeof_expression_checks_inner_expression() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "typeof unknownVar;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 (Cannot find name) for inner expression; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkVoidExpression — `void x` returns undefined type
+// ============================================================================
+
+// Go: internal/checker/checker.go:Checker.checkVoidExpression(10799)
+#[test]
+fn check_void_expression_returns_undefined_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: number;\nvoid x;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let u = c.undefined_type();
+    assert_eq!(c.check_expression(&p, usage), u);
+}
+
+#[test]
+fn check_void_zero_returns_undefined_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "void 0;");
+    let usage = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    let u = c.undefined_type();
+    assert_eq!(c.check_expression(&p, usage), u);
+}
+
+// ============================================================================
+// checkDeleteExpression — `delete obj.x` returns boolean; invalid operand
+// reports TS2703
+// ============================================================================
+
+// Go: internal/checker/checker.go:Checker.checkDeleteExpression(10763)
+#[test]
+fn check_delete_expression_returns_boolean_type() {
+    let p =
+        StubProgram::parse_and_bind("/a.ts", "declare const obj: { x: number };\ndelete obj.x;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let b = c.boolean_type();
+    assert_eq!(c.check_expression(&p, usage), b);
+}
+
+#[test]
+fn check_delete_non_property_reports_2703() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: number;\ndelete x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2703),
+        "expected TS2703 (operand of delete must be a property reference); got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_delete_element_access_no_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const obj: { [k: string]: number };\ndelete obj[\"x\"];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2703),
+        "delete on element access should not report 2703; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkWithStatement — reports TS2410 (with statement not supported)
+// ============================================================================
+
+// Go: internal/checker/checker.go:Checker.checkWithStatement(4129)
+#[test]
+fn check_with_statement_reports_2410() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const obj: any;\nwith (obj) { }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2410),
+        "expected TS2410 (with statement not supported); got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_with_statement_checks_expression() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "with (unknownObj) { }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 (cannot find name) for with expression; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkLabeledStatement — reports TS1114 for duplicate labels
+// ============================================================================
+
+// Go: internal/checker/checker.go:Checker.checkLabeledStatement(4180)
+#[test]
+fn check_labeled_statement_reports_duplicate_label() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "foo: foo: 1;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 1114),
+        "expected TS1114 (Duplicate label); got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_labeled_statement_no_error_for_unique_labels() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "foo: bar: 1;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 1114),
+        "unique labels should not report duplicate; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkThrowStatement — validates grammar (line-break check)
+// ============================================================================
+
+// Go: internal/checker/checker.go:Checker.checkThrowStatement(4198)
+#[test]
+fn check_throw_statement_checks_expression() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const err: any;\nthrow err;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2304),
+        "throw with declared variable should not report cannot-find-name; got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_throw_statement_validates_inner_expression() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "throw unknownError;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 for undeclared throw expression; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkBreakOrContinueStatement — grammar validation (ambient context)
+// ============================================================================
+
+// Go: internal/checker/checker.go:Checker.checkBreakOrContinueStatement(4056)
+#[test]
+fn check_break_in_switch_no_checker_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: number;\nswitch (x) { case 1: break; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 1107 || d.code == 1104),
+        "break in switch should not report jump errors; got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_continue_in_loop_no_checker_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "while (true) { continue; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 1107 || d.code == 1104),
+        "continue in loop should not report jump errors; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkReturnStatement — validates return type compatibility
+// ============================================================================
+
+// The return statement checking is already partially implemented (4q). These
+// tests verify the existing behavior.
+#[test]
+fn check_return_statement_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(): number { return 'hello'; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2322),
+        "expected TS2322 (type not assignable) for wrong return type; got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_return_statement_matching_type_no_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(): number { return 42; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2322),
+        "correct return type should not report 2322; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkVariableDeclaration / checkVariableStatement — validates initializers
+// ============================================================================
+
+// These were previously tested (4m), but we add targeted tests for clarity.
+#[test]
+fn check_variable_declaration_type_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x: number = 'hello';",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2322),
+        "expected TS2322 for variable type mismatch; got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_variable_declaration_matching_type_no_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x: number = 42;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2322),
+        "matching types should not report 2322; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkIfStatement — validates condition expression is checked
+// ============================================================================
+
+#[test]
+fn check_if_statement_checks_condition() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "if (unknownCond) { }"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 for undeclared if condition; got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_if_statement_checks_then_branch() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "if (true) { unknownInThen; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 for undeclared identifier in then-branch; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkSwitchStatement — validates expression and case clauses
+// ============================================================================
+
+#[test]
+fn check_switch_statement_checks_expression() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "switch (unknownExpr) { }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 for undeclared switch expression; got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_switch_case_clause_checks_expression() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: number;\nswitch (x) { case unknownCase: break; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 for undeclared case expression; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkTryStatement — validates try/catch/finally blocks are descended
+// ============================================================================
+
+#[test]
+fn check_try_statement_checks_try_block() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "try { unknownInTry; } catch (e) { }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 for undeclared identifier in try block; got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_try_statement_checks_catch_block() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "try { } catch (e) { unknownInCatch; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 for undeclared identifier in catch block; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkWhileStatement / checkDoStatement — condition and body check
+// ============================================================================
+
+#[test]
+fn check_while_statement_checks_condition() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "while (unknownCond) { }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 for undeclared while condition; got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_do_statement_checks_condition() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "do { } while (unknownCond);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 for undeclared do-while condition; got: {:?}",
+        diags
+    );
+}
+
+// ============================================================================
+// checkForStatement — validates initializer, condition, incrementor, body
+// ============================================================================
+
+#[test]
+fn check_for_statement_checks_condition() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "for (let i = 0; unknownCond; i++) { }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 for undeclared for condition; got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn check_for_statement_checks_body() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "for (;;) { unknownInBody; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2304),
+        "expected TS2304 for undeclared identifier in for body; got: {:?}",
+        diags
+    );
+}
