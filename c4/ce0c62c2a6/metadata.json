@@ -1,0 +1,20 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "c4ce0c62c2a6",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "internal/transformers/estransforms/esdecorator.rs",
+    "internal/transformers/estransforms/esdecorator_test.rs",
+    "internal/transformers/estransforms/mod.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c4/ce0c62c2a6/0/metadata.json",
+      "transcript": "/c4/ce0c62c2a6/0/full.jsonl",
+      "content_hash": "/c4/ce0c62c2a6/0/content_hash.txt",
+      "prompt": "/c4/ce0c62c2a6/0/prompt.txt"
+    }
+  ]
+}
