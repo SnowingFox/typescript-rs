@@ -48,6 +48,7 @@ use tsgo_parser::{parse_source_file, SourceFileParseOptions};
 use tsgo_printer::printer::{PrintHandlers, Printer, PrinterOptions};
 use tsgo_printer::EmitContext;
 use tsgo_sourcemap::Generator;
+use tsgo_transformers::declarations::new_declarations_transformer;
 use tsgo_transformers::estransforms::classfields::new_class_fields_transformer;
 use tsgo_transformers::estransforms::exponentiation::new_exponentiation_transformer;
 use tsgo_transformers::estransforms::forawait::new_for_await_transformer;
@@ -346,6 +347,63 @@ fn parse_script_kind(file_name: &str) -> ScriptKind {
         ScriptKind::Unknown => ScriptKind::Ts,
         kind => kind,
     }
+}
+
+/// Runs the declarations transformer pipeline over `source_text` and prints the
+/// result as `.d.ts` text.
+///
+/// Re-parses the file into a fresh [`EmitContext`]-owned arena, runs the
+/// declarations transformer (which strips function bodies, adds `declare`,
+/// normalizes modifiers), and prints the result. When `resolver` is `Some`,
+/// the transform uses it for visibility/overload queries; otherwise all
+/// declarations are kept (the bare-context path).
+///
+/// Side effects: allocates a parse arena and emit context.
+// Go: internal/compiler/emitter.go:emitter.emitDeclarationFile + emitDeclarationFileOrBundle
+pub(crate) fn emit_dts_text(
+    file_name: &str,
+    source_text: &str,
+    options: &CompilerOptions,
+) -> String {
+    let parse = parse_source_file(
+        SourceFileParseOptions {
+            file_name: file_name.to_string(),
+        },
+        source_text,
+        parse_script_kind(file_name),
+    );
+    let ec: SharedEmitContext = Rc::new(RefCell::new(EmitContext::with_arena(parse.arena)));
+    let sf = run_declaration_transformer(&ec, parse.source_file, options);
+
+    let ec_ref = ec.borrow();
+    let mut printer = Printer::new(
+        PrinterOptions {
+            remove_comments: options.remove_comments.is_true(),
+            new_line: options.new_line,
+            ..Default::default()
+        },
+        PrintHandlers::default(),
+        &ec_ref,
+    );
+    printer.emit_source_file(sf, source_text)
+}
+
+/// Runs the declarations transformer over `source_file`, returning the rebuilt
+/// declaration-file source-file node.
+///
+/// Side effects: mutates the shared context's arena.
+// Go: internal/compiler/emitter.go:getDeclarationTransformers
+fn run_declaration_transformer(
+    ec: &SharedEmitContext,
+    source_file: NodeId,
+    options: &CompilerOptions,
+) -> NodeId {
+    let topt = TransformOptions {
+        context: Some(Rc::clone(ec)),
+        compiler_options: options.clone(),
+    };
+    let mut tx = new_declarations_transformer(&topt, None);
+    tx.transform_source_file(source_file)
 }
 
 #[cfg(test)]

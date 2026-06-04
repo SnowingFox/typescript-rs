@@ -22,7 +22,7 @@ use tsgo_tspath::{
 };
 
 use crate::checkerpool::CompilerCheckerPool;
-use crate::emitter::{emit_js_text_with_source_map, EmitOnly};
+use crate::emitter::{emit_dts_text, emit_js_text_with_source_map, EmitOnly};
 use crate::fileloader::{process_all_program_files, ProcessedFiles};
 use crate::host::{effective_script_kind, CompilerHost, ParsedFile};
 use crate::projectreference::{
@@ -733,9 +733,10 @@ impl Program {
             .collect()
     }
 
-    /// Emits one source file: computes its output paths and emits the `.js`.
+    /// Emits one source file: computes its output paths and emits the `.js`
+    /// and, when declarations are requested, the `.d.ts`.
     ///
-    /// Side effects: writes the emitted file.
+    /// Side effects: writes the emitted file(s).
     // Go: internal/compiler/program.go:Emit (per-file body) + emitter.go:emitter.emit
     fn emit_one(&self, file: &ParsedFile, options: &mut EmitOptions) -> EmitResult {
         let mut result = EmitResult::default();
@@ -743,8 +744,7 @@ impl Program {
         let force_dts = options.emit_only == EmitOnly::ForcedDts;
         let paths = get_output_paths_for(file, self.options(), &host, force_dts);
         self.emit_js_file(file, paths.js_file_path(), options, &mut result);
-        // DEFER(P6) blocked-by: declarations transformer + checker EmitResolver:
-        // `emit_declaration_file` (`.d.ts` + declaration map).
+        self.emit_declaration_file(file, paths.declaration_file_path(), options, &mut result);
         result
     }
 
@@ -857,6 +857,49 @@ impl Program {
         }
         // DEFER(P6): on write error, add a `Could_not_write_file` diagnostic
         // (needs the `ast.Diagnostic` compiler-diagnostic constructor surface).
+    }
+
+    /// Emits the declaration (`.d.ts`) output for `file` to
+    /// `declaration_file_path`, writing through `options.write_file` (or the host
+    /// file system). Skipped when `declaration_file_path` is empty (declarations
+    /// not requested) or `emit_only` is `Js`.
+    ///
+    /// Side effects: writes the emitted `.d.ts` file.
+    // Go: internal/compiler/emitter.go:emitter.emitDeclarationFile
+    fn emit_declaration_file(
+        &self,
+        file: &ParsedFile,
+        declaration_file_path: &str,
+        options: &mut EmitOptions,
+        result: &mut EmitResult,
+    ) {
+        let emit_only = options.emit_only;
+        if declaration_file_path.is_empty()
+            || (emit_only != EmitOnly::All
+                && emit_only != EmitOnly::Dts
+                && emit_only != EmitOnly::ForcedDts)
+        {
+            return;
+        }
+        if self.options().no_emit.is_true() && emit_only != EmitOnly::ForcedDts {
+            return;
+        }
+
+        let mut text = emit_dts_text(file.file_name(), file.text(), self.options());
+
+        if self.options().emit_bom.is_true() {
+            text = tsgo_stringutil::add_utf8_byte_order_mark(&text);
+        }
+        let data = WriteFileData {
+            source_map_url_pos: -1,
+            skipped_dts_write: false,
+        };
+        if self
+            .write_text(declaration_file_path, &text, &data, options)
+            .is_ok()
+        {
+            result.emitted_files.push(declaration_file_path.to_string());
+        }
     }
 
     /// Returns the directory that source-map `sources` are relativized against

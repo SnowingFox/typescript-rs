@@ -443,6 +443,55 @@ fn emit_cjs_import_and_use_lowers_to_require_and_member_access() {
     );
 }
 
+// ── Declaration emit ────────────────────────────────────────────────────────
+
+// Go: internal/compiler/program.go:Program.Emit (declaration: true)
+// With `declaration: true`, the emitter produces both a `.js` and a `.d.ts` for
+// each source file. The `.d.ts` contains the ambient declarations.
+#[test]
+fn emit_declaration_simple_function() {
+    let options = CompilerOptions {
+        declaration: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[(
+            "/src/index.ts",
+            "export function foo(x: number): string { return \"\"; }",
+        )],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    let dts_files: Vec<&(String, String)> = captured
+        .iter()
+        .filter(|(n, _)| n.ends_with(".d.ts"))
+        .collect();
+    assert_eq!(
+        dts_files.len(),
+        1,
+        "expected exactly one .d.ts file, got: {dts_files:?}"
+    );
+    assert_eq!(dts_files[0].0, "/src/index.d.ts");
+    let dts_text = &dts_files[0].1;
+    assert!(
+        dts_text.contains("declare"),
+        ".d.ts should contain 'declare': {dts_text}"
+    );
+    assert!(
+        dts_text.contains("foo"),
+        ".d.ts should contain 'foo': {dts_text}"
+    );
+    assert!(
+        !dts_text.contains("return"),
+        ".d.ts should NOT contain function body: {dts_text}"
+    );
+}
+
 // Go: internal/compiler/emitter.go:getScriptTransformers (ESM passthrough)
 // With `module: EsNext`, `export default function() {}` is preserved as-is: the
 // implied module transformer dispatches to the ES module transform which is a
@@ -708,4 +757,186 @@ fn emit_honors_crlf_newline_option() {
 
     let captured = captured.borrow();
     assert_eq!(captured[0].1, "\"use strict\";\r\nconst x = 1;\r\n");
+}
+
+// ── Declaration emit (tests 2–6) ───────────────────────────────────────────
+
+// Go: internal/compiler/program.go:Program.Emit (declaration: true, class)
+#[test]
+fn emit_declaration_class() {
+    let options = CompilerOptions {
+        declaration: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[("/src/index.ts", "export class Greeter {\n  greeting: string;\n  constructor(message: string) {\n    this.greeting = message;\n  }\n  greet(): string {\n    return this.greeting;\n  }\n}")],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    let dts_files: Vec<&(String, String)> = captured
+        .iter()
+        .filter(|(n, _)| n.ends_with(".d.ts"))
+        .collect();
+    assert_eq!(dts_files.len(), 1);
+    let dts_text = &dts_files[0].1;
+    assert!(
+        dts_text.contains("Greeter"),
+        ".d.ts should contain class name: {dts_text}"
+    );
+    assert!(
+        dts_text.contains("greeting"),
+        ".d.ts should contain property: {dts_text}"
+    );
+    assert!(
+        dts_text.contains("greet"),
+        ".d.ts should contain method: {dts_text}"
+    );
+    assert!(
+        !dts_text.contains("this.greeting = message"),
+        ".d.ts should NOT contain body: {dts_text}"
+    );
+    assert!(
+        !dts_text.contains("return"),
+        ".d.ts should NOT contain return: {dts_text}"
+    );
+}
+
+// Go: internal/compiler/program.go:Program.Emit (declaration: true, interface)
+#[test]
+fn emit_declaration_interface() {
+    let options = CompilerOptions {
+        declaration: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[(
+            "/src/index.ts",
+            "export interface Point {\n  x: number;\n  y: number;\n}",
+        )],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    let dts_files: Vec<&(String, String)> = captured
+        .iter()
+        .filter(|(n, _)| n.ends_with(".d.ts"))
+        .collect();
+    assert_eq!(dts_files.len(), 1);
+    let dts_text = &dts_files[0].1;
+    assert!(
+        dts_text.contains("interface Point"),
+        ".d.ts should contain interface: {dts_text}"
+    );
+    assert!(
+        dts_text.contains("x: number"),
+        ".d.ts should contain member x: {dts_text}"
+    );
+    assert!(
+        dts_text.contains("y: number"),
+        ".d.ts should contain member y: {dts_text}"
+    );
+    assert!(
+        !dts_text.contains("declare interface"),
+        ".d.ts should NOT have declare on interface: {dts_text}"
+    );
+}
+
+// Go: internal/compiler/program.go:Program.Emit (declaration: true, re-export)
+#[test]
+fn emit_declaration_reexport() {
+    let options = CompilerOptions {
+        declaration: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[
+            ("/src/m.ts", "export const x: number = 1;"),
+            ("/src/index.ts", "export { x } from \"./m\";"),
+        ],
+        &["/src/m.ts", "/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    let index_dts: Vec<&(String, String)> = captured
+        .iter()
+        .filter(|(n, _)| n == "/src/index.d.ts")
+        .collect();
+    assert_eq!(
+        index_dts.len(),
+        1,
+        "expected /src/index.d.ts, got: {:?}",
+        captured.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+    let dts_text = &index_dts[0].1;
+    assert!(
+        dts_text.contains("export"),
+        ".d.ts should contain export: {dts_text}"
+    );
+}
+
+// Go: internal/compiler/program.go:Program.Emit (declaration: true, enum)
+// The declaration transformer currently does not handle enums (DEFER), so the
+// `.d.ts` is produced but enum content may be elided. This test verifies the
+// pipeline produces the file.
+#[test]
+fn emit_declaration_enum() {
+    let options = CompilerOptions {
+        declaration: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[("/src/index.ts", "export enum Color { Red, Green, Blue }")],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    let dts_files: Vec<&(String, String)> = captured
+        .iter()
+        .filter(|(n, _)| n.ends_with(".d.ts"))
+        .collect();
+    assert_eq!(dts_files.len(), 1, "expected a .d.ts file for enum source");
+    assert_eq!(dts_files[0].0, "/src/index.d.ts");
+}
+
+// Go: internal/compiler/program.go:Program.Emit (declaration: false)
+#[test]
+fn emit_no_declaration_when_not_requested() {
+    let program = build_program(
+        &[(
+            "/src/index.ts",
+            "export function foo(x: number): string { return \"\"; }",
+        )],
+        &["/src/index.ts"],
+        CompilerOptions::default(),
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    let result = emit_capturing(&program, &captured);
+
+    assert!(!result.emit_skipped);
+    let captured = captured.borrow();
+    let dts_files: Vec<&(String, String)> = captured
+        .iter()
+        .filter(|(n, _)| n.ends_with(".d.ts"))
+        .collect();
+    assert!(
+        dts_files.is_empty(),
+        "should not produce .d.ts when declaration is off"
+    );
 }

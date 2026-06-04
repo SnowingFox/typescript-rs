@@ -41,8 +41,8 @@
 //! 2. Heritage clause evaluated outside private name scope.
 //! 3. Class name assigned.
 //! 4. For each member: (a) member decorators evaluated, (b) computed name eval.
-//! 5–8. Decorator application by category (static non-field, non-static
-//!      non-field, static field, non-static field).
+//!    5–8. Decorator application by category (static non-field, non-static
+//!    non-field, static field, non-static field).
 //! 9. Class decorators applied.
 //! 10. Class binding initialized.
 //! 11. Static method extra initializers evaluated.
