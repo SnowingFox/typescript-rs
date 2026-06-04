@@ -62,3 +62,21 @@ fn property_assignment_inside_function_body_hoists_into_body() {
         "function f() { var _a; (_a = a).x = Math.pow(_a.x, b); }",
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// T2-8 integration tests: exponentiation verification
+// ───────────────────────────────────────────────────────────────────────
+
+// Go: internal/transformers/estransforms/exponentiation.go:visitExponentiationExpression
+// Numeric-literal operands pass through correctly to `Math.pow`.
+#[test]
+fn exponentiation_with_numeric_literals() {
+    check_downlevel("2 ** 3", "Math.pow(2, 3);");
+}
+
+// Go: internal/transformers/estransforms/exponentiation.go:visitExponentiationExpression
+// Non-`**` binary expressions pass through unchanged.
+#[test]
+fn non_exponentiation_binary_unchanged() {
+    check_downlevel("a + b", "a + b;");
+}

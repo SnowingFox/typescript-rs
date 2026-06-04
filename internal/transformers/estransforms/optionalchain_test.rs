@@ -243,3 +243,29 @@ fn non_optional_member_then_optional_call_threads_this() {
         "var _a;\n(_a = a.b) === null || _a === void 0 ? void 0 : _a.call(a);",
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// T2-8 integration tests: optional chaining verification
+// ───────────────────────────────────────────────────────────────────────
+
+// Go: internal/transformers/estransforms/optionalchain.go:visitOptionalExpression
+// A simple identifier with optional property access — the canonical `a?.b`
+// lowering from the spec tests (ES2019 target).
+#[test]
+fn simple_optional_property_canonical() {
+    check_downlevel(
+        "var r = a?.b;",
+        "var r = a === null || a === void 0 ? void 0 : a.b;",
+    );
+}
+
+// Go: internal/transformers/estransforms/optionalchain.go:visitOptionalExpression
+// Optional chaining on a string literal property name with bracket notation
+// `a?.["prop"]` lowers to an element access guard.
+#[test]
+fn optional_string_element_access_lowered() {
+    check_downlevel(
+        "a?.[\"prop\"];",
+        "a === null || a === void 0 ? void 0 : a[\"prop\"];",
+    );
+}

@@ -268,3 +268,27 @@ fn named_class_expression_static_field_keeps_name_in_comma_sequence() {
         "var _a;\nconst C = (_a = class D {\n}, _a.x = 1, _a);",
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// T2-8 integration tests: class field verification
+// ───────────────────────────────────────────────────────────────────────
+
+// Go: internal/transformers/estransforms/classfields.go:transformClassMembers
+// A class with a single uninitialized field (no `= ...`) is left as-is: the
+// declaration-only `x;` form is valid ES2022+, so no constructor is synthesized.
+#[test]
+fn uninitialized_instance_field_kept_as_is() {
+    check_downlevel("class C { x }", "class C {\n    x;\n}");
+}
+
+// Go: internal/transformers/estransforms/classfields.go:transformConstructorBody (existing ctor + super)
+// A derived class with an existing constructor that calls `super()` followed by
+// a statement, plus two instance fields — the field initializers are inserted
+// between `super()` and the existing body statements.
+#[test]
+fn derived_class_multiple_fields_inserted_after_super() {
+    check_downlevel(
+        "class C extends B { x = 1; y = 2; constructor() { super(); this.z = 3; } }",
+        "class C extends B {\n    constructor() {\n        super();\n        this.x = 1;\n        this.y = 2;\n        this.z = 3;\n    }\n}",
+    );
+}

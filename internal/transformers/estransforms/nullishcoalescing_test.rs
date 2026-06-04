@@ -36,3 +36,24 @@ fn non_nullish_binary_unchanged() {
 fn plain_statement_unchanged() {
     check_nullish("var x = 1;", "var x = 1;");
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// T2-8 integration tests: nullish coalescing verification
+// ───────────────────────────────────────────────────────────────────────
+
+// Go: internal/transformers/estransforms/nullishcoalescing.go:visitBinaryExpression
+// `a ?? b` as a standalone expression statement, not just an initializer.
+#[test]
+fn nullish_coalescing_as_expression_statement() {
+    check_nullish("a ?? b;", "a !== null && a !== void 0 ? a : b;");
+}
+
+// Go: internal/transformers/estransforms/nullishcoalescing.go:visitBinaryExpression
+// A numeric-literal left operand is simple-copiable and lowered without a temp.
+#[test]
+fn numeric_literal_left_no_temp() {
+    check_nullish(
+        "var x = 0 ?? b;",
+        "var x = 0 !== null && 0 !== void 0 ? 0 : b;",
+    );
+}

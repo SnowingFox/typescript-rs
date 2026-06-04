@@ -95,3 +95,75 @@ fn nested_element_child_is_lowered() {
 fn fragment_lowers_to_react_fragment_create_element() {
     check_downlevel("<>{x}</>;", "React.createElement(React.Fragment, null, x);");
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// T2-8 integration tests: JSX transform verification
+// ───────────────────────────────────────────────────────────────────────
+
+// Go: internal/transformers/jsxtransforms/jsx.go:visitJsxText + visitJsxOpeningLikeElementCreateElement
+// A classic-runtime element with a text child "hello" produces the expected
+// `React.createElement("div", null, "hello")` call — verifies that the text
+// normalisation path handles multi-char strings.
+#[test]
+fn classic_div_with_text_hello() {
+    check_downlevel(
+        "<div>hello</div>;",
+        "React.createElement(\"div\", null, \"hello\");",
+    );
+}
+
+// Go: internal/transformers/jsxtransforms/jsx.go:getTagName + transformJsxAttributeInitializer
+// A component (uppercase tag) with an expression-valued attribute produces a
+// props object containing the expression as a value.
+#[test]
+fn component_with_expression_prop() {
+    check_downlevel(
+        "<Comp prop={x}/>;",
+        "React.createElement(Comp, { prop: x });",
+    );
+}
+
+// Go: internal/transformers/jsxtransforms/jsx.go:transformJsxChildToExpression (recursive)
+// A nested structure — an outer element whose expression child contains a
+// nested element — lowers both elements recursively.
+#[test]
+fn nested_element_inside_expression_child() {
+    check_downlevel(
+        "<div>{<span>{y}</span>}</div>;",
+        "React.createElement(\"div\", null, React.createElement(\"span\", null, y));",
+    );
+}
+
+// Go: internal/transformers/jsxtransforms/jsx.go:visitJsxOpeningFragmentCreateElement + visitJsxText
+// A fragment wrapping a plain text child lowers to
+// `React.createElement(React.Fragment, null, "text")`.
+#[test]
+fn fragment_with_text_child() {
+    check_downlevel(
+        "<>text</>;",
+        "React.createElement(React.Fragment, null, \"text\");",
+    );
+}
+
+// Go: internal/transformers/jsxtransforms/jsx.go:visitJsxOpeningLikeElementCreateElement
+// An element with multiple props produces a single props object whose
+// properties appear in source order.
+#[test]
+fn element_with_multiple_props() {
+    check_downlevel(
+        "<div id=\"a\" className={b}/>;",
+        "React.createElement(\"div\", { id: \"a\", className: b });",
+    );
+}
+
+// Go: internal/transformers/jsxtransforms/jsx.go:transformJsxChildToExpression
+// An element with multiple children of different kinds (text + expression +
+// nested element) produces three trailing arguments, each lowered to its
+// appropriate form.
+#[test]
+fn element_with_mixed_children() {
+    check_downlevel(
+        "<div>a{x}<span/></div>;",
+        "React.createElement(\"div\", null, \"a\", x, React.createElement(\"span\", null));",
+    );
+}
