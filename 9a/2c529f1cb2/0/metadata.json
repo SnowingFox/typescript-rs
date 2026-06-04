@@ -1,0 +1,57 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "9a2c529f1cb2",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-04T08:13:19.79121Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "internal/project/lib.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-4.6-opus-max-thinking",
+  "turn_id": "e9c9a27c6c0f",
+  "checkpoint_transcript_start": 1494,
+  "transcript_lines_at_start": 1494,
+  "session_metrics": {
+    "turn_count": 44,
+    "context_tokens": 933669,
+    "context_window_size": 1000000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-04T08:13:19.711763Z",
+    "agent_lines": 24,
+    "agent_removed": 0,
+    "human_added": 555,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 579,
+    "total_lines_changed": 579,
+    "agent_percentage": 4.145077720207254,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 199,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "internal/project/lib.rs": 3,
+        "internal/project/session.rs": 21,
+        "internal/project/session_test.rs": 2,
+        "internal/project/snapshot.rs": 118,
+        "internal/project/snapshot_test.rs": 55
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 644,
+      "agent_lines_removed": 0
+    }
+  ]
+}

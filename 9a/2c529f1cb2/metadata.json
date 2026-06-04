@@ -1,0 +1,18 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "9a2c529f1cb2",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "internal/project/lib.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9a/2c529f1cb2/0/metadata.json",
+      "transcript": "/9a/2c529f1cb2/0/full.jsonl",
+      "content_hash": "/9a/2c529f1cb2/0/content_hash.txt",
+      "prompt": "/9a/2c529f1cb2/0/prompt.txt"
+    }
+  ]
+}
