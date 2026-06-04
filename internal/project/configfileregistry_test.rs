@@ -183,3 +183,99 @@ fn test_default_is_empty() {
     reg.for_each_config_entry(|_, _| count += 1);
     assert_eq!(count, 0);
 }
+
+// --- register/unregister/update tests ---
+
+#[test]
+fn test_register_config_adds_entry() {
+    let mut reg = ConfigFileRegistry::new();
+    let config_path = path("/project/tsconfig.json");
+    let project_path = path("/project");
+
+    reg.register_config(&config_path, "/project/tsconfig.json", &project_path);
+
+    let entry = reg
+        .get_entry(&config_path)
+        .expect("entry should exist after register");
+    assert_eq!(entry.file_name, "/project/tsconfig.json");
+    assert!(entry.retaining_projects.contains_key(&project_path));
+    assert_eq!(entry.pending_reload, PendingReload::Full);
+}
+
+#[test]
+fn test_double_register_increments_refcount() {
+    let mut reg = ConfigFileRegistry::new();
+    let config_path = path("/tsconfig.json");
+    let proj_a = path("/proj_a");
+    let proj_b = path("/proj_b");
+
+    reg.register_config(&config_path, "/tsconfig.json", &proj_a);
+    reg.register_config(&config_path, "/tsconfig.json", &proj_b);
+
+    let entry = reg.get_entry(&config_path).unwrap();
+    assert_eq!(entry.retaining_projects.len(), 2);
+    assert!(entry.retaining_projects.contains_key(&proj_a));
+    assert!(entry.retaining_projects.contains_key(&proj_b));
+}
+
+#[test]
+fn test_unregister_config_decrements_and_removes() {
+    let mut reg = ConfigFileRegistry::new();
+    let config_path = path("/tsconfig.json");
+    let proj_a = path("/proj_a");
+    let proj_b = path("/proj_b");
+
+    reg.register_config(&config_path, "/tsconfig.json", &proj_a);
+    reg.register_config(&config_path, "/tsconfig.json", &proj_b);
+
+    // Unregister one project — entry should still exist
+    reg.unregister_config(&config_path, &proj_a);
+    let entry = reg.get_entry(&config_path).unwrap();
+    assert_eq!(entry.retaining_projects.len(), 1);
+    assert!(!entry.retaining_projects.contains_key(&proj_a));
+    assert!(entry.retaining_projects.contains_key(&proj_b));
+
+    // Unregister last project — entry should be removed
+    reg.unregister_config(&config_path, &proj_b);
+    assert!(
+        reg.get_entry(&config_path).is_none(),
+        "entry should be removed when no retainers remain"
+    );
+}
+
+#[test]
+fn test_update_config_marks_full_reload() {
+    let mut reg = ConfigFileRegistry::new();
+    let config_path = path("/tsconfig.json");
+    let project_path = path("/project");
+
+    reg.register_config(&config_path, "/tsconfig.json", &project_path);
+
+    // Clear the pending reload to simulate a loaded state
+    reg.configs.get_mut(&config_path).unwrap().pending_reload = PendingReload::None;
+    assert_eq!(
+        reg.get_entry(&config_path).unwrap().pending_reload,
+        PendingReload::None
+    );
+
+    // Update should mark it for full reload
+    let updated = reg.update_config(&config_path);
+    assert!(
+        updated,
+        "update_config should return true for existing entry"
+    );
+    assert_eq!(
+        reg.get_entry(&config_path).unwrap().pending_reload,
+        PendingReload::Full
+    );
+}
+
+#[test]
+fn test_update_config_nonexistent_returns_false() {
+    let mut reg = ConfigFileRegistry::new();
+    let result = reg.update_config(&path("/nonexistent/tsconfig.json"));
+    assert!(
+        !result,
+        "update_config should return false for missing entry"
+    );
+}

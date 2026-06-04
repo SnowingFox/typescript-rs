@@ -56,6 +56,12 @@ impl ProjectCollection {
         &self.config_file_registry
     }
 
+    /// Returns a mutable reference to the config file registry.
+    // Go: internal/project/projectcollection.go (builder access pattern)
+    pub fn config_file_registry_mut(&mut self) -> &mut ConfigFileRegistry {
+        &mut self.config_file_registry
+    }
+
     /// Returns a configured project by its config file path.
     // Go: internal/project/projectcollection.go:ProjectCollection.ConfiguredProject
     pub fn configured_project(&self, path: &Path) -> Option<&Project> {

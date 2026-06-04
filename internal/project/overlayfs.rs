@@ -203,6 +203,16 @@ impl OverlayFS {
         &self.overlays
     }
 
+    /// Checks if a file exists in either overlays or the underlying FS.
+    // Go: internal/project/overlayfs.go:overlayFS.FileExists (implicit)
+    pub fn file_exists(&self, file_name: &str) -> bool {
+        let path = (self.to_path)(file_name);
+        if self.overlays.contains_key(&path) {
+            return true;
+        }
+        self.fs.file_exists(file_name)
+    }
+
     /// Looks up a file by name. Returns the overlay if open, otherwise reads from disk.
     // Go: internal/project/overlayfs.go:overlayFS.getFile
     pub fn get_file(&self, file_name: &str) -> Option<BoxedFileHandle> {

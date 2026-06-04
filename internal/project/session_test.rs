@@ -209,6 +209,103 @@ fn session_get_language_service_no_project_returns_err() {
     assert!(result.is_err(), "should return Err when no project found");
 }
 
+// --- find_project_for_file ---
+
+#[test]
+fn session_find_project_for_file_with_tsconfig() {
+    let files: Vec<(&str, &str)> = vec![
+        ("/project/tsconfig.json", r#"{"compilerOptions":{}}"#),
+        ("/project/src/index.ts", "let x = 1;"),
+    ];
+    let fs: Box<dyn tsgo_vfs::Fs + Send + Sync> =
+        Box::new(tsgo_vfs::vfstest::MapFs::from_map(files, false));
+    let overlay_fs = OverlayFS::new(fs, std::collections::HashMap::new(), |s: &str| {
+        tsgo_tspath::Path(s.to_lowercase())
+    });
+    let options = SessionOptions {
+        current_directory: "/project".to_string(),
+    };
+    let session = Session::new(options, overlay_fs, Arc::new(NoopClient));
+
+    let result = session.find_project_for_file("/project/src/index.ts");
+    assert_eq!(
+        result,
+        Some("/project/tsconfig.json".to_string()),
+        "should find tsconfig.json in parent directory"
+    );
+}
+
+#[test]
+fn session_find_project_for_file_no_tsconfig_returns_none() {
+    let files: Vec<(&str, &str)> = vec![("/loose/app.ts", "x")];
+    let fs: Box<dyn tsgo_vfs::Fs + Send + Sync> =
+        Box::new(tsgo_vfs::vfstest::MapFs::from_map(files, false));
+    let overlay_fs = OverlayFS::new(fs, std::collections::HashMap::new(), |s: &str| {
+        tsgo_tspath::Path(s.to_lowercase())
+    });
+    let options = SessionOptions {
+        current_directory: "/".to_string(),
+    };
+    let session = Session::new(options, overlay_fs, Arc::new(NoopClient));
+
+    let result = session.find_project_for_file("/loose/app.ts");
+    assert_eq!(
+        result, None,
+        "should return None when no tsconfig.json found"
+    );
+}
+
+// --- on_config_file_changed ---
+
+#[test]
+fn session_on_config_file_changed_invalidates_project() {
+    let files: Vec<(&str, &str)> = vec![
+        ("/project/tsconfig.json", r#"{"compilerOptions":{}}"#),
+        ("/project/src/index.ts", "let x = 1;"),
+    ];
+    let fs: Box<dyn tsgo_vfs::Fs + Send + Sync> =
+        Box::new(tsgo_vfs::vfstest::MapFs::from_map(files, false));
+    let overlay_fs = OverlayFS::new(fs, std::collections::HashMap::new(), |s: &str| {
+        tsgo_tspath::Path(s.to_lowercase())
+    });
+    let options = SessionOptions {
+        current_directory: "/project".to_string(),
+    };
+    let mut session = Session::new(options, overlay_fs, Arc::new(NoopClient));
+
+    // Open a file to create a configured project
+    session.did_open_file(
+        "file:///project/src/index.ts",
+        1,
+        "let x = 1;",
+        tsgo_lsproto::LanguageKind::TYPE_SCRIPT,
+    );
+    let snap_before = session.snapshot().id();
+
+    // Simulate config file change
+    session.on_config_file_changed("/project/tsconfig.json");
+
+    let snap_after = session.snapshot().id();
+    assert!(
+        snap_after > snap_before,
+        "snapshot should be rebuilt after config change"
+    );
+}
+
+// --- update_snapshot ---
+
+#[test]
+fn session_update_snapshot_increments_id() {
+    let mut session = make_test_session();
+    assert_eq!(session.snapshot().id(), 0);
+
+    session.update_snapshot();
+    assert_eq!(session.snapshot().id(), 1);
+
+    session.update_snapshot();
+    assert_eq!(session.snapshot().id(), 2);
+}
+
 // --- Snapshot ID increment ---
 
 #[test]

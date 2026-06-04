@@ -167,6 +167,52 @@ impl ConfigFileRegistry {
             })
     }
 
+    /// Registers a config file for a project. If the entry already exists,
+    /// adds the project to the retaining set (incrementing refcount).
+    /// If it doesn't exist, creates a new entry with PendingReload::Full.
+    // Go: configFileRegistryBuilder.acquireConfigForProject (simplified)
+    pub fn register_config(&mut self, config_path: &Path, file_name: &str, project_path: &Path) {
+        let entry = self
+            .configs
+            .entry(config_path.clone())
+            .or_insert_with(|| ConfigFileEntry {
+                file_name: file_name.to_string(),
+                pending_reload: PendingReload::Full,
+                retaining_projects: HashMap::new(),
+                retaining_open_files: HashMap::new(),
+                retaining_configs: HashMap::new(),
+            });
+        entry.retaining_projects.insert(project_path.clone(), ());
+    }
+
+    /// Unregisters a project from a config file. Removes the project from
+    /// the retaining set; if no retainers remain, removes the entry entirely.
+    // Go: configFileRegistryBuilder.releaseConfigForProject (simplified)
+    pub fn unregister_config(&mut self, config_path: &Path, project_path: &Path) {
+        let should_remove = if let Some(entry) = self.configs.get_mut(config_path) {
+            entry.retaining_projects.remove(project_path);
+            entry.retaining_projects.is_empty()
+                && entry.retaining_open_files.is_empty()
+                && entry.retaining_configs.is_empty()
+        } else {
+            false
+        };
+        if should_remove {
+            self.configs.remove(config_path);
+        }
+    }
+
+    /// Marks a config entry for full reload (simulating file-system change).
+    // Go: configFileRegistryBuilder.invalidateCache / DidChangeFiles
+    pub fn update_config(&mut self, config_path: &Path) -> bool {
+        if let Some(entry) = self.configs.get_mut(config_path) {
+            entry.pending_reload = PendingReload::Full;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Inserts or replaces a config entry (used by builder).
     #[allow(dead_code)]
     pub(crate) fn set_config(&mut self, path: Path, entry: ConfigFileEntry) {

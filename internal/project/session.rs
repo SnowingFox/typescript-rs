@@ -321,19 +321,59 @@ impl Session {
         }
     }
 
-    /// Searches for a tsconfig.json that governs the given file.
-    ///
-    /// MVP: checks the overlay FS for config files in parent directories.
-    /// Full implementation would use the real config-file search from
-    /// `tsoptions`.
+    /// Finds the project (tsconfig.json) for a given file path by walking up
+    /// parent directories. Returns the config file path if found, None otherwise.
     ///
     /// Side effects: reads from the overlay filesystem.
-    // Go: internal/project/configfileregistry.go (simplified)
-    fn find_config_for_file(&self, _file_name: &str) -> Option<String> {
-        // DEFER(phase-8): Full tsconfig search traversing parent directories
-        // and using tsoptions::find_config_file. For the MVP, all files
-        // without pre-existing configured projects go to inferred.
+    // Go: internal/project/configfileregistry.go:findConfigFileNameForFile (simplified)
+    pub fn find_project_for_file(&self, file_name: &str) -> Option<String> {
+        let mut dir = tsgo_tspath::get_directory_path(file_name);
+        loop {
+            let candidate = format!(
+                "{}{}tsconfig.json",
+                dir,
+                if dir.ends_with('/') { "" } else { "/" }
+            );
+            if self.overlay_fs.file_exists(&candidate) {
+                return Some(candidate);
+            }
+            let parent = tsgo_tspath::get_directory_path(&dir);
+            if parent == dir || parent.is_empty() {
+                break;
+            }
+            dir = parent;
+        }
         None
+    }
+
+    /// Callback invoked when a watched config file changes on disk.
+    /// Marks the config for reload in the registry and rebuilds the snapshot.
+    ///
+    /// Side effects: mutates the config registry and snapshot.
+    // Go: configFileRegistryBuilder.DidChangeFiles + session.UpdateSnapshot
+    pub fn on_config_file_changed(&mut self, config_file_name: &str) {
+        let config_path = (self.to_path)(config_file_name);
+        let mut pc = self.snapshot.project_collection().shallow_clone();
+        pc.config_file_registry_mut().update_config(&config_path);
+
+        self.snapshot_id += 1;
+        self.snapshot = Snapshot::new(self.snapshot_id, pc);
+    }
+
+    /// Explicitly rebuilds the snapshot (increments snapshot ID).
+    /// Used when external state changes require a fresh snapshot.
+    ///
+    /// Side effects: increments snapshot_id, rebuilds snapshot.
+    // Go: session.UpdateSnapshot (simplified)
+    pub fn update_snapshot(&mut self) {
+        self.snapshot_id += 1;
+        let pc = self.snapshot.project_collection().shallow_clone();
+        self.snapshot = Snapshot::new(self.snapshot_id, pc);
+    }
+
+    /// Internal config search used by ensure_project_for_file.
+    fn find_config_for_file(&self, file_name: &str) -> Option<String> {
+        self.find_project_for_file(file_name)
     }
 }
 
