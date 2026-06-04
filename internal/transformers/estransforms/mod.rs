@@ -150,6 +150,7 @@
 pub mod r#async;
 pub mod classfields;
 pub mod classthis;
+pub mod esdecorator;
 pub mod exponentiation;
 pub mod forawait;
 pub mod logicalassignment;
