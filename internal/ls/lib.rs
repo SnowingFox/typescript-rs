@@ -16,14 +16,18 @@ mod host;
 mod languageservice;
 
 pub mod autoinsert;
+pub mod callhierarchy;
+pub mod codeactions;
 pub mod completions;
 pub mod definition;
 pub mod diagnostics;
 pub mod documenthighlights;
+pub mod findallreferences_types;
 pub mod folding;
 pub mod hover;
 pub mod inlay_hints;
 pub mod linkedediting;
+pub mod organizeimports;
 pub mod references;
 pub mod rename;
 pub mod selectionranges;
@@ -31,11 +35,17 @@ pub mod semantictokens;
 pub mod signaturehelp;
 pub mod symbols;
 
+pub use callhierarchy::{CallHierarchyItemKind, CallSite};
+pub use codeactions::{CodeAction, CodeFixContext, CodeFixProvider, CombinedCodeActions};
 pub use completions::CompletionList;
 pub use documenthighlights::{DocumentHighlight, DocumentHighlightKind};
+pub use findallreferences_types::{
+    DefinitionKind, EntryKind, RefOptions, ReferenceEntry, ReferenceUse, SymbolAndEntries,
+};
 pub use host::LanguageServiceHost;
 pub use hover::QuickInfo;
 pub use languageservice::LanguageService;
+pub use organizeimports::{CategorizedImports, ImportGroup, OrganizeImportsMode};
 pub use rename::RenameInfo;
 pub use signaturehelp::{ParameterInformation, SignatureHelp, SignatureInformation};
 pub use symbols::DocumentSymbol;
