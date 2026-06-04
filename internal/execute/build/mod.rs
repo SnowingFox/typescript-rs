@@ -12,5 +12,12 @@
 //! [`orchestrator`].
 
 mod orchestrator;
+pub mod parse_cache;
+pub mod uptodatestatus;
 
 pub use orchestrator::perform_build;
+pub use parse_cache::ParseCache;
+pub use uptodatestatus::{
+    InputOutputFileAndTime, InputOutputName, UpToDateStatus, UpToDateStatusData,
+    UpToDateStatusKind, UpstreamErrors,
+};

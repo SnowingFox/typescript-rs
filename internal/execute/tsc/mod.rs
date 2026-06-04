@@ -11,6 +11,8 @@
 mod compile;
 mod diagnostics;
 mod emit;
+pub mod extendedconfigcache;
+pub mod statistics;
 
 pub use compile::{CommandLineResult, CompileAndEmitResult, ExitStatus};
 pub(crate) use diagnostics::format_status_time;
@@ -20,3 +22,5 @@ pub use diagnostics::{
     ReportedDiagnostic, WatchStatusReporter,
 };
 pub use emit::{emit_and_report_statistics, emit_files_and_report_errors};
+pub use extendedconfigcache::ExtendedConfigCache;
+pub use statistics::{CompileTimes, Statistics};

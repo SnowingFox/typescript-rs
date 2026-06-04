@@ -13,24 +13,35 @@
 
 pub mod boundfile;
 pub mod checkerpool;
+pub mod emit_host;
 pub mod emitter;
+pub mod file_include;
 pub mod fileloader;
 pub mod filesparser;
 pub mod host;
+pub mod includeprocessor;
 pub mod multifile;
+pub mod processing_diagnostic;
 pub mod program;
 pub mod projectreference;
 pub mod verify_options;
 
 pub use boundfile::BoundFile;
 pub use checkerpool::{checker_count, CompilerCheckerPool};
+pub use emit_host::EmitHost;
 pub use emitter::EmitOnly;
+pub use file_include::{
+    AutomaticTypeDirectiveData, FileIncludeKind, FileIncludeReason, FileIncludeReasonData,
+    PackageId, ReferencedFileData,
+};
 pub use fileloader::{
     get_default_lib_file_priority, import_syntax_affects_module_resolution,
     process_all_program_files, ProcessedFiles,
 };
 pub use host::{new_compiler_host, CompilerHost, CompilerHostImpl, ParsedFile};
+pub use includeprocessor::IncludeProcessor;
 pub use multifile::MultiFileBoundProgram;
+pub use processing_diagnostic::{ProcessingDiagnostic, ProcessingDiagnosticKind};
 pub use program::{
     combine_emit_results, new_program, EmitOptions, EmitResult, Program, ProgramOptions,
     SourceMapEmitResult, WriteFileCallback, WriteFileData,

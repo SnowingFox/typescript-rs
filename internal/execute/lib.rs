@@ -41,13 +41,16 @@ pub mod sys;
 pub mod tsc;
 pub mod watch;
 
-pub use build::perform_build;
+pub use build::{
+    perform_build, ParseCache, UpToDateStatus, UpToDateStatusData, UpToDateStatusKind,
+};
 pub use sys::{System, VfsSystem};
 pub use tsc::{
     create_diagnostic_reporter, create_report_error_summary, create_watch_status_reporter,
     emit_and_report_statistics, emit_files_and_report_errors, sort_and_deduplicate_diagnostics,
-    CommandLineResult, CompileAndEmitResult, DiagFile, DiagnosticReporter, ExitStatus,
-    ReportErrorSummary, ReportedDiagnostic, WatchStatusReporter,
+    CommandLineResult, CompileAndEmitResult, CompileTimes, DiagFile, DiagnosticReporter,
+    ExitStatus, ExtendedConfigCache, ReportErrorSummary, ReportedDiagnostic, Statistics,
+    WatchStatusReporter,
 };
 pub use watch::perform_watch;
 
