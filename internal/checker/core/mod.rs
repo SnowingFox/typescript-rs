@@ -242,6 +242,9 @@ pub struct Checker {
     index_infos: IndexInfoArena,
     /// Per-relation result cache (Go's `identityRelation`/`assignableRelation`/...).
     relations: RelationCache,
+    /// Symbols whose type-parameter lists have already been checked for
+    /// identical declarations (Go's `declaredTypeLinks.typeParametersChecked`).
+    type_parameter_lists_checked: FxHashSet<SymbolId>,
     /// Current recursion depth of the structural relation check (Go's
     /// `len(r.sourceStack)` / `len(r.targetStack)` in the `Relater`). When this
     /// reaches 100, the comparison bails with `false` and sets `overflow`.
@@ -534,6 +537,7 @@ impl Checker {
             signatures: SignatureArena::new(),
             index_infos: IndexInfoArena::new(),
             relations: RelationCache::default(),
+            type_parameter_lists_checked: FxHashSet::default(),
             relation_depth: 0,
             instantiation_depth: 0,
             instantiation_count: 0,

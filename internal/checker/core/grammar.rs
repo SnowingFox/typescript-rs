@@ -1363,6 +1363,332 @@ impl Checker {
         // DEFER(phase-4-checker-later): checkGrammarParameterList,
         // checkGrammarArrowFunction, checkGrammarForUseStrictSimpleParameterList.
     }
+
+    // -- checkGrammarMetaProperty -----------------------------------------------
+
+    /// Validates meta-property syntax (`new.target`, `import.meta`,
+    /// `import.defer`).
+    ///
+    /// * `new.xyz` where `xyz` !== `"target"` → TS17012.
+    /// * `import.xyz` (non-callee) where `xyz` !== `"meta"` → TS17012.
+    /// * `import.xyz(...)` (callee) where `xyz` !== `"meta"` and `!= "defer"` → TS18061.
+    /// * `import.defer` as non-callee → TS1005 (`"(" expected`).
+    ///
+    /// Returns `true` if a grammar error was reported.
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarMetaProperty(1841)
+    pub fn check_grammar_meta_property(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let (keyword_token, name_id) = match program.arena().data(node) {
+            NodeData::MetaProperty(d) => (d.keyword_token, d.name),
+            _ => return false,
+        };
+        let name_text = program.arena().text(name_id);
+
+        match keyword_token {
+            Kind::NewKeyword => {
+                if name_text != "target" {
+                    return self.grammar_error_on_node(
+                        program,
+                        name_id,
+                        &tsgo_diagnostics::X_0_IS_NOT_A_VALID_META_PROPERTY_FOR_KEYWORD_1_DID_YOU_MEAN_2,
+                        &[name_text, tsgo_scanner::token_to_string(keyword_token), "target"],
+                    );
+                }
+            }
+            Kind::ImportKeyword => {
+                if name_text != "meta" {
+                    let is_callee = program.arena().parent(node).is_some_and(|parent| {
+                        tsgo_ast::utilities::is_call_expression(program.arena(), parent)
+                            && match program.arena().data(parent) {
+                                NodeData::CallExpression(d) => d.expression == node,
+                                _ => false,
+                            }
+                    });
+                    if name_text == "defer" {
+                        if !is_callee {
+                            return self.grammar_error_at_pos(
+                                program,
+                                node,
+                                program.arena().loc(node).end(),
+                                0,
+                                &tsgo_diagnostics::X_0_EXPECTED,
+                                &["("],
+                            );
+                        }
+                    } else if is_callee {
+                        return self.grammar_error_on_node(
+                            program,
+                            name_id,
+                            &tsgo_diagnostics::X_0_IS_NOT_A_VALID_META_PROPERTY_FOR_KEYWORD_IMPORT_DID_YOU_MEAN_META_OR_DEFER,
+                            &[name_text],
+                        );
+                    } else {
+                        return self.grammar_error_on_node(
+                            program,
+                            name_id,
+                            &tsgo_diagnostics::X_0_IS_NOT_A_VALID_META_PROPERTY_FOR_KEYWORD_1_DID_YOU_MEAN_2,
+                            &[name_text, tsgo_scanner::token_to_string(keyword_token), "meta"],
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        false
+    }
+
+    // -- checkGrammarDecorator ------------------------------------------------
+
+    /// Validates a decorator expression's syntax.
+    ///
+    /// Walks the expression tree: a valid decorator is `@ident`,
+    /// `@ident.prop`, `@ident(args)`, `@ident.prop(args)`, or any of those
+    /// wrapped in parentheses. Optional chaining (`?.`) or non-identifier
+    /// leaf expressions require parentheses; reports TS1497 + TS1498.
+    ///
+    /// Returns `true` if a grammar error was reported.
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarDecorator(126)
+    pub fn check_grammar_decorator(&mut self, program: &dyn BoundProgram, node: NodeId) -> bool {
+        let decorator_expr = match program.arena().data(node) {
+            NodeData::Decorator(d) => d.expression,
+            _ => return false,
+        };
+
+        let arena = program.arena();
+
+        if arena.kind(decorator_expr) == Kind::ParenthesizedExpression {
+            return false;
+        }
+
+        let mut current = decorator_expr;
+        let mut can_have_call = true;
+        let mut error_node: Option<NodeId> = None;
+
+        loop {
+            let kind = arena.kind(current);
+
+            if kind == Kind::ExpressionWithTypeArguments || kind == Kind::NonNullExpression {
+                current = match arena.data(current) {
+                    NodeData::ExpressionWithTypeArguments(d) => d.expression,
+                    NodeData::NonNullExpression(d) => d.expression,
+                    _ => break,
+                };
+                continue;
+            }
+
+            if kind == Kind::CallExpression {
+                let d = match arena.data(current) {
+                    NodeData::CallExpression(d) => d,
+                    _ => break,
+                };
+                if !can_have_call {
+                    error_node = Some(current);
+                }
+                if d.question_dot_token.is_some() {
+                    error_node = d.question_dot_token;
+                }
+                current = d.expression;
+                can_have_call = false;
+                continue;
+            }
+
+            if kind == Kind::PropertyAccessExpression {
+                let d = match arena.data(current) {
+                    NodeData::PropertyAccessExpression(d) => d,
+                    _ => break,
+                };
+                if d.question_dot_token.is_some() {
+                    error_node = d.question_dot_token;
+                }
+                current = d.expression;
+                can_have_call = false;
+                continue;
+            }
+
+            if kind != Kind::Identifier {
+                error_node = Some(current);
+            }
+
+            break;
+        }
+
+        if let Some(err_node) = error_node {
+            let primary = self.diagnostic_for_node_public(
+                program,
+                decorator_expr,
+                &tsgo_diagnostics::EXPRESSION_MUST_BE_ENCLOSED_IN_PARENTHESES_TO_BE_USED_AS_A_DECORATOR,
+                &[],
+            );
+            let related = self.diagnostic_for_node_public(
+                program,
+                err_node,
+                &tsgo_diagnostics::INVALID_SYNTAX_IN_DECORATOR,
+                &[],
+            );
+            let mut diag = primary;
+            diag.related_information.push(related);
+            self.add_diagnostic(program, diag);
+            return true;
+        }
+
+        false
+    }
+
+    /// Creates a diagnostic for the given node. Public wrapper for grammar
+    /// use, mirroring `self.diagnostic_for_node` in check.rs.
+    fn diagnostic_for_node_public(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        message: &'static tsgo_diagnostics::Message,
+        args: &[&str],
+    ) -> super::check::Diagnostic {
+        let loc = program.arena().loc(node);
+        super::check::Diagnostic {
+            code: message.code(),
+            category: message.category(),
+            message: tsgo_diagnostics::format(&message.to_string(), args),
+            start: loc.pos(),
+            length: loc.end() - loc.pos(),
+            related_information: Vec::new(),
+            message_chain: Vec::new(),
+        }
+    }
+
+    // -- checkGrammarImportCallExpression ------------------------------------
+
+    /// Validates the grammar of a dynamic `import()` call expression.
+    ///
+    /// * Module=ES2015 → TS1323 (dynamic imports not supported).
+    /// * Type arguments → TS1326.
+    /// * Wrong argument count (0 or >2) → TS1450.
+    /// * Spread argument → TS1325.
+    /// * >1 arg without a supporting module kind → TS1324.
+    ///
+    /// Returns `true` if a grammar error was reported.
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarImportCallExpression(2172)
+    pub fn check_grammar_import_call_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        use tsgo_core::compileroptions::ModuleKind;
+        let module_kind = self.compiler_options().module;
+
+        let (callee, args, type_args) = match program.arena().data(node) {
+            NodeData::CallExpression(d) => (
+                d.expression,
+                d.arguments.nodes.clone(),
+                d.type_arguments.as_ref(),
+            ),
+            _ => return false,
+        };
+
+        // Deferred-import callee check (`import.defer(...)`)
+        if program.arena().kind(callee) == Kind::MetaProperty {
+            if module_kind != ModuleKind::EsNext && module_kind != ModuleKind::Preserve {
+                return self.grammar_error_on_node(
+                    program,
+                    node,
+                    &tsgo_diagnostics::DEFERRED_IMPORTS_ARE_ONLY_SUPPORTED_WHEN_THE_MODULE_FLAG_IS_SET_TO_ESNEXT_OR_PRESERVE,
+                    &[],
+                );
+            }
+        } else if module_kind == ModuleKind::Es2015 {
+            return self.grammar_error_on_node(
+                program,
+                node,
+                &tsgo_diagnostics::DYNAMIC_IMPORTS_ARE_ONLY_SUPPORTED_WHEN_THE_MODULE_FLAG_IS_SET_TO_ES2020_ES2022_ESNEXT_COMMONJS_AMD_SYSTEM_UMD_NODE16_NODE18_NODE20_OR_NODENEXT,
+                &[],
+            );
+        }
+
+        if type_args.is_some() {
+            return self.grammar_error_on_node(
+                program,
+                node,
+                &tsgo_diagnostics::THIS_USE_OF_IMPORT_IS_INVALID_IMPORT_CALLS_CAN_BE_WRITTEN_BUT_THEY_MUST_HAVE_PARENTHESES_AND_CANNOT_HAVE_TYPE_ARGUMENTS,
+                &[],
+            );
+        }
+
+        let is_node_range = (ModuleKind::Node16 as u32) <= (module_kind as u32)
+            && (module_kind as u32) <= (ModuleKind::NodeNext as u32);
+        if !is_node_range
+            && module_kind != ModuleKind::EsNext
+            && module_kind != ModuleKind::Preserve
+            && args.len() > 1
+        {
+            return self.grammar_error_on_node(
+                program,
+                args[1],
+                &tsgo_diagnostics::DYNAMIC_IMPORTS_ONLY_SUPPORT_A_SECOND_ARGUMENT_WHEN_THE_MODULE_OPTION_IS_SET_TO_ESNEXT_NODE16_NODE18_NODE20_NODENEXT_OR_PRESERVE,
+                &[],
+            );
+        }
+
+        if args.is_empty() || args.len() > 2 {
+            return self.grammar_error_on_node(
+                program,
+                node,
+                &tsgo_diagnostics::DYNAMIC_IMPORTS_CAN_ONLY_ACCEPT_A_MODULE_SPECIFIER_AND_AN_OPTIONAL_SET_OF_ATTRIBUTES_AS_ARGUMENTS,
+                &[],
+            );
+        }
+
+        if let Some(&spread) = args
+            .iter()
+            .find(|&&a| program.arena().kind(a) == Kind::SpreadElement)
+        {
+            return self.grammar_error_on_node(
+                program,
+                spread,
+                &tsgo_diagnostics::ARGUMENT_OF_DYNAMIC_IMPORT_CANNOT_BE_SPREAD_ELEMENT,
+                &[],
+            );
+        }
+
+        false
+    }
+
+    /// Reports a grammar error at a specific position and length.
+    /// Returns `true` if the error was recorded (i.e. no parse diagnostics
+    /// conflict).
+    ///
+    /// Side effects: records a diagnostic, returns `true`.
+    // Go: internal/checker/grammarchecks.go:Checker.grammarErrorAtPos(28)
+    fn grammar_error_at_pos(
+        &mut self,
+        program: &dyn BoundProgram,
+        _source_node: NodeId,
+        start: i32,
+        length: i32,
+        message: &'static tsgo_diagnostics::Message,
+        args: &[&str],
+    ) -> bool {
+        use super::check::Diagnostic;
+        let diagnostic = Diagnostic {
+            code: message.code(),
+            category: message.category(),
+            message: tsgo_diagnostics::format(&message.to_string(), args),
+            start,
+            length,
+            related_information: Vec::new(),
+            message_chain: Vec::new(),
+        };
+        self.add_diagnostic(program, diagnostic);
+        true
+    }
 }
 
 // The keyword text of a modifier token (Go's `scanner.TokenToString`).
@@ -1386,6 +1712,13 @@ fn modifier_text(kind: Kind) -> &'static str {
         Kind::OutKeyword => "out",
         _ => "",
     }
+}
+
+/// Returns the modifier/decorator token node ids of `node` (public for
+/// decorator-checking cross-module use).
+// Go: internal/ast/ast.go:Node.ModifierNodes
+pub(crate) fn modifier_nodes_pub(arena: &NodeArena, node: NodeId) -> Vec<NodeId> {
+    modifier_nodes(arena, node)
 }
 
 /// Returns the modifier/decorator token node ids of `node`, if it bears any.

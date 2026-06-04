@@ -30,9 +30,9 @@ use tsgo_diagnostics::{Category, Message};
 use super::contextual::ContextFlags;
 use super::declared_types::{
     fill_missing_type_arguments, get_apparent_type, get_constraint_of_type_parameter,
-    get_declaration_of_alias_symbol, get_declared_type_of_symbol, get_indexed_access_type,
-    get_min_type_argument_count, get_property_of_type, get_type_from_type_node,
-    get_type_of_property_of_type, get_type_of_symbol, resolve_alias,
+    get_declaration_of_alias_symbol, get_declared_type_of_symbol, get_default_from_type_parameter,
+    get_indexed_access_type, get_min_type_argument_count, get_property_of_type,
+    get_type_from_type_node, get_type_of_property_of_type, get_type_of_symbol, resolve_alias,
 };
 use super::inference::{InferenceContext, InferencePriority};
 use super::mapper::TypeMapper;
@@ -246,7 +246,13 @@ impl Checker {
             Kind::ThisKeyword => self.check_this_expression(program, node),
             Kind::PropertyAccessExpression => self.check_property_access(program, node),
             Kind::ElementAccessExpression => self.check_element_access(program, node),
-            Kind::CallExpression => self.check_call_expression(program, node),
+            Kind::CallExpression => {
+                if is_import_call(program, node) {
+                    self.check_import_call_expression(program, node)
+                } else {
+                    self.check_call_expression(program, node)
+                }
+            }
             Kind::NewExpression => self.check_new_expression(program, node),
             Kind::BinaryExpression => self.check_binary_expression(program, node),
             Kind::JsxSelfClosingElement => self.check_jsx_self_closing_element(program, node),
@@ -258,6 +264,8 @@ impl Checker {
             Kind::ArrowFunction => self.check_arrow_function(program, node),
             Kind::NonNullExpression => self.check_non_null_assertion(program, node),
             Kind::AsExpression => self.check_assertion(program, node),
+            Kind::SatisfiesExpression => self.check_satisfies_expression(program, node),
+            Kind::MetaProperty => self.check_meta_property(program, node),
             // A parenthesized expression `(expr)` has the type of its inner
             // expression (Go's `checkParenthesizedExpression` ->
             // `checkExpressionEx(node.Expression())`).
@@ -302,6 +310,105 @@ impl Checker {
         }
         let globals = program.globals();
         super::declared_types::get_type_from_type_node(self, program, type_node, globals)
+    }
+
+    /// Checks a dynamic `import()` call expression.
+    ///
+    /// Runs grammar checks, type-checks any arguments, and returns
+    /// `Promise<any>` (the full module-symbol resolution is deferred).
+    ///
+    /// DEFER(phase-4-checker-later): `resolveExternalModuleName`,
+    /// `createPromiseReturnType`, `getTypeWithSyntheticDefaultImportType`.
+    // Go: internal/checker/checker.go:Checker.checkImportCallExpression(8235)
+    fn check_import_call_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        self.check_grammar_import_call_expression(program, node);
+        let args = match program.arena().data(node) {
+            NodeData::CallExpression(d) => d.arguments.nodes.clone(),
+            _ => return self.error_type,
+        };
+        for &arg in &args {
+            self.check_expression(program, arg);
+        }
+        // Full module resolution + promise wrapping deferred.
+        self.any_type
+    }
+
+    /// Checks a `satisfies` expression (`expr satisfies T`).
+    ///
+    /// Unlike `as`, `satisfies` returns the **expression's** type — the
+    /// assertion only validates that the expression type is assignable to the
+    /// target type, reporting TS1360 on failure.
+    // Go: internal/checker/checker.go:Checker.checkSatisfiesExpression(10699)
+    fn check_satisfies_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let (expr, type_node) = match program.arena().data(node) {
+            NodeData::SatisfiesExpression(d) => (d.expression, d.type_node),
+            _ => return self.error_type,
+        };
+        let expr_type = self.check_expression(program, expr);
+        let globals = program.globals();
+        let target_type =
+            super::declared_types::get_type_from_type_node(self, program, type_node, globals);
+        if target_type == self.error_type {
+            return target_type;
+        }
+        if !self.is_type_assignable_to(program, expr_type, target_type) {
+            let source_str = super::nodebuilder::type_to_string(self, program, expr_type);
+            let target_str = super::nodebuilder::type_to_string(self, program, target_type);
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::TYPE_0_DOES_NOT_SATISFY_THE_EXPECTED_TYPE_1,
+                &[source_str.as_str(), target_str.as_str()],
+            );
+        }
+        expr_type
+    }
+
+    /// Checks a meta-property expression (`new.target` or `import.meta`).
+    ///
+    /// Dispatches grammar check, then `checkNewTargetMetaProperty` (TS17013)
+    /// or `checkImportMetaProperty` (TS1343) based on keyword.
+    ///
+    /// DEFER(phase-4-checker-later): real return types (the `new.target` type
+    /// is `getTypeOfSymbol` on the containing constructor, `import.meta` is
+    /// `ImportMeta`).
+    // Go: internal/checker/checker.go:Checker.checkMetaProperty(10712)
+    fn check_meta_property(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        self.check_grammar_meta_property(program, node);
+        let keyword = match program.arena().data(node) {
+            NodeData::MetaProperty(d) => d.keyword_token,
+            _ => return self.error_type,
+        };
+        match keyword {
+            Kind::NewKeyword => self.check_new_target_meta_property(program, node),
+            Kind::ImportKeyword => {
+                // `import.meta` / `import.defer` — type is deferred.
+                self.error_type
+            }
+            _ => self.error_type,
+        }
+    }
+
+    /// Checks `new.target`. Reports TS17013 if `new.target` is used outside
+    /// a function declaration, function expression, or constructor.
+    // Go: internal/checker/checker.go:Checker.checkNewTargetMetaProperty(10727)
+    fn check_new_target_meta_property(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
+        let container = get_new_target_container(program, node);
+        if container.is_none() {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::META_PROPERTY_0_IS_ONLY_ALLOWED_IN_THE_BODY_OF_A_FUNCTION_DECLARATION_FUNCTION_EXPRESSION_OR_CONSTRUCTOR,
+                &["new.target"],
+            );
+            return self.error_type;
+        }
+        // Full type resolution (`getTypeOfSymbol(symbol)`) deferred.
+        self.error_type
     }
 
     // Types an object literal `{ a: 1, b: "x" }` as a fresh anonymous object
@@ -4175,13 +4282,12 @@ impl Checker {
             program.arena().data(node)
         {
             let members = d.members.nodes.clone();
-            // Go runs `checkClassLikeDeclaration` (heritage relations: implements
-            // satisfaction + extends compatibility) BEFORE iterating the members
-            // (`checkSourceElements(node.Members())`).
+            self.check_decorators_on_node(program, node);
             self.check_grammar_class_like_declaration(program, node);
             self.check_class_like_declaration(program, node);
             for member in members {
                 self.check_grammar_modifiers(program, member);
+                self.check_decorators_on_node(program, member);
                 self.check_class_member(program, member);
             }
         }
@@ -4212,6 +4318,7 @@ impl Checker {
             self.check_grammar_type_parameter_defaults(program, type_parameters);
             self.check_object_type_for_duplicate_declarations(program, node);
             if let Some(sym) = program.symbol_of_node(node) {
+                self.check_type_parameter_lists_identical(program, sym);
                 if !self.declared_type_links.get(sym).index_signatures_checked {
                     self.declared_type_links.get(sym).index_signatures_checked = true;
                     self.check_type_for_duplicate_index_signatures(program, node);
@@ -4832,6 +4939,146 @@ impl Checker {
     // (`checkTypeRelatedToEx` with chains) for the member elaboration + the
     // static/constructor type of a class value symbol + override-modifier
     // resolution + generic type-argument instantiation through `this`.
+    /// Checks that all declarations of an interface/class symbol share
+    /// identical type parameter lists (TS2428).
+    ///
+    /// Called once per symbol when the declared type is first resolved. If the
+    /// parameter lists differ in count, name, constraint, or default, every
+    /// conflicting declaration gets an error.
+    // Go: internal/checker/checker.go:Checker.checkTypeParameterListsIdentical(4389)
+    pub fn check_type_parameter_lists_identical(
+        &mut self,
+        program: &dyn BoundProgram,
+        symbol: SymbolId,
+    ) {
+        let decls = &program.symbol(symbol).declarations;
+        if decls.len() <= 1 {
+            return;
+        }
+        if self.type_parameter_lists_checked.contains(&symbol) {
+            return;
+        }
+        self.type_parameter_lists_checked.insert(symbol);
+
+        let class_or_interface_decls: Vec<NodeId> = decls
+            .iter()
+            .copied()
+            .filter(|&d| {
+                matches!(
+                    program.arena().kind(d),
+                    Kind::ClassDeclaration | Kind::InterfaceDeclaration
+                )
+            })
+            .collect();
+        if class_or_interface_decls.len() <= 1 {
+            return;
+        }
+
+        let globals = program.globals();
+        let t = get_declared_type_of_symbol(self, program, symbol, globals);
+        let Some(obj) = self.get_type(t).as_object() else {
+            return;
+        };
+        let mut target_params = obj.type_parameters.clone();
+        target_params.dedup();
+
+        if !self.are_type_parameters_identical(program, &class_or_interface_decls, &target_params) {
+            let name = super::nodebuilder::symbol_to_string(program, symbol);
+            for &decl in &class_or_interface_decls {
+                let name_node = match program.arena().data(decl) {
+                    NodeData::ClassDeclaration(d)
+                    | NodeData::ClassExpression(d)
+                    | NodeData::InterfaceDeclaration(d) => d.name.unwrap_or(decl),
+                    _ => decl,
+                };
+                self.error(
+                    program,
+                    name_node,
+                    &tsgo_diagnostics::ALL_DECLARATIONS_OF_0_MUST_HAVE_IDENTICAL_TYPE_PARAMETERS,
+                    &[&name],
+                );
+            }
+        }
+    }
+
+    /// Checks whether all declarations share the same type parameters in
+    /// name, count, constraint, and default.
+    // Go: internal/checker/checker.go:Checker.areTypeParametersIdentical(4417)
+    fn are_type_parameters_identical(
+        &mut self,
+        program: &dyn BoundProgram,
+        declarations: &[NodeId],
+        target_parameters: &[TypeId],
+    ) -> bool {
+        let max_count = target_parameters.len();
+        let min_count = get_min_type_argument_count(self, program, target_parameters);
+
+        for &decl in declarations {
+            let source_params = type_parameter_nodes(program.arena(), decl);
+            if source_params.len() < min_count || source_params.len() > max_count {
+                return false;
+            }
+            for (i, &source) in source_params.iter().enumerate() {
+                let target = target_parameters[i];
+                let source_data = match program.arena().data(source) {
+                    NodeData::TypeParameterDeclaration(d) => d,
+                    _ => return false,
+                };
+                let target_name = self
+                    .get_type(target)
+                    .as_type_parameter()
+                    .and_then(|tp| tp.symbol)
+                    .map(|s| program.symbol(s).name.as_str())
+                    .unwrap_or("");
+                if program.arena().text(source_data.name) != target_name {
+                    return false;
+                }
+                if let Some(constraint_node) = source_data.constraint {
+                    if let Some(target_constraint) =
+                        get_constraint_of_type_parameter(self, program, target)
+                    {
+                        let globals = program.globals();
+                        let source_constraint =
+                            get_type_from_type_node(self, program, constraint_node, globals);
+                        if !self.is_type_identical_to(program, source_constraint, target_constraint)
+                        {
+                            return false;
+                        }
+                    }
+                }
+                if let Some(default_node) = source_data.default_type {
+                    if let Some(target_default) =
+                        get_default_from_type_parameter(self, program, target)
+                    {
+                        let globals = program.globals();
+                        let source_default =
+                            get_type_from_type_node(self, program, default_node, globals);
+                        if !self.is_type_identical_to(program, source_default, target_default) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Runs the grammar decorator check on each decorator modifier of `node`.
+    ///
+    /// In Go, `checkDecorators` iterates `node.ModifierNodes()` and calls
+    /// `checkDecorator` → `checkGrammarDecorator` on each decorator. The full
+    /// type-level decorator checking (return-type assignability) is deferred;
+    /// here we only run the grammar validation.
+    // Go: internal/checker/checker.go:Checker.checkDecorators(5992)
+    fn check_decorators_on_node(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let modifiers = super::grammar::modifier_nodes_pub(program.arena(), node);
+        for m in modifiers {
+            if program.arena().kind(m) == Kind::Decorator {
+                self.check_grammar_decorator(program, m);
+            }
+        }
+    }
+
     // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4266)
     fn check_class_like_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
         // Report duplicate members (`Duplicate identifier`, TS2300) within the
@@ -7751,6 +7998,61 @@ fn is_compound_assignment(operator: Kind) -> bool {
             | Kind::BarBarEqualsToken
             | Kind::QuestionQuestionEqualsToken
     )
+}
+
+/// Returns the enclosing function-like container where `new.target` is valid
+/// (constructor, function declaration, or function expression), or `None` if
+/// `node` is at the top level.
+// Go: internal/ast/utilities.go:GetNewTargetContainer(2126)
+fn get_new_target_container(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    let arena = program.arena();
+    let mut current = arena.parent(node)?;
+    loop {
+        match arena.kind(current) {
+            Kind::Constructor | Kind::FunctionDeclaration | Kind::FunctionExpression => {
+                return Some(current)
+            }
+            Kind::ArrowFunction => {
+                // Arrow functions don't have their own `new.target`, keep
+                // walking up.
+            }
+            Kind::SourceFile => return None,
+            _ => {}
+        }
+        current = arena.parent(current)?;
+    }
+}
+
+/// Returns the type-parameter declaration nodes of a class or interface declaration.
+// Go: internal/ast/ast.go:Node.TypeParameters
+fn type_parameter_nodes(arena: &tsgo_ast::NodeArena, node: NodeId) -> Vec<NodeId> {
+    let list = match arena.data(node) {
+        NodeData::InterfaceDeclaration(d) => d.type_parameters.as_ref(),
+        NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d.type_parameters.as_ref(),
+        _ => None,
+    };
+    list.map(|l| l.nodes.clone()).unwrap_or_default()
+}
+
+/// Returns `true` if `node` is a dynamic `import()` call (the callee is the
+/// `import` keyword token, or an `import.defer` meta-property).
+// Go: internal/ast/utilities.go:IsImportCall(2059)
+fn is_import_call(program: &dyn BoundProgram, node: NodeId) -> bool {
+    let callee = match program.arena().data(node) {
+        NodeData::CallExpression(d) => d.expression,
+        _ => return false,
+    };
+    let callee_kind = program.arena().kind(callee);
+    if callee_kind == Kind::ImportKeyword {
+        return true;
+    }
+    if callee_kind == Kind::MetaProperty {
+        if let NodeData::MetaProperty(d) = program.arena().data(callee) {
+            return d.keyword_token == Kind::ImportKeyword
+                && program.arena().text(d.name) == "defer";
+        }
+    }
+    false
 }
 
 // Go: internal/checker/utilities.go:isTypeUsableAsPropertyName

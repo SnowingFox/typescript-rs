@@ -10057,3 +10057,158 @@ fn referenced_local_no_unused_error() {
         diags
     );
 }
+
+// ========== T1-D5: checkSatisfiesExpression ==========
+
+// Go: internal/checker/checker.go:checkSatisfiesExpression
+// `satisfies` returns the expression type, not the target type.
+#[test]
+fn satisfies_expression_returns_expression_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const x: 'hello'; x satisfies string;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    let s = c.string_type();
+    assert_ne!(
+        t, s,
+        "satisfies should return the narrow expression type, not the target string"
+    );
+}
+
+// Go: internal/checker/checker.go:checkSatisfiesExpression
+// `satisfies` reports TS1360 when the expression does not satisfy the target.
+#[test]
+fn satisfies_expression_incompatible_reports_1360() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "42 satisfies string;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1360);
+    assert!(
+        d.is_some(),
+        "expected TS1360 (type does not satisfy); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/checker.go:checkSatisfiesExpression
+// `satisfies` with compatible types produces no error.
+#[test]
+// ========== T1-D8: checkTypeParameterListsIdentical ==========
+
+// Go: internal/checker/checker.go:checkTypeParameterListsIdentical
+// Identical interface type-parameter lists -> no error
+#[test]
+fn type_parameter_lists_identical_no_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Foo<T> { x: T; }\ninterface Foo<T> { y: T; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 2428);
+    assert!(
+        d.is_none(),
+        "identical type parameter lists should produce no TS2428; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/checker.go:checkTypeParameterListsIdentical
+// Different type-parameter names -> TS2428
+#[test]
+fn type_parameter_lists_different_names_reports_2428() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Foo<T> { x: T; }\ninterface Foo<U> { y: U; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 2428);
+    assert!(
+        d.is_some(),
+        "expected TS2428 (identical type parameters required); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/checker.go:checkTypeParameterListsIdentical
+// Different number of type parameters -> TS2428
+#[test]
+fn type_parameter_lists_different_count_reports_2428() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Foo<T> { x: T; }\ninterface Foo<T, U> { y: T; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 2428);
+    assert!(
+        d.is_some(),
+        "expected TS2428 (identical type parameters required); got: {:?}",
+        diags
+    );
+}
+
+// ========== T1-D5b: checkMetaProperty / checkNewTargetMetaProperty ==========
+
+// Go: internal/checker/checker.go:checkNewTargetMetaProperty
+// `new.target` at top level (no function container) -> TS17013
+#[test]
+fn new_target_outside_function_reports_17013() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "new.target;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 17013);
+    assert!(
+        d.is_some(),
+        "expected TS17013 (new.target only allowed in function body); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/checker.go:checkNewTargetMetaProperty
+// `new.target` inside a function -> no TS17013
+#[test]
+fn new_target_inside_function_no_17013() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() { new.target; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 17013);
+    assert!(
+        d.is_none(),
+        "new.target inside function should not trigger TS17013; got: {:?}",
+        diags
+    );
+}
+
+fn satisfies_expression_compatible_no_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string; x satisfies string;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1360);
+    assert!(
+        d.is_none(),
+        "compatible satisfies should produce no TS1360; got: {:?}",
+        diags
+    );
+}

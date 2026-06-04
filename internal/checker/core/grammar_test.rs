@@ -791,3 +791,224 @@ fn for_of_variable_with_type_annotation_reports_2483() {
         diags
     );
 }
+
+// ========== T1-D9: checkGrammarMetaProperty ==========
+
+// Go: internal/checker/grammarchecks.go:checkGrammarMetaProperty
+// `new.xyz` where xyz !== "target" -> TS17012
+#[test]
+fn meta_property_new_invalid_name_reports_17012() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() { new.xyz; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 17012);
+    assert!(
+        d.is_some(),
+        "expected TS17012 ('xyz' is not a valid meta-property for 'new'); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarMetaProperty
+// `import.xyz` where xyz !== "meta" and not a callee -> TS17012
+#[test]
+fn meta_property_import_invalid_name_reports_17012() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "import.xyz;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 17012);
+    assert!(
+        d.is_some(),
+        "expected TS17012 ('xyz' is not a valid meta-property for 'import'); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarMetaProperty
+// `import.xyz(...)` where it IS a callee but xyz !== "meta"/"defer" -> TS18061
+#[test]
+fn meta_property_import_callee_invalid_name_reports_18061() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "import.xyz('./a');"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 18061);
+    assert!(
+        d.is_some(),
+        "expected TS18061 ('xyz' is not a valid meta-property for keyword 'import'. Did you mean 'meta' or 'defer'?); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarMetaProperty
+// `new.target` in a function body -> no grammar error from meta-property check
+#[test]
+// Go: internal/checker/grammarchecks.go:checkGrammarMetaProperty
+// `import.defer` as non-callee -> TS1005 ("(" expected)
+#[test]
+fn meta_property_import_defer_non_callee_reports_1005() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "import.defer;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1005);
+    assert!(
+        d.is_some(),
+        "expected TS1005 ('(' expected) for import.defer non-callee; got: {:?}",
+        diags
+    );
+}
+
+// ========== T1-D10: checkGrammarImportCallExpression ==========
+
+// Go: internal/checker/grammarchecks.go:checkGrammarImportCallExpression
+// `import()` with 0 args -> TS1450
+#[test]
+fn import_call_zero_args_reports_1450() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "import();"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1450);
+    assert!(
+        d.is_some(),
+        "expected TS1450 (dynamic import accepts module specifier + optional attributes); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarImportCallExpression
+// `import('./a')` with default options (ESNext) -> no grammar error
+#[test]
+fn import_call_single_arg_esnext_no_grammar_error() {
+    use tsgo_core::compileroptions::{CompilerOptions, ModuleKind};
+    let mut opts = CompilerOptions::default();
+    opts.module = ModuleKind::EsNext;
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "import('./a');",
+        opts,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let grammar = diags
+        .iter()
+        .find(|d| d.code == 1323 || d.code == 1326 || d.code == 1450);
+    assert!(
+        grammar.is_none(),
+        "import('./a') with ESNext module should not trigger grammar error; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarImportCallExpression
+// `import('./a')` with module=ES2015 -> TS1323 (dynamic imports not supported)
+#[test]
+fn import_call_es2015_reports_1323() {
+    use tsgo_core::compileroptions::{CompilerOptions, ModuleKind};
+    let mut opts = CompilerOptions::default();
+    opts.module = ModuleKind::Es2015;
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "import('./a');",
+        opts,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1323);
+    assert!(
+        d.is_some(),
+        "expected TS1323 (dynamic imports not supported with ES2015); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarImportCallExpression
+// `import(...x)` with spread -> TS1325
+#[test]
+fn import_call_spread_arg_reports_1325() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "import(...['./a']);"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1325);
+    assert!(
+        d.is_some(),
+        "expected TS1325 (spread element in dynamic import); got: {:?}",
+        diags
+    );
+}
+
+// ========== T1-D7: checkGrammarDecorator ==========
+
+// Go: internal/checker/grammarchecks.go:checkGrammarDecorator
+// Decorator with optional chaining `?.` reports expression-in-parens error
+#[test]
+fn decorator_optional_chain_call_reports_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function dec(t: any) { return t; }\nclass C { @dec?.() method() {} }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1497);
+    assert!(
+        d.is_some(),
+        "expected TS1497 (expression must be enclosed in parentheses to be used as a decorator); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarDecorator
+// Simple identifier decorator -> no grammar error
+#[test]
+fn decorator_simple_identifier_no_grammar_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function sealed(target: any): any;\n@sealed\nclass C {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1497);
+    assert!(
+        d.is_none(),
+        "simple identifier decorator should not trigger TS1497; got: {:?}",
+        diags
+    );
+}
+
+fn meta_property_new_target_valid_no_grammar_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() { new.target; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let grammar = diags.iter().find(|d| d.code == 17012);
+    assert!(
+        grammar.is_none(),
+        "new.target in function body should not trigger TS17012; got: {:?}",
+        diags
+    );
+}
