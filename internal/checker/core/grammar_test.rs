@@ -834,6 +834,362 @@ fn for_of_multiple_declarations_reports_1188() {
     );
 }
 
+// ========== checkGrammarProperty ==========
+
+// Go: internal/checker/grammarchecks.go:checkGrammarProperty
+// Class field named "constructor" -> TS18006
+#[test]
+fn class_field_named_constructor_reports_18006() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { 'constructor': number; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 18006);
+    assert!(
+        d.is_some(),
+        "expected TS18006 (classes may not have a field named 'constructor'); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarProperty
+// Interface property with initializer -> TS1246
+#[test]
+fn interface_property_with_initializer_reports_1246() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { x: number = 1; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1246);
+    assert!(
+        d.is_some(),
+        "expected TS1246 (interface property cannot have initializer); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarProperty
+// Valid class property -> no grammar errors from checkGrammarProperty
+#[test]
+fn class_property_valid_no_grammar_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { x: number = 1; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 18006 || d.code == 1246);
+    assert!(
+        d.is_none(),
+        "valid class property should not trigger grammar errors; got: {:?}",
+        diags
+    );
+}
+
+// ========== checkGrammarTypeOperatorNode ==========
+
+// Go: internal/checker/grammarchecks.go:checkGrammarTypeOperatorNode
+// `readonly` type modifier on non-array/tuple -> TS1354
+#[test]
+fn readonly_type_modifier_on_non_array_reports_1354() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = readonly string;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1354);
+    assert!(
+        d.is_some(),
+        "expected TS1354 (readonly type modifier only on array/tuple); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarTypeOperatorNode
+// `readonly` on array type -> no TS1354
+#[test]
+fn readonly_type_modifier_on_array_no_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = readonly number[];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1354);
+    assert!(
+        d.is_none(),
+        "readonly on array type should not trigger TS1354; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarTypeOperatorNode
+// `unique` on non-symbol type -> TS1005 ('symbol' expected)
+#[test]
+fn unique_type_on_non_symbol_reports_1005() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = unique string;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 1005 && d.message.contains("symbol"));
+    assert!(
+        d.is_some(),
+        "expected TS1005 ('symbol' expected for unique type); got: {:?}",
+        diags
+    );
+}
+
+// ========== checkGrammarTopLevelElementForRequiredDeclareModifier ==========
+
+// Go: internal/checker/grammarchecks.go:checkGrammarTopLevelElementForRequiredDeclareModifier
+// .d.ts file top-level declaration without declare -> TS1046
+#[test]
+fn dts_top_level_without_declare_reports_1046() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.d.ts",
+        "function f(): void;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1046);
+    assert!(
+        d.is_some(),
+        "expected TS1046 (top-level declarations in .d.ts must start with declare/export); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarTopLevelElementForRequiredDeclareModifier
+// .d.ts file with declare modifier -> no TS1046
+#[test]
+fn dts_top_level_with_declare_no_1046() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.d.ts",
+        "declare function f(): void;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1046);
+    assert!(
+        d.is_none(),
+        ".d.ts with declare should not trigger TS1046; got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarTopLevelElementForRequiredDeclareModifier
+// .d.ts file interface (exempt from declare requirement) -> no TS1046
+#[test]
+fn dts_top_level_interface_no_1046() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.d.ts",
+        "interface I { x: number; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1046);
+    assert!(
+        d.is_none(),
+        "interface in .d.ts should not trigger TS1046; got: {:?}",
+        diags
+    );
+}
+
+// ========== checkGrammarIndexSignatureParameters ==========
+
+// Go: internal/checker/grammarchecks.go:checkGrammarIndexSignatureParameters
+// Index signature with rest parameter -> TS1017
+#[test]
+fn index_signature_rest_parameter_reports_1017() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { [...x: string]: number; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1017);
+    assert!(
+        d.is_some(),
+        "expected TS1017 (index signature cannot have rest parameter); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarIndexSignatureParameters
+// Index signature with optional parameter -> TS1019
+#[test]
+fn index_signature_optional_parameter_reports_1019() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { [x?: string]: number; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1019);
+    assert!(
+        d.is_some(),
+        "expected TS1019 (index signature parameter cannot have question mark); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarIndexSignatureParameters
+// Index signature with initializer -> TS1020
+#[test]
+fn index_signature_with_initializer_reports_1020() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { [x: string = 'a']: number; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1020);
+    assert!(
+        d.is_some(),
+        "expected TS1020 (index signature parameter cannot have initializer); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarIndexSignatureParameters
+// Valid index signature -> no grammar errors
+#[test]
+fn index_signature_valid_no_grammar_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { [x: string]: number; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| {
+        d.code == 1017 || d.code == 1019 || d.code == 1020 || d.code == 1022 || d.code == 1096
+    });
+    assert!(
+        d.is_none(),
+        "valid index signature should not trigger grammar errors; got: {:?}",
+        diags
+    );
+}
+
+// ========== checkGrammarTypeArguments ==========
+
+// Go: internal/checker/grammarchecks.go:checkGrammarTypeArguments
+// Trailing comma in type arguments -> TS1009
+#[test]
+fn type_arguments_trailing_comma_reports_1009() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T>() {}\nf<number,>();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1009);
+    assert!(
+        d.is_some(),
+        "expected TS1009 (trailing comma not allowed in type arguments); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarTypeArguments
+// Valid type arguments -> no TS1009 or TS1099
+#[test]
+fn type_arguments_valid_no_grammar_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T>() {}\nf<number>();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1009 || d.code == 1099);
+    assert!(
+        d.is_none(),
+        "valid type arguments should not trigger grammar errors; got: {:?}",
+        diags
+    );
+}
+
+// ========== checkGrammarArrowFunction ==========
+
+// Go: internal/checker/grammarchecks.go:checkGrammarArrowFunction
+// Arrow function with line terminator before `=>` -> TS1200
+#[test]
+fn arrow_function_line_terminator_before_arrow_reports_1200() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const f = (x: number)\n=> x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1200);
+    assert!(
+        d.is_some(),
+        "expected TS1200 (line terminator not permitted before arrow); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarArrowFunction
+// Valid arrow function -> no TS1200
+#[test]
+fn arrow_function_valid_no_1200() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const f = (x: number) => x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1200);
+    assert!(
+        d.is_none(),
+        "valid arrow function should not trigger TS1200; got: {:?}",
+        diags
+    );
+}
+
 // ========== T1-D9: checkGrammarMetaProperty ==========
 
 // Go: internal/checker/grammarchecks.go:checkGrammarMetaProperty
@@ -890,9 +1246,6 @@ fn meta_property_import_callee_invalid_name_reports_18061() {
     );
 }
 
-// Go: internal/checker/grammarchecks.go:checkGrammarMetaProperty
-// `new.target` in a function body -> no grammar error from meta-property check
-#[test]
 // Go: internal/checker/grammarchecks.go:checkGrammarMetaProperty
 // `import.defer` as non-callee -> TS1005 ("(" expected)
 #[test]
@@ -1038,6 +1391,111 @@ fn decorator_simple_identifier_no_grammar_error() {
     );
 }
 
+// ========== checkGrammarParameterList ==========
+
+// Go: internal/checker/grammarchecks.go:checkGrammarParameterList
+// Rest parameter not last -> TS1014
+#[test]
+fn rest_parameter_not_last_reports_1014() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(...a: number[], b: string) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1014);
+    assert!(
+        d.is_some(),
+        "expected TS1014 (rest parameter must be last); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarParameterList
+// Rest parameter with ? -> TS1047
+#[test]
+fn rest_parameter_optional_reports_1047() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(...a?: number[]) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1047);
+    assert!(
+        d.is_some(),
+        "expected TS1047 (rest parameter cannot be optional); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarParameterList
+// Rest parameter with initializer -> TS1048
+#[test]
+fn rest_parameter_with_initializer_reports_1048() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(...a: number[] = []) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1048);
+    assert!(
+        d.is_some(),
+        "expected TS1048 (rest parameter cannot have initializer); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarParameterList
+// Required parameter after optional -> TS1016
+#[test]
+fn required_parameter_after_optional_reports_1016() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(a?: number, b: number) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1016);
+    assert!(
+        d.is_some(),
+        "expected TS1016 (required parameter cannot follow optional); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarParameterList
+// Valid parameter list -> no grammar error
+#[test]
+fn valid_parameter_list_no_grammar_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(a: number, b?: string, ...c: boolean[]) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 1014 || d.code == 1016 || d.code == 1047 || d.code == 1048);
+    assert!(
+        d.is_none(),
+        "valid parameter list should not trigger grammar errors; got: {:?}",
+        diags
+    );
+}
+
+#[test]
 fn meta_property_new_target_valid_no_grammar_error() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
@@ -1051,6 +1509,48 @@ fn meta_property_new_target_valid_no_grammar_error() {
     assert!(
         grammar.is_none(),
         "new.target in function body should not trigger TS17012; got: {:?}",
+        diags
+    );
+}
+
+// ========== checkGrammarComputedPropertyName ==========
+
+// Go: internal/checker/grammarchecks.go:checkGrammarComputedPropertyName
+// Comma expression in computed property name -> TS1171
+#[test]
+fn computed_property_name_comma_expr_reports_1171() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = { [1, 2]: 3 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1171);
+    assert!(
+        d.is_some(),
+        "expected TS1171 (comma expression not allowed in computed property name); got: {:?}",
+        diags
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:checkGrammarComputedPropertyName
+// Valid computed property name -> no TS1171
+#[test]
+fn computed_property_name_valid_no_1171() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const key = 'a';\nconst x = { [key]: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    let d = diags.iter().find(|d| d.code == 1171);
+    assert!(
+        d.is_none(),
+        "valid computed property should not trigger TS1171; got: {:?}",
         diags
     );
 }

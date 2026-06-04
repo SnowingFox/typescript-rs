@@ -862,12 +862,667 @@ impl Checker {
         false
     }
 
+    // -- checkGrammarProperty ----------------------------------------------------
+
+    /// Grammar-checks a property declaration or property signature (Go's
+    /// `checkGrammarProperty`): class field named "constructor" (TS18006),
+    /// interface/type-literal property with initializer (TS1246/TS1247),
+    /// definite-assignment assertions on class properties.
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarProperty(1892)
+    pub fn check_grammar_property(&mut self, program: &dyn BoundProgram, node: NodeId) -> bool {
+        let arena = program.arena();
+        let kind = arena.kind(node);
+        let parent = arena.parent(node);
+        let parent_kind = parent.map(|p| arena.kind(p));
+
+        let property_name = match arena.data(node) {
+            NodeData::PropertyDeclaration(d) => d.name,
+            NodeData::PropertySignature(d) => d.name,
+            _ => return false,
+        };
+
+        // Class context checks
+        if parent_kind.is_some_and(is_class_like_kind) {
+            if arena.kind(property_name) == Kind::StringLiteral
+                && arena.text(property_name) == "constructor"
+            {
+                return self.grammar_error_on_node(
+                    program,
+                    property_name,
+                    &tsgo_diagnostics::CLASSES_MAY_NOT_HAVE_A_FIELD_NAMED_CONSTRUCTOR,
+                    &[],
+                );
+            }
+            // DEFER(phase-4-checker-later): checkGrammarForInvalidDynamicName,
+            // auto-accessor optional check (blocked-by: isNonBindableDynamicName/
+            // isLateBindableName).
+        } else if parent_kind == Some(Kind::InterfaceDeclaration) {
+            // DEFER(phase-4-checker-later): checkGrammarForInvalidDynamicName
+            if kind == Kind::PropertySignature {
+                if let NodeData::PropertySignature(d) = arena.data(node) {
+                    if let Some(init) = d.initializer {
+                        return self.grammar_error_on_node(
+                            program,
+                            init,
+                            &tsgo_diagnostics::AN_INTERFACE_PROPERTY_CANNOT_HAVE_AN_INITIALIZER,
+                            &[],
+                        );
+                    }
+                }
+            }
+        } else if parent_kind == Some(Kind::TypeLiteral) {
+            // DEFER(phase-4-checker-later): checkGrammarForInvalidDynamicName
+            if kind == Kind::PropertySignature {
+                if let NodeData::PropertySignature(d) = arena.data(node) {
+                    if let Some(init) = d.initializer {
+                        return self.grammar_error_on_node(
+                            program,
+                            init,
+                            &tsgo_diagnostics::A_TYPE_LITERAL_PROPERTY_CANNOT_HAVE_AN_INITIALIZER,
+                            &[],
+                        );
+                    }
+                }
+            }
+        }
+
+        // DEFER(phase-4-checker-later): checkAmbientInitializer (blocked-by:
+        // isInitializerSimpleLiteralEnumReference → checkExpressionCached).
+
+        // Definite assignment assertion checks on class PropertyDeclaration
+        if kind == Kind::PropertyDeclaration {
+            if let NodeData::PropertyDeclaration(d) = arena.data(node) {
+                if let Some(postfix) = d.postfix_token {
+                    if arena.kind(postfix) == Kind::ExclamationToken {
+                        if d.initializer.is_some() {
+                            return self.grammar_error_on_node(
+                                program, postfix,
+                                &tsgo_diagnostics::DECLARATIONS_WITH_INITIALIZERS_CANNOT_ALSO_HAVE_DEFINITE_ASSIGNMENT_ASSERTIONS,
+                                &[],
+                            );
+                        }
+                        if d.type_node.is_none() {
+                            return self.grammar_error_on_node(
+                                program, postfix,
+                                &tsgo_diagnostics::DECLARATIONS_WITH_DEFINITE_ASSIGNMENT_ASSERTIONS_MUST_ALSO_HAVE_TYPE_ANNOTATIONS,
+                                &[],
+                            );
+                        }
+                        if !parent_kind.is_some_and(is_class_like_kind)
+                            || arena.flags(node).contains(NodeFlags::AMBIENT)
+                            || has_syntactic_modifier(arena, node, ModifierFlags::STATIC)
+                            || has_syntactic_modifier(arena, node, ModifierFlags::ABSTRACT)
+                        {
+                            return self.grammar_error_on_node(
+                                program, postfix,
+                                &tsgo_diagnostics::A_DEFINITE_ASSIGNMENT_ASSERTION_IS_NOT_PERMITTED_IN_THIS_CONTEXT,
+                                &[],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    // -- checkGrammarTypeOperatorNode --------------------------------------------
+
+    /// Grammar-checks a type-operator node (`keyof`, `unique`, `readonly`) (Go's
+    /// `checkGrammarTypeOperatorNode`):
+    /// * `unique` requires `symbol` as inner type (TS1110), plus context checks.
+    /// * `readonly` requires an array or tuple as inner type (TS1354).
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarTypeOperatorNode(1379)
+    pub fn check_grammar_type_operator_node(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let arena = program.arena();
+        let (operator, inner_type) = match arena.data(node) {
+            NodeData::TypeOperator(d) => (d.operator, d.type_node),
+            _ => return false,
+        };
+
+        if operator == Kind::UniqueKeyword {
+            if arena.kind(inner_type) != Kind::SymbolKeyword {
+                return self.grammar_error_on_node(
+                    program,
+                    inner_type,
+                    &tsgo_diagnostics::X_0_EXPECTED,
+                    &[tsgo_scanner::token_to_string(Kind::SymbolKeyword)],
+                );
+            }
+            // Walk up parenthesized types to the context
+            let mut parent = arena.parent(node);
+            while parent.is_some_and(|p| arena.kind(p) == Kind::ParenthesizedType) {
+                parent = parent.and_then(|p| arena.parent(p));
+            }
+            if let Some(p) = parent {
+                match arena.kind(p) {
+                    Kind::VariableDeclaration => {
+                        if let NodeData::VariableDeclaration(d) = arena.data(p) {
+                            if arena.kind(d.name) != Kind::Identifier {
+                                return self.grammar_error_on_node(
+                                    program, node,
+                                    &tsgo_diagnostics::X_UNIQUE_SYMBOL_TYPES_MAY_NOT_BE_USED_ON_A_VARIABLE_DECLARATION_WITH_A_BINDING_NAME,
+                                    &[],
+                                );
+                            }
+                            // Check if parent is a VariableStatement
+                            let gp = arena.parent(p).and_then(|list| arena.parent(list));
+                            if gp.is_none_or(|g| arena.kind(g) != Kind::VariableStatement) {
+                                return self.grammar_error_on_node(
+                                    program, node,
+                                    &tsgo_diagnostics::X_UNIQUE_SYMBOL_TYPES_ARE_ONLY_ALLOWED_ON_VARIABLES_IN_A_VARIABLE_STATEMENT,
+                                    &[],
+                                );
+                            }
+                            // Check const
+                            if let Some(list) = arena.parent(p) {
+                                if !arena.flags(list).contains(NodeFlags::CONST) {
+                                    return self.grammar_error_on_node(
+                                        program, d.name,
+                                        &tsgo_diagnostics::A_VARIABLE_WHOSE_TYPE_IS_A_UNIQUE_SYMBOL_TYPE_MUST_BE_CONST,
+                                        &[],
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Kind::PropertyDeclaration => {
+                        let is_static = has_syntactic_modifier(arena, p, ModifierFlags::STATIC);
+                        let is_readonly = has_syntactic_modifier(arena, p, ModifierFlags::READONLY);
+                        if !is_static || !is_readonly {
+                            if let NodeData::PropertyDeclaration(d) = arena.data(p) {
+                                return self.grammar_error_on_node(
+                                    program, d.name,
+                                    &tsgo_diagnostics::A_PROPERTY_OF_A_CLASS_WHOSE_TYPE_IS_A_UNIQUE_SYMBOL_TYPE_MUST_BE_BOTH_STATIC_AND_READONLY,
+                                    &[],
+                                );
+                            }
+                        }
+                    }
+                    Kind::PropertySignature => {
+                        if !has_syntactic_modifier(arena, p, ModifierFlags::READONLY) {
+                            if let NodeData::PropertySignature(d) = arena.data(p) {
+                                return self.grammar_error_on_node(
+                                    program, d.name,
+                                    &tsgo_diagnostics::A_PROPERTY_OF_AN_INTERFACE_OR_TYPE_LITERAL_WHOSE_TYPE_IS_A_UNIQUE_SYMBOL_TYPE_MUST_BE_READONLY,
+                                    &[],
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        return self.grammar_error_on_node(
+                            program,
+                            node,
+                            &tsgo_diagnostics::X_UNIQUE_SYMBOL_TYPES_ARE_NOT_ALLOWED_HERE,
+                            &[],
+                        );
+                    }
+                }
+            }
+        } else if operator == Kind::ReadonlyKeyword
+            && !matches!(arena.kind(inner_type), Kind::ArrayType | Kind::TupleType)
+        {
+            return self.grammar_error_on_first_token(
+                program,
+                node,
+                &tsgo_diagnostics::X_READONLY_TYPE_MODIFIER_IS_ONLY_PERMITTED_ON_ARRAY_AND_TUPLE_LITERAL_TYPES,
+                &[tsgo_scanner::token_to_string(Kind::SymbolKeyword)],
+            );
+        }
+
+        false
+    }
+
+    // -- checkGrammarSourceFile ---------------------------------------------------
+
+    /// Grammar-checks a source file (Go's `checkGrammarSourceFile`): in
+    /// ambient (`.d.ts`) files, top-level declarations must have `declare` or
+    /// `export` modifiers.
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarSourceFile(2053)
+    pub fn check_grammar_source_file(&mut self, program: &dyn BoundProgram, node: NodeId) -> bool {
+        let arena = program.arena();
+        if !arena.flags(node).contains(NodeFlags::AMBIENT) {
+            return false;
+        }
+        let statements = match arena.data(node) {
+            NodeData::SourceFile(d) => d.statements.nodes.clone(),
+            _ => return false,
+        };
+        for decl in &statements {
+            let kind = arena.kind(*decl);
+            let is_decl_node = matches!(
+                kind,
+                Kind::FunctionDeclaration
+                    | Kind::ClassDeclaration
+                    | Kind::EnumDeclaration
+                    | Kind::InterfaceDeclaration
+                    | Kind::TypeAliasDeclaration
+                    | Kind::ModuleDeclaration
+                    | Kind::ImportDeclaration
+                    | Kind::ImportEqualsDeclaration
+                    | Kind::ExportDeclaration
+                    | Kind::ExportAssignment
+                    | Kind::NamespaceExportDeclaration
+            ) || kind == Kind::VariableStatement;
+            if is_decl_node
+                && self
+                    .check_grammar_top_level_element_for_required_declare_modifier(program, *decl)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Checks whether a top-level `.d.ts` declaration requires `declare`/`export`
+    /// modifiers (Go's `checkGrammarTopLevelElementForRequiredDeclareModifier`).
+    ///
+    /// Returns `true` and records TS1046 if the node needs but lacks
+    /// `declare`/`export`/`default`.
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarTopLevelElementForRequiredDeclareModifier(2022)
+    pub fn check_grammar_top_level_element_for_required_declare_modifier(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let kind = program.arena().kind(node);
+        if matches!(
+            kind,
+            Kind::InterfaceDeclaration
+                | Kind::TypeAliasDeclaration
+                | Kind::ImportDeclaration
+                | Kind::ImportEqualsDeclaration
+                | Kind::ExportDeclaration
+                | Kind::ExportAssignment
+                | Kind::NamespaceExportDeclaration
+        ) {
+            return false;
+        }
+        if has_syntactic_modifier(
+            program.arena(),
+            node,
+            ModifierFlags::AMBIENT | ModifierFlags::EXPORT | ModifierFlags::DEFAULT,
+        ) {
+            return false;
+        }
+        self.grammar_error_on_first_token(
+            program,
+            node,
+            &tsgo_diagnostics::TOP_LEVEL_DECLARATIONS_IN_D_TS_FILES_MUST_START_WITH_EITHER_A_DECLARE_OR_EXPORT_MODIFIER,
+            &[],
+        )
+    }
+
+    // -- checkGrammarIndexSignature -----------------------------------------------
+
+    /// Grammar-checks an index signature declaration (Go's
+    /// `checkGrammarIndexSignature`): delegates to modifier + parameter checks.
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarIndexSignature(850)
+    pub fn check_grammar_index_signature(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        self.check_grammar_modifiers(program, node)
+            || self.check_grammar_index_signature_parameters(program, node)
+    }
+
+    /// Grammar-checks index-signature parameters (Go's
+    /// `checkGrammarIndexSignatureParameters`): exactly one parameter (TS1096),
+    /// no rest (TS1017), no accessibility modifier (TS1018), no `?` (TS1019),
+    /// no initializer (TS1020), must have type annotation (TS1022), return type
+    /// annotation required (TS1021).
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarIndexSignatureParameters(806)
+    pub fn check_grammar_index_signature_parameters(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let arena = program.arena();
+        let (parameters, return_type) = match arena.data(node) {
+            NodeData::IndexSignatureDeclaration(d) => (&d.parameters, d.type_node),
+            _ => return false,
+        };
+        let params = &parameters.nodes;
+
+        if params.is_empty() {
+            return self.grammar_error_on_node(
+                program,
+                node,
+                &tsgo_diagnostics::AN_INDEX_SIGNATURE_MUST_HAVE_EXACTLY_ONE_PARAMETER,
+                &[],
+            );
+        }
+
+        let first_param = params[0];
+        let pd = match arena.data(first_param) {
+            NodeData::ParameterDeclaration(d) => d.clone(),
+            _ => return false,
+        };
+
+        if params.len() != 1 {
+            return self.grammar_error_on_node(
+                program,
+                pd.name,
+                &tsgo_diagnostics::AN_INDEX_SIGNATURE_MUST_HAVE_EXACTLY_ONE_PARAMETER,
+                &[],
+            );
+        }
+
+        // trailing comma
+        self.check_grammar_for_disallowed_trailing_comma(
+            program,
+            parameters,
+            &tsgo_diagnostics::AN_INDEX_SIGNATURE_CANNOT_HAVE_A_TRAILING_COMMA,
+        );
+
+        if pd.dot_dot_dot_token.is_some() {
+            return self.grammar_error_on_node(
+                program,
+                pd.dot_dot_dot_token.unwrap(),
+                &tsgo_diagnostics::AN_INDEX_SIGNATURE_CANNOT_HAVE_A_REST_PARAMETER,
+                &[],
+            );
+        }
+
+        if modifier_nodes(arena, first_param)
+            .iter()
+            .any(|&m| arena.kind(m) != Kind::Decorator)
+        {
+            return self.grammar_error_on_node(
+                program,
+                pd.name,
+                &tsgo_diagnostics::AN_INDEX_SIGNATURE_PARAMETER_CANNOT_HAVE_AN_ACCESSIBILITY_MODIFIER,
+                &[],
+            );
+        }
+
+        if pd.question_token.is_some() {
+            return self.grammar_error_on_node(
+                program,
+                pd.question_token.unwrap(),
+                &tsgo_diagnostics::AN_INDEX_SIGNATURE_PARAMETER_CANNOT_HAVE_A_QUESTION_MARK,
+                &[],
+            );
+        }
+
+        if pd.initializer.is_some() {
+            return self.grammar_error_on_node(
+                program,
+                pd.name,
+                &tsgo_diagnostics::AN_INDEX_SIGNATURE_PARAMETER_CANNOT_HAVE_AN_INITIALIZER,
+                &[],
+            );
+        }
+
+        if pd.type_node.is_none() {
+            return self.grammar_error_on_node(
+                program,
+                pd.name,
+                &tsgo_diagnostics::AN_INDEX_SIGNATURE_PARAMETER_MUST_HAVE_A_TYPE_ANNOTATION,
+                &[],
+            );
+        }
+
+        // DEFER(phase-4-checker-later): type resolution checks
+        // (literal/generic type and valid index key type checks require
+        // getTypeFromTypeNode/someType/everyType/isValidIndexKeyType).
+
+        if return_type.is_none() {
+            return self.grammar_error_on_node(
+                program,
+                node,
+                &tsgo_diagnostics::AN_INDEX_SIGNATURE_MUST_HAVE_A_TYPE_ANNOTATION,
+                &[],
+            );
+        }
+
+        false
+    }
+
+    // -- checkGrammarTypeArguments ------------------------------------------------
+
+    /// Grammar-checks a type argument list (Go's `checkGrammarTypeArguments`):
+    /// trailing comma (TS1009) and empty list (TS1099).
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarTypeArguments(865)
+    pub fn check_grammar_type_arguments(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        type_arguments: Option<&tsgo_ast::NodeList>,
+    ) -> bool {
+        if let Some(list) = type_arguments {
+            if self.check_grammar_for_disallowed_trailing_comma(
+                program,
+                list,
+                &tsgo_diagnostics::TRAILING_COMMA_NOT_ALLOWED,
+            ) {
+                return true;
+            }
+        }
+        self.check_grammar_for_at_least_one_type_argument(program, node, type_arguments)
+    }
+
+    /// Reports TS1099 if the type-argument list is present but empty.
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarForAtLeastOneTypeArgument(855)
+    fn check_grammar_for_at_least_one_type_argument(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        type_arguments: Option<&tsgo_ast::NodeList>,
+    ) -> bool {
+        if let Some(list) = type_arguments {
+            if list.nodes.is_empty() {
+                // DEFER: proper span calculation for `<>` delimiters.
+                return self.grammar_error_on_node(
+                    program,
+                    node,
+                    &tsgo_diagnostics::TYPE_ARGUMENT_LIST_CANNOT_BE_EMPTY,
+                    &[],
+                );
+            }
+        }
+        false
+    }
+
+    /// Reports an error if a `NodeList` has a trailing comma (Go's
+    /// `checkGrammarForDisallowedTrailingComma`).
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarForDisallowedTrailingComma(681)
+    pub fn check_grammar_for_disallowed_trailing_comma(
+        &mut self,
+        program: &dyn BoundProgram,
+        list: &tsgo_ast::NodeList,
+        message: &'static tsgo_diagnostics::Message,
+    ) -> bool {
+        if program.arena().list_has_trailing_comma(list) {
+            let end = list.end();
+            return self.grammar_error_at_pos(program, list.nodes[0], end - 1, 1, message, &[]);
+        }
+        false
+    }
+
+    // -- checkGrammarArrowFunction ------------------------------------------------
+
+    /// Grammar-checks an arrow function (Go's `checkGrammarArrowFunction`):
+    /// line-terminator before `=>` is TS1200.
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarArrowFunction(782)
+    pub fn check_grammar_arrow_function(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let arena = program.arena();
+        if arena.kind(node) != Kind::ArrowFunction {
+            return false;
+        }
+        let equals_greater_than_token = match arena.data(node) {
+            NodeData::ArrowFunction(d) => d.equals_greater_than_token,
+            _ => return false,
+        };
+        // DEFER(phase-4-checker-later): .mts/.cts single type parameter
+        // without constraint/trailing comma check (TS7060).
+        if let Some(source_text) = program.source_text() {
+            let line_starts = tsgo_core::compute_ecma_line_starts(source_text);
+            let token_loc = arena.loc(equals_greater_than_token);
+            let start_line = tsgo_scanner::compute_line_of_position(&line_starts, token_loc.pos());
+            let end_line = tsgo_scanner::compute_line_of_position(&line_starts, token_loc.end());
+            if start_line != end_line {
+                return self.grammar_error_on_node(
+                    program,
+                    equals_greater_than_token,
+                    &tsgo_diagnostics::LINE_TERMINATOR_NOT_PERMITTED_BEFORE_ARROW,
+                    &[],
+                );
+            }
+        }
+        false
+    }
+
+    // -- checkGrammarParameterList -----------------------------------------------
+
+    /// Grammar-checks a parameter list (Go's `checkGrammarParameterList`):
+    /// rest parameter must be last (TS1014), rest cannot be optional (TS1047),
+    /// rest cannot have initializer (TS1048), `?` + initializer conflict
+    /// (TS1015), required after optional (TS1016).
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarParameterList(697)
+    pub fn check_grammar_parameter_list(
+        &mut self,
+        program: &dyn BoundProgram,
+        parameters: &tsgo_ast::NodeList,
+    ) -> bool {
+        let arena = program.arena();
+        let params = &parameters.nodes;
+        let count = params.len();
+        let mut seen_optional = false;
+
+        for (i, &param) in params.iter().enumerate() {
+            let pd = match arena.data(param) {
+                NodeData::ParameterDeclaration(d) => d.clone(),
+                _ => continue,
+            };
+            if pd.dot_dot_dot_token.is_some() {
+                if i != count - 1 {
+                    return self.grammar_error_on_node(
+                        program,
+                        pd.dot_dot_dot_token.unwrap(),
+                        &tsgo_diagnostics::A_REST_PARAMETER_MUST_BE_LAST_IN_A_PARAMETER_LIST,
+                        &[],
+                    );
+                }
+                // DEFER: trailing comma check for rest/binding pattern
+                if pd.question_token.is_some() {
+                    return self.grammar_error_on_node(
+                        program,
+                        pd.question_token.unwrap(),
+                        &tsgo_diagnostics::A_REST_PARAMETER_CANNOT_BE_OPTIONAL,
+                        &[],
+                    );
+                }
+                if pd.initializer.is_some() {
+                    return self.grammar_error_on_node(
+                        program,
+                        pd.name,
+                        &tsgo_diagnostics::A_REST_PARAMETER_CANNOT_HAVE_AN_INITIALIZER,
+                        &[],
+                    );
+                }
+            } else if is_optional_parameter(arena, param) {
+                seen_optional = true;
+                if pd.question_token.is_some()
+                    && !arena
+                        .flags(pd.question_token.unwrap())
+                        .contains(NodeFlags::REPARSED)
+                    && pd.initializer.is_some()
+                {
+                    return self.grammar_error_on_node(
+                        program,
+                        pd.name,
+                        &tsgo_diagnostics::PARAMETER_CANNOT_HAVE_QUESTION_MARK_AND_INITIALIZER,
+                        &[],
+                    );
+                }
+            } else if seen_optional && pd.initializer.is_none() {
+                return self.grammar_error_on_node(
+                    program,
+                    pd.name,
+                    &tsgo_diagnostics::A_REQUIRED_PARAMETER_CANNOT_FOLLOW_AN_OPTIONAL_PARAMETER,
+                    &[],
+                );
+            }
+        }
+        false
+    }
+
+    // -- checkGrammarComputedPropertyName --------------------------------------
+
+    /// Grammar-checks a computed property name (Go's
+    /// `checkGrammarComputedPropertyName`): a comma expression inside `[...]` is
+    /// TS1171.
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarComputedPropertyName(989)
+    pub fn check_grammar_computed_property_name(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let arena = program.arena();
+        if arena.kind(node) != Kind::ComputedPropertyName {
+            return false;
+        }
+        let expression = match arena.data(node) {
+            NodeData::ComputedPropertyName(d) => d.expression,
+            _ => return false,
+        };
+        if arena.kind(expression) == Kind::BinaryExpression {
+            if let NodeData::BinaryExpression(d) = arena.data(expression) {
+                if arena.kind(d.operator_token) == Kind::CommaToken {
+                    return self.grammar_error_on_node(
+                        program,
+                        expression,
+                        &tsgo_diagnostics::A_COMMA_EXPRESSION_IS_NOT_ALLOWED_IN_A_COMPUTED_PROPERTY_NAME,
+                        &[],
+                    );
+                }
+            }
+        }
+        false
+    }
+
     /// Reports a grammar error on `node` and returns `true` (Go's
     /// `grammarErrorOnNode`). Uses the same span as `self.error`.
     ///
     /// Side effects: records a diagnostic, returns `true`.
     // Go: internal/checker/checker.go:Checker.grammarErrorOnNode(14179)
-    fn grammar_error_on_node(
+    pub(crate) fn grammar_error_on_node(
         &mut self,
         program: &dyn BoundProgram,
         node: NodeId,
@@ -887,7 +1542,7 @@ impl Checker {
     ///
     /// Side effects: records a diagnostic, returns `true`.
     // Go: internal/checker/checker.go:Checker.grammarErrorOnFirstToken(14193)
-    fn grammar_error_on_first_token(
+    pub(crate) fn grammar_error_on_first_token(
         &mut self,
         program: &dyn BoundProgram,
         node: NodeId,
@@ -1350,18 +2005,32 @@ impl Checker {
         if self.check_grammar_modifiers(program, node) {
             return true;
         }
-        let type_parameters = match arena.data(node) {
-            NodeData::FunctionDeclaration(d) => d.type_parameters.as_ref(),
-            NodeData::MethodDeclaration(d) => d.type_parameters.as_ref(),
-            NodeData::ConstructorDeclaration(d) => d.type_parameters.as_ref(),
-            NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
-                d.type_parameters.as_ref()
+        let (type_parameters, parameters) = match arena.data(node) {
+            NodeData::FunctionDeclaration(d) => (d.type_parameters.as_ref(), Some(&d.parameters)),
+            NodeData::MethodDeclaration(d) => (d.type_parameters.as_ref(), Some(&d.parameters)),
+            NodeData::ConstructorDeclaration(d) => {
+                (d.type_parameters.as_ref(), Some(&d.parameters))
             }
-            _ => None,
+            NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+                (d.type_parameters.as_ref(), Some(&d.parameters))
+            }
+            NodeData::ArrowFunction(d) => (d.type_parameters.as_ref(), Some(&d.parameters)),
+            NodeData::FunctionExpression(d) => (d.type_parameters.as_ref(), Some(&d.parameters)),
+            _ => (None, None),
         };
-        self.check_grammar_type_parameter_list(program, type_parameters)
-        // DEFER(phase-4-checker-later): checkGrammarParameterList,
-        // checkGrammarArrowFunction, checkGrammarForUseStrictSimpleParameterList.
+        if self.check_grammar_type_parameter_list(program, type_parameters) {
+            return true;
+        }
+        if let Some(params) = parameters {
+            if self.check_grammar_parameter_list(program, params) {
+                return true;
+            }
+        }
+        if self.check_grammar_arrow_function(program, node) {
+            return true;
+        }
+        // DEFER(phase-4-checker-later): checkGrammarForUseStrictSimpleParameterList.
+        false
     }
 
     // -- checkGrammarMetaProperty -----------------------------------------------
@@ -1826,6 +2495,16 @@ fn is_this_parameter(arena: &NodeArena, node: NodeId) -> bool {
         arena.kind(d.name) == Kind::Identifier && arena.text(d.name) == "this"
     } else {
         false
+    }
+}
+
+/// Returns `true` if a parameter is optional: has a `?` token or an
+/// initializer (Go's `isOptionalDeclaration` for parameters).
+// Go: internal/ast/utilities.go:isOptionalDeclaration
+fn is_optional_parameter(arena: &NodeArena, node: NodeId) -> bool {
+    match arena.data(node) {
+        NodeData::ParameterDeclaration(d) => d.question_token.is_some() || d.initializer.is_some(),
+        _ => false,
     }
 }
 
