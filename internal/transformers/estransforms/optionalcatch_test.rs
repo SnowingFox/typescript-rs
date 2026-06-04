@@ -37,3 +37,45 @@ fn catch_with_binding_is_unchanged() {
 fn non_catch_nodes_pass_through() {
     check_optional_catch("var x = 1;", "var x = 1;");
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// T2-10 integration tests: optional catch verification
+// ───────────────────────────────────────────────────────────────────────
+
+// Go: internal/transformers/estransforms/optionalcatch.go:visitCatchClause
+// A `try/catch/finally` where the catch clause has no binding gains a temp.
+#[test]
+fn catch_without_binding_with_finally() {
+    check_optional_catch(
+        "try { } catch { } finally { }",
+        "try { }\ncatch (_a) { }\nfinally { }",
+    );
+}
+
+// Go: internal/transformers/estransforms/optionalcatch.go:visitCatchClause
+// A `try/finally` (no catch at all) passes through unchanged.
+#[test]
+fn try_finally_no_catch_passes_through() {
+    check_optional_catch("try { } finally { }", "try { }\nfinally { }");
+}
+
+// Go: internal/transformers/estransforms/optionalcatch.go:visitCatchClause
+// A catch clause with a body that contains statements — the body is preserved
+// while the binding is added.
+#[test]
+fn catch_without_binding_preserves_body() {
+    check_optional_catch(
+        "try { } catch { console.log(1); }",
+        "try { }\ncatch (_a) {\n    console.log(1);\n}",
+    );
+}
+
+// Go: internal/transformers/estransforms/optionalcatch.go:visitCatchClause
+// Existing catch binding with a body containing statements passes through.
+#[test]
+fn catch_with_binding_preserves_body() {
+    check_optional_catch(
+        "try { } catch (e) { console.log(e); }",
+        "try { }\ncatch (e) {\n    console.log(e);\n}",
+    );
+}

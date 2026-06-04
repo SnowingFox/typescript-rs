@@ -63,3 +63,91 @@ fn find_first_kind(arena: &NodeArena, root: NodeId, target: Kind) -> Option<Node
     });
     result
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// T2-10 integration tests: classthis verification
+// ───────────────────────────────────────────────────────────────────────
+
+// Go: internal/transformers/estransforms/classthis.go:isClassThisAssignmentBlock
+// A class with an empty static block (zero statements) returns false.
+#[test]
+fn class_with_empty_static_block_returns_false() {
+    let (ec, source_file) = parse_shared("class C { static { } }");
+    let ec_ref = ec.borrow();
+    let static_block = find_first_kind(
+        ec_ref.arena(),
+        source_file,
+        Kind::ClassStaticBlockDeclaration,
+    );
+    if let Some(sb) = static_block {
+        assert!(!is_class_this_assignment_block(&ec_ref, sb));
+    }
+}
+
+// Go: internal/transformers/estransforms/classthis.go:isClassThisAssignmentBlock
+// A class with a static block containing two statements returns false
+// (must be exactly one assignment statement).
+#[test]
+fn class_with_multi_statement_static_block_returns_false() {
+    let (ec, source_file) =
+        parse_shared("class C { static { _classThis = this; console.log(1); } }");
+    let ec_ref = ec.borrow();
+    let static_block = find_first_kind(
+        ec_ref.arena(),
+        source_file,
+        Kind::ClassStaticBlockDeclaration,
+    );
+    if let Some(sb) = static_block {
+        assert!(!is_class_this_assignment_block(&ec_ref, sb));
+    }
+}
+
+// Go: internal/transformers/estransforms/classthis.go:isClassThisAssignmentBlock
+// A class with a static block containing a non-assignment expression statement
+// (e.g. a call expression) returns false.
+#[test]
+fn class_with_call_in_static_block_returns_false() {
+    let (ec, source_file) = parse_shared("class C { static { foo(); } }");
+    let ec_ref = ec.borrow();
+    let static_block = find_first_kind(
+        ec_ref.arena(),
+        source_file,
+        Kind::ClassStaticBlockDeclaration,
+    );
+    if let Some(sb) = static_block {
+        assert!(!is_class_this_assignment_block(&ec_ref, sb));
+    }
+}
+
+// Go: internal/transformers/estransforms/classthis.go:isClassThisAssignmentBlock
+// A class with a static block containing `_classThis += this` (compound
+// assignment, not plain `=`) returns false.
+#[test]
+fn class_with_compound_assignment_returns_false() {
+    let (ec, source_file) = parse_shared("class C { static { _classThis += this; } }");
+    let ec_ref = ec.borrow();
+    let static_block = find_first_kind(
+        ec_ref.arena(),
+        source_file,
+        Kind::ClassStaticBlockDeclaration,
+    );
+    if let Some(sb) = static_block {
+        assert!(!is_class_this_assignment_block(&ec_ref, sb));
+    }
+}
+
+// Go: internal/transformers/estransforms/classthis.go:isClassThisAssignmentBlock
+// A class with `static { x = 42; }` — not assigning `this` on the RHS.
+#[test]
+fn class_with_non_this_rhs_returns_false() {
+    let (ec, source_file) = parse_shared("class C { static { x = 42; } }");
+    let ec_ref = ec.borrow();
+    let static_block = find_first_kind(
+        ec_ref.arena(),
+        source_file,
+        Kind::ClassStaticBlockDeclaration,
+    );
+    if let Some(sb) = static_block {
+        assert!(!is_class_this_assignment_block(&ec_ref, sb));
+    }
+}

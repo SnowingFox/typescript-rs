@@ -47,3 +47,44 @@ fn non_logical_assignment_unchanged() {
 fn plain_statement_unchanged() {
     check_logical("var x = 1;", "var x = 1;");
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// T2-10 integration tests: logical assignment verification
+// ───────────────────────────────────────────────────────────────────────
+
+// Go: internal/transformers/estransforms/logicalassignment.go:visitBinaryExpression
+// Property access LHS: `a.x ||= b` → receiver `a` is simple-copiable, so no
+// temp is needed.
+#[test]
+fn or_equals_property_access_simple_receiver() {
+    check_logical("a.x ||= b;", "a.x || (a.x = b);");
+}
+
+// Go: internal/transformers/estransforms/logicalassignment.go:visitBinaryExpression
+// Property access `&&=` with simple receiver.
+#[test]
+fn and_equals_property_access_simple_receiver() {
+    check_logical("a.x &&= b;", "a.x && (a.x = b);");
+}
+
+// Go: internal/transformers/estransforms/logicalassignment.go:visitBinaryExpression
+// Property access `??=` with simple receiver.
+#[test]
+fn nullish_equals_property_access_simple_receiver() {
+    check_logical("a.x ??= b;", "a.x ?? (a.x = b);");
+}
+
+// Go: internal/transformers/estransforms/logicalassignment.go:visitBinaryExpression
+// Element access `||=` with simple key: `a[0] ||= b` — both receiver and key
+// are simple-copiable (identifier / literal), so no temp is needed.
+#[test]
+fn or_equals_element_access_simple_key() {
+    check_logical("a[0] ||= b;", "a[0] || (a[0] = b);");
+}
+
+// Go: internal/transformers/estransforms/logicalassignment.go:visitBinaryExpression
+// Regular addition assignment is not a logical assignment and passes through.
+#[test]
+fn plus_equals_passes_through() {
+    check_logical("a += b;", "a += b;");
+}

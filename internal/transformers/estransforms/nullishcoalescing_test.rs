@@ -57,3 +57,39 @@ fn numeric_literal_left_no_temp() {
         "var x = 0 !== null && 0 !== void 0 ? 0 : b;",
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// T2-10 integration tests: nullish coalescing verification
+// ───────────────────────────────────────────────────────────────────────
+
+// Go: internal/transformers/estransforms/nullishcoalescing.go:visitBinaryExpression
+// Nested `??` — `a ?? b ?? c` lowers left-to-right. The inner `a ?? b` lowers
+// to a conditional; because that conditional is NOT simple-copiable, the outer
+// `?? c` introduces a temp `_a` to cache the inner result.
+#[test]
+fn nested_nullish_two_levels() {
+    check_nullish(
+        "var x = a ?? b ?? c;",
+        "var x = (_a = a !== null && a !== void 0 ? a : b) !== null && _a !== void 0 ? _a : c;",
+    );
+}
+
+// Go: internal/transformers/estransforms/nullishcoalescing.go:visitBinaryExpression
+// A string-literal left operand is simple-copiable and lowered without a temp.
+#[test]
+fn string_literal_left_no_temp() {
+    check_nullish(
+        "var x = \"hello\" ?? b;",
+        "var x = \"hello\" !== null && \"hello\" !== void 0 ? \"hello\" : b;",
+    );
+}
+
+// Go: internal/transformers/estransforms/nullishcoalescing.go:visitBinaryExpression
+// A `this` keyword left operand is simple-copiable (keyword kind).
+#[test]
+fn this_keyword_left_no_temp() {
+    check_nullish(
+        "var x = this ?? b;",
+        "var x = this !== null && this !== void 0 ? this : b;",
+    );
+}
