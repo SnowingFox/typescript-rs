@@ -64,4 +64,6 @@ members = [
     "internal/testutil/fsbaselineutil",
     "internal/testutil/jstest",
     "internal/testutil/fixtures",
+    "internal/testutil/tsbaseline",
+    "internal/testutil/testutil",
 ]

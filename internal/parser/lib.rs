@@ -18,6 +18,7 @@
 //! caller in [`ParseResult`] because, unlike Go's GC graph, the Rust arena owns
 //! every node.
 
+pub mod references;
 pub mod types;
 pub mod utilities;
 
@@ -6895,3 +6896,7 @@ mod tests;
 #[cfg(test)]
 #[path = "deepclone_test.rs"]
 mod deepclone_tests;
+
+#[cfg(test)]
+#[path = "references_test.rs"]
+mod references_tests;

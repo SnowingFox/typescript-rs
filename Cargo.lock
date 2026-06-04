@@ -1200,6 +1200,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_testutil"
+version = "0.0.0"
+dependencies = [
+ "tsgo_testutil_race",
+]
+
+[[package]]
 name = "tsgo_testutil_baseline"
 version = "0.0.0"
 dependencies = [
@@ -1295,6 +1302,14 @@ name = "tsgo_testutil_stringtestutil"
 version = "0.0.0"
 dependencies = [
  "tsgo_stringutil",
+]
+
+[[package]]
+name = "tsgo_testutil_tsbaseline"
+version = "0.0.0"
+dependencies = [
+ "regex",
+ "tsgo_tspath",
 ]
 
 [[package]]
