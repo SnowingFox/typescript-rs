@@ -308,6 +308,8 @@ impl DeclarationsTransformer {
             Kind::ClassDeclaration => Some(self.transform_class_declaration(arena, node)),
             Kind::InterfaceDeclaration => Some(self.transform_interface_declaration(arena, node)),
             Kind::TypeAliasDeclaration => Some(self.transform_type_alias_declaration(arena, node)),
+            Kind::EnumDeclaration => Some(self.transform_enum_declaration(arena, node)),
+            Kind::ModuleDeclaration => Some(self.transform_module_declaration(arena, node)),
             Kind::ImportDeclaration => self.transform_import_declaration(arena, node),
             Kind::ExportDeclaration => Some(self.transform_export_declaration(arena, node)),
             Kind::ExportAssignment => self.transform_export_assignment(arena, node),
@@ -625,6 +627,69 @@ impl DeclarationsTransformer {
         self.needs_declare = false;
         let modifiers = self.ensure_modifiers(arena, node);
         arena.new_type_alias_declaration(modifiers, name, type_parameters, type_node)
+    }
+
+    /// Transforms an enum declaration into its ambient form: `declare` added,
+    /// members kept with their initializers (enum member values are compile-time
+    /// constants and must be preserved in `.d.ts`).
+    ///
+    /// Side effects: may push rebuilt nodes onto `arena`.
+    // Go: internal/transformers/declarations/transform.go:DeclarationTransformer.transformEnumDeclaration
+    fn transform_enum_declaration(&self, arena: &mut NodeArena, node: NodeId) -> NodeId {
+        let (name, members) = match arena.data(node) {
+            NodeData::EnumDeclaration(d) => (d.name, d.members.clone()),
+            _ => unreachable!("kind/data mismatch"),
+        };
+        let modifiers = self.ensure_modifiers(arena, node);
+        arena.new_enum_declaration(modifiers, name, members)
+    }
+
+    /// Transforms a module/namespace declaration into its ambient form:
+    /// `declare` added, body statements recursively transformed.
+    ///
+    /// Side effects: may push rebuilt nodes onto `arena`.
+    // Go: internal/transformers/declarations/transform.go:DeclarationTransformer.transformModuleDeclaration
+    fn transform_module_declaration(&mut self, arena: &mut NodeArena, node: NodeId) -> NodeId {
+        let (keyword, name, body) = match arena.data(node) {
+            NodeData::ModuleDeclaration(d) => (d.keyword, d.name, d.body),
+            _ => unreachable!("kind/data mismatch"),
+        };
+        let modifiers = self.ensure_modifiers(arena, node);
+        let new_body = body.map(|b| self.transform_module_body(arena, b));
+        arena.new_module_declaration(modifiers, keyword, name, new_body)
+    }
+
+    /// Transforms the body of a module/namespace declaration: a `ModuleBlock`
+    /// has its statements transformed as nested declarations (with `needsDeclare`
+    /// set to `false` since the outer `declare` covers them); a nested
+    /// `ModuleDeclaration` recurses.
+    ///
+    /// Side effects: may push rebuilt nodes onto `arena`.
+    fn transform_module_body(&mut self, arena: &mut NodeArena, node: NodeId) -> NodeId {
+        match arena.data(node) {
+            NodeData::ModuleBlock(d) => {
+                let stmts = d.statements.nodes.clone();
+                let saved = self.needs_declare;
+                self.needs_declare = false;
+                let mut out: Vec<NodeId> = Vec::new();
+                for stmt in stmts {
+                    if let Some(result) = self.transform_top_level_statement(arena, stmt) {
+                        match arena.data(result) {
+                            NodeData::SyntaxList(d) => {
+                                for elem in d.list.nodes.clone() {
+                                    out.push(elem);
+                                }
+                            }
+                            _ => out.push(result),
+                        }
+                    }
+                }
+                self.needs_declare = saved;
+                arena.new_module_block(NodeList::new(out))
+            }
+            NodeData::ModuleDeclaration(_) => self.transform_module_declaration(arena, node),
+            _ => node,
+        }
     }
 
     /// Transforms an import declaration for `.d.ts` emit: each binding is kept

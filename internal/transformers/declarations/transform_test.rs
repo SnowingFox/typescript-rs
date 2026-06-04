@@ -598,6 +598,117 @@ fn void_function_without_isolated_declarations_reports_nothing() {
     assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
 }
 
+// ── Enum declaration → ambient enum ─────────────────────────────────────────
+// Go: transform.go:transformEnumDeclaration. An exported enum is kept with
+// `declare` added; member initializers are kept (they are compile-time constants).
+// tsgo --declaration: `export enum Color { Red, Green, Blue }`
+//   → `export declare enum Color {\n    Red,\n    Green,\n    Blue\n}`.
+#[test]
+fn enum_declaration_becomes_declare_enum() {
+    check(
+        "export enum Color { Red, Green, Blue }",
+        "export declare enum Color {\n    Red,\n    Green,\n    Blue\n}",
+    );
+}
+
+// A non-exported enum gains `declare`.
+#[test]
+fn nonexported_enum_gains_declare() {
+    check(
+        "enum Dir { Up, Down }",
+        "declare enum Dir {\n    Up,\n    Down\n}",
+    );
+}
+
+// Enum members with explicit initializers keep their values.
+#[test]
+fn enum_members_with_initializers_keep_values() {
+    check(
+        "export enum Status { Active = 1, Inactive = 0 }",
+        "export declare enum Status {\n    Active = 1,\n    Inactive = 0\n}",
+    );
+}
+
+// ── Namespace declaration → ambient namespace ──────────────────────────────
+// Go: transform.go:transformModuleDeclaration. A namespace is kept with
+// `declare` added and body statements recursively transformed.
+#[test]
+fn namespace_declaration_becomes_declare_namespace() {
+    check(
+        "export namespace Utils { export function id(x: number): number { return x; } }",
+        "export declare namespace Utils {\n    export function id(x: number): number;\n}",
+    );
+}
+
+// A non-exported namespace gains `declare`.
+#[test]
+fn nonexported_namespace_gains_declare() {
+    check(
+        "namespace Internal { export const x: number = 1; }",
+        "declare namespace Internal {\n    export const x: number;\n}",
+    );
+}
+
+// A namespace with multiple members keeps each transformed member.
+#[test]
+fn namespace_multiple_members() {
+    check(
+        "export namespace NS { export const x: number = 1; export function f(y: string): void {} export interface I { a: number; } }",
+        "export declare namespace NS {\n    export const x: number;\n    export function f(y: string): void;\n    export interface I {\n        a: number;\n    }\n}",
+    );
+}
+
+// ── isolatedDeclarations: explicit types → clean ────────────────────────────
+// Under --isolatedDeclarations, a function with ALL explicit type annotations
+// (parameters + return type) produces zero diagnostics.
+#[test]
+fn isolated_declarations_explicit_types_clean_dts() {
+    let diags = check_diagnostics_opts(
+        "export function add(a: number, b: number): number { return a + b; }",
+        true,
+    );
+    assert!(
+        diags.is_empty(),
+        "explicit types should produce no isolated-declarations diagnostics: {diags:?}"
+    );
+}
+
+// Under --isolatedDeclarations, a class with explicit property types and method
+// return types produces zero diagnostics.
+#[test]
+fn isolated_declarations_class_with_explicit_types_clean() {
+    let diags = check_diagnostics_opts(
+        "export class Calc { value: number = 0; add(x: number): number { return this.value + x; } }",
+        true,
+    );
+    assert!(
+        diags.is_empty(),
+        "class with explicit types should produce no diagnostics: {diags:?}"
+    );
+}
+
+// Under --isolatedDeclarations, a multi-statement void body reports 9007.
+#[test]
+fn isolated_declarations_void_multi_statement_reports_9007() {
+    let diags = check_diagnostics_opts(
+        "export function setup() { console.log('init'); console.log('done'); }",
+        true,
+    );
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].0, 9007);
+}
+
+// Under --isolatedDeclarations, a method with a void body reports 9008.
+#[test]
+fn isolated_declarations_method_no_return_reports_9008() {
+    let diags = check_diagnostics_opts(
+        "export class Logger { log() { console.log('msg'); } }",
+        true,
+    );
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].0, 9008);
+}
+
 // The 9007 diagnostic carries a 9031 "add a return type" related suggestion.
 #[test]
 fn isolated_declarations_9007_has_related_suggestion() {

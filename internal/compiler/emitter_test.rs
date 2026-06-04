@@ -915,6 +915,194 @@ fn emit_declaration_enum() {
     assert_eq!(dts_files[0].0, "/src/index.d.ts");
 }
 
+// ── .d.ts baseline comparison tests ─────────────────────────────────────────
+// These verify the FULL emit pipeline (parse → declarations transform → print)
+// produces an exact .d.ts text matching the expected baseline output.
+
+// Baseline 1: Simple function with explicit types → clean .d.ts.
+#[test]
+fn dts_baseline_function_explicit_types() {
+    let options = CompilerOptions {
+        declaration: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[(
+            "/src/index.ts",
+            "export function greet(name: string): string { return \"Hello, \" + name; }",
+        )],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    emit_capturing(&program, &captured);
+
+    let captured = captured.borrow();
+    let dts: Vec<_> = captured
+        .iter()
+        .filter(|(n, _)| n.ends_with(".d.ts"))
+        .collect();
+    assert_eq!(dts.len(), 1);
+    assert_eq!(dts[0].0, "/src/index.d.ts");
+    assert_eq!(
+        dts[0].1,
+        "export declare function greet(name: string): string;\n"
+    );
+}
+
+// Baseline 2: Class with methods and properties → .d.ts with `declare`.
+#[test]
+fn dts_baseline_class_with_members() {
+    let options = CompilerOptions {
+        declaration: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[(
+            "/src/index.ts",
+            "export class Point {\n  x: number;\n  y: number;\n  constructor(x: number, y: number) {\n    this.x = x;\n    this.y = y;\n  }\n  distanceTo(other: Point): number {\n    return Math.sqrt((this.x - other.x) ** 2);\n  }\n}",
+        )],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    emit_capturing(&program, &captured);
+
+    let captured = captured.borrow();
+    let dts: Vec<_> = captured
+        .iter()
+        .filter(|(n, _)| n.ends_with(".d.ts"))
+        .collect();
+    assert_eq!(dts.len(), 1);
+    assert_eq!(dts[0].0, "/src/index.d.ts");
+    assert_eq!(
+        dts[0].1,
+        "export declare class Point {\n    x: number;\n    y: number;\n    constructor(x: number, y: number);\n    distanceTo(other: Point): number;\n}\n"
+    );
+}
+
+// Baseline 3: Re-exports → preserved in .d.ts.
+#[test]
+fn dts_baseline_reexport_preserved() {
+    let options = CompilerOptions {
+        declaration: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[
+            (
+                "/src/types.ts",
+                "export interface Config { debug: boolean; }",
+            ),
+            ("/src/index.ts", "export { Config } from \"./types\";"),
+        ],
+        &["/src/types.ts", "/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    emit_capturing(&program, &captured);
+
+    let captured = captured.borrow();
+    let index_dts: Vec<_> = captured
+        .iter()
+        .filter(|(n, _)| n == "/src/index.d.ts")
+        .collect();
+    assert_eq!(index_dts.len(), 1);
+    assert_eq!(index_dts[0].1, "export { Config } from \"./types\";\n");
+}
+
+// Baseline 4: Interface → .d.ts (no `declare` on interfaces).
+#[test]
+fn dts_baseline_interface() {
+    let options = CompilerOptions {
+        declaration: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[(
+            "/src/index.ts",
+            "export interface User {\n  id: number;\n  name: string;\n  email?: string;\n}",
+        )],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    emit_capturing(&program, &captured);
+
+    let captured = captured.borrow();
+    let dts: Vec<_> = captured
+        .iter()
+        .filter(|(n, _)| n.ends_with(".d.ts"))
+        .collect();
+    assert_eq!(dts.len(), 1);
+    assert_eq!(
+        dts[0].1,
+        "export interface User {\n    id: number;\n    name: string;\n    email?: string;\n}\n"
+    );
+}
+
+// Baseline 5: Enum → .d.ts representation (members preserved).
+#[test]
+fn dts_baseline_enum() {
+    let options = CompilerOptions {
+        declaration: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[(
+            "/src/index.ts",
+            "export enum Color {\n  Red,\n  Green,\n  Blue\n}",
+        )],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    emit_capturing(&program, &captured);
+
+    let captured = captured.borrow();
+    let dts: Vec<_> = captured
+        .iter()
+        .filter(|(n, _)| n.ends_with(".d.ts"))
+        .collect();
+    assert_eq!(dts.len(), 1);
+    assert_eq!(dts[0].0, "/src/index.d.ts");
+    assert_eq!(
+        dts[0].1,
+        "export declare enum Color {\n    Red,\n    Green,\n    Blue\n}\n"
+    );
+}
+
+// Baseline 6: Namespace with exported members → .d.ts.
+#[test]
+fn dts_baseline_namespace() {
+    let options = CompilerOptions {
+        declaration: Tristate::True,
+        ..Default::default()
+    };
+    let program = build_program(
+        &[(
+            "/src/index.ts",
+            "export namespace Utils {\n  export function clamp(x: number, lo: number, hi: number): number {\n    return Math.min(Math.max(x, lo), hi);\n  }\n  export const PI: number = 3.14;\n}",
+        )],
+        &["/src/index.ts"],
+        options,
+    );
+    let captured: Captured = Rc::new(RefCell::new(Vec::new()));
+    emit_capturing(&program, &captured);
+
+    let captured = captured.borrow();
+    let dts: Vec<_> = captured
+        .iter()
+        .filter(|(n, _)| n.ends_with(".d.ts"))
+        .collect();
+    assert_eq!(dts.len(), 1);
+    assert_eq!(dts[0].0, "/src/index.d.ts");
+    assert_eq!(
+        dts[0].1,
+        "export declare namespace Utils {\n    export function clamp(x: number, lo: number, hi: number): number;\n    export const PI: number;\n}\n"
+    );
+}
+
 // Go: internal/compiler/program.go:Program.Emit (declaration: false)
 #[test]
 fn emit_no_declaration_when_not_requested() {
