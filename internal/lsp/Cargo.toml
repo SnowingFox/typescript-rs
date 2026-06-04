@@ -13,6 +13,8 @@ thiserror = "2.0.18"
 tsgo_core = { path = "../core" }
 tsgo_jsonrpc = { path = "../jsonrpc" }
 tsgo_lsproto = { path = "lsproto" }
+tsgo_project = { path = "../project" }
 tsgo_tspath = { path = "../tspath" }
+tsgo_vfs = { path = "../vfs" }
 
 [dev-dependencies]

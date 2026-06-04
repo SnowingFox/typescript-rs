@@ -960,7 +960,9 @@ dependencies = [
  "tsgo_core",
  "tsgo_jsonrpc",
  "tsgo_lsproto",
+ "tsgo_project",
  "tsgo_tspath",
+ "tsgo_vfs",
 ]
 
 [[package]]
