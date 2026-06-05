@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "bb0c6643088c",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "internal/testrunner/Cargo.toml",
+    "internal/testrunner/compiler_runner.rs",
+    "internal/testrunner/compiler_runner_test.rs",
+    "internal/testrunner/test_case_parser.rs",
+    "internal/testrunner/test_case_parser_test.rs",
+    "internal/testutil/harnessutil/Cargo.toml",
+    "internal/testutil/harnessutil/harnessutil.rs",
+    "internal/testutil/harnessutil/harnessutil_test.rs",
+    "internal/tsoptions/tsconfigparsing_test.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/bb/0c6643088c/0/metadata.json",
+      "transcript": "/bb/0c6643088c/0/full.jsonl",
+      "content_hash": "/bb/0c6643088c/0/content_hash.txt",
+      "prompt": "/bb/0c6643088c/0/prompt.txt"
+    }
+  ]
+}

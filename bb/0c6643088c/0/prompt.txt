@@ -1,0 +1,12 @@
+/session-handoff ➜  typescript-go git:(main) ✗ ./target/release/tsgo --noEmit --noEmit ~/dev/local_services_web_monorepo/subspaces/local_service_c/apps/poi-creator-next/*.ts
+
+thread 'tsgo-main' (57679131) panicked at internal/ast/lib.rs:1680:19:
+index out of bounds: the len is 11776 but the index is 30302
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'main' (57679129) panicked at cmd/tsgo/main.rs:248:32:
+main thread panicked: Any { .. }
+
+看一下这个为什么不行？而 tsc 是可以正确检查的
+
+用 subagent 深入探查

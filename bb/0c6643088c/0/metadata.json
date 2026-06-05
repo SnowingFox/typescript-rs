@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "bb0c6643088c",
+  "session_id": "fc98ae35-feaa-48ad-b625-70c62354986a",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-05T09:21:43.419081Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "internal/testrunner/Cargo.toml",
+    "internal/testrunner/compiler_runner.rs",
+    "internal/testrunner/compiler_runner_test.rs",
+    "internal/testrunner/test_case_parser.rs",
+    "internal/testrunner/test_case_parser_test.rs",
+    "internal/testutil/harnessutil/Cargo.toml",
+    "internal/testutil/harnessutil/harnessutil.rs",
+    "internal/testutil/harnessutil/harnessutil_test.rs",
+    "internal/tsoptions/tsconfigparsing_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "composer-2.5",
+  "turn_id": "2d24dfa6d3c9",
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-05T09:21:43.412985Z",
+    "agent_lines": 365,
+    "agent_removed": 65,
+    "human_added": 46,
+    "human_modified": 32,
+    "human_removed": 0,
+    "total_committed": 443,
+    "total_lines_changed": 508,
+    "agent_percentage": 84.64566929133859,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
