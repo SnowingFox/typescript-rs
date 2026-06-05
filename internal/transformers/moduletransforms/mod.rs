@@ -38,3 +38,4 @@ pub mod esmodule;
 pub mod externalmoduleinfo;
 pub mod impliedmodule;
 pub mod systemmodule;
+pub mod utilities;

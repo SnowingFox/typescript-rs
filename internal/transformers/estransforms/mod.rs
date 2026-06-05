@@ -150,6 +150,7 @@
 pub mod r#async;
 pub mod classfields;
 pub mod classthis;
+pub mod definitions;
 pub mod esdecorator;
 pub mod exponentiation;
 pub mod forawait;
@@ -163,3 +164,4 @@ pub mod spread;
 pub mod taggedtemplate;
 pub mod usestrict;
 pub mod using;
+pub mod utilities;
