@@ -42,7 +42,9 @@ use super::relations::RelationKind;
 use super::signatures::{IndexInfo, IndexInfoId, Signature, SignatureFlags, SignatureId};
 use super::symbols::resolve_name;
 use super::type_facts::TypeFacts;
-use super::types::{LiteralValue, ObjectFlags, ObjectType, TypeFlags, TypeId};
+use super::types::{
+    IntrinsicType, LiteralValue, ObjectFlags, ObjectType, TypeData, TypeFlags, TypeId,
+};
 use super::Checker;
 
 /// A type-checking diagnostic produced while checking a source file.
@@ -7917,6 +7919,108 @@ impl Checker {
             return false;
         }
         true
+    }
+
+    /// Reports whether `t` is a tuple type (Go's `isTupleType`): an object type
+    /// carrying the `TUPLE` flag.
+    // Go: internal/checker/checker.go:isTupleType(23350)
+    pub fn is_tuple_type(&self, t: TypeId) -> bool {
+        self.get_type(t).object_flags().contains(ObjectFlags::TUPLE)
+    }
+
+    /// Reports whether `t` is an array type (Go's `isArrayType`).
+    // Go: internal/checker/checker.go:Checker.isArrayType(23342)
+    pub fn is_array_type(&self, t: TypeId) -> bool {
+        let ty = self.get_type(t);
+        if !ty.object_flags().contains(ObjectFlags::REFERENCE) {
+            return false;
+        }
+        if let Some(obj) = ty.as_object() {
+            if let Some(target) = obj.target {
+                let target_name = self.get_type(target).intrinsic_name();
+                return matches!(target_name, Some("Array") | Some("ReadonlyArray"));
+            }
+        }
+        false
+    }
+
+    /// Reports whether `t` is a readonly array type (Go's `isReadonlyArrayType`).
+    // Go: internal/checker/checker.go:Checker.isReadonlyArrayType(23346)
+    pub fn is_readonly_array_type(&self, t: TypeId) -> bool {
+        let ty = self.get_type(t);
+        if !ty.object_flags().contains(ObjectFlags::REFERENCE) {
+            return false;
+        }
+        if let Some(obj) = ty.as_object() {
+            if let Some(target) = obj.target {
+                return self.get_type(target).intrinsic_name() == Some("ReadonlyArray");
+            }
+        }
+        false
+    }
+
+    /// Reports whether `t` is an array or tuple type (Go's `isArrayOrTupleType`).
+    // Go: internal/checker/checker.go:Checker.isArrayOrTupleType(23366)
+    pub fn is_array_or_tuple_type(&self, t: TypeId) -> bool {
+        self.is_array_type(t) || self.is_tuple_type(t)
+    }
+
+    /// Creates an array type by wrapping `element_type` in a generic type
+    /// reference to a named array target.
+    // Go: internal/checker/checker.go:Checker.createArrayType(24562)
+    pub fn create_array_type(&mut self, element_type: TypeId) -> TypeId {
+        self.create_array_type_ex(element_type, false)
+    }
+
+    /// Creates an array type reference, with an optional `readonly` flag.
+    // Go: internal/checker/checker.go:Checker.createArrayTypeEx(24566)
+    pub fn create_array_type_ex(&mut self, element_type: TypeId, readonly: bool) -> TypeId {
+        let name = if readonly { "ReadonlyArray" } else { "Array" };
+        let target = self.get_or_create_array_target(name);
+        self.create_type_reference(target, vec![element_type])
+    }
+
+    fn get_or_create_array_target(&mut self, name: &str) -> TypeId {
+        if let Some(&id) = self.global_types.get(name) {
+            return id;
+        }
+        let tp = self.new_type_parameter(None);
+        let target = self.new_object_type(
+            ObjectFlags::INTERFACE,
+            None,
+            ObjectType {
+                type_parameters: vec![tp],
+                ..Default::default()
+            },
+        );
+        self.types.get_mut(target).data = TypeData::Intrinsic(IntrinsicType {
+            intrinsic_name: name.to_string(),
+        });
+        self.global_types.insert(name.to_string(), target);
+        target
+    }
+
+    /// Performs assignability checking with optional elaboration (Go's
+    /// `checkTypeAssignableToAndOptionallyElaborate`).
+    // Go: internal/checker/checker.go:Checker.checkTypeAssignableToAndOptionallyElaborate(12568)
+    #[allow(dead_code)]
+    pub(crate) fn check_type_assignable_to_and_optionally_elaborate(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        error_node: NodeId,
+        expr: Option<NodeId>,
+    ) {
+        if self.is_type_assignable_to(program, source, target) {
+            return;
+        }
+        if let Some(expr_node) = expr {
+            if self.elaborate_error(program, expr_node, source, target, RelationKind::Assignable) {
+                return;
+            }
+        }
+        self.report_type_not_assignable(program, error_node, source, target);
     }
 }
 

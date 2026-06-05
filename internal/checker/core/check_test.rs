@@ -11105,3 +11105,154 @@ fn b3_type_param_non_reserved_no_2368() {
     c.check_source_file(root);
     assert!(!c.get_diagnostics(root).iter().any(|d| d.code == 2368));
 }
+
+// ---- T1-E batch 4: type relation and inference functions ----
+
+// Go: internal/checker/checker.go:isTupleType(23350)
+#[test]
+fn is_tuple_type_recognizes_tuple_objects() {
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let n = c.number_type();
+    let tuple = c.create_tuple_type(vec![s, n]);
+    assert!(c.is_tuple_type(tuple));
+    assert!(!c.is_tuple_type(s));
+    let obj = c.new_object_type(
+        crate::core::types::ObjectFlags::INTERFACE,
+        None,
+        Default::default(),
+    );
+    assert!(!c.is_tuple_type(obj));
+}
+
+// Go: internal/checker/checker.go:Checker.isArrayType(23342)
+#[test]
+fn is_array_type_recognizes_array_references() {
+    let mut c = Checker::new();
+    let n = c.number_type();
+    let arr = c.create_array_type(n);
+    assert!(c.is_array_type(arr));
+    assert!(!c.is_array_type(n));
+    let tuple = c.create_tuple_type(vec![n]);
+    assert!(!c.is_array_type(tuple));
+}
+
+// Go: internal/checker/checker.go:Checker.isReadonlyArrayType(23346)
+#[test]
+fn is_readonly_array_type_distinguishes_mutability() {
+    let mut c = Checker::new();
+    let n = c.number_type();
+    let mutable_arr = c.create_array_type(n);
+    let readonly_arr = c.create_array_type_ex(n, true);
+    assert!(!c.is_readonly_array_type(mutable_arr));
+    assert!(c.is_readonly_array_type(readonly_arr));
+    assert!(c.is_array_type(readonly_arr));
+}
+
+// Go: internal/checker/checker.go:Checker.isArrayOrTupleType(23366)
+#[test]
+fn is_array_or_tuple_type_covers_both() {
+    let mut c = Checker::new();
+    let n = c.number_type();
+    let arr = c.create_array_type(n);
+    let tuple = c.create_tuple_type(vec![n]);
+    assert!(c.is_array_or_tuple_type(arr));
+    assert!(c.is_array_or_tuple_type(tuple));
+    assert!(!c.is_array_or_tuple_type(n));
+}
+
+// Go: internal/checker/checker.go:Checker.createArrayType(24562)
+#[test]
+fn create_array_type_produces_reference_with_element_type() {
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let arr = c.create_array_type(s);
+    let ty = c.get_type(arr);
+    assert!(ty
+        .object_flags()
+        .contains(crate::core::types::ObjectFlags::REFERENCE));
+    let obj = ty.as_object().expect("object");
+    assert_eq!(obj.resolved_type_arguments, vec![s]);
+}
+
+// Go: internal/checker/checker.go:Checker.createArrayTypeEx(24566)
+#[test]
+fn create_array_type_ex_readonly_interns_separately() {
+    let mut c = Checker::new();
+    let n = c.number_type();
+    let mutable_arr = c.create_array_type(n);
+    let readonly_arr = c.create_array_type_ex(n, true);
+    assert_ne!(mutable_arr, readonly_arr);
+    let mutable_obj = c.get_type(mutable_arr).as_object().expect("obj");
+    let readonly_obj = c.get_type(readonly_arr).as_object().expect("obj");
+    assert_ne!(mutable_obj.target, readonly_obj.target);
+}
+
+// Go: internal/checker/checker.go:Checker.getRegularTypeOfLiteralType(25132)
+#[test]
+fn regular_type_of_literal_type_returns_regular_form() {
+    let mut c = Checker::new();
+    let fresh = c.get_fresh_type_of_literal_type(c.regular_false_type());
+    assert_ne!(fresh, c.regular_false_type());
+    let regular = c.regular_type_of_literal_type(fresh);
+    assert_eq!(regular, c.regular_false_type());
+    let s = c.string_type();
+    assert_eq!(c.regular_type_of_literal_type(s), s);
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypeAssignableToAndOptionallyElaborate(12568)
+#[test]
+fn check_type_assignable_to_and_optionally_elaborate_reports_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x: number = 'hello';",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p.clone());
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.iter().any(|d| d.code == 2322), "should report TS2322");
+}
+
+// Go: internal/checker/checker.go:Checker.getBaseTypeOfLiteralType(25293)
+#[test]
+fn get_base_type_of_literal_type_maps_literals_to_primitives() {
+    let mut c = Checker::new();
+    let str_lit = c.new_literal_type(
+        crate::core::types::TypeFlags::STRING_LITERAL,
+        crate::core::types::LiteralValue::String("x".into()),
+        None,
+    );
+    assert_eq!(c.get_base_type_of_literal_type(str_lit), c.string_type());
+    let num_lit = c.new_literal_type(
+        crate::core::types::TypeFlags::NUMBER_LITERAL,
+        crate::core::types::LiteralValue::Number(tsgo_jsnum::Number::from(42.0)),
+        None,
+    );
+    assert_eq!(c.get_base_type_of_literal_type(num_lit), c.number_type());
+    assert_eq!(
+        c.get_base_type_of_literal_type(c.false_type()),
+        c.boolean_type()
+    );
+    assert_eq!(
+        c.get_base_type_of_literal_type(c.string_type()),
+        c.string_type()
+    );
+}
+
+// Go: internal/checker/checker.go:isLiteralType(25252)
+#[test]
+fn is_literal_type_recognizes_literals_and_unit_types() {
+    let mut c = Checker::new();
+    assert!(c.is_literal_type(c.false_type()));
+    assert!(c.is_literal_type(c.null_type()));
+    assert!(c.is_literal_type(c.undefined_type()));
+    let str_lit = c.new_literal_type(
+        crate::core::types::TypeFlags::STRING_LITERAL,
+        crate::core::types::LiteralValue::String("x".into()),
+        None,
+    );
+    assert!(c.is_literal_type(str_lit));
+    assert!(!c.is_literal_type(c.string_type()));
+    assert!(!c.is_literal_type(c.number_type()));
+}
