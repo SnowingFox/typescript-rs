@@ -588,6 +588,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsgo_api"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tsgo_json",
+ "tsgo_jsonrpc",
+]
+
+[[package]]
 name = "tsgo_ast"
 version = "0.0.0"
 dependencies = [
