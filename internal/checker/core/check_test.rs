@@ -11259,3 +11259,176 @@ fn is_literal_type_recognizes_literals_and_unit_types() {
     assert!(!c.is_literal_type(c.string_type()));
     assert!(!c.is_literal_type(c.number_type()));
 }
+
+// --- T1-E batch 5: inference + contextual typing entry points (check.rs) ---
+
+fn source_statements_batch5(p: &StubProgram) -> Vec<tsgo_ast::NodeId> {
+    match p.arena().data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    }
+}
+
+fn var_decl_initializer_batch5(p: &StubProgram, stmt_idx: usize) -> tsgo_ast::NodeId {
+    let arena = p.arena();
+    let list = match arena.data(source_statements_batch5(p)[stmt_idx]) {
+        NodeData::VariableStatement(d) => d.declaration_list,
+        _ => panic!("variable statement"),
+    };
+    let decl = match arena.data(list) {
+        NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+        _ => panic!("declaration list"),
+    };
+    match arena.data(decl) {
+        NodeData::VariableDeclaration(d) => d.initializer.expect("initializer"),
+        _ => panic!("variable declaration"),
+    }
+}
+
+fn var_decl_type_annotation_batch5(p: &StubProgram, stmt_idx: usize) -> tsgo_ast::NodeId {
+    let arena = p.arena();
+    let list = match arena.data(source_statements_batch5(p)[stmt_idx]) {
+        NodeData::VariableStatement(d) => d.declaration_list,
+        _ => panic!("variable statement"),
+    };
+    let decl = match arena.data(list) {
+        NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+        _ => panic!("declaration list"),
+    };
+    match arena.data(decl) {
+        NodeData::VariableDeclaration(d) => d.type_node.expect("type annotation"),
+        _ => panic!("variable declaration"),
+    }
+}
+
+fn object_literal_property_value_batch5(p: &StubProgram, member_idx: usize) -> tsgo_ast::NodeId {
+    let arena = p.arena();
+    let literal = var_decl_initializer_batch5(p, 0);
+    let members = match arena.data(literal) {
+        NodeData::ObjectLiteralExpression(d) => d.list.nodes.clone(),
+        _ => panic!("object literal"),
+    };
+    match arena.data(members[member_idx]) {
+        NodeData::PropertyAssignment(d) => d.initializer.expect("property value"),
+        _ => panic!("property assignment"),
+    }
+}
+
+// Go: internal/checker/checker.go:Checker.checkExpressionWithContextualType
+#[test]
+fn check_expression_with_contextual_type_preserves_string_literal() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const x: { k: \"a\" } = { k: \"a\" };");
+    let value = object_literal_property_value_batch5(&p, 0);
+    let mut c = Checker::new();
+    let a_lit = c.get_string_literal_type("a");
+    let lit = c.check_expression_with_contextual_type(&p, value, a_lit, None);
+    assert_eq!(lit, a_lit);
+}
+
+// Go: internal/checker/checker.go:Checker.getContextualType (pushed stack)
+#[test]
+fn pushed_contextual_type_overrides_parent_walk() {
+    use crate::core::contextual::ContextFlags;
+    let p = StubProgram::parse_and_bind("/a.ts", "const x = 1;");
+    let init = var_decl_initializer_batch5(&p, 0);
+    let mut c = Checker::new();
+    let string = c.string_type();
+    c.push_contextual_type(init, string, false);
+    assert_eq!(
+        c.get_contextual_type(&p, init, ContextFlags::NONE),
+        Some(string),
+    );
+    c.pop_contextual_type();
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfNode / getRegularTypeOfExpression
+#[test]
+fn get_type_of_node_returns_expression_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const x = 1;");
+    let init = var_decl_initializer_batch5(&p, 0);
+    let mut c = Checker::new();
+    let num_lit = c.get_number_literal_type(tsgo_jsnum::Number::from(1.0));
+    assert_eq!(c.get_type_of_node(&p, init, None), num_lit);
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromTypeNode
+#[test]
+fn get_type_from_type_node_on_checker_resolves_primitives() {
+    let p = StubProgram::parse_and_bind("/a.ts", "let x: string;");
+    let ty = var_decl_type_annotation_batch5(&p, 0);
+    let mut c = Checker::new();
+    assert_eq!(c.get_type_from_type_node(&p, ty, None), c.string_type());
+}
+
+// Go: internal/checker/inference.go:Checker.getInferredType
+#[test]
+fn get_inferred_type_resolves_from_candidates() {
+    use crate::core::inference::InferenceContext;
+    let p = empty();
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let one = c.get_number_literal_type(tsgo_jsnum::Number::from(1.0));
+    let two = c.get_number_literal_type(tsgo_jsnum::Number::from(2.0));
+    let mut ctx = InferenceContext::new(&[tp]);
+    ctx.inferences[0].candidates = vec![one, two];
+    let union = c.get_union_type(&[one, two]);
+    assert_eq!(c.get_inferred_type(&p, &mut ctx, 0), union);
+}
+
+// Go: internal/checker/inference.go:Checker.inferTypeArguments
+#[test]
+fn infer_type_arguments_on_checker_infers_from_argument() {
+    let p = empty();
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    let num = c.number_type();
+    assert_eq!(c.infer_type_arguments(&p, &[tp], &[num], &[tp]), vec![num]);
+}
+
+// Go: internal/checker/checker.go:Checker.getReturnTypeOfSignature
+#[test]
+fn get_return_type_of_signature_reads_resolved_return_type() {
+    use crate::core::signatures::{Signature, SignatureFlags};
+    let mut c = Checker::new();
+    let ret = c.string_type();
+    let mut sig = Signature::new(SignatureFlags::NONE);
+    sig.resolved_return_type = Some(ret);
+    let sid = c.new_signature(sig);
+    assert_eq!(c.get_return_type_of_signature(sid), ret);
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypeArguments
+#[test]
+fn check_type_arguments_reports_constraint_violation() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T extends number>(x: T) {}\nf<string>(\"a\");",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p.clone());
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2344),
+        "expected TS2344 from checkTypeArguments path, got {diags:?}",
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getPropertyTypeForIndexType
+#[test]
+fn get_property_type_for_index_type_resolves_literal_key() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const o: { a: number };");
+    let mut c = Checker::new();
+    let root = p.root();
+    c.check_source_file(root);
+    let o_sym = *p
+        .locals(root)
+        .expect("locals")
+        .get("o")
+        .expect("symbol o");
+    let o_ty = crate::core::declared_types::get_type_of_symbol(&mut c, &p, o_sym, None);
+    let a_lit = c.get_string_literal_type("a");
+    let prop = c
+        .get_property_type_for_index_type(&p, o_ty, a_lit)
+        .expect("property type for 'a'");
+    assert_eq!(prop, c.number_type());
+}
