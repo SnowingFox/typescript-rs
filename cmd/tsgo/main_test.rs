@@ -64,10 +64,7 @@ fn good_file_compiles_clean_exits_zero_and_emits_js() {
 // `bad.ts(1,7): error TS2322: Type 'string' is not assignable to type
 // 'number'.`; `bad.js` still written.
 //
-// DIVERGENCE(port): the reported column is `6`, not Go's `7` — the
-// `tsgo_checker` diagnostic span for the declaration starts one character
-// earlier. The code (TS2322), message, exit code, and "still emitted" behavior
-// all match Go. (Same divergence documented in `internal/execute`.)
+// Column matches Go `tsgo`: the TS2322 span starts on the initializer `"s"`.
 #[test]
 fn bad_file_reports_ts2322_and_exits_one() {
     let (sys, fs) = single_file_sys("bad.ts", "const x: number = \"s\";\n");
@@ -75,7 +72,7 @@ fn bad_file_reports_ts2322_and_exits_one() {
     assert_eq!(status, ExitStatus::DiagnosticsPresentOutputsGenerated);
     assert_eq!(
         sys.output(),
-        "bad.ts(1,6): error TS2322: Type 'string' is not assignable to type 'number'.\n"
+        "bad.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.\n"
     );
     assert!(fs.file_exists("/p/bad.js"));
 }
@@ -92,7 +89,7 @@ fn no_emit_bad_file_exits_two_without_writing_js() {
     assert_eq!(status, ExitStatus::DiagnosticsPresentOutputsSkipped);
     assert_eq!(
         sys.output(),
-        "bad.ts(1,6): error TS2322: Type 'string' is not assignable to type 'number'.\n"
+        "bad.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.\n"
     );
     assert!(!fs.file_exists("/p/bad.js"));
 }
