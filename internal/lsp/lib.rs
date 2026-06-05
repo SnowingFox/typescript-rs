@@ -18,8 +18,11 @@
 //! - The Go `Server` holds a real `*project.Session`; this port uses a trait
 //!   [`Session`] so tests can plug in a stub without the full project system.
 
+pub mod logger;
+pub mod progress;
 pub mod project_session;
 mod server;
+pub mod stack_sanitizer;
 
 pub use project_session::ProjectSession;
 pub use server::{Server, ServerError, Session};

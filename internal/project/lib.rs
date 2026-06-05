@@ -25,3 +25,4 @@ pub mod projectcollection;
 pub mod refcountcache;
 pub mod session;
 pub mod snapshot;
+pub mod watch;
