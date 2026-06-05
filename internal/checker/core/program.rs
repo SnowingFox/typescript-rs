@@ -222,6 +222,16 @@ pub trait BoundProgram {
         let _ = (importing_file, specifier);
         None
     }
+
+    /// Whether this file's parse pass recorded syntactic diagnostics (Go's
+    /// `hasParseDiagnostics`). Grammar checks must not add checker diagnostics
+    /// on top of a file that already failed to parse cleanly.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/checker.go:Checker.hasParseDiagnostics
+    fn has_parse_diagnostics(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

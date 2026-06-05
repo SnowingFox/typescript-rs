@@ -108,6 +108,8 @@ pub(crate) struct FileView {
     /// checker's option-gated diagnostics read the actual `--target` /
     /// `--downlevelIteration` (see [`BoundProgram::compiler_options`]).
     options: Rc<CompilerOptions>,
+    /// True when this file's parse pass recorded syntactic diagnostics.
+    has_parse_diagnostics: bool,
 }
 
 impl BoundProgram for FileView {
@@ -161,6 +163,10 @@ impl BoundProgram for FileView {
 
     fn compiler_options(&self) -> &CompilerOptions {
         &self.options
+    }
+
+    fn has_parse_diagnostics(&self) -> bool {
+        self.has_parse_diagnostics
     }
 
     fn file_view(&self, file: NodeId) -> Option<Rc<dyn BoundProgram>> {
@@ -439,6 +445,7 @@ impl MultiFileBoundProgram {
                 flow_lists: Rc::new(bind.flow_lists.clone()),
                 flow_switch: Rc::new(bind.flow_switch_data.clone()),
                 options: Rc::clone(&options),
+                has_parse_diagnostics: !file.diagnostics().is_empty(),
             }));
         }
 

@@ -25,6 +25,7 @@ pub(crate) struct StubProgram {
     bind: tsgo_binder::BindResult,
     options: CompilerOptions,
     text: String,
+    has_parse_diagnostics: bool,
 }
 
 impl StubProgram {
@@ -94,6 +95,7 @@ impl StubProgram {
             file_name: file_name.to_string(),
         };
         let mut parsed = parse_source_file(opts, text, script_kind);
+        let has_parse_diagnostics = !parsed.diagnostics.is_empty();
         let bind = bind_source_file(&mut parsed.arena, parsed.source_file);
         StubProgram {
             arena: parsed.arena,
@@ -101,6 +103,7 @@ impl StubProgram {
             bind,
             options,
             text: text.to_string(),
+            has_parse_diagnostics,
         }
     }
 }
@@ -156,6 +159,10 @@ impl BoundProgram for StubProgram {
 
     fn compiler_options(&self) -> &CompilerOptions {
         &self.options
+    }
+
+    fn has_parse_diagnostics(&self) -> bool {
+        self.has_parse_diagnostics
     }
 }
 

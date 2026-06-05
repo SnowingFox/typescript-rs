@@ -351,6 +351,30 @@ fn ambient_function_with_body_reports_1183() {
 // checkGrammarVariableDeclarationList (using / await using)
 // ---------------------------------------------------------------------------
 
+// Corpus `panicForInEmptyDeclarationList`: `for (let in)` recovers to an empty
+// variable-declaration list with parse diagnostics, so grammar must NOT add
+// TS1123 on top (Go's `grammarErrorAtPos` / `hasParseDiagnostics` gate).
+#[test]
+fn for_in_empty_declaration_list_with_parse_errors_no_1123() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() { for (let in) {} }",
+    ));
+    assert!(
+        p.has_parse_diagnostics(),
+        "expected parse diagnostics for `for (let in)`"
+    );
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 1123),
+        "grammar must not report TS1123 when parse diagnostics exist: {:?}",
+        diags
+    );
+}
+
 // Go: internal/checker/grammarchecks.go:checkGrammarVariableDeclarationList
 // Empty declaration list -> TS1123
 #[test]

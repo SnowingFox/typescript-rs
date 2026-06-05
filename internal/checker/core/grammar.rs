@@ -1529,6 +1529,9 @@ impl Checker {
         message: &'static tsgo_diagnostics::Message,
         args: &[&str],
     ) -> bool {
+        if program.has_parse_diagnostics() {
+            return false;
+        }
         self.error(program, node, message, args);
         true
     }
@@ -1549,6 +1552,9 @@ impl Checker {
         message: &'static tsgo_diagnostics::Message,
         args: &[&str],
     ) -> bool {
+        if program.has_parse_diagnostics() {
+            return false;
+        }
         self.error(program, node, message, args);
         true
     }
@@ -1769,13 +1775,18 @@ impl Checker {
         };
 
         if declarations.nodes.is_empty() {
-            self.error(
+            let loc = match arena.data(node) {
+                NodeData::VariableDeclarationList(d) => d.declarations.loc,
+                _ => return false,
+            };
+            return self.grammar_error_at_pos(
                 program,
                 node,
+                loc.pos(),
+                loc.end() - loc.pos(),
                 &tsgo_diagnostics::VARIABLE_DECLARATION_LIST_CANNOT_BE_EMPTY,
                 &[],
             );
-            return true;
         }
 
         let block_scope_flags = arena.flags(node) & NodeFlags::BLOCK_SCOPED;
@@ -2345,6 +2356,9 @@ impl Checker {
         message: &'static tsgo_diagnostics::Message,
         args: &[&str],
     ) -> bool {
+        if program.has_parse_diagnostics() {
+            return false;
+        }
         use super::check::Diagnostic;
         let diagnostic = Diagnostic {
             code: message.code(),

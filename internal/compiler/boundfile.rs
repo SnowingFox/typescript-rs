@@ -52,6 +52,8 @@ pub struct BoundFile {
     /// The program's real compiler options (see
     /// [`BoundProgram::compiler_options`]).
     options: Rc<CompilerOptions>,
+    /// True when the parse pass recorded syntactic diagnostics for this file.
+    has_parse_diagnostics: bool,
 }
 
 impl BoundFile {
@@ -90,6 +92,7 @@ impl BoundFile {
             root: file.node(),
             bind,
             options,
+            has_parse_diagnostics: !file.diagnostics().is_empty(),
         })
     }
 }
@@ -150,6 +153,10 @@ impl BoundProgram for BoundFile {
 
     fn compiler_options(&self) -> &CompilerOptions {
         &self.options
+    }
+
+    fn has_parse_diagnostics(&self) -> bool {
+        self.has_parse_diagnostics
     }
 }
 
