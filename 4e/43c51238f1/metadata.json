@@ -1,0 +1,22 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "4e43c51238f1",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "internal/checker/core/flow.rs",
+    "internal/checker/core/types.rs",
+    "internal/compiler/bench_test.rs",
+    "internal/compiler/stress_test.rs",
+    "internal/testrunner/test_case_parser_test.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/4e/43c51238f1/0/metadata.json",
+      "transcript": "/4e/43c51238f1/0/full.jsonl",
+      "content_hash": "/4e/43c51238f1/0/content_hash.txt",
+      "prompt": "/4e/43c51238f1/0/prompt.txt"
+    }
+  ]
+}
