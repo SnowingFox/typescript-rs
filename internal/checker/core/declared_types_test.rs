@@ -329,6 +329,26 @@ fn property_of_primitive_is_none() {
     assert_eq!(get_property_of_type(&c, c.string_type(), "length"), None);
 }
 
+// Go: internal/checker/checker.go:Checker.resolveBaseTypesOfInterface (circularity)
+#[test]
+fn circular_interface_extends_breaks_cycle_without_stack_overflow() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A extends B { a: number; }\ninterface B extends A { b: string; }",
+    );
+    let mut c = Checker::new();
+    let a = get_declared_type_of_symbol(&mut c, &p, local(&p, "A"), None);
+    let b = get_declared_type_of_symbol(&mut c, &p, local(&p, "B"), None);
+    let a_bases = c.get_type(a).as_object().expect("A").base_types.clone();
+    let b_bases = c.get_type(b).as_object().expect("B").base_types.clone();
+    // B is resolved first in the mutual cycle; A must not inherit B back.
+    assert_eq!(b_bases, vec![a]);
+    assert!(
+        a_bases.is_empty(),
+        "A must not list B as a base (cycle broken)"
+    );
+}
+
 // Go: internal/checker/checker.go:getDeclaredTypeOfClassOrInterface (extends merge)
 #[test]
 fn declared_interface_inherits_extends_members() {

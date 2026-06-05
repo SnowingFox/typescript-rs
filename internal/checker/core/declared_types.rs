@@ -375,7 +375,7 @@ fn get_declared_type_of_class_or_interface(
     checker.declared_type_links.get(symbol).declared_type = Some(t);
 
     // Resolve and merge base (extends) members.
-    let base_types = resolve_base_types(checker, program, &declarations, globals);
+    let base_types = resolve_base_types(checker, program, t, &declarations, globals);
     if !base_types.is_empty() {
         let mut merged = SymbolTable::default();
         for &base in &base_types {
@@ -671,6 +671,18 @@ fn collect_index_infos_of_members(
 // generic type references when needed.
 // Go: internal/checker/checker.go:Checker.getIndexInfosOfStructuredType
 fn get_index_infos_of_structured_type(checker: &mut Checker, t: TypeId) -> Vec<IndexInfoId> {
+    get_index_infos_of_structured_type_impl(checker, t, &mut FxHashMap::default())
+}
+
+fn get_index_infos_of_structured_type_impl(
+    checker: &mut Checker,
+    t: TypeId,
+    visited: &mut FxHashMap<TypeId, ()>,
+) -> Vec<IndexInfoId> {
+    if visited.contains_key(&t) {
+        return Vec::new();
+    }
+    visited.insert(t, ());
     let Some(obj) = checker.get_type(t).as_object().cloned() else {
         return Vec::new();
     };
@@ -681,7 +693,7 @@ fn get_index_infos_of_structured_type(checker: &mut Checker, t: TypeId) -> Vec<I
             .map(|o| o.type_parameters.clone())
             .unwrap_or_default();
         let args = obj.resolved_type_arguments.clone();
-        let target_infos = get_index_infos_of_structured_type(checker, target);
+        let target_infos = get_index_infos_of_structured_type_impl(checker, target, visited);
         if !params.is_empty() && params.len() == args.len() {
             return instantiate_index_infos(
                 checker,
@@ -696,7 +708,7 @@ fn get_index_infos_of_structured_type(checker: &mut Checker, t: TypeId) -> Vec<I
     }
     let mut infos = obj.index_infos.clone();
     for &base in &obj.base_types {
-        for id in get_index_infos_of_structured_type(checker, base) {
+        for id in get_index_infos_of_structured_type_impl(checker, base, visited) {
             if !infos.iter().any(|&existing| {
                 checker.index_info(existing).key_type == checker.index_info(id).key_type
             }) {
@@ -760,6 +772,7 @@ fn collect_local_type_parameters(
 fn resolve_base_types(
     checker: &mut Checker,
     program: &dyn BoundProgram,
+    self_type: TypeId,
     declarations: &[tsgo_ast::NodeId],
     globals: Option<&SymbolTable>,
 ) -> Vec<TypeId> {
@@ -789,25 +802,87 @@ fn resolve_base_types(
                     continue;
                 }
                 let name = program.arena().text(expression).to_string();
-                if let Some(base_symbol) = resolve_name(
+                let Some(base_symbol) = resolve_name(
                     program,
                     expression,
                     &name,
                     SymbolFlags::TYPE,
                     false,
                     globals,
-                ) {
-                    bases.push(get_declared_type_of_symbol(
-                        checker,
-                        program,
-                        base_symbol,
-                        globals,
-                    ));
+                ) else {
+                    continue;
+                };
+                let base_type = get_declared_type_of_symbol(checker, program, base_symbol, globals);
+                if base_type == checker.error_type() {
+                    continue;
+                }
+                if self_type != base_type && !has_base_type(checker, base_type, self_type) {
+                    bases.push(base_type);
+                } else {
+                    report_circular_base_type(checker, program, type_node, self_type);
                 }
             }
         }
     }
     bases
+}
+
+// Returns the target of a class/interface type reference.
+// Go: internal/checker/checker.go:getTargetType
+fn get_target_type(checker: &Checker, t: TypeId) -> TypeId {
+    checker
+        .get_type(t)
+        .as_object()
+        .and_then(|obj| obj.target)
+        .unwrap_or(t)
+}
+
+// Returns whether `t` has `check_base` in its extends chain.
+// Go: internal/checker/checker.go:Checker.hasBaseType
+fn has_base_type(checker: &Checker, t: TypeId, check_base: TypeId) -> bool {
+    fn check(checker: &Checker, t: TypeId, check_base: TypeId) -> bool {
+        let ty = checker.get_type(t);
+        if let Some(members) = ty.intersection_types() {
+            return members
+                .iter()
+                .any(|&member| check(checker, member, check_base));
+        }
+        if ty
+            .object_flags()
+            .intersects(ObjectFlags::CLASS_OR_INTERFACE | ObjectFlags::REFERENCE)
+        {
+            let target = get_target_type(checker, t);
+            if target == check_base {
+                return true;
+            }
+            if let Some(target_obj) = checker.get_type(target).as_object() {
+                return target_obj
+                    .base_types
+                    .iter()
+                    .any(|&base| check(checker, base, check_base));
+            }
+        }
+        false
+    }
+    check(checker, t, check_base)
+}
+
+// Reports TS2310 when an interface/class `extends` clause would make the type
+// its own base.
+// Go: internal/checker/checker.go:Checker.reportCircularBaseType
+fn report_circular_base_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+    t: TypeId,
+) {
+    let type_str = super::nodebuilder::type_to_string(checker, program, t);
+    checker.error(
+        program,
+        node,
+        &tsgo_diagnostics::TYPE_0_RECURSIVELY_REFERENCES_ITSELF_AS_A_BASE_TYPE,
+        &[type_str.as_str()],
+    );
 }
 
 /// Returns the resolved member table of a structured type.
@@ -4296,14 +4371,14 @@ pub fn get_indexed_access_type(
             .to_vec();
         let mut prop_types: Vec<TypeId> = Vec::with_capacity(members.len());
         for m in members {
-            match get_property_type_for_index_type(checker, program, object_type, m) {
+            match checker.get_property_type_for_index_type(program, object_type, m) {
                 Some(pt) => prop_types.push(pt),
                 None => return None,
             }
         }
         return Some(checker.get_union_type(&prop_types));
     }
-    get_property_type_for_index_type(checker, program, object_type, index_type)
+    checker.get_property_type_for_index_type(program, object_type, index_type)
 }
 
 // Resolves `objectType[indexType]` to the type of the property/element selected
@@ -4318,7 +4393,7 @@ pub fn get_indexed_access_type(
 // constraint-of-index-type fallback for a residual generic object. blocked-by:
 // the access-node error machinery + access flags + numeric property names.
 // Go: internal/checker/checker.go:Checker.getPropertyTypeForIndexType
-fn get_property_type_for_index_type(
+pub(crate) fn get_property_type_for_index_type(
     checker: &mut Checker,
     program: &dyn BoundProgram,
     object_type: TypeId,

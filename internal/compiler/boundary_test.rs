@@ -18,7 +18,7 @@ use tsgo_vfs::Fs;
 
 use crate::host::new_compiler_host;
 use crate::program::{new_program, ProgramOptions};
-use crate::{EmitOptions, EmitOnly, EmitResult, Program};
+use crate::{EmitOnly, EmitOptions, EmitResult, Program};
 
 type Captured = Rc<RefCell<Vec<(String, String)>>>;
 
@@ -260,15 +260,7 @@ const Σ = π + _ñ;
 // ────────────────────────────────────────────────────────────────────────────
 // 10. Circular extends
 // ────────────────────────────────────────────────────────────────────────────
-//
-// BUG(checker): `interface A extends B {} / interface B extends A {}` causes a
-// stack overflow in the checker's base-type resolution — infinite recursion
-// without a circularity guard. The type-alias equivalent (`type A = { b: B }`)
-// is handled correctly (see `stress_circular_type_references`). This test is
-// ignored until the checker's `resolveBaseTypesOfInterface` gains a circularity
-// sentinel (expected to produce TS2310).
 #[test]
-#[ignore = "checker stack overflow on circular interface extends (known bug)"]
 fn boundary_circular_extends() {
     let src = r#"
 interface A extends B { a: number; }
@@ -321,12 +313,12 @@ fn boundary_very_long_string_literal() {
 fn boundary_file_ending_mid_token() {
     // Various truncated inputs — primary assertion: no panic.
     let cases = [
-        "const x = \"hello world",       // unterminated string
-        "const y = `template ${",        // unterminated template
-        "function foo(",                 // unterminated parameter list
-        "const z = {",                   // unterminated object
-        "/* unclosed comment",           // unterminated block comment
-        "const w: num",                  // truncated type annotation
+        "const x = \"hello world", // unterminated string
+        "const y = `template ${",  // unterminated template
+        "function foo(",           // unterminated parameter list
+        "const z = {",             // unterminated object
+        "/* unclosed comment",     // unterminated block comment
+        "const w: num",            // truncated type annotation
     ];
     for src in &cases {
         let mut program = boundary_program(&[("/index.ts", src)], &["/index.ts"]);
