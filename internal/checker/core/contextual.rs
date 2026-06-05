@@ -25,6 +25,20 @@ use super::symbols::resolve_name;
 use super::types::{TypeFlags, TypeId};
 use super::Checker;
 
+/// A pushed contextual type for an expression node (Go's `ContextualInfo`).
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/checker.go:ContextualInfo
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ContextualInfo {
+    /// The expression node this contextual type applies to.
+    pub node: NodeId,
+    /// The contextual type pushed for `node`.
+    pub contextual_type: TypeId,
+    /// Whether this entry is a cache push (ignored for non-`NONE` flag lookups).
+    pub is_cache: bool,
+}
+
 bitflags::bitflags! {
     /// Flags controlling how a contextual type is computed (Go's `ContextFlags`).
     ///
@@ -81,6 +95,20 @@ impl Checker {
         node: NodeId,
         context_flags: ContextFlags,
     ) -> Option<TypeId> {
+        if program
+            .arena()
+            .flags(node)
+            .contains(tsgo_ast::NodeFlags::IN_WITH_STATEMENT)
+        {
+            return None;
+        }
+        // Cached/pushed contextual types are consulted with no `ContextFlags`, so
+        // only `NONE` requests may read them (Go's `findContextualNode`).
+        if context_flags == ContextFlags::NONE {
+            if let Some(t) = self.find_pushed_contextual_type(node, true) {
+                return Some(t);
+            }
+        }
         let parent = program.arena().parent(node)?;
         match program.arena().kind(parent) {
             Kind::VariableDeclaration
@@ -815,6 +843,46 @@ impl Checker {
             self.assign_contextual_parameter_types(program, node, context);
         }
     }
+
+    /// Pushes `contextual_type` as the contextual type of `node` (Go's
+    /// `pushContextualType`). Popped by [`Checker::pop_contextual_type`].
+    ///
+    /// Side effects: mutates the contextual-type stack.
+    // Go: internal/checker/checker.go:Checker.pushContextualType
+    pub(crate) fn push_contextual_type(
+        &mut self,
+        node: NodeId,
+        contextual_type: TypeId,
+        is_cache: bool,
+    ) {
+        self.contextual_infos.push(ContextualInfo {
+            node,
+            contextual_type,
+            is_cache,
+        });
+    }
+
+    /// Pops the innermost pushed contextual type (Go's `popContextualType`).
+    ///
+    /// Side effects: mutates the contextual-type stack.
+    // Go: internal/checker/checker.go:Checker.popContextualType
+    pub(crate) fn pop_contextual_type(&mut self) {
+        if !self.contextual_infos.is_empty() {
+            self.contextual_infos.pop();
+        }
+    }
+
+    /// Returns the pushed contextual type for `node`, if any (Go's
+    /// `findContextualNode` -> `contextualInfos[index].t`).
+    // Go: internal/checker/checker.go:Checker.findContextualNode
+    fn find_pushed_contextual_type(&self, node: NodeId, include_caches: bool) -> Option<TypeId> {
+        for info in self.contextual_infos.iter().rev() {
+            if info.node == node && (include_caches || !info.is_cache) {
+                return Some(info.contextual_type);
+            }
+        }
+        None
+    }
 }
 
 /// Returns the initializer node of a variable-like declaration, if any.
@@ -840,7 +908,7 @@ fn declaration_type_node(program: &dyn BoundProgram, declaration: NodeId) -> Opt
 
 /// Reports whether `node` is a function expression or arrow function (Go's
 /// `ast.IsFunctionExpressionOrArrowFunction`).
-fn is_function_expression_or_arrow(program: &dyn BoundProgram, node: NodeId) -> bool {
+pub(crate) fn is_function_expression_or_arrow(program: &dyn BoundProgram, node: NodeId) -> bool {
     matches!(
         program.arena().kind(node),
         Kind::ArrowFunction | Kind::FunctionExpression

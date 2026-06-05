@@ -300,6 +300,10 @@ pub struct Checker {
     /// run's forward scan is not reported again. Cleared per file.
     // Go: internal/checker/checker.go:Checker.reportedUnreachableNodes
     reported_unreachable_nodes: FxHashSet<NodeId>,
+    /// Pushed contextual types for expressions being checked with an explicit
+    /// contextual type (Go's `contextualInfos` stack).
+    // Go: internal/checker/checker.go:Checker.contextualInfos
+    contextual_infos: Vec<contextual::ContextualInfo>,
     /// The signature resolved for a call/new expression, keyed by the call node
     /// (Go memoizes this on `signatureLinks[node].resolvedSignature`). C-B2
     /// populates it for a generic call whose type arguments were inferred, so a
@@ -551,6 +555,7 @@ impl Checker {
             ambient_context_reported: FxHashSet::default(),
             within_unreachable_code: false,
             reported_unreachable_nodes: FxHashSet::default(),
+            contextual_infos: Vec::new(),
             resolved_signatures: FxHashMap::default(),
             type_reference_cache: FxHashMap::default(),
             any_type,

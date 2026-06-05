@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use rustc_hash::FxHashSet;
 use tsgo_ast::symbol::{INTERNAL_SYMBOL_NAME_COMPUTED, INTERNAL_SYMBOL_NAME_EXPORT_EQUALS};
-use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags, SymbolId, SymbolTable};
+use tsgo_ast::{Kind, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId, SymbolTable};
 use tsgo_core::compileroptions::ScriptTarget;
 use tsgo_diagnostics::{Category, Message};
 
@@ -32,7 +32,8 @@ use super::declared_types::{
     fill_missing_type_arguments, get_apparent_type, get_constraint_of_type_parameter,
     get_declaration_of_alias_symbol, get_declared_type_of_symbol, get_default_from_type_parameter,
     get_indexed_access_type, get_min_type_argument_count, get_property_of_type,
-    get_type_from_type_node, get_type_of_property_of_type, get_type_of_symbol, resolve_alias,
+    get_property_type_for_index_type, get_type_from_type_node, get_type_of_property_of_type,
+    get_type_of_symbol, resolve_alias,
 };
 use super::inference::{InferenceContext, InferencePriority};
 use super::mapper::TypeMapper;
@@ -185,6 +186,34 @@ enum NonNullReporter {
     Invocation,
 }
 
+/// Syntactic truthiness classification for a condition expression (Go's
+/// `PredicateSemantics`).
+// Go: internal/checker/checker.go:PredicateSemantics
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PredicateSemantics {
+    /// No fixed truthiness.
+    None = 0,
+    /// Always truthy.
+    Always = 1,
+    /// Always falsy.
+    Never = 2,
+    /// May be either (Go's `PredicateSemanticsSometimes`).
+    Sometimes = 3,
+}
+
+impl std::ops::BitOr for PredicateSemantics {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        match (self, rhs) {
+            (Self::None, other) | (other, Self::None) => other,
+            (Self::Always, Self::Always) => Self::Always,
+            (Self::Never, Self::Never) => Self::Never,
+            _ => Self::Sometimes,
+        }
+    }
+}
+
 // A typed object-literal member, recorded in declaration order to compute index
 // signatures (Go's `propertiesArray` entries). The port's synthesized property
 // symbols carry no declarations, so the computed-name expression's type is kept
@@ -222,6 +251,165 @@ impl Checker {
         let result = self.check_expression_worker(program, node);
         self.current_node = saved_current_node;
         result
+    }
+
+    /// Checks `node` with an explicit `contextual_type`, optionally participating
+    /// in generic inference via `inference_context` (Go's
+    /// `checkExpressionWithContextualType`).
+    ///
+    /// Pushes the contextual type onto the checker stack so
+    /// [`Checker::get_contextual_type`] sees it, checks the expression, then
+    /// strips literal freshness when the result is a literal in a matching
+    /// literal context. The `inference_context` arm (inferential check mode and
+    /// intra-expression inference sites) is deferred.
+    ///
+    /// Side effects: may record diagnostics, allocate types, and mutate the
+    /// contextual-type stack.
+    // Go: internal/checker/checker.go:Checker.checkExpressionWithContextualType
+    pub(crate) fn check_expression_with_contextual_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        contextual_type: TypeId,
+        _inference_context: Option<&mut InferenceContext>,
+    ) -> TypeId {
+        let context_node = get_context_node(program, node);
+        self.push_contextual_type(context_node, contextual_type, false);
+        let t = if super::contextual::is_function_expression_or_arrow(program, node) {
+            // Context-sensitive callback arguments: assign parameter types from
+            // the contextual signature, check the body, and build the function
+            // type for return-type inference (Go's inferential
+            // `checkExpressionWithContextualType` on a function-like node).
+            if let Some(&ctx_sig) = self.get_signatures_of_type(contextual_type).first() {
+                self.assign_contextual_parameter_types(program, node, ctx_sig);
+            }
+            self.get_type_of_context_sensitive_arrow(program, node)
+        } else {
+            self.check_expression(program, node)
+        };
+        let t = if self.is_literal_type(t)
+            && self.is_literal_of_contextual_type(t, Some(contextual_type))
+        {
+            self.regular_type_of_literal_type(t)
+        } else {
+            t
+        };
+        self.pop_contextual_type();
+        t
+    }
+
+    /// Returns the semantic type of `node` for tooling queries (Go's
+    /// `getTypeOfNode` / `GetTypeAtLocation`).
+    ///
+    /// Reachable subset: whole non-module source files and nodes inside `with`
+    /// blocks yield the error type; type-syntax nodes use
+    /// [`Checker::get_type_from_type_node`]; expressions use
+    /// [`Checker::get_regular_type_of_expression`]; declarations and declaration
+    /// names resolve through their symbols.
+    ///
+    /// Side effects: may check expressions and allocate types.
+    // Go: internal/checker/checker.go:Checker.getTypeOfNode
+    pub(crate) fn get_type_of_node(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        globals: Option<&SymbolTable>,
+    ) -> TypeId {
+        let arena = program.arena();
+        if arena.kind(node) == Kind::SourceFile
+            || arena.flags(node).contains(NodeFlags::IN_WITH_STATEMENT)
+        {
+            return self.error_type();
+        }
+        if is_part_of_type_node(program, node) {
+            return self.get_type_from_type_node(program, node, globals);
+        }
+        if is_expression_node(program, node) {
+            return self.get_regular_type_of_expression(program, node);
+        }
+        if super::symbols_query::is_declaration(arena, node) {
+            return match super::symbols_query::get_symbol_of_declaration(program, node) {
+                Some(symbol) => get_type_of_symbol(self, program, symbol, globals),
+                None => self.error_type(),
+            };
+        }
+        if super::symbols_query::is_declaration_name(arena, node) {
+            return match super::symbols_query::get_symbol_at_location(self, program, node, globals)
+            {
+                Some(symbol) => get_type_of_symbol(self, program, symbol, globals),
+                None => self.error_type(),
+            };
+        }
+        self.error_type()
+    }
+
+    /// The regular (non-fresh) type of an expression `expr` (Go's
+    /// `getRegularTypeOfExpression`).
+    ///
+    /// Side effects: may check `expr` and allocate types.
+    // Go: internal/checker/checker.go:Checker.getRegularTypeOfExpression
+    pub(crate) fn get_regular_type_of_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        expr: NodeId,
+    ) -> TypeId {
+        let expr = if is_right_side_of_qualified_name_or_property_access(program, expr) {
+            program.arena().parent(expr).unwrap_or(expr)
+        } else {
+            expr
+        };
+        let t = self.check_expression(program, expr);
+        self.regular_type_of_literal_type(t)
+    }
+
+    /// Resolves a type-syntax node to its type (Go's `getTypeFromTypeNode`).
+    ///
+    /// Side effects: may allocate types.
+    // Go: internal/checker/checker.go:Checker.getTypeFromTypeNode
+    pub(crate) fn get_type_from_type_node(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        globals: Option<&SymbolTable>,
+    ) -> TypeId {
+        get_type_from_type_node(self, program, node, globals)
+    }
+
+    /// Returns the type of the property named `name` on object type `t` (Go's
+    /// `getTypeOfPropertyOfType`).
+    ///
+    /// Side effects: may allocate synthesized properties.
+    // Go: internal/checker/checker.go:Checker.getTypeOfPropertyOfType
+    pub(crate) fn get_type_of_property_of_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        name: &str,
+    ) -> Option<TypeId> {
+        get_type_of_property_of_type(self, program, t, name)
+    }
+
+    /// Resolves `object_type[index_type]` to the selected property/element type
+    /// (Go's `getPropertyTypeForIndexType`).
+    ///
+    /// Side effects: may allocate types.
+    // Go: internal/checker/checker.go:Checker.getPropertyTypeForIndexType
+    pub(crate) fn get_property_type_for_index_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        object_type: TypeId,
+        index_type: TypeId,
+    ) -> Option<TypeId> {
+        get_property_type_for_index_type(self, program, object_type, index_type)
+    }
+
+    /// Returns the resolved return type of `signature` (Go's
+    /// `getReturnTypeOfSignature` for an already-resolved signature).
+    ///
+    /// Side effects: none for signatures whose return type is already resolved.
+    // Go: internal/checker/checker.go:Checker.getReturnTypeOfSignature
+    pub(crate) fn get_return_type_of_signature(&self, signature: SignatureId) -> TypeId {
+        self.signature_return_type(signature)
     }
 
     fn check_expression_worker(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
@@ -1118,20 +1306,23 @@ impl Checker {
         self.get_non_null_type(operand_type)
     }
 
-    // Checks an expression used as the object of a property/element access (Go's
-    // `checkNonNullExpression`): types the expression, then runs the
-    // possibly-`null`/`undefined` check on `node`.
+    /// Checks an expression used as the object of a property/element access (Go's
+    /// `checkNonNullExpression`): types the expression, then runs the
+    /// possibly-`null`/`undefined` check on `node`.
     // Go: internal/checker/checker.go:Checker.checkNonNullExpression(7373)
-    fn check_non_null_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+    pub fn check_non_null_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
         let t = self.check_expression(program, node);
         self.check_non_null_type(program, t, node)
     }
 
-    // Reports the possibly-`null`/`undefined` error for a property/element access
-    // object and narrows to the non-null type (Go's `checkNonNullType`, which
-    // defaults to the `reportObjectPossiblyNullOrUndefinedError` reporter).
+    /// Reports the possibly-`null`/`undefined` error for a property/element access
+    /// object and narrows to the non-null type (Go's `checkNonNullType`).
     // Go: internal/checker/checker.go:Checker.checkNonNullType(7377)
-    fn check_non_null_type(
+    pub fn check_non_null_type(
         &mut self,
         program: &dyn BoundProgram,
         t: TypeId,
@@ -1682,7 +1873,7 @@ impl Checker {
             return object_type;
         }
         let name = program.arena().text(name_node).to_string();
-        match get_type_of_property_of_type(self, program, object_type, &name) {
+        match self.get_type_of_property_of_type(program, object_type, &name) {
             Some(t) => t,
             None => {
                 let type_str = super::nodebuilder::type_to_string(self, program, object_type);
@@ -1711,7 +1902,7 @@ impl Checker {
         let object_type = self.check_non_null_expression(program, expr);
         if program.arena().kind(arg) == Kind::StringLiteral {
             let name = program.arena().text(arg).to_string();
-            if let Some(t) = get_type_of_property_of_type(self, program, object_type, &name) {
+            if let Some(t) = self.get_type_of_property_of_type(program, object_type, &name) {
                 return t;
             }
         }
@@ -2680,7 +2871,7 @@ impl Checker {
     // adjustment and the head-message chaining. blocked-by: `this`-type
     // instantiation + diagnostic-chain head messages.
     // Go: internal/checker/checker.go:Checker.checkTypeArguments
-    fn check_type_arguments(
+    pub(crate) fn check_type_arguments(
         &mut self,
         program: &dyn BoundProgram,
         signature: SignatureId,
@@ -2848,7 +3039,7 @@ impl Checker {
         signature: SignatureId,
         context: &mut InferenceContext,
     ) {
-        let return_type = self.signature_return_type(signature);
+        let return_type = self.get_return_type_of_signature(signature);
         if !self.could_contain_type_variables(return_type) {
             return;
         }
@@ -2888,13 +3079,7 @@ impl Checker {
         // themselves, so the instantiated parameter type is `(x: number) => U`.
         let mapper = self.get_fixing_inference_mapper(program, context);
         let instantiated_param = self.instantiate_param_type(program, param_type, &mapper);
-        // Contextually type the callback's parameters from the instantiated
-        // parameter type's call signature, then build its function type.
-        let ctx_signature = self.get_signatures_of_type(instantiated_param);
-        if let Some(&ctx_sig) = ctx_signature.first() {
-            self.assign_contextual_parameter_types(program, arg, ctx_sig);
-        }
-        self.get_type_of_context_sensitive_arrow(program, arg)
+        self.check_expression_with_contextual_type(program, arg, instantiated_param, Some(context))
     }
 
     // Builds the function type of a context-sensitive arrow/function expression
@@ -4484,6 +4669,175 @@ impl Checker {
             .any(|&d| arena.kind(d) == Kind::ModuleDeclaration && module_is_value_module(arena, d))
     }
 
+    /// Checks a block statement and its nested statements (Go's `checkBlock`).
+    ///
+    /// Side effects: may record diagnostics and recurse into child statements.
+    // Go: internal/checker/checker.go:Checker.checkBlock(3761)
+    pub fn check_block(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        if program.arena().kind(node) == Kind::Block {
+            self.check_grammar_statement_in_ambient_context(program, node);
+        }
+        // DEFER(phase-4-checker-4g): save/restore `flowAnalysisDisabled` around
+        // function/module blocks (`IsFunctionOrModuleBlock`). blocked-by:
+        // `flowAnalysisDisabled` wiring.
+        self.check_source_elements(program, node);
+        if program.locals(node).is_some() {
+            self.register_for_unused_identifiers_check(node);
+        }
+    }
+
+    /// Checks an expression statement (Go's `checkExpressionStatement`).
+    ///
+    /// Side effects: may record diagnostics and check the expression.
+    // Go: internal/checker/checker.go:Checker.checkExpressionStatement(7297)
+    pub fn check_expression_statement(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        self.check_grammar_statement_in_ambient_context(program, node);
+        if let NodeData::ExpressionStatement(d) = program.arena().data(node) {
+            self.check_expression(program, d.expression);
+        }
+    }
+
+    /// Checks a labeled statement, including duplicate-label and unused-label
+    /// diagnostics (Go's `checkLabeledStatement`).
+    ///
+    /// Side effects: may record diagnostics and recurse into the body.
+    // Go: internal/checker/checker.go:Checker.checkLabeledStatement(4180)
+    pub fn check_labeled_statement(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::LabeledStatement(d) = program.arena().data(node) else {
+            return;
+        };
+        let (label, statement) = (d.label, d.statement);
+        if !self.check_grammar_statement_in_ambient_context(program, node) {
+            let label_text = program.arena().text(label).to_string();
+            let mut current = program.arena().parent(node);
+            while let Some(cur) = current {
+                if is_function_like_kind(program.arena().kind(cur)) {
+                    break;
+                }
+                if let NodeData::LabeledStatement(ld) = program.arena().data(cur) {
+                    if program.arena().text(ld.label) == label_text {
+                        self.grammar_error_on_node(
+                            program,
+                            label,
+                            &tsgo_diagnostics::DUPLICATE_LABEL_0,
+                            &[&label_text],
+                        );
+                        break;
+                    }
+                }
+                current = program.arena().parent(cur);
+            }
+        }
+        if program
+            .arena()
+            .flags(label)
+            .contains(NodeFlags::UNREACHABLE)
+            && self.compiler_options().allow_unused_labels != tsgo_core::tristate::Tristate::True
+        {
+            self.error(program, label, &tsgo_diagnostics::UNUSED_LABEL, &[]);
+        }
+        self.check_statement(program, statement);
+    }
+
+    /// Validates that `t` may be tested for truthiness at `node` (partial port
+    /// of Go's `checkTruthinessOfType`).
+    ///
+    /// Reports `1345` for `void`, and `2872`/`2873` when syntactic semantics
+    /// prove the expression is always truthy/falsy.
+    ///
+    /// Side effects: may record diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkTruthinessOfType(12809)
+    pub fn check_truthiness_of_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        node: NodeId,
+    ) -> TypeId {
+        if self.get_type(t).flags().contains(TypeFlags::VOID) {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::AN_EXPRESSION_OF_TYPE_VOID_CANNOT_BE_TESTED_FOR_TRUTHINESS,
+                &[],
+            );
+            return t;
+        }
+        let semantics = self.get_syntactic_truthy_semantics(program, node);
+        if semantics != PredicateSemantics::Sometimes {
+            let message = if semantics == PredicateSemantics::Always {
+                &tsgo_diagnostics::THIS_KIND_OF_EXPRESSION_IS_ALWAYS_TRUTHY
+            } else {
+                &tsgo_diagnostics::THIS_KIND_OF_EXPRESSION_IS_ALWAYS_FALSY
+            };
+            self.error(program, node, message, &[]);
+        }
+        t
+    }
+
+    /// Returns syntactic truthiness semantics for `node` (partial port of Go's
+    /// `getSyntacticTruthySemantics`).
+    ///
+    /// Side effects: none (pure read of the AST).
+    // Go: internal/checker/checker.go:Checker.getSyntacticTruthySemantics(12830)
+    pub fn get_syntactic_truthy_semantics(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> PredicateSemantics {
+        let node = skip_outer_expressions(program, node);
+        match program.arena().kind(node) {
+            Kind::NumericLiteral => {
+                let text = program.arena().text(node);
+                if text == "0" || text == "1" {
+                    PredicateSemantics::Sometimes
+                } else {
+                    PredicateSemantics::Always
+                }
+            }
+            Kind::ArrayLiteralExpression
+            | Kind::ArrowFunction
+            | Kind::BigIntLiteral
+            | Kind::ClassExpression
+            | Kind::FunctionExpression
+            | Kind::JsxElement
+            | Kind::JsxSelfClosingElement
+            | Kind::ObjectLiteralExpression
+            | Kind::RegularExpressionLiteral => PredicateSemantics::Always,
+            Kind::VoidExpression | Kind::NullKeyword => PredicateSemantics::Never,
+            Kind::NoSubstitutionTemplateLiteral | Kind::StringLiteral => {
+                if program.arena().text(node).is_empty() {
+                    PredicateSemantics::Never
+                } else {
+                    PredicateSemantics::Always
+                }
+            }
+            Kind::ConditionalExpression => {
+                let NodeData::ConditionalExpression(d) = program.arena().data(node) else {
+                    return PredicateSemantics::Sometimes;
+                };
+                self.get_syntactic_truthy_semantics(program, d.when_true)
+                    | self.get_syntactic_truthy_semantics(program, d.when_false)
+            }
+            _ => PredicateSemantics::Sometimes,
+        }
+    }
+
+    /// Checks each statement contained in `node` (Go's `checkSourceElements`).
+    ///
+    /// Side effects: may record diagnostics while checking nested statements.
+    // Go: internal/checker/checker.go:Checker.checkSourceElements
+    fn check_source_elements(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let statements = match program.arena().data(node) {
+            NodeData::Block(d) => d.list.nodes.clone(),
+            NodeData::SourceFile(d) => d.statements.nodes.clone(),
+            NodeData::ModuleBlock(d) => d.statements.nodes.clone(),
+            _ => Vec::new(),
+        };
+        for statement in statements {
+            self.check_statement(program, statement);
+        }
+    }
+
     // Checks a single statement (Go's `checkSourceElement` dispatch). Covers
     // grammar modifiers, expression statements, variable statements, and the
     // statement-container kinds that recurse (block / if / while / do / for /
@@ -4554,9 +4908,8 @@ impl Checker {
                 self.check_class_member(program, member);
             }
         }
-        if let NodeData::ExpressionStatement(d) = program.arena().data(node) {
-            let expr = d.expression;
-            self.check_expression(program, expr);
+        if let NodeData::ExpressionStatement(_) = program.arena().data(node) {
+            self.check_expression_statement(program, node);
         }
         if let NodeData::VariableStatement(d) = program.arena().data(node) {
             self.check_grammar_variable_declaration_list(program, d.declaration_list);
@@ -4571,18 +4924,8 @@ impl Checker {
         if let NodeData::EnumDeclaration(_) = program.arena().data(node) {
             self.check_enum_declaration(program, node);
         }
-        // A `{ ... }` block checks each contained statement (Go's `checkBlock` ->
-        // `checkSourceElements`).
-        if let NodeData::Block(d) = program.arena().data(node) {
-            self.check_grammar_statement_in_ambient_context(program, node);
-            let statements = d.list.nodes.clone();
-            for statement in statements {
-                self.check_statement(program, statement);
-            }
-            // Go: checkBlock -> if len(node.Locals()) != 0 { registerForUnusedIdentifiersCheck }
-            if program.locals(node).is_some() {
-                self.register_for_unused_identifiers_check(node);
-            }
+        if let NodeData::Block(_) = program.arena().data(node) {
+            self.check_block(program, node);
         }
         // An `if` statement checks its condition then descends into the then/else
         // branches (Go's `checkIfStatement` -> `checkSourceElement`), so nested
@@ -4778,34 +5121,8 @@ impl Checker {
             }
             self.check_expression(program, expression);
         }
-        // A labeled statement checks for duplicate labels in enclosing scopes
-        // (Go's `checkLabeledStatement` -> parent walk for `Duplicate_label_0`
-        // 1114), then descends into its body.
-        // Go: internal/checker/checker.go:Checker.checkLabeledStatement(4180)
-        if let NodeData::LabeledStatement(d) = program.arena().data(node) {
-            let (label, statement) = (d.label, d.statement);
-            if !self.check_grammar_statement_in_ambient_context(program, node) {
-                let label_text = program.arena().text(label).to_string();
-                let mut current = program.arena().parent(node);
-                while let Some(cur) = current {
-                    if is_function_like_kind(program.arena().kind(cur)) {
-                        break;
-                    }
-                    if let NodeData::LabeledStatement(ld) = program.arena().data(cur) {
-                        if program.arena().text(ld.label) == label_text {
-                            self.grammar_error_on_node(
-                                program,
-                                label,
-                                &tsgo_diagnostics::DUPLICATE_LABEL_0,
-                                &[&label_text],
-                            );
-                            break;
-                        }
-                    }
-                    current = program.arena().parent(cur);
-                }
-            }
-            self.check_statement(program, statement);
+        if let NodeData::LabeledStatement(_) = program.arena().data(node) {
+            self.check_labeled_statement(program, node);
         }
         // A `with` statement reports TS2410 (the with statement is not supported)
         // and checks its expression.
@@ -7597,7 +7914,7 @@ impl Checker {
         name: &str,
         name_type: TypeId,
     ) -> Option<TypeId> {
-        if let Some(t) = get_type_of_property_of_type(self, program, obj, name) {
+        if let Some(t) = self.get_type_of_property_of_type(program, obj, name) {
             return Some(t);
         }
         get_indexed_access_type(self, program, obj, name_type)
@@ -8902,6 +9219,129 @@ fn enum_decl_name(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
     match program.arena().data(node) {
         NodeData::EnumDeclaration(d) => Some(d.name),
         _ => None,
+    }
+}
+
+/// Skips parenthesized and assertion wrappers (partial port of Go's
+/// `SkipOuterExpressions` with `OEKAll`).
+// Go: internal/ast/utilities.go:SkipOuterExpressions
+fn skip_outer_expressions(program: &dyn BoundProgram, mut node: NodeId) -> NodeId {
+    loop {
+        match program.arena().kind(node) {
+            Kind::ParenthesizedExpression => {
+                node = match program.arena().data(node) {
+                    NodeData::ParenthesizedExpression(d) => d.expression,
+                    _ => break,
+                };
+            }
+            Kind::AsExpression | Kind::TypeAssertionExpression | Kind::SatisfiesExpression => {
+                node = match program.arena().data(node) {
+                    NodeData::AsExpression(d) => d.expression,
+                    NodeData::TypeAssertionExpression(d) => d.expression,
+                    NodeData::SatisfiesExpression(d) => d.expression,
+                    _ => break,
+                };
+            }
+            _ => break,
+        }
+    }
+    node
+}
+
+/// The node that owns a pushed contextual type (Go's `getContextNode`).
+// Go: internal/checker/checker.go:Checker.getContextNode
+fn get_context_node(_program: &dyn BoundProgram, node: NodeId) -> NodeId {
+    node
+}
+
+/// Reports whether `node` sits in a type-syntax position (Go's
+/// `IsPartOfTypeNode`, reachable subset).
+// Go: internal/ast/utilities.go:IsPartOfTypeNode
+fn is_part_of_type_node(program: &dyn BoundProgram, node: NodeId) -> bool {
+    let arena = program.arena();
+    let kind = arena.kind(node);
+    if kind >= Kind::FIRST_TYPE_NODE && kind <= Kind::LAST_TYPE_NODE {
+        return true;
+    }
+    matches!(
+        kind,
+        Kind::AnyKeyword
+            | Kind::UnknownKeyword
+            | Kind::NumberKeyword
+            | Kind::BigIntKeyword
+            | Kind::StringKeyword
+            | Kind::BooleanKeyword
+            | Kind::SymbolKeyword
+            | Kind::ObjectKeyword
+            | Kind::UndefinedKeyword
+            | Kind::NullKeyword
+            | Kind::NeverKeyword
+    ) || (kind == Kind::VoidKeyword
+        && program
+            .arena()
+            .parent(node)
+            .is_none_or(|p| arena.kind(p) != Kind::VoidExpression))
+}
+
+/// Reports whether `node` is an expression node (Go's `IsExpressionNode`,
+/// reachable subset used by `getTypeOfNode`).
+// Go: internal/ast/utilities.go:IsExpressionNode
+fn is_expression_node(program: &dyn BoundProgram, node: NodeId) -> bool {
+    if is_part_of_type_node(program, node) {
+        return false;
+    }
+    let arena = program.arena();
+    if super::symbols_query::is_declaration(arena, node)
+        || super::symbols_query::is_declaration_name(arena, node)
+    {
+        return false;
+    }
+    matches!(
+        arena.kind(node),
+        Kind::Identifier
+            | Kind::StringLiteral
+            | Kind::NumericLiteral
+            | Kind::TrueKeyword
+            | Kind::FalseKeyword
+            | Kind::NullKeyword
+            | Kind::ThisKeyword
+            | Kind::PropertyAccessExpression
+            | Kind::ElementAccessExpression
+            | Kind::CallExpression
+            | Kind::NewExpression
+            | Kind::BinaryExpression
+            | Kind::ObjectLiteralExpression
+            | Kind::ArrayLiteralExpression
+            | Kind::FunctionExpression
+            | Kind::ArrowFunction
+            | Kind::ParenthesizedExpression
+            | Kind::NonNullExpression
+            | Kind::AsExpression
+            | Kind::SatisfiesExpression
+            | Kind::TypeOfExpression
+            | Kind::VoidExpression
+            | Kind::DeleteExpression
+            | Kind::JsxElement
+            | Kind::JsxSelfClosingElement
+            | Kind::JsxFragment
+            | Kind::MetaProperty
+    )
+}
+
+/// Reports whether `node` is the right-hand name of `a.b` / `a?.b` (Go's
+/// `IsRightSideOfQualifiedNameOrPropertyAccess`).
+// Go: internal/ast/utilities.go:IsRightSideOfQualifiedNameOrPropertyAccess
+fn is_right_side_of_qualified_name_or_property_access(
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> bool {
+    let Some(parent) = program.arena().parent(node) else {
+        return false;
+    };
+    match program.arena().data(parent) {
+        NodeData::PropertyAccessExpression(d) => d.name == node,
+        NodeData::QualifiedName(d) => d.right == node,
+        _ => false,
     }
 }
 

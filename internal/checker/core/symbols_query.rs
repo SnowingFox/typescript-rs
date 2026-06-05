@@ -8,7 +8,7 @@
 //! more node shapes and routes property access through
 //! `checkPropertyAccessExpression`, which lands in later sub-phases.
 
-use tsgo_ast::{Kind, NodeArena, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId, SymbolTable};
+use tsgo_ast::{Kind, NodeArena, NodeData, NodeId, SymbolFlags, SymbolId, SymbolTable};
 
 use super::declared_types::{get_property_of_type, get_type_of_symbol};
 use super::program::BoundProgram;
@@ -133,33 +133,7 @@ pub fn get_type_at_location(
     node: NodeId,
     globals: Option<&SymbolTable>,
 ) -> TypeId {
-    let arena = program.arena();
-    // A whole source file that is not a module, or any node inside a `with`
-    // block, has no answerable semantic type (Go's first two guards).
-    if arena.kind(node) == Kind::SourceFile
-        || arena.flags(node).contains(NodeFlags::IN_WITH_STATEMENT)
-    {
-        return checker.error_type();
-    }
-
-    // A declaration's type is the type of its symbol (Go's `IsDeclaration` arm).
-    if is_declaration(arena, node) {
-        return match get_symbol_of_declaration(program, node) {
-            Some(symbol) => get_type_of_symbol(checker, program, symbol, globals),
-            None => checker.error_type(),
-        };
-    }
-
-    // A declaration *name* resolves to the declared symbol's type (Go's
-    // `IsDeclarationNameOrImportPropertyName` arm).
-    if is_declaration_name(arena, node) {
-        return match get_symbol_at_location(checker, program, node, globals) {
-            Some(symbol) => get_type_of_symbol(checker, program, symbol, globals),
-            None => checker.error_type(),
-        };
-    }
-
-    checker.error_type()
+    checker.get_type_of_node(program, node, globals)
 }
 
 /// Resolves the signature called at a call / `new` expression `node` for
@@ -212,7 +186,7 @@ pub fn get_resolved_signature(
 /// (functions, classes, enums, parameters, ...) are added as their type queries
 /// are needed.
 // Go: internal/ast/utilities.go:IsDeclaration (reachable subset)
-fn is_declaration(arena: &NodeArena, node: NodeId) -> bool {
+pub(crate) fn is_declaration(arena: &NodeArena, node: NodeId) -> bool {
     matches!(
         arena.kind(node),
         Kind::VariableDeclaration | Kind::PropertyDeclaration | Kind::PropertySignature
@@ -277,7 +251,7 @@ fn get_symbol_of_property_access(
 // Reports whether `node` is the name of a declaration whose name field is
 // `node` itself (the subset of Go's `IsDeclarationName` 4b needs).
 // Go: internal/ast/utilities.go:IsDeclarationName
-fn is_declaration_name(arena: &NodeArena, node: NodeId) -> bool {
+pub(crate) fn is_declaration_name(arena: &NodeArena, node: NodeId) -> bool {
     if arena.kind(node) != Kind::Identifier {
         return false;
     }
