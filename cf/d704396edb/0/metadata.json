@@ -1,0 +1,87 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "cfd704396edb",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-05T05:19:33.233682Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "internal/checker/core/declared_types.rs",
+    "internal/checker/core/declared_types_test.rs",
+    "internal/compiler/boundary_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "composer-2.5",
+  "turn_id": "68ad14545193",
+  "checkpoint_transcript_start": 1780,
+  "transcript_lines_at_start": 1780,
+  "session_metrics": {
+    "turn_count": 4,
+    "context_tokens": 207712,
+    "context_window_size": 200000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-05T05:19:33.144825Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 14,
+    "human_removed": 22,
+    "total_committed": 0,
+    "total_lines_changed": 36,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 757,
+      "user_lines_removed": 68,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "internal/checker/core/check.rs": 288,
+        "internal/checker/core/check_test.rs": 211,
+        "internal/checker/core/contextual.rs": 69,
+        "internal/checker/core/declared_types.rs": 92,
+        "internal/checker/core/declared_types_test.rs": 17,
+        "internal/checker/core/grammar.rs": 16,
+        "internal/checker/core/grammar_test.rs": 24,
+        "internal/checker/core/mod.rs": 5,
+        "internal/checker/core/program.rs": 10,
+        "internal/checker/core/symbols_query.rs": 4,
+        "internal/checker/core/test_support.rs": 7,
+        "internal/compiler/boundfile.rs": 7,
+        "internal/compiler/multifile.rs": 7
+      },
+      "user_removed_per_file": {
+        "internal/checker/core/check.rs": 15,
+        "internal/checker/core/contextual.rs": 1,
+        "internal/checker/core/declared_types.rs": 12,
+        "internal/checker/core/grammar.rs": 2,
+        "internal/checker/core/symbols_query.rs": 30,
+        "internal/compiler/boundary_test.rs": 8
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 16,
+      "user_lines_removed": 34,
+      "agent_lines_added": 757,
+      "agent_lines_removed": 68,
+      "user_added_per_file": {
+        "internal/checker/core/check.rs": 3,
+        "internal/checker/core/check_test.rs": 8,
+        "internal/checker/core/declared_types.rs": 1,
+        "internal/checker/core/declared_types_test.rs": 4
+      },
+      "user_removed_per_file": {
+        "internal/checker/core/check.rs": 9,
+        "internal/checker/core/check_test.rs": 18,
+        "internal/checker/core/declared_types.rs": 6,
+        "internal/checker/core/declared_types_test.rs": 1
+      }
+    }
+  ]
+}
