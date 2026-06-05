@@ -11420,11 +11420,7 @@ fn get_property_type_for_index_type_resolves_literal_key() {
     let mut c = Checker::new();
     let root = p.root();
     c.check_source_file(root);
-    let o_sym = *p
-        .locals(root)
-        .expect("locals")
-        .get("o")
-        .expect("symbol o");
+    let o_sym = *p.locals(root).expect("locals").get("o").expect("symbol o");
     let o_ty = crate::core::declared_types::get_type_of_symbol(&mut c, &p, o_sym, None);
     let a_lit = c.get_string_literal_type("a");
     let prop = c

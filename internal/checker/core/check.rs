@@ -1529,6 +1529,13 @@ impl Checker {
                 if let Some(alias) =
                     resolve_name(program, node, &name, SymbolFlags::ALIAS, false, globals)
                 {
+                    // Go: internal/checker/checker.go:Checker.onSuccessfullyResolvedSymbol
+                    self.on_successfully_resolved_symbol(
+                        program,
+                        node,
+                        alias,
+                        SymbolFlags::VALUE | SymbolFlags::EXPORT_VALUE,
+                    );
                     let resolves_to_value = match resolve_alias(self, program, alias) {
                         Some(target) => program.symbol(target).flags.intersects(SymbolFlags::VALUE),
                         None => true,
@@ -1537,6 +1544,7 @@ impl Checker {
                         let declared = get_type_of_symbol(self, program, alias, globals);
                         return self.get_flow_type_of_reference(program, node, declared);
                     }
+                    return self.error_type;
                 }
                 // Go registers a global `undefinedSymbol` (type
                 // `undefinedWideningType`) in `NewChecker`, so the `undefined`
@@ -1582,6 +1590,13 @@ impl Checker {
                 self.error_type
             }
             Some(symbol) => {
+                // Go: internal/checker/checker.go:Checker.onSuccessfullyResolvedSymbol
+                self.on_successfully_resolved_symbol(
+                    program,
+                    node,
+                    symbol,
+                    SymbolFlags::VALUE | SymbolFlags::EXPORT_VALUE,
+                );
                 // Go's `checkIdentifier` maps the resolved symbol through
                 // `getExportSymbolOfValueSymbolIfExported` before typing it: a
                 // phantom `ExportValue` local carries no real declaration flags,
@@ -4309,7 +4324,10 @@ impl Checker {
         location: Option<NodeId>,
     ) -> Option<SymbolId> {
         let arena = program.arena();
-        if arena.text(name).is_empty() && arena.loc(name).end() == arena.loc(name).pos() {
+        if arena.kind(name) == Kind::Identifier
+            && arena.text(name).is_empty()
+            && arena.loc(name).end() == arena.loc(name).pos()
+        {
             return None;
         }
         match arena.kind(name) {
@@ -4328,9 +4346,19 @@ impl Checker {
                     let msg = if meaning == SymbolFlags::NAMESPACE {
                         &tsgo_diagnostics::CANNOT_FIND_NAMESPACE_0
                     } else {
-                        &tsgo_diagnostics::CANNOT_FIND_NAME_0
+                        self.get_cannot_find_name_diagnostic_for_name(program, name)
                     };
-                    self.error(program, name, msg, &[&text]);
+                    let suggested_lib = get_suggested_lib_for_non_existent_name(&text);
+                    if suggested_lib.is_empty() {
+                        self.error(program, name, msg, &[&text]);
+                    } else {
+                        self.error(program, name, msg, &[&text, suggested_lib]);
+                    }
+                } else if let Some(sym) = result {
+                    if !ignore_errors {
+                        let hook_location = location.unwrap_or(name);
+                        self.on_successfully_resolved_symbol(program, hook_location, sym, meaning);
+                    }
                 }
                 result
             }
@@ -4354,13 +4382,7 @@ impl Checker {
                     .copied()
                     .filter(|&sid| program.symbol(sid).flags.intersects(meaning));
                 if symbol.is_none() && !ignore_errors {
-                    let ns_name = program.symbol(namespace).name.clone();
-                    self.error(
-                        program,
-                        right,
-                        &tsgo_diagnostics::NAMESPACE_0_HAS_NO_EXPORTED_MEMBER_1,
-                        &[&ns_name, &right_text],
-                    );
+                    self.report_missing_namespace_member(program, namespace, right, &right_text);
                 }
                 symbol
             }
@@ -4384,17 +4406,41 @@ impl Checker {
                     .copied()
                     .filter(|&sid| program.symbol(sid).flags.intersects(meaning));
                 if symbol.is_none() && !ignore_errors {
-                    let ns_name = program.symbol(namespace).name.clone();
-                    self.error(
-                        program,
-                        prop_name,
-                        &tsgo_diagnostics::NAMESPACE_0_HAS_NO_EXPORTED_MEMBER_1,
-                        &[&ns_name, &prop_text],
-                    );
+                    self.report_missing_namespace_member(program, namespace, prop_name, &prop_text);
                 }
                 symbol
             }
             _ => None,
+        }
+    }
+
+    // Reports TS2724 spelling suggestion or TS2694 for a missing namespace export.
+    // Go: internal/checker/checker.go:Checker.resolveQualifiedName
+    fn report_missing_namespace_member(
+        &mut self,
+        program: &dyn BoundProgram,
+        namespace: SymbolId,
+        member_name: NodeId,
+        member_text: &str,
+    ) {
+        let ns_name = program.symbol(namespace).name.clone();
+        if let Some(suggestion) =
+            self.get_suggested_symbol_for_nonexistent_module(program, member_text, namespace)
+        {
+            let suggestion_name = program.symbol(suggestion).name.clone();
+            self.error(
+                program,
+                member_name,
+                &tsgo_diagnostics::X_0_HAS_NO_EXPORTED_MEMBER_NAMED_1_DID_YOU_MEAN_2,
+                &[&ns_name, member_text, &suggestion_name],
+            );
+        } else {
+            self.error(
+                program,
+                member_name,
+                &tsgo_diagnostics::NAMESPACE_0_HAS_NO_EXPORTED_MEMBER_1,
+                &[&ns_name, member_text],
+            );
         }
     }
 
@@ -7411,6 +7457,15 @@ impl Checker {
             .unwrap_or(&[])
     }
 
+    /// Returns diagnostics already recorded for `file` without type-checking.
+    #[cfg(test)]
+    pub(crate) fn peek_recorded_diagnostics(&self, file: NodeId) -> &[Diagnostic] {
+        self.diagnostics_by_file
+            .get(&file)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     // Records a diagnostic at `node` from `message` with `args` substituted,
     // partitioned by the file `program` is a view of (Go records into a per-file
     // `DiagnosticsCollection`). The partition key is `program.file_handle()`, so
@@ -7537,7 +7592,7 @@ impl Checker {
     // `createDiagnosticForNode`). Callers attach related entries via
     // `Diagnostic::add_related_info` before recording with `add_diagnostic`.
     // Go: internal/checker/checker.go:createDiagnosticForNode(14148)
-    fn diagnostic_for_node(
+    pub(super) fn diagnostic_for_node(
         &self,
         program: &dyn BoundProgram,
         node: NodeId,
@@ -8409,7 +8464,7 @@ fn is_parameter_property_declaration(program: &dyn BoundProgram, node: NodeId) -
 
 // Reports whether `node` has the given syntactic modifier.
 // Go: internal/ast/utilities.go:HasSyntacticModifier
-fn has_syntactic_modifier(
+pub(crate) fn has_syntactic_modifier(
     program: &dyn BoundProgram,
     node: NodeId,
     flag: tsgo_ast::ModifierFlags,
@@ -9257,7 +9312,7 @@ fn get_context_node(_program: &dyn BoundProgram, node: NodeId) -> NodeId {
 /// Reports whether `node` sits in a type-syntax position (Go's
 /// `IsPartOfTypeNode`, reachable subset).
 // Go: internal/ast/utilities.go:IsPartOfTypeNode
-fn is_part_of_type_node(program: &dyn BoundProgram, node: NodeId) -> bool {
+pub(crate) fn is_part_of_type_node(program: &dyn BoundProgram, node: NodeId) -> bool {
     let arena = program.arena();
     let kind = arena.kind(node);
     if kind >= Kind::FIRST_TYPE_NODE && kind <= Kind::LAST_TYPE_NODE {
@@ -9286,7 +9341,7 @@ fn is_part_of_type_node(program: &dyn BoundProgram, node: NodeId) -> bool {
 /// Reports whether `node` is an expression node (Go's `IsExpressionNode`,
 /// reachable subset used by `getTypeOfNode`).
 // Go: internal/ast/utilities.go:IsExpressionNode
-fn is_expression_node(program: &dyn BoundProgram, node: NodeId) -> bool {
+pub(crate) fn is_expression_node(program: &dyn BoundProgram, node: NodeId) -> bool {
     if is_part_of_type_node(program, node) {
         return false;
     }

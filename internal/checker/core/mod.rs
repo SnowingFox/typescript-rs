@@ -16,6 +16,7 @@ pub mod inference;
 pub mod jsx;
 pub mod late_binding;
 pub mod mapper;
+pub mod name_resolution;
 pub mod nodebuilder;
 pub mod program;
 pub mod reachability;
