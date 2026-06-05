@@ -25,17 +25,24 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use tsgo_compiler::{new_compiler_host, new_program, CompilerHost, EmitOptions, ProgramOptions};
-use tsgo_core::compileroptions::{CompilerOptions, NewLineKind};
+use tsgo_compiler::{
+    check_source_files_belong_to_root_dir, new_compiler_host, new_program, CompilerHost,
+    EmitOptions, ProgramOptions,
+};
+use tsgo_core::compileroptions::{CompilerOptions, NewLineKind, ResolutionMode};
 use tsgo_core::text::TextPos;
 use tsgo_core::tristate::Tristate;
-use tsgo_diagnostics::Category;
+use tsgo_diagnostics::{self as diagnostics, Category};
 use tsgo_diagnosticwriter::{Diagnostic as DiagnosticTrait, FileLike};
 use tsgo_locale::Locale;
+use tsgo_module::{
+    get_automatic_type_directive_names, ResolutionHost, Resolver, INFERRED_TYPES_CONTAINING_FILE,
+};
 use tsgo_tsoptions::{
     new_parsed_command_line, parse_compiler_options, CommandLineOptionKind, EnumValue, OptionValue,
-    COMMAND_LINE_COMPILER_OPTIONS_MAP,
+    ParsedCommandLine, COMMAND_LINE_COMPILER_OPTIONS_MAP,
 };
+use tsgo_tspath::get_directory_path;
 use tsgo_tspath::{
     file_extension_is, get_base_file_name, get_normalized_absolute_path, ComparePathsOptions,
     EXTENSION_JSON, EXTENSION_TS_BUILD_INFO,
@@ -238,6 +245,33 @@ impl HarnessDiagnostic {
         }
     }
 
+    fn from_message_with_chain(
+        message: &'static tsgo_diagnostics::Message,
+        args: &[String],
+        chain: Vec<HarnessDiagnostic>,
+        locale: &Locale,
+    ) -> HarnessDiagnostic {
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        HarnessDiagnostic {
+            file: None,
+            code: message.code(),
+            category: message.category(),
+            message: message.localize(locale, &arg_refs),
+            start: 0,
+            length: 0,
+            message_chain: chain,
+            related_information: Vec::new(),
+        }
+    }
+
+    fn message_only(
+        message: &'static tsgo_diagnostics::Message,
+        args: &[String],
+        locale: &Locale,
+    ) -> HarnessDiagnostic {
+        HarnessDiagnostic::from_message(message, args, None, 0, 0, locale)
+    }
+
     fn from_checker(
         diag: &tsgo_checker::Diagnostic,
         file: Option<Rc<HarnessFile>>,
@@ -408,6 +442,117 @@ impl CompilationResult {
 ///
 /// Side effects: reads the (in-memory) file system and writes emitted files
 /// into it (recorded for the result).
+/// Minimal [`ResolutionHost`] for type-reference resolution during harness compiles.
+struct HarnessResolutionHost {
+    fs: Arc<dyn Fs + Send + Sync>,
+    current_directory: String,
+}
+
+impl ResolutionHost for HarnessResolutionHost {
+    fn fs(&self) -> &dyn Fs {
+        self.fs.as_ref()
+    }
+
+    fn get_current_directory(&self) -> &str {
+        &self.current_directory
+    }
+}
+
+/// Collects config-file and early-program diagnostics that Go surfaces through
+/// `GetConfigFileParsingDiagnostics` / `GetProgramDiagnostics` before checking.
+///
+/// Side effects: reads the file system through `host`.
+// Go: internal/compiler/fileloader.go:resolveAutomaticTypeDirectives
+//     + internal/compiler/program.go:checkSourceFilesBelongToPath
+fn collect_config_and_early_program_diagnostics(
+    config: &ParsedCommandLine,
+    host: &dyn CompilerHost,
+    locale: &Locale,
+) -> Vec<HarnessDiagnostic> {
+    let mut diags = Vec::new();
+
+    for err in config.errors() {
+        diags.push(HarnessDiagnostic::from_message(
+            err.message,
+            &err.args,
+            None,
+            0,
+            0,
+            locale,
+        ));
+    }
+
+    let resolution_host: Arc<dyn ResolutionHost> = Arc::new(HarnessResolutionHost {
+        fs: host.fs(),
+        current_directory: host.get_current_directory().to_string(),
+    });
+    let resolver = Resolver::new(
+        Arc::clone(&resolution_host),
+        Arc::new(config.compiler_options().clone()),
+        "",
+        "",
+    );
+    let containing_directory = if !config.compiler_options().config_file_path.is_empty() {
+        get_directory_path(&config.compiler_options().config_file_path)
+    } else {
+        host.get_current_directory().to_string()
+    };
+    let containing_file =
+        tsgo_tspath::combine_paths(&containing_directory, &[INFERRED_TYPES_CONTAINING_FILE]);
+
+    for name in
+        get_automatic_type_directive_names(config.compiler_options(), resolution_host.as_ref())
+    {
+        let (resolved, _) = resolver.resolve_type_reference_directive(
+            &name,
+            &containing_file,
+            ResolutionMode::None,
+            None,
+        );
+        if !resolved.is_resolved() {
+            let detail = HarnessDiagnostic::message_only(
+                &diagnostics::ENTRY_POINT_OF_TYPE_LIBRARY_0_SPECIFIED_IN_COMPILEROPTIONS,
+                std::slice::from_ref(&name),
+                locale,
+            );
+            let mut because = HarnessDiagnostic::message_only(
+                &diagnostics::THE_FILE_IS_IN_THE_PROGRAM_BECAUSE_COLON,
+                &[],
+                locale,
+            );
+            because.message_chain = vec![detail];
+            diags.push(HarnessDiagnostic::from_message_with_chain(
+                &diagnostics::CANNOT_FIND_TYPE_DEFINITION_FILE_FOR_0,
+                &[name],
+                vec![because],
+                locale,
+            ));
+        }
+    }
+
+    for prd in check_source_files_belong_to_root_dir(config) {
+        let detail = HarnessDiagnostic::message_only(
+            &diagnostics::ROOT_FILE_SPECIFIED_FOR_COMPILATION,
+            &[],
+            locale,
+        );
+        let mut because = HarnessDiagnostic::message_only(
+            &diagnostics::THE_FILE_IS_IN_THE_PROGRAM_BECAUSE_COLON,
+            &[],
+            locale,
+        );
+        because.message_chain = vec![detail];
+        diags.push(HarnessDiagnostic::from_message_with_chain(
+            prd.message,
+            &prd.args,
+            vec![because],
+            locale,
+        ));
+    }
+
+    diags
+}
+
 // Go: internal/testutil/harnessutil/harnessutil.go:CompileFilesEx
 pub fn compile_files_ex(
     input_files: Vec<TestFile>,
@@ -415,6 +560,7 @@ pub fn compile_files_ex(
     harness_options: HarnessOptions,
     mut compiler_options: CompilerOptions,
     current_directory: &str,
+    ts_config: Option<ParsedCommandLine>,
 ) -> CompilationResult {
     // Root the path-typed compiler options to the current directory, mirroring
     // Go's `CompileFilesEx` (`ts.convertToOptionsWithAbsolutePaths`). The
@@ -482,22 +628,35 @@ pub fn compile_files_ex(
         tsgo_bundled::lib_path(),
     ));
 
-    let config = new_parsed_command_line(
-        compiler_options.clone(),
-        program_file_names,
-        ComparePathsOptions {
-            use_case_sensitive_file_names: use_case_sensitive,
-            current_directory: current_directory.to_string(),
-        },
-    );
+    let compare_paths_options = ComparePathsOptions {
+        use_case_sensitive_file_names: use_case_sensitive,
+        current_directory: current_directory.to_string(),
+    };
+
+    let config = if let Some(mut ts_config) = ts_config {
+        if let Some(co) = ts_config.parsed_config.compiler_options.as_mut() {
+            **co = compiler_options.clone();
+        }
+        ts_config.parsed_config.file_names = program_file_names;
+        ts_config.compare_paths_options = compare_paths_options;
+        ts_config
+    } else {
+        new_parsed_command_line(
+            compiler_options.clone(),
+            program_file_names,
+            compare_paths_options,
+        )
+    };
+
+    let locale = default_locale();
+    let mut diagnostics =
+        collect_config_and_early_program_diagnostics(&config, host.as_ref(), &locale);
+
     let mut program = new_program(ProgramOptions {
-        host,
+        host: host.clone(),
         config: Arc::new(config),
         single_threaded: true,
     });
-
-    let locale = default_locale();
-    let mut diagnostics: Vec<HarnessDiagnostic> = Vec::new();
 
     // Option-consistency diagnostics are global (no file).
     for od in program.options_diagnostics() {
@@ -574,6 +733,7 @@ pub fn compile_files_ex(
 ///     vec![],
 ///     &TestConfiguration::new(),
 ///     "/.src",
+///     None,
 /// );
 /// assert!(result.diagnostics().is_empty());
 /// ```
@@ -585,8 +745,12 @@ pub fn compile_files(
     other_files: Vec<TestFile>,
     test_config: &TestConfiguration,
     current_directory: &str,
+    ts_config: Option<ParsedCommandLine>,
 ) -> CompilationResult {
-    let mut compiler_options = CompilerOptions::default();
+    let mut compiler_options = ts_config
+        .as_ref()
+        .map(|c| c.compiler_options().clone())
+        .unwrap_or_default();
     if compiler_options.new_line == NewLineKind::None {
         compiler_options.new_line = NewLineKind::Crlf;
     }
@@ -614,6 +778,7 @@ pub fn compile_files(
         harness_options,
         compiler_options,
         current_directory,
+        ts_config,
     )
 }
 

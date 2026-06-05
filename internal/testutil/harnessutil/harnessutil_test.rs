@@ -17,6 +17,7 @@ fn compile_clean_case_emits_js_with_no_diagnostics() {
         vec![],
         &TestConfiguration::new(),
         "/.src",
+        None,
     );
 
     assert!(
@@ -43,6 +44,7 @@ fn compile_errored_case_reports_ts2322() {
         vec![],
         &TestConfiguration::new(),
         "/.src",
+        None,
     );
 
     let diags = result.diagnostics();
@@ -74,6 +76,7 @@ fn compile_files_ex_no_emit_skips_output() {
         HarnessOptions::default(),
         options,
         "/.src",
+        None,
     );
     assert!(result.emit_skipped());
     assert!(result.outputs().is_empty());
@@ -91,6 +94,7 @@ fn set_options_from_test_config_applies_boolean() {
         vec![],
         &config,
         "/.src",
+        None,
     );
     assert!(result.emit_skipped());
     assert!(result.outputs().is_empty());
@@ -130,7 +134,7 @@ fn multi_file_semantic_diagnostics_stay_within_their_own_file() {
         .map(|f| (f.unit_name.clone(), f.content.len()))
         .collect();
 
-    let result = compile_files(files, vec![], &config, "/.src");
+    let result = compile_files(files, vec![], &config, "/.src", None);
 
     for diag in result.diagnostics() {
         if let Some(name) = diag.file_name() {
@@ -170,6 +174,7 @@ fn relative_out_dir_is_rooted_before_emit() {
         vec![],
         &config,
         "/.src",
+        None,
     );
 
     // The relative `dist` is rooted to `/.src`, so the emit is written to (and

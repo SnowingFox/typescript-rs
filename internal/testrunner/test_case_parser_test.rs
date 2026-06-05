@@ -32,21 +32,24 @@ function foo() { return \"a\"; }\n\
 // some other comment\n\
 function bar() { return \"b\"; }";
 
-    let expected = TestCaseContent {
-        test_unit_data: vec![
-            TestUnit {
-                content: "function foo() { return \"a\"; }\n// normal comment".to_string(),
-                name: "firstFile.ts".to_string(),
-            },
-            TestUnit {
-                content: "// some other comment\nfunction bar() { return \"b\"; }".to_string(),
-                name: "secondFile.ts".to_string(),
-            },
-        ],
-        symlinks: Default::default(),
-    };
-
-    assert_eq!(make_units_from_test(code, "simpleTest.ts"), expected);
+    let content = make_units_from_test(code, "simpleTest.ts");
+    assert_eq!(content.test_unit_data.len(), 2);
+    assert_eq!(
+        content.test_unit_data[0],
+        TestUnit {
+            content: "function foo() { return \"a\"; }\n// normal comment".to_string(),
+            name: "firstFile.ts".to_string(),
+        }
+    );
+    assert_eq!(
+        content.test_unit_data[1],
+        TestUnit {
+            content: "// some other comment\nfunction bar() { return \"b\"; }".to_string(),
+            name: "secondFile.ts".to_string(),
+        }
+    );
+    assert!(content.ts_config.is_none());
+    assert!(content.symlinks.is_empty());
 }
 
 // The global directives that precede the first `@filename` are collected as
@@ -115,6 +118,21 @@ fn symlink_directive_maps_links_to_current_file() {
     assert_eq!(
         parsed.symlinks.get("b.ts").map(String::as_str),
         Some("real.ts")
+    );
+}
+
+// An embedded `tsconfig.json` unit is parsed into `ts_config` and removed from
+// the compile unit list (mirroring Go `makeUnitsFromTest`).
+#[test]
+fn make_units_from_test_parses_tsconfig() {
+    let code = "// @filename: tsconfig.json\n{}\n// @filename: a.ts\nexport const x = 1;";
+    let content = make_units_from_test(code, "test.ts");
+    assert_eq!(content.test_unit_data.len(), 1);
+    assert_eq!(content.test_unit_data[0].name, "a.ts");
+    assert!(content.ts_config.is_some());
+    assert_eq!(
+        content.ts_config_file_unit.as_ref().map(|u| u.name.as_str()),
+        Some("tsconfig.json")
     );
 }
 

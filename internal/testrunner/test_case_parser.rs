@@ -17,7 +17,12 @@
 use indexmap::IndexMap;
 
 use tsgo_scanner::skip_trivia;
-use tsgo_tspath::get_base_file_name;
+use tsgo_testutil_harnessutil::get_config_name_from_file_name;
+use tsgo_tsoptions::{
+    new_tsconfig_source_file_from_file_path, parse_json_source_file_config_file_content,
+    tsoptionstest::VfsParseConfigHost, ParsedCommandLine,
+};
+use tsgo_tspath::{get_base_file_name, get_directory_path, get_normalized_absolute_path};
 
 use crate::SRC_FOLDER;
 
@@ -47,19 +52,17 @@ pub struct TestUnit {
 /// The parsed contents of a test file: its named units and the symlinks
 /// declared via `// @link:` / `// @symlink:` directives.
 ///
-/// DEFER(P10): the `tsConfig` / `tsConfigFileUnitData` fields of Go's
-/// `testCaseContent` (a `tsconfig.json` unit parsed into a
-/// `ParsedCommandLine`).
-/// blocked-by: `tsoptions::parse_json_source_file_config_file_content` wiring
-/// into the harness (a later P10 round); the reachable subset has no in-test
-/// `tsconfig.json`.
-///
 /// Side effects: none (plain data).
 // Go: internal/testrunner/test_case_parser.go:testCaseContent
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TestCaseContent {
     /// The named units, in declaration order.
     pub test_unit_data: Vec<TestUnit>,
+    /// When the test embeds a `tsconfig.json` / `jsconfig.json` unit, its parsed
+    /// command line (the unit itself is removed from [`test_unit_data`]).
+    pub ts_config: Option<ParsedCommandLine>,
+    /// The original `tsconfig.json` unit (for baseline file ordering).
+    pub ts_config_file_unit: Option<TestUnit>,
     /// Declared symlinks (`link target` -> `source`).
     pub symlinks: IndexMap<String, String>,
 }
@@ -284,18 +287,59 @@ pub fn parse_test_files_and_symlinks_with_options(
 pub fn make_units_from_test(code: &str, file_name: &str) -> TestCaseContent {
     let parsed = parse_test_files_and_symlinks(code, file_name);
 
-    let mut _current_directory = parsed.current_directory;
-    if _current_directory.is_empty() {
-        _current_directory = SRC_FOLDER.to_string();
+    let current_directory = if parsed.current_directory.is_empty() {
+        SRC_FOLDER.to_string()
+    } else {
+        get_normalized_absolute_path(&parsed.current_directory, SRC_FOLDER)
+    };
+
+    let mut test_unit_data = parsed.units;
+    let mut ts_config = None;
+    let mut ts_config_file_unit = None;
+
+    // Mirror Go `makeUnitsFromTest`: if a unit is a ts/jsconfig file, parse it
+    // and remove it from the compile unit list.
+    let all_files: Vec<(String, String)> = test_unit_data
+        .iter()
+        .map(|u| {
+            (
+                get_normalized_absolute_path(&u.name, &current_directory),
+                u.content.clone(),
+            )
+        })
+        .collect();
+    let file_refs: Vec<(&str, &str)> = all_files
+        .iter()
+        .map(|(name, content)| (name.as_str(), content.as_str()))
+        .collect();
+    let parse_config_host = VfsParseConfigHost::new(
+        &file_refs,
+        &current_directory,
+        true, /*useCaseSensitiveFileNames*/
+    );
+
+    if let Some(index) = test_unit_data
+        .iter()
+        .position(|u| !get_config_name_from_file_name(&u.name).is_empty())
+    {
+        let unit = test_unit_data.remove(index);
+        let config_file_name = get_normalized_absolute_path(&unit.name, &current_directory);
+        let config_dir = get_directory_path(&config_file_name);
+        let source_file = new_tsconfig_source_file_from_file_path(&config_file_name, &unit.content);
+        ts_config = Some(parse_json_source_file_config_file_content(
+            &source_file,
+            &parse_config_host,
+            &config_dir,
+            None,
+            &config_file_name,
+        ));
+        ts_config_file_unit = Some(unit);
     }
 
-    // DEFER(P10): detect an in-test `tsconfig.json` unit and parse it into a
-    // `ParsedCommandLine` (Go removes it from the unit list). blocked-by:
-    // `tsoptions` config-file parsing wired through a VFS parse-config host;
-    // the reachable subset has no in-test config file, so every unit is kept.
-
     TestCaseContent {
-        test_unit_data: parsed.units,
+        test_unit_data,
+        ts_config,
+        ts_config_file_unit,
         symlinks: parsed.symlinks,
     }
 }

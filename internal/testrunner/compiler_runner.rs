@@ -102,25 +102,79 @@ impl CompilerTestType {
 // Go: internal/testrunner/compiler_runner.go:compilerTest.verifyDiagnostics
 //     + internal/testutil/tsbaseline/error_baseline.go:DoErrorBaseline
 pub fn error_baseline_for_test(code: &str, file_name: &str) -> String {
-    let units = make_units_from_test(code, file_name).test_unit_data;
-    let input_files: Vec<TestFile> = units
-        .iter()
-        .map(|unit| TestFile {
-            unit_name: get_normalized_absolute_path(&unit.name, SRC_FOLDER),
-            content: unit.content.clone(),
-        })
-        .collect();
+    let test_content = make_units_from_test(code, file_name);
     let settings = extract_compiler_settings(code);
-    let result = compile_files(input_files.clone(), Vec::new(), &settings, SRC_FOLDER);
+
+    let mut ts_config_files: Vec<TestFile> = Vec::new();
+    let mut to_be_compiled: Vec<TestFile> = Vec::new();
+    let mut other_files: Vec<TestFile> = Vec::new();
+
+    if let Some(ref ts_config) = test_content.ts_config {
+        if let Some(ref unit) = test_content.ts_config_file_unit {
+            ts_config_files.push(TestFile {
+                unit_name: get_normalized_absolute_path(&unit.name, SRC_FOLDER),
+                content: unit.content.clone(),
+            });
+        }
+        for unit in &test_content.test_unit_data {
+            let harness_file = TestFile {
+                unit_name: get_normalized_absolute_path(&unit.name, SRC_FOLDER),
+                content: unit.content.clone(),
+            };
+            if ts_config
+                .file_names()
+                .iter()
+                .any(|f| f == &harness_file.unit_name)
+            {
+                to_be_compiled.push(harness_file);
+            } else {
+                other_files.push(harness_file);
+            }
+        }
+    } else {
+        let input_files: Vec<TestFile> = test_content
+            .test_unit_data
+            .iter()
+            .map(|unit| TestFile {
+                unit_name: get_normalized_absolute_path(&unit.name, SRC_FOLDER),
+                content: unit.content.clone(),
+            })
+            .collect();
+        if input_files.len() < 2 {
+            to_be_compiled = input_files;
+        } else if settings
+            .get("noimplicitreferences")
+            .is_some_and(|v| !v.is_empty())
+            || input_files
+                .last()
+                .is_some_and(|f| f.content.contains(REQUIRE_STR))
+            || input_files
+                .last()
+                .is_some_and(|f| references_regex().is_match(&f.content))
+        {
+            to_be_compiled.push(input_files.last().unwrap().clone());
+            other_files.extend(input_files[..input_files.len() - 1].iter().cloned());
+        } else {
+            to_be_compiled = input_files;
+        }
+    }
+
+    let result = compile_files(
+        to_be_compiled.clone(),
+        other_files.clone(),
+        &settings,
+        SRC_FOLDER,
+        test_content.ts_config,
+    );
 
     if result.diagnostics().is_empty() {
         return tsgo_testutil_baseline::NO_CONTENT.to_string();
     }
-    // Render the per-file sections in Go's `toBeCompiled` ++ `otherFiles` order
-    // (NOT source order). The compile above stays all-files-as-root, so the
-    // diagnostics are unchanged — only the baseline's file-section ORDER moves
-    // to match Go byte-for-byte.
-    let ordered = baseline_file_order(&input_files, &settings);
+
+    let mut ordered = Vec::new();
+    ordered.extend(ts_config_files);
+    ordered.extend(baseline_file_order(&to_be_compiled, &settings));
+    ordered.extend(other_files);
     get_error_baseline(&ordered, result.diagnostics(), false)
 }
 

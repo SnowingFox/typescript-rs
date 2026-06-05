@@ -384,3 +384,51 @@ fn text_to_json_comments_only_is_empty() {
         assert_eq!(value.as_map().unwrap().size(), 0);
     }
 }
+
+// Corpus repro: tsconfigMalformedNonObject.ts — array-root recovery + types option.
+#[test]
+fn corpus_tsconfig_malformed_non_object_types_option() {
+    use crate::tsoptionstest::VfsParseConfigHost;
+    let json_text = r#"[{"compilerOptions": {"types": ["nonexistent"]}}]"#;
+    let files = &[("/.src/index.ts", "export const x = 1;")];
+    let host = VfsParseConfigHost::new(files, "/.src", true);
+    let (json, _) = parse_config_file_text_to_json("/.src/tsconfig.json", json_text);
+    let parsed = parse_json_config_file_content(json, &host, "/.src", None, "/.src/tsconfig.json");
+    assert!(
+        parsed
+            .compiler_options()
+            .types
+            .contains(&"nonexistent".to_string()),
+        "types: {:?}",
+        parsed.compiler_options().types
+    );
+}
+
+// Corpus repro: tsconfigRootdirInclude.ts — malformed JSON with rootDir + include.
+#[test]
+fn corpus_tsconfig_rootdir_include_malformed_json() {
+    use crate::tsoptionstest::VfsParseConfigHost;
+    let json_text = r#"{
+    "compilerOptions": {
+        "target": "es2020",
+        "strictNullChecks": true,
+        "stableTypeOrdering": true,
+        "rootDir": "./src2",
+    }
+    "include": ["src1/*"]
+}"#;
+    let files = &[("/.src/src1/main.ts", "")];
+    let host = VfsParseConfigHost::new(files, "/.src", true);
+    let sf = new_tsconfig_source_file_from_file_path("/.src/tsconfig.json", json_text);
+    let parsed = parse_json_source_file_config_file_content(
+        &sf,
+        &host,
+        "/.src",
+        None,
+        "/.src/tsconfig.json",
+    );
+    assert_eq!(parsed.compiler_options().root_dir, "/.src/src2");
+    assert!(parsed
+        .file_names()
+        .contains(&"/.src/src1/main.ts".to_string()));
+}

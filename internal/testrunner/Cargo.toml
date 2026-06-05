@@ -16,6 +16,7 @@ tsgo_locale = { path = "../locale" }
 tsgo_scanner = { path = "../scanner" }
 tsgo_testutil_baseline = { path = "../testutil/baseline" }
 tsgo_testutil_harnessutil = { path = "../testutil/harnessutil" }
+tsgo_tsoptions = { path = "../tsoptions" }
 tsgo_tspath = { path = "../tspath" }
 
 [dev-dependencies]

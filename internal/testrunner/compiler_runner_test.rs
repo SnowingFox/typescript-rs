@@ -446,6 +446,42 @@ fn run_clean_conformance_case_passes() {
     );
 }
 
+// Corpus repro (RED->GREEN): in-test `tsconfig.json` with a non-object root
+// (array recovery) still applies `compilerOptions.types` and reports TS2688.
+// Go: testdata/tests/cases/compiler/tsconfigMalformedNonObject.ts
+#[test]
+fn corpus_tsconfig_malformed_non_object_matches_baseline() {
+    let case_path = Path::new(tsgo_repo::test_data_path())
+        .join("tests/cases/compiler/tsconfigMalformedNonObject.ts");
+    let reference_path = Path::new(tsgo_repo::test_data_path())
+        .join("baselines/reference/compiler/tsconfigMalformedNonObject.errors.txt");
+    let source = std::fs::read_to_string(&case_path).expect("read case");
+    let committed = std::fs::read_to_string(&reference_path).expect("read reference");
+    let produced = error_baseline_for_test(&source, "tsconfigMalformedNonObject.ts");
+    assert_eq!(
+        produced, committed,
+        "tsconfigMalformedNonObject baseline mismatch"
+    );
+}
+
+// Corpus repro (RED->GREEN): malformed tsconfig JSON with `rootDir` + `include`
+// reports TS6059 when an included file lies outside `rootDir`.
+// Go: testdata/tests/cases/compiler/tsconfigRootdirInclude.ts
+#[test]
+fn corpus_tsconfig_rootdir_include_matches_baseline() {
+    let case_path = Path::new(tsgo_repo::test_data_path())
+        .join("tests/cases/compiler/tsconfigRootdirInclude.ts");
+    let reference_path = Path::new(tsgo_repo::test_data_path())
+        .join("baselines/reference/compiler/tsconfigRootdirInclude.errors.txt");
+    let source = std::fs::read_to_string(&case_path).expect("read case");
+    let committed = std::fs::read_to_string(&reference_path).expect("read reference");
+    let produced = error_baseline_for_test(&source, "tsconfigRootdirInclude.ts");
+    assert_eq!(
+        produced, committed,
+        "tsconfigRootdirInclude baseline mismatch"
+    );
+}
+
 // Slice 2 (RED->GREEN): a case whose committed `.errors.txt` baseline our
 // compiler reproduces byte-for-byte runs to a parity PASS (driven through the
 // real file-system runner: read case + read reference + byte-compare).
@@ -1066,11 +1102,15 @@ fn expanded_compiler_subset_parity_smoke() {
     // (was divergent: spurious `extra TS1123` on `for (let in)` atop TS1109)
     // to PASS (measured 94 -> 95 on this subset; the prior pin of 98 reflected
     // fixes not yet on this branch).
+    //
+    // Round (in-test tsconfig wiring): `tsconfigMalformedNonObject.ts` and
+    // `tsconfigRootdirInclude.ts` flip from `missing_all_errors` to PASS
+    // (measured 95 -> 97 passed, 55 -> 53 failed).
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 95,
-            failed: 55,
+            passed: 97,
+            failed: 53,
             errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
@@ -1181,8 +1221,9 @@ fn expanded_compiler_subset_parity_smoke() {
     // (`jsxEntityDecoderAfterNonEntityAmpersand`) flips to PASS (8 -> 7).
     //
     // T5-6: measured `missing_all_errors` is 36 on this branch (pin 38 was ahead).
+    // The in-test tsconfig round flips two cases to PASS; `divergent` drops 9 -> 7.
     assert_eq!(hist.missing_all_errors, 36);
-    assert_eq!(hist.divergent, 9);
+    assert_eq!(hist.divergent, 7);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare
@@ -1271,10 +1312,10 @@ fn expanded_compiler_subset_parity_smoke() {
     // four `simpleTest*` / `singleSettings*` diagnostics out of `extra TS2322`
     // (7 -> 3), so the top extras become `TS2339 ×5` and `TS2304 ×4`.
     //
-    // T5-6: measured top extras on this branch are `TS2304 ×8` then `TS2339 ×5`.
+    // T5-6: measured top extras on this branch are `TS2304 ×7` then `TS2339 ×5`.
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 8), (2339, 5)],
+        vec![(2304, 7), (2339, 5)],
         "top extra (false-positive) codes; histogram:\n{}",
         hist.report()
     );
@@ -1410,7 +1451,7 @@ fn expanded_compiler_subset_parity_smoke() {
     // T5-6: measured top extras on this branch (see the first `top_extra` pin above).
     assert_eq!(
         hist.top_extra(2),
-        vec![(2304, 8), (2339, 5)],
+        vec![(2304, 7), (2339, 5)],
         "measured top extra codes; histogram:\n{}",
         hist.report()
     );
