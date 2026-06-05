@@ -4538,9 +4538,10 @@ impl Checker {
         // method/accessor/constructor bodies and checks property initializers so
         // nested diagnostics surface). A class expression is checked the same way
         // when reached as a statement-position expression.
-        if let NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) =
-            program.arena().data(node)
-        {
+        if let NodeData::ClassDeclaration(_) = program.arena().data(node) {
+            self.check_class_declaration(program, node);
+        }
+        if let NodeData::ClassExpression(d) = program.arena().data(node) {
             let members = d.members.nodes.clone();
             self.check_decorators_on_node(program, node);
             self.check_grammar_class_like_declaration(program, node);
@@ -4559,40 +4560,14 @@ impl Checker {
             self.check_grammar_variable_declaration_list(program, d.declaration_list);
             self.check_variable_declaration_list(program, d.declaration_list);
         }
-        // A type-alias declaration grammar-checks its type-parameter list (2706)
-        // and descends into its aliased type node so a generic reference there
-        // has its arity/constraints checked (Go's `checkTypeAliasDeclaration` ->
-        // `checkSourceElement(node.Type())`).
-        if let NodeData::TypeAliasDeclaration(d) = program.arena().data(node) {
-            let (type_parameters, type_node) = (d.type_parameters.clone(), d.type_node);
-            self.check_grammar_type_parameter_defaults(program, type_parameters);
-            self.check_type_node(program, type_node);
+        if let NodeData::TypeAliasDeclaration(_) = program.arena().data(node) {
+            self.check_type_alias_declaration(program, node);
         }
-        // An interface declaration grammar-checks its type-parameter list (2706)
-        // and reports duplicate members (`Duplicate identifier`, TS2300) within
-        // the declaration; its member type nodes are not yet descended (DEFER
-        // below).
-        // Go: internal/checker/checker.go:Checker.checkInterfaceDeclaration(4990)
-        if let NodeData::InterfaceDeclaration(d) = program.arena().data(node) {
-            let type_parameters = d.type_parameters.clone();
-            let members = d.members.nodes.clone();
-            self.check_grammar_type_parameter_defaults(program, type_parameters);
-            self.check_object_type_for_duplicate_declarations(program, node);
-            for member in &members {
-                let member_kind = program.arena().kind(*member);
-                if member_kind == Kind::IndexSignature {
-                    self.check_grammar_index_signature(program, *member);
-                } else if member_kind == Kind::PropertySignature {
-                    self.check_grammar_property(program, *member);
-                }
-            }
-            if let Some(sym) = program.symbol_of_node(node) {
-                self.check_type_parameter_lists_identical(program, sym);
-                if !self.declared_type_links.get(sym).index_signatures_checked {
-                    self.declared_type_links.get(sym).index_signatures_checked = true;
-                    self.check_type_for_duplicate_index_signatures(program, node);
-                }
-            }
+        if let NodeData::InterfaceDeclaration(_) = program.arena().data(node) {
+            self.check_interface_declaration(program, node);
+        }
+        if let NodeData::EnumDeclaration(_) = program.arena().data(node) {
+            self.check_enum_declaration(program, node);
         }
         // A `{ ... }` block checks each contained statement (Go's `checkBlock` ->
         // `checkSourceElements`).
@@ -4864,21 +4839,8 @@ impl Checker {
         // (reached only through expression positions not yet descended).
         // blocked-by: signature checking + flow implicit-return + expression-body
         // descent.
-        if let NodeData::FunctionDeclaration(d) = program.arena().data(node) {
-            self.check_grammar_function_like_declaration(program, node);
-            let (params, return_type, body) = (d.parameters.nodes.clone(), d.type_node, d.body);
-            // The return-type annotation's type-predicate parameter-name check
-            // (Go's `checkSignatureDeclaration` -> `checkTypePredicate`) runs for
-            // an overload/ambient signature too (no body required).
-            self.check_return_type_predicate(program, &params, return_type);
-            for param in &params {
-                self.check_parameter(program, *param);
-            }
-            if let Some(body) = body {
-                self.check_statement(program, body);
-            }
-            // Go: checkFunctionDeclaration -> registerForUnusedIdentifiersCheck
-            self.register_for_unused_identifiers_check(node);
+        if let NodeData::FunctionDeclaration(_) = program.arena().data(node) {
+            self.check_function_declaration(program, node);
         }
         // A `return <expr>` statement checks the returned expression so nested
         // diagnostics surface, and (where the enclosing function has an explicit
@@ -4902,10 +4864,8 @@ impl Checker {
         // DEFER(phase-4-checker): the full `checkModuleDeclaration` (ambient checks,
         // non-identifier name checks, augmentation merge checks).
         // Go: internal/checker/checker.go:Checker.checkModuleDeclaration(5365)
-        if let NodeData::ModuleDeclaration(d) = program.arena().data(node) {
-            if let Some(body) = d.body {
-                self.check_statement(program, body);
-            }
+        if let NodeData::ModuleDeclaration(_) = program.arena().data(node) {
+            self.check_module_declaration(program, node);
         }
         // A `ModuleBlock` (the `{ ... }` body of a namespace/module) descends
         // into its child statements.
@@ -5495,12 +5455,350 @@ impl Checker {
         }
     }
 
+    fn check_class_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::ClassDeclaration(d) = program.arena().data(node) else {
+            return;
+        };
+        let name = d.name;
+        let members = d.members.nodes.clone();
+        if name.is_none()
+            && !modifier_flags_of(program.arena(), node).contains(tsgo_ast::ModifierFlags::DEFAULT)
+        {
+            self.grammar_error_on_first_token(program, node, &tsgo_diagnostics::A_CLASS_DECLARATION_WITHOUT_THE_DEFAULT_MODIFIER_MUST_HAVE_A_NAME, &[]);
+        }
+        self.check_decorators_on_node(program, node);
+        self.check_grammar_class_like_declaration(program, node);
+        self.check_class_like_declaration(program, node);
+        for member in members {
+            if !matches!(
+                program.arena().kind(member),
+                Kind::MethodDeclaration | Kind::GetAccessor | Kind::SetAccessor
+            ) {
+                self.check_grammar_modifiers(program, member);
+            }
+            self.check_decorators_on_node(program, member);
+            self.check_class_member(program, member);
+        }
+        self.register_for_unused_identifiers_check(node);
+    }
+    fn check_interface_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::InterfaceDeclaration(d) = program.arena().data(node) else {
+            return;
+        };
+        let type_parameters = d.type_parameters.clone();
+        let members = d.members.nodes.clone();
+        let name = d.name;
+        self.check_grammar_modifiers(program, node);
+        self.check_grammar_type_parameter_defaults(program, type_parameters);
+        if let Some(name) = name {
+            self.check_type_name_is_reserved(
+                program,
+                name,
+                &tsgo_diagnostics::INTERFACE_NAME_CANNOT_BE_0,
+            );
+        }
+        self.check_object_type_for_duplicate_declarations(program, node);
+        for member in &members {
+            let mk = program.arena().kind(*member);
+            if mk == Kind::IndexSignature {
+                self.check_grammar_index_signature(program, *member);
+            } else if mk == Kind::PropertySignature {
+                self.check_grammar_property(program, *member);
+            }
+        }
+        if let Some(sym) = program.symbol_of_node(node) {
+            self.check_type_parameter_lists_identical(program, sym);
+            if !self.declared_type_links.get(sym).index_signatures_checked {
+                self.declared_type_links.get(sym).index_signatures_checked = true;
+                self.check_type_for_duplicate_index_signatures(program, node);
+            }
+        }
+        self.register_for_unused_identifiers_check(node);
+    }
+    fn check_type_alias_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::TypeAliasDeclaration(d) = program.arena().data(node) else {
+            return;
+        };
+        let (type_parameters, type_node, name) = (d.type_parameters.clone(), d.type_node, d.name);
+        self.check_grammar_modifiers(program, node);
+        self.check_type_name_is_reserved(
+            program,
+            name,
+            &tsgo_diagnostics::TYPE_ALIAS_NAME_CANNOT_BE_0,
+        );
+        self.check_grammar_type_parameter_defaults(program, type_parameters.clone());
+        if let Some(ref tps) = type_parameters {
+            for tp in &tps.nodes {
+                self.check_type_parameter_declaration(program, *tp);
+            }
+        }
+        self.check_type_node(program, type_node);
+        self.register_for_unused_identifiers_check(node);
+    }
+    fn check_enum_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::EnumDeclaration(d) = program.arena().data(node) else {
+            return;
+        };
+        let members = d.members.nodes.clone();
+        self.check_grammar_modifiers(program, node);
+        for member in &members {
+            self.check_enum_member(program, *member);
+        }
+        let Some(enum_symbol) = program.symbol_of_node(node) else {
+            return;
+        };
+        if !self.declared_type_links.get(enum_symbol).enum_checked {
+            self.declared_type_links.get(enum_symbol).enum_checked = true;
+            let decls = program.symbol(enum_symbol).declarations.clone();
+            if decls.len() > 1 {
+                let this_is_const = is_enum_const(program, node);
+                for decl in &decls {
+                    if program.arena().kind(*decl) == Kind::EnumDeclaration
+                        && is_enum_const(program, *decl) != this_is_const
+                    {
+                        if let Some(dn) = enum_decl_name(program, *decl) {
+                            self.error(
+                                program,
+                                dn,
+                                &tsgo_diagnostics::ENUM_DECLARATIONS_MUST_ALL_BE_CONST_OR_NON_CONST,
+                                &[],
+                            );
+                        }
+                    }
+                }
+            }
+            let mut seen_missing = false;
+            for decl in &decls {
+                if program.arena().kind(*decl) != Kind::EnumDeclaration {
+                    continue;
+                }
+                let dm = match program.arena().data(*decl) {
+                    NodeData::EnumDeclaration(ed) => ed.members.nodes.clone(),
+                    _ => continue,
+                };
+                if dm.is_empty() {
+                    continue;
+                }
+                let first = dm[0];
+                let has_init = matches!(program.arena().data(first), NodeData::EnumMember(em) if em.initializer.is_some());
+                if !has_init {
+                    if seen_missing {
+                        let nn = match program.arena().data(first) {
+                            NodeData::EnumMember(em) => em.name,
+                            _ => first,
+                        };
+                        self.error(program, nn, &tsgo_diagnostics::IN_AN_ENUM_WITH_MULTIPLE_DECLARATIONS_ONLY_ONE_DECLARATION_CAN_OMIT_AN_INITIALIZER_FOR_ITS_FIRST_ENUM_ELEMENT, &[]);
+                    } else {
+                        seen_missing = true;
+                    }
+                }
+            }
+        }
+    }
+    fn check_enum_member(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::EnumMember(d) = program.arena().data(node) else {
+            return;
+        };
+        if program.arena().kind(d.name) == Kind::PrivateIdentifier {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::AN_ENUM_MEMBER_CANNOT_BE_NAMED_WITH_A_PRIVATE_IDENTIFIER,
+                &[],
+            );
+        }
+        // DEFER(phase-4-checker): check_expression on initializer requires enum
+        // value computation to be complete first to avoid spurious 2304 on
+        // self-referential members like `E.A`. Go gates this through
+        // computeEnumMemberValues running before the check.
+    }
+    fn check_module_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::ModuleDeclaration(d) = program.arena().data(node) else {
+            return;
+        };
+        let (body, name, keyword) = (d.body, d.name, d.keyword);
+        if let Some(body) = body {
+            self.check_statement(program, body);
+            self.register_for_unused_identifiers_check(node);
+        }
+        let in_ambient = program
+            .arena()
+            .flags(node)
+            .contains(tsgo_ast::NodeFlags::AMBIENT);
+        self.check_grammar_modifiers(program, node);
+        if program.arena().kind(name) == Kind::Identifier && keyword == Kind::ModuleKeyword {
+            self.error(program, name, &tsgo_diagnostics::A_NAMESPACE_DECLARATION_SHOULD_NOT_BE_DECLARED_USING_THE_MODULE_KEYWORD_PLEASE_USE_THE_NAMESPACE_KEYWORD_INSTEAD, &[]);
+        }
+        if !in_ambient && program.arena().kind(name) == Kind::StringLiteral {
+            self.grammar_error_on_node(
+                program,
+                name,
+                &tsgo_diagnostics::ONLY_AMBIENT_MODULES_CAN_USE_QUOTED_NAMES,
+                &[],
+            );
+        }
+    }
+    fn check_function_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::FunctionDeclaration(d) = program.arena().data(node) else {
+            return;
+        };
+        let (params, return_type, body) = (d.parameters.nodes.clone(), d.type_node, d.body);
+        self.check_grammar_function_like_declaration(program, node);
+        self.check_return_type_predicate(program, &params, return_type);
+        for param in &params {
+            self.check_parameter(program, *param);
+        }
+        if let Some(body) = body {
+            self.check_statement(program, body);
+        }
+        self.register_for_unused_identifiers_check(node);
+    }
+    fn check_method_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::MethodDeclaration(d) = program.arena().data(node) else {
+            return;
+        };
+        let (name, params, body) = (d.name, d.parameters.nodes.clone(), d.body);
+        self.check_grammar_function_like_declaration(program, node);
+        if d.asterisk_token.is_some()
+            && program.arena().kind(name) == Kind::Identifier
+            && program.arena().text(name) == "constructor"
+        {
+            self.error(
+                program,
+                name,
+                &tsgo_diagnostics::CLASS_CONSTRUCTOR_MAY_NOT_BE_A_GENERATOR,
+                &[],
+            );
+        }
+        for param in &params {
+            self.check_parameter(program, *param);
+        }
+        if let Some(body) = body {
+            self.check_statement(program, body);
+        }
+        if has_abstract_modifier(program.arena(), node) && body.is_some() {
+            let ns = program.arena().text(name).to_string();
+            self.error(program, node, &tsgo_diagnostics::METHOD_0_CANNOT_HAVE_AN_IMPLEMENTATION_BECAUSE_IT_IS_MARKED_ABSTRACT, &[&ns]);
+        }
+        if program.arena().kind(name) == Kind::PrivateIdentifier
+            && get_containing_class(program, node).is_none()
+        {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::PRIVATE_IDENTIFIERS_ARE_NOT_ALLOWED_OUTSIDE_CLASS_BODIES,
+                &[],
+            );
+        }
+    }
+    fn check_constructor_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::ConstructorDeclaration(d) = program.arena().data(node) else {
+            return;
+        };
+        let (params, body) = (d.parameters.nodes.clone(), d.body);
+        self.check_grammar_constructor_type_parameters(program, node);
+        self.check_grammar_constructor_type_annotation(program, node);
+        for param in &params {
+            self.check_parameter(program, *param);
+        }
+        if let Some(body) = body {
+            self.check_statement(program, body);
+        }
+    }
+    fn check_accessor_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let (name, params, body) = match program.arena().data(node) {
+            NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+                (d.name, d.parameters.nodes.clone(), d.body)
+            }
+            _ => return,
+        };
+        self.check_grammar_function_like_declaration(program, node);
+        self.check_grammar_accessor(program, node);
+        if program.arena().kind(name) == Kind::Identifier
+            && program.arena().text(name) == "constructor"
+            && get_containing_class(program, node).is_some()
+        {
+            self.error(
+                program,
+                name,
+                &tsgo_diagnostics::CLASS_CONSTRUCTOR_MAY_NOT_BE_AN_ACCESSOR,
+                &[],
+            );
+        }
+        for param in &params {
+            self.check_parameter(program, *param);
+        }
+        if let Some(body) = body {
+            self.check_statement(program, body);
+        }
+    }
+    fn check_property_declaration_full(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::PropertyDeclaration(d) = program.arena().data(node) else {
+            return;
+        };
+        let (name, initializer) = (d.name, d.initializer);
+        self.check_grammar_property(program, node);
+        self.check_property_declaration(program, node);
+        if has_abstract_modifier(program.arena(), node) && initializer.is_some() {
+            let ns = program.arena().text(name).to_string();
+            self.error(program, node, &tsgo_diagnostics::PROPERTY_0_CANNOT_HAVE_AN_INITIALIZER_BECAUSE_IT_IS_MARKED_ABSTRACT, &[&ns]);
+        }
+    }
+    fn check_type_parameter_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::TypeParameterDeclaration(d) = program.arena().data(node) else {
+            return;
+        };
+        let name = d.name;
+        if let Some(expr) = d.expression {
+            self.grammar_error_on_first_token(program, expr, &tsgo_diagnostics::TYPE_EXPECTED, &[]);
+        }
+        if let Some(c) = d.constraint {
+            self.check_type_node(program, c);
+        }
+        if let Some(dt) = d.default_type {
+            self.check_type_node(program, dt);
+        }
+        self.check_type_name_is_reserved(
+            program,
+            name,
+            &tsgo_diagnostics::TYPE_PARAMETER_NAME_CANNOT_BE_0,
+        );
+    }
+    fn check_type_name_is_reserved(
+        &mut self,
+        program: &dyn BoundProgram,
+        name: NodeId,
+        message: &'static Message,
+    ) {
+        match program.arena().text(name) {
+            "any" | "unknown" | "never" | "number" | "bigint" | "boolean" | "string" | "symbol"
+            | "void" | "object" | "undefined" => {
+                self.error(program, name, message, &[program.arena().text(name)]);
+            }
+            _ => {}
+        }
+    }
+    #[allow(dead_code)]
+    fn container_allows_block_scoped_variable(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let Some(parent) = program.arena().parent(node) else {
+            return true;
+        };
+        matches!(
+            program.arena().kind(parent),
+            Kind::SourceFile
+                | Kind::ModuleBlock
+                | Kind::Block
+                | Kind::CaseClause
+                | Kind::DefaultClause
+        )
+    }
+
     // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4266)
     fn check_class_like_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
-        // Report duplicate members (`Duplicate identifier`, TS2300) within the
-        // class first (Go runs it from `checkClassLikeDeclaration` regardless of
-        // whether the declared type resolves).
-        // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4279)
         self.check_object_type_for_duplicate_declarations(program, node);
         if let Some(sym) = program.symbol_of_node(node) {
             if !self.declared_type_links.get(sym).index_signatures_checked {
@@ -5820,44 +6118,21 @@ impl Checker {
     // Go: internal/checker/checker.go:Checker.checkClassMember / checkSourceElement
     fn check_class_member(&mut self, program: &dyn BoundProgram, member: NodeId) {
         match program.arena().data(member) {
-            NodeData::MethodDeclaration(d) => {
-                let params = d.parameters.nodes.clone();
-                for param in params {
-                    self.check_parameter(program, param);
-                }
-                if let Some(body) = d.body {
-                    self.check_statement(program, body);
-                }
+            NodeData::MethodDeclaration(_) => {
+                self.check_method_declaration(program, member);
             }
-            NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
-                self.check_grammar_accessor(program, member);
-                let params = d.parameters.nodes.clone();
-                for param in params {
-                    self.check_parameter(program, param);
-                }
-                if let Some(body) = d.body {
-                    self.check_statement(program, body);
-                }
+            NodeData::GetAccessorDeclaration(_) | NodeData::SetAccessorDeclaration(_) => {
+                self.check_accessor_declaration(program, member);
             }
-            NodeData::ConstructorDeclaration(d) => {
-                let params = d.parameters.nodes.clone();
-                let body = d.body;
-                self.check_grammar_constructor_type_parameters(program, member);
-                self.check_grammar_constructor_type_annotation(program, member);
-                for param in params {
-                    self.check_parameter(program, param);
-                }
-                if let Some(body) = body {
-                    self.check_statement(program, body);
-                }
+            NodeData::ConstructorDeclaration(_) => {
+                self.check_constructor_declaration(program, member);
             }
             NodeData::ClassStaticBlockDeclaration(d) => {
                 let body = d.body;
                 self.check_statement(program, body);
             }
             NodeData::PropertyDeclaration(_) => {
-                self.check_grammar_property(program, member);
-                self.check_property_declaration(program, member);
+                self.check_property_declaration_full(program, member);
             }
             _ => {}
         }
@@ -8498,6 +8773,32 @@ fn is_import_call(program: &dyn BoundProgram, node: NodeId) -> bool {
 #[allow(dead_code)]
 pub(crate) fn is_type_usable_as_property_name(flags: TypeFlags) -> bool {
     flags.intersects(TypeFlags::STRING_OR_NUMBER_LITERAL_OR_UNIQUE)
+}
+
+fn get_containing_class(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    let arena = program.arena();
+    let mut current = arena.parent(node);
+    while let Some(n) = current {
+        if matches!(
+            arena.kind(n),
+            Kind::ClassDeclaration | Kind::ClassExpression
+        ) {
+            return Some(n);
+        }
+        current = arena.parent(n);
+    }
+    None
+}
+
+fn is_enum_const(program: &dyn BoundProgram, node: NodeId) -> bool {
+    modifier_flags_of(program.arena(), node).contains(tsgo_ast::ModifierFlags::CONST)
+}
+
+fn enum_decl_name(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    match program.arena().data(node) {
+        NodeData::EnumDeclaration(d) => Some(d.name),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

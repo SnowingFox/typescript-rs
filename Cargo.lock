@@ -1351,6 +1351,7 @@ dependencies = [
  "tsgo_parser",
  "tsgo_printer",
  "tsgo_scanner",
+ "tsgo_sourcemap",
  "tsgo_stringutil",
  "tsgo_tspath",
 ]

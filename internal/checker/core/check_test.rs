@@ -10896,3 +10896,212 @@ fn check_for_statement_checks_body() {
         diags
     );
 }
+
+// == T1-E batch 3 ==
+
+#[test]
+fn b3_class_declaration_no_name_reports_1211() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "class { }"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 1211));
+}
+
+#[test]
+fn b3_class_declaration_named_no_1211() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "class Foo { }"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(!c.get_diagnostics(root).iter().any(|d| d.code == 1211));
+}
+
+#[test]
+fn b3_interface_reserved_name_reports_2427() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "interface string { }"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 2427));
+}
+
+#[test]
+fn b3_interface_non_reserved_no_2427() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Foo { x: number; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(!c.get_diagnostics(root).iter().any(|d| d.code == 2427));
+}
+
+#[test]
+fn b3_type_alias_reserved_name_reports_2457() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type number = string;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 2457));
+}
+
+#[test]
+fn b3_type_alias_non_reserved_no_2457() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type MyType = string;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(!c.get_diagnostics(root).iter().any(|d| d.code == 2457));
+}
+
+#[test]
+fn b3_enum_normal_members_no_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "enum E { X, Y, Z }"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(!c.get_diagnostics(root).iter().any(|d| d.code == 18024));
+}
+
+#[test]
+fn b3_module_keyword_reports_1540() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "module Foo { }"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 1540));
+}
+
+#[test]
+fn b3_namespace_keyword_no_1540() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "namespace Foo { }"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(!c.get_diagnostics(root).iter().any(|d| d.code == 1540));
+}
+
+#[test]
+fn b3_namespace_body_checked() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace N { unknownInNs; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 2304));
+}
+
+#[test]
+fn b3_function_body_checked() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() { unknownInFn; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 2304));
+}
+
+#[test]
+fn b3_method_body_is_checked() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { foo() { unknownInMethod; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 2304));
+}
+
+#[test]
+fn b3_method_return_type_checked() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { foo(): number { return 'x'; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 2322));
+}
+
+#[test]
+fn b3_constructor_body_checked() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { constructor() { unknownInCtor; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 2304));
+}
+
+#[test]
+fn b3_accessor_params_checked() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { set x(this: number) { } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 2784));
+}
+
+#[test]
+fn b3_accessor_body_checked() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { get x() { unknownInGetter; return 1; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 2304));
+}
+
+#[test]
+fn b3_property_initializer_checked() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { x: number = unknownPropInit; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 2304));
+}
+
+#[test]
+fn b3_type_param_reserved_name_reports_2368() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Foo<string> = string;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(c.get_diagnostics(root).iter().any(|d| d.code == 2368));
+}
+
+#[test]
+fn b3_type_param_non_reserved_no_2368() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "type Foo<T> = T;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    assert!(!c.get_diagnostics(root).iter().any(|d| d.code == 2368));
+}

@@ -26,6 +26,9 @@ pub mod program;
 pub mod projectreference;
 pub mod verify_options;
 
+#[cfg(test)]
+mod stress_test;
+
 pub use boundfile::BoundFile;
 pub use checkerpool::{checker_count, CompilerCheckerPool};
 pub use emit_host::EmitHost;
