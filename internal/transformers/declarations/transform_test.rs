@@ -709,6 +709,157 @@ fn isolated_declarations_method_no_return_reports_9008() {
     assert_eq!(diags[0].0, 9008);
 }
 
+// ── T4-終 slice 1: generic type alias → type params preserved ───────────────
+// Go: transform.go:transformTypeAliasDeclaration. A generic type alias preserves
+// its type parameter list and aliased type.
+// tsgo --declaration: `export type Result<T, E> = { ok: T } | { err: E };`
+//   → `export type Result<T, E> = {\n    ok: T;\n} | {\n    err: E;\n};`
+#[test]
+fn generic_type_alias_preserves_type_params() {
+    check(
+        "export type Result<T, E> = { ok: T } | { err: E };",
+        "export type Result<T, E> = {\n    ok: T;\n} | {\n    err: E;\n};",
+    );
+}
+
+// A constrained generic type alias keeps the `extends` constraint.
+// tsgo --declaration: `export type Boxed<T extends object> = { value: T };`
+#[test]
+fn generic_type_alias_with_constraint() {
+    check(
+        "export type Boxed<T extends object> = { value: T };",
+        "export type Boxed<T extends object> = {\n    value: T;\n};",
+    );
+}
+
+// ── T4-終 slice 2: variable declaration — `let`/`var` with annotation ───────
+// Go: transform.go:transformVariableStatement. A `let` gains `declare` and the
+// annotation is preserved (initializer stripped).
+// tsgo --declaration: `export let x: number = 1;` → `export declare let x: number;`
+#[test]
+fn let_declaration_with_annotation() {
+    check("export let x: number = 1;", "export declare let x: number;");
+}
+
+// A `var` also gains `declare` with annotation preserved.
+// tsgo --declaration: `var y: string = "hello";` → `declare var y: string;`
+#[test]
+fn var_declaration_with_annotation() {
+    check("var y: string = \"hello\";", "declare var y: string;");
+}
+
+// ── T4-終 slice 3: import re-export from module preserved ──────────────────
+// Go: transform.go:transformExportDeclaration (ExportDeclaration arm).
+// `export { Foo } from "./bar";` is preserved as-is in the .d.ts.
+// tsgo --declaration: kept verbatim (the module specifier is not rewritten in
+// this reachable subset).
+#[test]
+fn import_reexport_from_module_is_preserved() {
+    check(
+        "export { Foo } from \"./bar\";",
+        "export { Foo } from \"./bar\";",
+    );
+}
+
+// A type-only re-export is also preserved.
+// tsgo --declaration: `export type { Bar } from "./baz";` → preserved.
+#[test]
+fn type_only_reexport_from_module_is_preserved() {
+    check(
+        "export type { Bar } from \"./baz\";",
+        "export type { Bar } from \"./baz\";",
+    );
+}
+
+// A star re-export is preserved.
+// tsgo --declaration: `export * from "./mod";` → preserved.
+#[test]
+fn star_reexport_from_module_is_preserved() {
+    check("export * from \"./mod\";", "export * from \"./mod\";");
+}
+
+// ── T4-終 slice 4: default export function / class ─────────────────────────
+// Go: transform.go:ensureModifierFlags / maskModifierFlags. A `default` export
+// keeps `export default` (no `declare` added alongside `default`).
+// tsgo --declaration: `export default function foo(): void {}` →
+//   `export default function foo(): void;`
+#[test]
+fn export_default_function_becomes_signature() {
+    check(
+        "export default function foo(): void {}",
+        "export default function foo(): void;",
+    );
+}
+
+// An anonymous default-exported function also works. The printer inserts a
+// space between `function` and `()` even when no name is present.
+// tsgo --declaration: `export default function(): void {}` →
+//   `export default function (): void;`
+#[test]
+fn export_default_anonymous_function() {
+    check(
+        "export default function(): void {}",
+        "export default function (): void;",
+    );
+}
+
+// A default-exported class is kept without `declare`.
+// tsgo --declaration: `export default class C { x: number = 1; }` →
+//   `export default class C {\n    x: number;\n}`
+#[test]
+fn export_default_class() {
+    check(
+        "export default class C { x: number = 1; }",
+        "export default class C {\n    x: number;\n}",
+    );
+}
+
+// ── T4-終 slice 5: overloaded functions — signatures preserved (bare) ──────
+// Without a resolver, all function signatures (overloads + implementation)
+// are kept — the resolver is needed to distinguish the implementation from
+// the declarations. The bare path keeps everything as ambient signatures.
+// tsgo --declaration (no overload elision without resolver): each signature
+// is kept.
+#[test]
+fn overloaded_functions_all_signatures_kept_bare() {
+    check(
+        "function f(x: number): number;\nfunction f(x: string): string;\nfunction f(x: any): any { return x; }",
+        "declare function f(x: number): number;\ndeclare function f(x: string): string;\ndeclare function f(x: any): any;",
+    );
+}
+
+// ── T4-終 slice 6: generic interface with constraint ───────────────────────
+// Go: transform.go:transformInterfaceDeclaration. An interface with constrained
+// type params preserves them.
+// tsgo --declaration: `export interface Container<T extends object> { value: T; }`
+#[test]
+fn generic_interface_with_constraint() {
+    check(
+        "export interface Container<T extends object> { value: T; }",
+        "export interface Container<T extends object> {\n    value: T;\n}",
+    );
+}
+
+// A generic class with a constraint preserves type parameters.
+// tsgo --declaration: `export class Box<T extends string> { value: T; constructor(v: T) { this.value = v; } }`
+#[test]
+fn generic_class_with_constraint() {
+    check(
+        "export class Box<T extends string> { value: T; constructor(v: T) { this.value = v; } }",
+        "export declare class Box<T extends string> {\n    value: T;\n    constructor(v: T);\n}",
+    );
+}
+
+// A function with multiple constrained type params.
+// tsgo --declaration: `export function merge<T extends object, U extends object>(a: T, b: U): T & U { ... }`
+#[test]
+fn generic_function_with_multiple_constraints() {
+    check(
+        "export function merge<T extends object, U extends object>(a: T, b: U): T & U { return Object.assign(a, b); }",
+        "export declare function merge<T extends object, U extends object>(a: T, b: U): T & U;",
+    );
+}
+
 // The 9007 diagnostic carries a 9031 "add a return type" related suggestion.
 #[test]
 fn isolated_declarations_9007_has_related_suggestion() {
@@ -735,5 +886,58 @@ fn isolated_declarations_9007_has_related_suggestion() {
     assert_eq!(
         diags[0].related_information[0].message,
         "Add a return type to the function declaration."
+    );
+}
+
+// ── T4-終 slice 8: combined / edge cases ───────────────────────────────────
+
+// A generic default-exported function: `export default` + type parameters.
+// tsgo --declaration: `export default function identity<T>(x: T): T { return x; }`
+//   → `export default function identity<T>(x: T): T;`
+#[test]
+fn generic_default_export_function() {
+    check(
+        "export default function identity<T>(x: T): T { return x; }",
+        "export default function identity<T>(x: T): T;",
+    );
+}
+
+// A file with a mix of re-exports, type aliases, and variable declarations.
+// tsgo --declaration: combined output.
+#[test]
+fn mixed_file_with_reexports_types_and_vars() {
+    check(
+        "export type ID = string;\nexport const VERSION: number = 1;\nexport { Foo } from \"./foo\";",
+        "export type ID = string;\nexport declare const VERSION: number;\nexport { Foo } from \"./foo\";",
+    );
+}
+
+// An `export * as ns from "./mod"` namespace re-export is preserved.
+// tsgo --declaration: kept verbatim.
+#[test]
+fn namespace_reexport_star_as() {
+    check(
+        "export * as utils from \"./utils\";",
+        "export * as utils from \"./utils\";",
+    );
+}
+
+// A `const enum` (enum with `const` modifier) keeps its `const` modifier.
+// tsgo --declaration: `export const enum Direction { Up, Down }`
+#[test]
+fn const_enum_preserves_const_modifier() {
+    check(
+        "export const enum Direction { Up, Down }",
+        "export declare const enum Direction {\n    Up,\n    Down\n}",
+    );
+}
+
+// An abstract class preserves the `abstract` modifier.
+// tsgo --declaration: `export abstract class Base { abstract m(): void; }`
+#[test]
+fn abstract_class_preserves_modifier() {
+    check(
+        "export abstract class Base { abstract m(): void; }",
+        "export declare abstract class Base {\n    abstract m(): void;\n}",
     );
 }

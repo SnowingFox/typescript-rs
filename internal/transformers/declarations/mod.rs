@@ -21,6 +21,7 @@
 //! explicit-annotation diagnostics — see [`transform`]'s module docs for the
 //! covered behaviors and the DEFER list.
 
+pub mod declaration_map;
 pub mod diagnostics;
 pub mod tracker;
 pub mod transform;

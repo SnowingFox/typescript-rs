@@ -22,6 +22,7 @@ tsgo_modulespecifiers = { path = "../modulespecifiers" }
 tsgo_nodebuilder = { path = "../nodebuilder" }
 tsgo_printer = { path = "../printer" }
 tsgo_scanner = { path = "../scanner" }
+tsgo_sourcemap = { path = "../sourcemap" }
 tsgo_stringutil = { path = "../stringutil" }
 tsgo_tspath = { path = "../tspath" }
 
