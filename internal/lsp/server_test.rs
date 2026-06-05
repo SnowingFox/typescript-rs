@@ -437,11 +437,11 @@ fn completion_request_returns_items() {
 }
 
 // ---------------------------------------------------------------------------
-// T13: definition request (default impl returns null)
+// T13: definition request returns empty locations array
 // ---------------------------------------------------------------------------
 // Go: internal/lsp/server.go:handlers() → "textDocument/definition"
 #[test]
-fn definition_request_returns_null_from_default_impl() {
+fn definition_request_returns_empty_locations() {
     let msgs = vec![
         make_request(1, "initialize", initialize_params()),
         make_request(
@@ -462,7 +462,11 @@ fn definition_request_returns_null_from_default_impl() {
     assert!(def_resp.error.is_none(), "definition should not error");
     let result: serde_json::Value =
         serde_json::from_str(def_resp.result.as_ref().unwrap().get()).unwrap();
-    assert!(result.is_null());
+    assert_eq!(
+        result,
+        serde_json::json!([]),
+        "definition stub returns empty locations array"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -494,11 +498,11 @@ fn semantic_tokens_full_returns_null_from_default_impl() {
 }
 
 // ---------------------------------------------------------------------------
-// T15: references request (default impl returns null)
+// T15: references request returns empty locations array
 // ---------------------------------------------------------------------------
 // Go: internal/lsp/server.go:handlers() → "textDocument/references"
 #[test]
-fn references_request_returns_null_from_default_impl() {
+fn references_request_returns_empty_locations() {
     let msgs = vec![
         make_request(1, "initialize", initialize_params()),
         make_request(
@@ -520,7 +524,11 @@ fn references_request_returns_null_from_default_impl() {
     assert!(ref_resp.error.is_none(), "references should not error");
     let result: serde_json::Value =
         serde_json::from_str(ref_resp.result.as_ref().unwrap().get()).unwrap();
-    assert!(result.is_null());
+    assert_eq!(
+        result,
+        serde_json::json!([]),
+        "references stub returns empty locations array"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -554,11 +562,11 @@ fn rename_request_returns_null_from_default_impl() {
 }
 
 // ---------------------------------------------------------------------------
-// T17: formatting request (default impl returns null)
+// T17: formatting request returns empty edits array
 // ---------------------------------------------------------------------------
 // Go: internal/lsp/server.go:handlers() → "textDocument/formatting"
 #[test]
-fn formatting_request_returns_null_from_default_impl() {
+fn formatting_request_returns_empty_edits() {
     let msgs = vec![
         make_request(1, "initialize", initialize_params()),
         make_request(
@@ -579,5 +587,107 @@ fn formatting_request_returns_null_from_default_impl() {
     assert!(fmt_resp.error.is_none(), "formatting should not error");
     let result: serde_json::Value =
         serde_json::from_str(fmt_resp.result.as_ref().unwrap().get()).unwrap();
-    assert!(result.is_null());
+    assert_eq!(
+        result,
+        serde_json::json!([]),
+        "formatting stub returns empty edits array"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T18: signatureHelp request returns null (not yet implemented)
+// ---------------------------------------------------------------------------
+// Go: internal/lsp/server.go:handlers() → "textDocument/signatureHelp"
+#[test]
+fn signature_help_request_returns_null() {
+    let msgs = vec![
+        make_request(1, "initialize", initialize_params()),
+        make_request(
+            2,
+            "textDocument/signatureHelp",
+            serde_json::json!({
+                "textDocument": { "uri": "file:///test.ts" },
+                "position": { "line": 0, "character": 5 }
+            }),
+        ),
+        make_request(3, "shutdown", serde_json::json!(null)),
+        make_notification("exit", serde_json::json!(null)),
+    ];
+    let mut server = test_server(msgs);
+    let responses = server.run().unwrap();
+
+    let sig_resp = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
+    assert!(sig_resp.error.is_none(), "signatureHelp should not error");
+    let result: serde_json::Value =
+        serde_json::from_str(sig_resp.result.as_ref().unwrap().get()).unwrap();
+    assert!(result.is_null(), "signatureHelp stub returns null");
+}
+
+// ---------------------------------------------------------------------------
+// T19: codeAction request returns empty array
+// ---------------------------------------------------------------------------
+// Go: internal/lsp/server.go:handlers() → "textDocument/codeAction"
+#[test]
+fn code_action_request_returns_empty_array() {
+    let msgs = vec![
+        make_request(1, "initialize", initialize_params()),
+        make_request(
+            2,
+            "textDocument/codeAction",
+            serde_json::json!({
+                "textDocument": { "uri": "file:///test.ts" },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 10 }
+                },
+                "context": { "diagnostics": [] }
+            }),
+        ),
+        make_request(3, "shutdown", serde_json::json!(null)),
+        make_notification("exit", serde_json::json!(null)),
+    ];
+    let mut server = test_server(msgs);
+    let responses = server.run().unwrap();
+
+    let ca_resp = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
+    assert!(ca_resp.error.is_none(), "codeAction should not error");
+    let result: serde_json::Value =
+        serde_json::from_str(ca_resp.result.as_ref().unwrap().get()).unwrap();
+    assert_eq!(
+        result,
+        serde_json::json!([]),
+        "codeAction stub returns empty array"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T20: documentSymbol request returns empty array
+// ---------------------------------------------------------------------------
+// Go: internal/lsp/server.go:handlers() → "textDocument/documentSymbol"
+#[test]
+fn document_symbol_request_returns_empty_array() {
+    let msgs = vec![
+        make_request(1, "initialize", initialize_params()),
+        make_request(
+            2,
+            "textDocument/documentSymbol",
+            serde_json::json!({
+                "textDocument": { "uri": "file:///test.ts" }
+            }),
+        ),
+        make_request(3, "shutdown", serde_json::json!(null)),
+        make_notification("exit", serde_json::json!(null)),
+    ];
+    let mut server = test_server(msgs);
+    let responses = server.run().unwrap();
+
+    let sym_resp = responses.iter().find(|r| r.id == Some(Id::Int(2))).unwrap();
+    assert!(sym_resp.error.is_none(), "documentSymbol should not error");
+    let result: serde_json::Value =
+        serde_json::from_str(sym_resp.result.as_ref().unwrap().get()).unwrap();
+    assert_eq!(
+        result,
+        serde_json::json!([]),
+        "documentSymbol stub returns empty array"
+    );
 }

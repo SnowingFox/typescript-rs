@@ -4080,6 +4080,116 @@ lsp_object! {
     }
 }
 
+// ---------------------------------------------------------------------------
+// WatchKind (bitflags)
+// Go: internal/lsp/lsproto/lsp_generated.go:WatchKind
+// ---------------------------------------------------------------------------
+
+bitflags::bitflags! {
+    /// Bitflag enumeration for file-system watch event kinds.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct WatchKind: u32 {
+        const CREATE = 1;
+        const CHANGE = 2;
+        const DELETE = 4;
+    }
+}
+
+impl Default for WatchKind {
+    fn default() -> Self {
+        Self::CREATE | Self::CHANGE | Self::DELETE
+    }
+}
+
+impl Serialize for WatchKind {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.bits())
+    }
+}
+
+impl<'de> Deserialize<'de> for WatchKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bits = u32::deserialize(deserializer)?;
+        Ok(WatchKind::from_bits_truncate(bits))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FileSystemWatcher
+// Go: internal/lsp/lsproto/lsp_generated.go:FileSystemWatcher
+// ---------------------------------------------------------------------------
+
+/// An LSP `FileSystemWatcher` describing a glob pattern and optional watch kind.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FileSystemWatcher {
+    /// The glob pattern to watch (plain pattern or relative pattern).
+    pub glob_pattern: PatternOrRelativePattern,
+    /// The kind of events of interest. Defaults to Create|Change|Delete (7).
+    pub kind: Option<WatchKind>,
+}
+
+impl Serialize for FileSystemWatcher {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let field_count = 1 + usize::from(self.kind.is_some());
+        let mut map = serializer.serialize_map(Some(field_count))?;
+        map.serialize_entry("globPattern", &self.glob_pattern)?;
+        if let Some(kind) = &self.kind {
+            map.serialize_entry("kind", kind)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for FileSystemWatcher {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Helper {
+            glob_pattern: PatternOrRelativePattern,
+            kind: Option<u32>,
+        }
+        let h = Helper::deserialize(deserializer)?;
+        Ok(FileSystemWatcher {
+            glob_pattern: h.glob_pattern,
+            kind: h.kind.map(WatchKind::from_bits_truncate),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MessageType
+// Go: internal/lsp/lsproto/lsp_generated.go:MessageType
+// ---------------------------------------------------------------------------
+
+/// LSP `MessageType` enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum MessageType {
+    Error = 1,
+    Warning = 2,
+    Info = 3,
+    Log = 4,
+}
+
+impl Serialize for MessageType {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(*self as u32)
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let n = u32::deserialize(deserializer)?;
+        match n {
+            1 => Ok(MessageType::Error),
+            2 => Ok(MessageType::Warning),
+            3 => Ok(MessageType::Info),
+            4 => Ok(MessageType::Log),
+            _ => Err(de::Error::custom(format!("unknown MessageType {n}"))),
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "generated_test.rs"]
 mod tests;

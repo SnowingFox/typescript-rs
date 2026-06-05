@@ -7,6 +7,7 @@ edition = "2021"
 path = "lib.rs"
 
 [dependencies]
+bitflags = "2.9"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["raw_value"] }
 tsgo_bundled = { path = "../../bundled" }

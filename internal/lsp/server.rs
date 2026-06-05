@@ -70,11 +70,11 @@ pub trait Session {
     }
 
     /// Handles `textDocument/definition`: returns a serialized `Location[]`
-    /// result or `None`.
+    /// result. Default returns an empty locations array.
     // Go: internal/lsp/server.go:handlers() → "textDocument/definition"
     fn definition(&self, uri: &str, position: &serde_json::Value) -> Option<serde_json::Value> {
         let _ = (uri, position);
-        None
+        Some(serde_json::json!([]))
     }
 
     /// Handles `textDocument/completion`: returns a serialized `CompletionList`
@@ -86,11 +86,11 @@ pub trait Session {
     }
 
     /// Handles `textDocument/references`: returns a serialized `Location[]`
-    /// result or `None`.
+    /// result. Default returns an empty locations array.
     // Go: internal/lsp/server.go:handlers() → "textDocument/references"
     fn references(&self, uri: &str, position: &serde_json::Value) -> Option<serde_json::Value> {
         let _ = (uri, position);
-        None
+        Some(serde_json::json!([]))
     }
 
     /// Handles `textDocument/rename`: returns a serialized rename locations
@@ -107,11 +107,11 @@ pub trait Session {
     }
 
     /// Handles `textDocument/formatting`: returns a serialized `TextEdit[]`
-    /// result or `None`.
+    /// result. Default returns an empty edits array.
     // Go: internal/lsp/server.go:handlers() → "textDocument/formatting"
     fn formatting(&self, uri: &str, options: &serde_json::Value) -> Option<serde_json::Value> {
         let _ = (uri, options);
-        None
+        Some(serde_json::json!([]))
     }
 
     /// Handles `textDocument/semanticTokens/full`: returns a serialized
@@ -120,6 +120,36 @@ pub trait Session {
     fn semantic_tokens_full(&self, uri: &str) -> Option<serde_json::Value> {
         let _ = uri;
         None
+    }
+
+    /// Handles `textDocument/signatureHelp`: returns a serialized
+    /// `SignatureHelp` result or `None` (null = not available).
+    // Go: internal/lsp/server.go:handlers() → "textDocument/signatureHelp"
+    fn signature_help(&self, uri: &str, position: &serde_json::Value) -> Option<serde_json::Value> {
+        let _ = (uri, position);
+        None
+    }
+
+    /// Handles `textDocument/codeAction`: returns a serialized
+    /// `(Command | CodeAction)[]` result. Default returns an empty array.
+    // Go: internal/lsp/server.go:handlers() → "textDocument/codeAction"
+    fn code_action(
+        &self,
+        uri: &str,
+        range: &serde_json::Value,
+        context: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let _ = (uri, range, context);
+        Some(serde_json::json!([]))
+    }
+
+    /// Handles `textDocument/documentSymbol`: returns a serialized
+    /// `DocumentSymbol[] | SymbolInformation[]` result. Default returns an empty
+    /// array.
+    // Go: internal/lsp/server.go:handlers() → "textDocument/documentSymbol"
+    fn document_symbol(&self, uri: &str) -> Option<serde_json::Value> {
+        let _ = uri;
+        Some(serde_json::json!([]))
     }
 }
 
@@ -444,6 +474,13 @@ impl<S: Session> Server<S> {
                 let options = &params["options"];
                 self.session.formatting(uri, options)
             }
+            "textDocument/signatureHelp" => self.session.signature_help(uri, position),
+            "textDocument/codeAction" => {
+                let range = &params["range"];
+                let context = &params["context"];
+                self.session.code_action(uri, range, context)
+            }
+            "textDocument/documentSymbol" => self.session.document_symbol(uri),
             "textDocument/semanticTokens/full" => self.session.semantic_tokens_full(uri),
             _ => {
                 return self.error_response(
