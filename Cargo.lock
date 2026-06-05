@@ -596,6 +596,9 @@ dependencies = [
  "thiserror",
  "tsgo_json",
  "tsgo_jsonrpc",
+ "tsgo_ls_lsconv",
+ "tsgo_lsproto",
+ "tsgo_tspath",
 ]
 
 [[package]]
@@ -1212,6 +1215,7 @@ dependencies = [
  "tsgo_scanner",
  "tsgo_testutil_baseline",
  "tsgo_testutil_harnessutil",
+ "tsgo_tsoptions",
  "tsgo_tspath",
 ]
 
@@ -1280,6 +1284,7 @@ dependencies = [
  "tsgo_diagnostics",
  "tsgo_diagnosticwriter",
  "tsgo_locale",
+ "tsgo_module",
  "tsgo_parser",
  "tsgo_tsoptions",
  "tsgo_tspath",

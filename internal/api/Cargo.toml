@@ -12,5 +12,8 @@ serde_json = "1.0.150"
 thiserror = "2.0.18"
 tsgo_json = { path = "../json" }
 tsgo_jsonrpc = { path = "../jsonrpc" }
+tsgo_ls_lsconv = { path = "../ls/lsconv" }
+tsgo_lsproto = { path = "../lsp/lsproto" }
+tsgo_tspath = { path = "../tspath" }
 
 [dev-dependencies]

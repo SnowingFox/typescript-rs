@@ -18,6 +18,7 @@
 //!   phase-8 `api/impl.md`); not present in this skeleton.
 
 mod conn;
+mod proto;
 mod protocol;
 mod protocol_msgpack;
 mod server;
@@ -28,6 +29,7 @@ mod transport_unix;
 mod transport_windows;
 
 pub use conn::{unmarshal_params, Conn, Handler, ERR_CONN_CLOSED, ERR_REQUEST_TIMEOUT};
+pub use proto::DocumentIdentifier;
 pub use protocol::{Message, Protocol};
 pub use protocol_msgpack::MessageType;
 pub use server::{StdioServer, StdioServerOptions};
