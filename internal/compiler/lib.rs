@@ -27,6 +27,10 @@ pub mod projectreference;
 pub mod verify_options;
 
 #[cfg(test)]
+mod boundary_test;
+#[cfg(test)]
+mod bench_test;
+#[cfg(test)]
 mod stress_test;
 
 pub use boundfile::BoundFile;
