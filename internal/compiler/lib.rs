@@ -27,9 +27,12 @@ pub mod projectreference;
 pub mod verify_options;
 
 #[cfg(test)]
+mod bench_test;
+#[cfg(test)]
 mod boundary_test;
 #[cfg(test)]
-mod bench_test;
+#[path = "emit_baseline_test.rs"]
+mod emit_baseline_test;
 #[cfg(test)]
 mod stress_test;
 
