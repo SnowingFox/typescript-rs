@@ -100,10 +100,7 @@ fn stress_large_union_type() {
         "large union took {elapsed:?} (>{STRESS_TIMEOUT_SECS}s)"
     );
     for d in &diags {
-        assert_ne!(
-            d.code, -1,
-            "internal error diagnostic: {d:?}"
-        );
+        assert_ne!(d.code, -1, "internal error diagnostic: {d:?}");
     }
 }
 
@@ -129,10 +126,7 @@ const nested = a.b.a.b.a.b.a;
         if d.code == 2589 {
             continue; // "Type instantiation is excessively deep" is fine
         }
-        assert_ne!(
-            d.code, -1,
-            "internal error diagnostic: {d:?}"
-        );
+        assert_ne!(d.code, -1, "internal error diagnostic: {d:?}");
     }
 }
 
@@ -160,10 +154,7 @@ fn stress_large_file_1000_declarations() {
         "1000 declarations took {elapsed:?} (>{STRESS_TIMEOUT_SECS}s)"
     );
     for d in &diags {
-        assert_ne!(
-            d.code, -1,
-            "internal error diagnostic: {d:?}"
-        );
+        assert_ne!(d.code, -1, "internal error diagnostic: {d:?}");
     }
 }
 
@@ -182,7 +173,10 @@ fn stress_many_imports_100_modules() {
     main_src.push_str("const sum = val0 + val50 + val99;\n");
     files.push(("/index.ts".to_string(), main_src));
 
-    let file_refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let file_refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
     let start = Instant::now();
     let mut program = stress_program(&file_refs, &["/index.ts"]);
     let diags = program.semantic_diagnostics();
@@ -192,10 +186,7 @@ fn stress_many_imports_100_modules() {
         "100 module imports took {elapsed:?} (>{STRESS_TIMEOUT_SECS}s)"
     );
     for d in &diags {
-        assert_ne!(
-            d.code, -1,
-            "internal error diagnostic: {d:?}"
-        );
+        assert_ne!(d.code, -1, "internal error diagnostic: {d:?}");
     }
 }
 
@@ -223,10 +214,7 @@ fn stress_deeply_nested_expressions() {
         "deeply nested expressions took {elapsed:?} (>{STRESS_TIMEOUT_SECS}s)"
     );
     for d in &diags {
-        assert_ne!(
-            d.code, -1,
-            "internal error diagnostic: {d:?}"
-        );
+        assert_ne!(d.code, -1, "internal error diagnostic: {d:?}");
     }
 }
 
@@ -259,10 +247,7 @@ const x = r.a.b.c.d.e;
         if d.code == 2589 {
             continue;
         }
-        assert_ne!(
-            d.code, -1,
-            "internal error diagnostic: {d:?}"
-        );
+        assert_ne!(d.code, -1, "internal error diagnostic: {d:?}");
     }
 }
 
@@ -285,9 +270,7 @@ fn stress_discriminated_union_50_variants() {
     src.push_str(";\n");
     src.push_str("function handle(u: Union) {\n  switch (u.kind) {\n");
     for i in 0..50 {
-        src.push_str(&format!(
-            "    case \"v{i}\": return u.data{i};\n"
-        ));
+        src.push_str(&format!("    case \"v{i}\": return u.data{i};\n"));
     }
     src.push_str("  }\n}\n");
     src.push_str("declare const u: Union;\nconst result = handle(u);\n");
@@ -301,10 +284,7 @@ fn stress_discriminated_union_50_variants() {
         "discriminated union 50 variants took {elapsed:?} (>{STRESS_TIMEOUT_SECS}s)"
     );
     for d in &diags {
-        assert_ne!(
-            d.code, -1,
-            "internal error diagnostic: {d:?}"
-        );
+        assert_ne!(d.code, -1, "internal error diagnostic: {d:?}");
     }
 }
 
@@ -332,10 +312,7 @@ declare const e: MouseEvents;
         "template literal types took {elapsed:?} (>{STRESS_TIMEOUT_SECS}s)"
     );
     for d in &diags {
-        assert_ne!(
-            d.code, -1,
-            "internal error diagnostic: {d:?}"
-        );
+        assert_ne!(d.code, -1, "internal error diagnostic: {d:?}");
     }
 }
 
@@ -353,9 +330,7 @@ fn stress_conditional_type_chains() {
 
     // Exercise each branch.
     for i in 0..25 {
-        src.push_str(&format!(
-            "type R{i} = Chain<{{ kind: \"v{i}\" }}>;\n"
-        ));
+        src.push_str(&format!("type R{i} = Chain<{{ kind: \"v{i}\" }}>;\n"));
     }
     src.push_str("type RFallback = Chain<{ kind: \"unknown\" }>;\n");
 
@@ -371,9 +346,6 @@ fn stress_conditional_type_chains() {
         if d.code == 2589 {
             continue;
         }
-        assert_ne!(
-            d.code, -1,
-            "internal error diagnostic: {d:?}"
-        );
+        assert_ne!(d.code, -1, "internal error diagnostic: {d:?}");
     }
 }

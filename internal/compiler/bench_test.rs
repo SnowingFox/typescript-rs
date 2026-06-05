@@ -21,7 +21,7 @@ use tsgo_vfs::Fs;
 
 use crate::host::{new_compiler_host, CompilerHost};
 use crate::program::{new_program, ProgramOptions};
-use crate::{EmitOptions, EmitOnly, Program};
+use crate::{EmitOnly, EmitOptions, Program};
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -59,7 +59,11 @@ fn gen_simple_source(lines: usize) -> String {
     src
 }
 
-fn build_bench_program(files: &[(&str, &str)], roots: &[&str], options: CompilerOptions) -> Program {
+fn build_bench_program(
+    files: &[(&str, &str)],
+    roots: &[&str],
+    options: CompilerOptions,
+) -> Program {
     let fs: Arc<dyn Fs + Send + Sync> = Arc::new(MapFs::from_map(files.iter().copied(), true));
     let host = Arc::new(new_compiler_host("/src", fs, "/lib"));
     let config = new_parsed_command_line(
@@ -196,14 +200,8 @@ fn bench_emit_200_lines() {
         captured.len(),
         result.emit_skipped
     );
-    assert!(
-        !result.emit_skipped,
-        "emit should not be skipped"
-    );
-    assert!(
-        !captured.is_empty(),
-        "should emit at least one file"
-    );
+    assert!(!result.emit_skipped, "emit should not be skipped");
+    assert!(!captured.is_empty(), "should emit at least one file");
     assert!(
         elapsed.as_millis() < 10000,
         "full pipeline 200 lines took {elapsed:?}, expected < 10000ms"
@@ -260,7 +258,10 @@ fn bench_many_files_100() {
     main_src.push_str("const r = fn0(1) + fn50(2) + fn99(3);\n");
     files.push(("/src/index.ts".to_string(), main_src));
 
-    let file_refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let file_refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
     let roots: Vec<&str> = vec!["/src/index.ts"];
 
     let start = Instant::now();
@@ -292,11 +293,7 @@ fn bench_declaration_emit_200_lines() {
     };
 
     let start = Instant::now();
-    let program = build_bench_program(
-        &[("/src/index.ts", &src)],
-        &["/src/index.ts"],
-        options,
-    );
+    let program = build_bench_program(&[("/src/index.ts", &src)], &["/src/index.ts"], options);
     let captured: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&captured);
     let result = program.emit(EmitOptions {
@@ -310,7 +307,10 @@ fn bench_declaration_emit_200_lines() {
     let elapsed = start.elapsed();
 
     let captured = captured.borrow();
-    let dts_count = captured.iter().filter(|(n, _)| n.ends_with(".d.ts")).count();
+    let dts_count = captured
+        .iter()
+        .filter(|(n, _)| n.ends_with(".d.ts"))
+        .count();
     let js_count = captured.iter().filter(|(n, _)| n.ends_with(".js")).count();
     eprintln!(
         "[bench_declaration_emit_200_lines] elapsed: {elapsed:?} ({} ms), \
@@ -318,14 +318,8 @@ fn bench_declaration_emit_200_lines() {
         elapsed.as_millis(),
         result.emit_skipped
     );
-    assert!(
-        !result.emit_skipped,
-        "emit should not be skipped"
-    );
-    assert!(
-        dts_count >= 1,
-        "should emit at least one .d.ts file"
-    );
+    assert!(!result.emit_skipped, "emit should not be skipped");
+    assert!(dts_count >= 1, "should emit at least one .d.ts file");
     assert!(
         elapsed.as_millis() < 10000,
         "declaration emit 200 lines took {elapsed:?}, expected < 10000ms"

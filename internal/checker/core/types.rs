@@ -1343,7 +1343,7 @@ impl TypeArena {
 ///
 /// # Examples
 /// ```
-/// use tsgo_checker::{compare_types, TypeId};
+/// use tsgo_checker::core::types::{compare_types, TypeId};
 /// assert_eq!(compare_types(TypeId(1), TypeId(1)), std::cmp::Ordering::Equal);
 /// assert_eq!(compare_types(TypeId(1), TypeId(2)), std::cmp::Ordering::Less);
 /// ```
@@ -1359,7 +1359,7 @@ pub fn compare_types(t1: TypeId, t2: TypeId) -> std::cmp::Ordering {
 ///
 /// # Examples
 /// ```
-/// use tsgo_checker::{contains_type, TypeId};
+/// use tsgo_checker::core::types::{contains_type, TypeId};
 /// let types = [TypeId(1), TypeId(3), TypeId(5)];
 /// assert!(contains_type(&types, TypeId(3)));
 /// assert!(!contains_type(&types, TypeId(2)));

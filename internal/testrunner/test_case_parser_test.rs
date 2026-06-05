@@ -131,7 +131,10 @@ fn make_units_from_test_parses_tsconfig() {
     assert_eq!(content.test_unit_data[0].name, "a.ts");
     assert!(content.ts_config.is_some());
     assert_eq!(
-        content.ts_config_file_unit.as_ref().map(|u| u.name.as_str()),
+        content
+            .ts_config_file_unit
+            .as_ref()
+            .map(|u| u.name.as_str()),
         Some("tsconfig.json")
     );
 }

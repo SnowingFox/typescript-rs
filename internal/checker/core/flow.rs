@@ -26,7 +26,7 @@ use super::Checker;
 ///
 /// # Examples
 /// ```
-/// use tsgo_checker::TypePredicateInfo;
+/// use tsgo_checker::core::flow::TypePredicateInfo;
 /// let p = TypePredicateInfo {
 ///     parameter_index: 0,
 ///     predicate_type: None,
