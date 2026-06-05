@@ -1,0 +1,63 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "c41403e09263",
+  "session_id": "fc98ae35-feaa-48ad-b625-70c62354986a",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-05T08:50:36.815581Z",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "Cargo.lock",
+    "internal/api/Cargo.toml",
+    "internal/api/lib.rs"
+  ],
+  "agent": "Cursor",
+  "model": "composer-2.5",
+  "turn_id": "2d24dfa6d3c9",
+  "initial_attribution": {
+    "calculated_at": "2026-06-05T08:50:36.808383Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 0,
+    "total_lines_changed": 0,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 1266,
+      "user_lines_removed": 82,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "Cargo.lock": 5,
+        "internal/api/Cargo.toml": 3,
+        "internal/api/lib.rs": 2,
+        "internal/api/proto.rs": 177,
+        "internal/api/proto_test.rs": 126,
+        "internal/checker/core/check.rs": 558,
+        "internal/testrunner/Cargo.toml": 1,
+        "internal/testrunner/compiler_runner.rs": 64,
+        "internal/testrunner/compiler_runner_test.rs": 35,
+        "internal/testrunner/test_case_parser.rs": 60,
+        "internal/testrunner/test_case_parser_test.rs": 18,
+        "internal/testutil/harnessutil/Cargo.toml": 1,
+        "internal/testutil/harnessutil/harnessutil.rs": 173,
+        "internal/testutil/harnessutil/harnessutil_test.rs": 6,
+        "internal/tsoptions/tsconfigparsing_test.rs": 37
+      },
+      "user_removed_per_file": {
+        "internal/checker/core/check.rs": 17,
+        "internal/testrunner/compiler_runner.rs": 14,
+        "internal/testrunner/test_case_parser.rs": 18,
+        "internal/testrunner/test_case_parser_test.rs": 15,
+        "internal/testutil/harnessutil/harnessutil.rs": 17,
+        "internal/testutil/harnessutil/harnessutil_test.rs": 1
+      }
+    }
+  ]
+}
