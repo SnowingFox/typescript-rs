@@ -34,6 +34,9 @@ mod boundary_test;
 #[path = "emit_baseline_test.rs"]
 mod emit_baseline_test;
 #[cfg(test)]
+#[path = "lib_dom_noemit_parity_test.rs"]
+mod lib_dom_noemit_parity_test;
+#[cfg(test)]
 mod stress_test;
 
 pub use boundfile::BoundFile;
