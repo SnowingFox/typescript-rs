@@ -2,7 +2,7 @@ use crate::core::declared_types::get_declared_type_of_symbol;
 use crate::core::program::BoundProgram;
 use crate::core::test_support::StubProgram;
 use crate::core::Checker;
-use tsgo_ast::SymbolId;
+use tsgo_ast::{NodeData, SymbolId};
 
 fn empty() -> StubProgram {
     StubProgram::parse_and_bind("/a.ts", "")
@@ -439,4 +439,55 @@ fn property_name_for_known_symbol_name_uses_at_prefixed_internal_name() {
         escape_all_internal_symbol_names(&c.get_property_name_for_known_symbol_name("iterator")),
         "__@iterator",
     );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypePredicateArgument(2419)
+#[test]
+fn get_type_predicate_argument_returns_indexed_parameter() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(x: unknown): x is string;\ndeclare const v: unknown;\nisString(v);",
+    );
+    let call = match p.arena().data(p.root()) {
+        NodeData::SourceFile(d) => match p.arena().data(d.statements.nodes[2]) {
+            NodeData::ExpressionStatement(d) => d.expression,
+            _ => panic!("expression statement"),
+        },
+        _ => panic!("source file"),
+    };
+    let c = Checker::new();
+    let arg = c
+        .get_type_predicate_argument(&p, 0, call)
+        .expect("first argument");
+    assert_eq!(p.arena().text(arg), "v");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate(309)
+#[test]
+fn narrow_type_by_type_predicate_narrows_matching_reference() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\ndeclare function isString(v: unknown): v is string;\nisString(x);",
+    );
+    let mut c = Checker::new();
+    let x_sym = *p.locals(p.root()).expect("locals").get("x").expect("x");
+    let x_decl = p.symbol(x_sym).declarations[0];
+    let x_ref = match p.arena().data(x_decl) {
+        NodeData::VariableDeclaration(d) => d.name,
+        _ => panic!("variable declaration"),
+    };
+    let call = match p.arena().data(p.root()) {
+        NodeData::SourceFile(d) => match p.arena().data(d.statements.nodes[2]) {
+            NodeData::ExpressionStatement(d) => d.expression,
+            _ => panic!("call statement"),
+        },
+        _ => panic!("source file"),
+    };
+    let union = c.get_union_type(&[c.string_type(), c.number_type()]);
+    let predicate = crate::core::flow::TypePredicateInfo {
+        parameter_index: 0,
+        predicate_type: Some(c.string_type()),
+    };
+    let narrowed = c.narrow_type_by_type_predicate(&p, x_ref, union, &predicate, call, true);
+    assert_eq!(narrowed, c.string_type());
 }

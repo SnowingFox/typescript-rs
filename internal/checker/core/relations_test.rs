@@ -1022,3 +1022,30 @@ fn relation_depth_guard_does_not_affect_normal_checks() {
     let any = c.any_type();
     assert!(c.is_type_assignable_to(&p, s, any));
 }
+
+// Go: internal/checker/relater.go:Checker.isTypeSubsetOf(2811)
+#[test]
+fn is_type_subset_of_primitive_in_union() {
+    let mut c = Checker::new();
+    let ab = c.get_union_type(&[c.string_type(), c.number_type()]);
+    assert!(c.is_type_subset_of(c.string_type(), ab));
+    assert!(c.is_type_subset_of(c.number_type(), ab));
+    assert!(!c.is_type_subset_of(ab, c.string_type()));
+}
+
+// Go: internal/checker/relater.go:Checker.isTypeSubsetOfUnion(2815)
+#[test]
+fn is_type_subset_of_union_of_union_type_ids() {
+    let mut c = Checker::new();
+    let ab = c.get_union_type(&[c.string_type(), c.number_type()]);
+    let abcd = c.get_union_type(&[ab, c.boolean_type()]);
+    assert!(c.is_type_subset_of(ab, abcd));
+    assert!(!c.is_type_subset_of(abcd, ab));
+}
+
+// Go: internal/checker/relater.go:Checker.isTypeSubsetOf(2811)
+#[test]
+fn is_type_subset_of_never_is_bottom() {
+    let c = Checker::new();
+    assert!(c.is_type_subset_of(c.never_type(), c.string_type()));
+}

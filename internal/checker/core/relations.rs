@@ -2043,6 +2043,78 @@ impl Checker {
     fn try_elaborate_array_like_errors(&mut self, _source: TypeId, _target: TypeId) -> bool {
         true
     }
+
+    /// Reports whether every constituent of `source` is included in `target`
+    /// when `target` is a union (simplified subset of Go's `isTypeSubsetOf`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// let mut c = Checker::new();
+    /// let ab = c.get_union_type(&[c.string_type(), c.number_type()]);
+    /// assert!(c.is_type_subset_of(c.string_type(), ab));
+    /// assert!(!c.is_type_subset_of(ab, c.string_type()));
+    /// ```
+    ///
+    /// Side effects: none (pure read of the type arena).
+    // Go: internal/checker/relater.go:Checker.isTypeSubsetOf(2811)
+    pub fn is_type_subset_of(&self, source: TypeId, target: TypeId) -> bool {
+        if source == target {
+            return true;
+        }
+        if self.get_type(source).flags().contains(TypeFlags::NEVER) {
+            return true;
+        }
+        if self.get_type(target).flags().contains(TypeFlags::UNION) {
+            return self.is_type_subset_of_union(source, target);
+        }
+        false
+    }
+
+    // Go: internal/checker/relater.go:Checker.isTypeSubsetOfUnion(2815)
+    fn is_type_subset_of_union(&self, source: TypeId, target: TypeId) -> bool {
+        if self.get_type(source).flags().contains(TypeFlags::UNION) {
+            if self.union_constituents(target).contains(&source) {
+                return true;
+            }
+            return self
+                .union_constituents(source)
+                .iter()
+                .all(|&member| self.is_type_subset_of(member, target));
+        }
+        let target_types = self.flatten_union_constituents(target);
+        if super::types::contains_type(&target_types, source) {
+            return true;
+        }
+        self.union_constituents(target)
+            .iter()
+            .any(|&member| self.is_type_subset_of(source, member))
+    }
+
+    fn flatten_union_constituents(&self, t: TypeId) -> Vec<TypeId> {
+        let mut flat = Vec::new();
+        self.collect_union_constituents(t, &mut flat);
+        flat.sort();
+        flat.dedup();
+        flat
+    }
+
+    fn collect_union_constituents(&self, t: TypeId, out: &mut Vec<TypeId>) {
+        if self.get_type(t).flags().contains(TypeFlags::UNION) {
+            for member in self.union_constituents(t) {
+                self.collect_union_constituents(member, out);
+            }
+        } else {
+            out.push(t);
+        }
+    }
+
+    fn union_constituents(&self, t: TypeId) -> Vec<TypeId> {
+        match &self.get_type(t).data {
+            TypeData::Union(union) => union.types.clone(),
+            _ => vec![t],
+        }
+    }
 }
 
 // Whether `message` is a conversion or interface-implementation head message,

@@ -1334,6 +1334,45 @@ impl TypeArena {
     }
 }
 
+/// Compares two types for a canonical sort order (simplified subset of Go's
+/// `CompareTypes`).
+///
+/// Union constituents in this port are sorted by [`TypeId`], so identity
+/// comparison on the handle matches the structural core used by
+/// [`contains_type`].
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{compare_types, TypeId};
+/// assert_eq!(compare_types(TypeId(1), TypeId(1)), std::cmp::Ordering::Equal);
+/// assert_eq!(compare_types(TypeId(1), TypeId(2)), std::cmp::Ordering::Less);
+/// ```
+///
+/// Side effects: none (pure).
+// Go: internal/checker/utilities.go:CompareTypes (id-order subset)
+pub fn compare_types(t1: TypeId, t2: TypeId) -> std::cmp::Ordering {
+    t1.0.cmp(&t2.0)
+}
+
+/// Reports whether sorted union constituents `types` include `t` (Go's
+/// `containsType`).
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::{contains_type, TypeId};
+/// let types = [TypeId(1), TypeId(3), TypeId(5)];
+/// assert!(contains_type(&types, TypeId(3)));
+/// assert!(!contains_type(&types, TypeId(2)));
+/// ```
+///
+/// Side effects: none (pure).
+// Go: internal/checker/checker.go:containsType(26439)
+pub fn contains_type(types: &[TypeId], t: TypeId) -> bool {
+    types
+        .binary_search_by(|probe| compare_types(*probe, t))
+        .is_ok()
+}
+
 #[cfg(test)]
 #[path = "types_test.rs"]
 mod tests;

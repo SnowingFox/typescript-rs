@@ -21,6 +21,29 @@ use super::type_facts::TypeFacts;
 use super::types::{TypeFlags, TypeId};
 use super::Checker;
 
+/// Metadata for a user-defined type predicate used during flow narrowing (Go's
+/// `TypePredicate` subset).
+///
+/// # Examples
+/// ```
+/// use tsgo_checker::TypePredicateInfo;
+/// let p = TypePredicateInfo {
+///     parameter_index: 0,
+///     predicate_type: None,
+/// };
+/// assert_eq!(p.parameter_index, 0);
+/// ```
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go:TypePredicate
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypePredicateInfo {
+    /// Index of the guarded parameter in the call arguments (`-1` for `this`/method).
+    pub parameter_index: i32,
+    /// The asserted/predicate type, once resolved.
+    pub predicate_type: Option<TypeId>,
+}
+
 impl Checker {
     /// Narrows `t` by a `typeof x === "<name>"` (or `!==`) guard.
     ///
@@ -280,8 +303,12 @@ impl Checker {
         }
     }
 
-    // Go: internal/checker/flow.go:FlowState.getTypeAtFlowNode (4f subset)
-    fn get_type_at_flow_node(
+    /// Walks one flow node for `reference` and returns the narrowed type (partial
+    /// port of Go's `getTypeAtFlowNode`).
+    ///
+    /// Side effects: may allocate unions and populate `cache`.
+    // Go: internal/checker/flow.go:Checker.getTypeAtFlowNode(117)
+    pub(crate) fn get_type_at_flow_node(
         &mut self,
         program: &dyn BoundProgram,
         reference: NodeId,
@@ -992,6 +1019,97 @@ impl Checker {
             tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_PREFIX,
             symbol_name
         )
+    }
+
+    /// Returns the call argument guarded by a type predicate (Go's
+    /// `getTypePredicateArgument`).
+    ///
+    /// Side effects: none (pure AST read).
+    // Go: internal/checker/flow.go:Checker.getTypePredicateArgument(2419)
+    pub fn get_type_predicate_argument(
+        &self,
+        program: &dyn BoundProgram,
+        parameter_index: i32,
+        call_expression: NodeId,
+    ) -> Option<NodeId> {
+        let NodeData::CallExpression(d) = program.arena().data(call_expression) else {
+            return None;
+        };
+        if parameter_index >= 0 {
+            return d.arguments.nodes.get(parameter_index as usize).copied();
+        }
+        match program.arena().data(d.expression) {
+            NodeData::PropertyAccessExpression(access) => Some(access.expression),
+            NodeData::ElementAccessExpression(access) => Some(access.expression),
+            _ => None,
+        }
+    }
+
+    /// Narrows `t` when a type-predicate call matches `reference` (partial port
+    /// of Go's `narrowTypeByTypePredicate`).
+    ///
+    /// DEFER(phase-4-checker-4g): optional-chain containment, discriminant
+    /// property narrowing, and the full `getNarrowedType` worker.
+    /// blocked-by: optional-chain reference matching + derived-type filtering.
+    ///
+    /// Side effects: may allocate narrowed types.
+    // Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate(309)
+    pub fn narrow_type_by_type_predicate(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        t: TypeId,
+        predicate: &TypePredicateInfo,
+        call_expression: NodeId,
+        assume_true: bool,
+    ) -> TypeId {
+        let Some(predicate_type) = predicate.predicate_type else {
+            return t;
+        };
+        let Some(argument) =
+            self.get_type_predicate_argument(program, predicate.parameter_index, call_expression)
+        else {
+            return t;
+        };
+        if self.is_matching_reference(program, reference, argument) {
+            return self.get_narrowed_type_simple(t, predicate_type, assume_true);
+        }
+        t
+    }
+
+    // Simplified `getNarrowedType` for type-predicate matching (true/false arms).
+    // Go: internal/checker/flow.go:Checker.getNarrowedType(826)
+    fn get_narrowed_type_simple(
+        &mut self,
+        t: TypeId,
+        candidate: TypeId,
+        assume_true: bool,
+    ) -> TypeId {
+        if assume_true {
+            if self
+                .get_type(t)
+                .flags()
+                .intersects(TypeFlags::ANY | TypeFlags::UNKNOWN)
+            {
+                return candidate;
+            }
+            if t == candidate {
+                return candidate;
+            }
+            return self.get_intersection_type(&[t, candidate]);
+        }
+        if t == candidate {
+            return self.never_type();
+        }
+        if self.get_type(t).flags().contains(TypeFlags::UNION) {
+            let members: Vec<TypeId> = self
+                .distributed_types(t)
+                .into_iter()
+                .filter(|member| *member != candidate)
+                .collect();
+            return self.get_union_type(&members);
+        }
+        t
     }
 
     // Returns the union constituents of `t`, or `[t]` for a non-union.

@@ -342,3 +342,29 @@ fn string_mapping_kind_and_mapped_type_modifiers() {
     assert_eq!(MappedTypeModifiers::INCLUDE_OPTIONAL.bits(), 1 << 2);
     assert_eq!(MappedTypeModifiers::EXCLUDE_OPTIONAL.bits(), 1 << 3);
 }
+
+// Go: internal/checker/checker.go:containsType(26439)
+#[test]
+fn contains_type_finds_member_in_sorted_union_constituents() {
+    let types = [TypeId(1), TypeId(3), TypeId(5)];
+    assert!(contains_type(&types, TypeId(3)));
+    assert!(!contains_type(&types, TypeId(2)));
+    assert!(!contains_type(&types, TypeId(6)));
+}
+
+// Go: internal/checker/utilities.go:CompareTypes (id-order subset)
+#[test]
+fn compare_types_orders_by_type_id() {
+    assert_eq!(
+        compare_types(TypeId(2), TypeId(2)),
+        std::cmp::Ordering::Equal
+    );
+    assert_eq!(
+        compare_types(TypeId(1), TypeId(9)),
+        std::cmp::Ordering::Less
+    );
+    assert_eq!(
+        compare_types(TypeId(9), TypeId(1)),
+        std::cmp::Ordering::Greater
+    );
+}
