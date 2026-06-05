@@ -1,0 +1,9 @@
+resume
+
+---
+
+一直推进下去吧，然后严格 tdd 和遵循 docs/rust-rewrite/README.md 以及 rust doc 形式
+
+---
+
+你等他们 subagent 回调吧，我是跟你说一声，让你一直推进下去
