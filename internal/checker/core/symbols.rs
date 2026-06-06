@@ -73,7 +73,7 @@ pub struct SymbolReferenceLinks {
 ///
 /// Side effects: none (pure value type).
 // Go: internal/checker/types.go:ValueSymbolLinks
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct ValueSymbolLinks {
     /// Type of the value symbol.
     pub resolved_type: Option<TypeId>,
@@ -81,12 +81,35 @@ pub struct ValueSymbolLinks {
     pub write_type: Option<TypeId>,
     /// The aliased/instantiation target symbol, if any.
     pub target: Option<SymbolId>,
+    /// Substitution mapper for an instantiated symbol.
+    pub mapper: Option<super::mapper::TypeMapper>,
     /// The literal "name type" for a computed/synthetic property.
     pub name_type: Option<TypeId>,
     /// The containing union/intersection/mapped type for a synthetic property.
     pub containing_type: Option<TypeId>,
     /// Whether a function/constructor symbol's signatures were checked.
     pub function_or_constructor_checked: bool,
+}
+
+/// Per-symbol links for a mapped-type property.
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go:MappedSymbolLinks
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MappedSymbolLinks {
+    pub key_type: Option<super::types::TypeId>,
+}
+
+/// Cached derived types of a mapped-type object.
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go (MappedType payload fields)
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MappedTypeLinks {
+    pub type_parameter: Option<super::types::TypeId>,
+    pub constraint_type: Option<super::types::TypeId>,
+    pub template_type: Option<super::types::TypeId>,
+    pub modifiers_type: Option<super::types::TypeId>,
 }
 
 /// Per-symbol links for an alias symbol (`import x = ...`, re-exports).

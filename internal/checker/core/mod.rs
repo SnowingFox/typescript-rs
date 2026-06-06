@@ -15,6 +15,7 @@ pub mod grammar;
 pub mod inference;
 pub mod jsx;
 pub mod late_binding;
+pub mod mapped_types;
 pub mod mapper;
 pub mod modules;
 pub mod name_resolution;
@@ -36,7 +37,7 @@ use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tsgo_ast::{CheckFlags, NodeId, SymbolId};
+use tsgo_ast::{CheckFlags, NodeId, SymbolId, SymbolTable};
 use tsgo_core::compileroptions::CompilerOptions;
 use tsgo_core::tristate::Tristate;
 
@@ -46,8 +47,9 @@ use program::{default_compiler_options, BoundProgram};
 use relations::RelationCache;
 use signatures::{IndexInfo, IndexInfoArena, IndexInfoId, Signature, SignatureArena, SignatureId};
 use symbols::{
-    DeclaredTypeLinks, LateBoundLinks, MembersAndExportsLinks, ModuleSymbolLinks, SymbolLinks,
-    SymbolNodeLinks, SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
+    DeclaredTypeLinks, LateBoundLinks, MappedSymbolLinks, MappedTypeLinks, MembersAndExportsLinks,
+    ModuleSymbolLinks, SymbolLinks, SymbolNodeLinks, SymbolReferenceLinks, TypeAliasLinks,
+    ValueSymbolLinks,
 };
 use types::{
     ConditionalRoot, ConditionalType, IntersectionType, IntrinsicType, LiteralType, LiteralValue,
@@ -357,6 +359,9 @@ pub struct Checker {
     /// value-comparable payload because [`TypeMapper`] is not comparable (Go
     /// stores `mapper` on the `MappedType`).
     mapped_type_mappers: FxHashMap<TypeId, TypeMapper>,
+    mapped_type_links: FxHashMap<TypeId, MappedTypeLinks>,
+    mapped_symbol_links: SymbolLinks<MappedSymbolLinks>,
+    structured_members_cache: FxHashMap<TypeId, SymbolTable>,
     /// Cached resolved exports per module symbol (Go's `moduleSymbolLinks`).
     module_symbol_links: SymbolLinks<ModuleSymbolLinks>,
     /// Module symbols whose exports have been resolved.
@@ -530,6 +535,9 @@ impl Checker {
             string_mapping_types: FxHashMap::default(),
             mapped_type_declarations: FxHashMap::default(),
             mapped_type_mappers: FxHashMap::default(),
+            mapped_type_links: FxHashMap::default(),
+            mapped_symbol_links: SymbolLinks::default(),
+            structured_members_cache: FxHashMap::default(),
             type_parameter_constraints: FxHashMap::default(),
             type_parameter_defaults: FxHashMap::default(),
             union_types,
@@ -1465,6 +1473,41 @@ impl Checker {
     // Go: internal/checker/checker.go:Checker.getCheckFlags
     pub(crate) fn synthesized_symbol_check_flags(&self, id: symbols::SymbolId) -> CheckFlags {
         self.synthesized_symbols.borrow()[Self::synthesized_index(id)].check_flags
+    }
+
+    /// Mints a synthesized symbol for an instantiated property.
+    // Go: internal/checker/checker.go:Checker.instantiateSymbol
+    #[allow(dead_code)] // production `instantiateSymbol` wiring lands in 4e
+    pub(crate) fn new_instantiated_symbol(
+        &mut self,
+        name: &str,
+        target: symbols::SymbolId,
+        mapper: TypeMapper,
+    ) -> symbols::SymbolId {
+        let id = self.new_synthesized_property(
+            name,
+            symbols::SymbolFlags::PROPERTY,
+            CheckFlags::INSTANTIATED,
+            TypeId(0),
+        );
+        let links = self.value_symbol_links.get(id);
+        links.target = Some(target);
+        links.mapper = Some(mapper);
+        id
+    }
+
+    /// Returns checker-time flags for `id`.
+    // Go: internal/checker/checker.go:Checker.getCheckFlags
+    pub(crate) fn resolved_symbol_check_flags(
+        &self,
+        program: &dyn BoundProgram,
+        id: symbols::SymbolId,
+    ) -> CheckFlags {
+        if is_synthesized_symbol(id) {
+            self.synthesized_symbol_check_flags(id)
+        } else {
+            program.symbol(id).check_flags
+        }
     }
 
     /// Returns a synthesized property's name.

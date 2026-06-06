@@ -46,6 +46,7 @@ fn new_link_store_records_default_to_empty() {
     let v = ValueSymbolLinks::default();
     assert!(v.resolved_type.is_none());
     assert!(v.target.is_none());
+    assert!(v.mapper.is_none());
     assert!(!v.function_or_constructor_checked);
 
     let a = AliasSymbolLinks::default();

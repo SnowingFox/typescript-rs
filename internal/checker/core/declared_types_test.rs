@@ -30,7 +30,7 @@ fn get_properties_of_type_excludes_reserved_index_member() {
     );
     let mut c = Checker::new();
     let i = get_declared_type_of_symbol(&mut c, &p, local(&p, "I"), None);
-    let props = get_properties_of_type(&c, i);
+    let props = get_properties_of_type(&mut c, i);
     // The binder's reserved `__index` member is filtered out; only `x` remains.
     let names: Vec<&str> = props.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names, ["x"]);
@@ -621,7 +621,7 @@ fn intersection_synthesizes_properties_of_each_constituent() {
     // A name absent from every constituent resolves to nothing.
     assert_eq!(get_property_of_type(&c, inter, "nope"), None);
     // `get_properties_of_type` collects both constituents' members.
-    let mut names: Vec<String> = get_properties_of_type(&c, inter)
+    let mut names: Vec<String> = get_properties_of_type(&mut c, inter)
         .into_iter()
         .map(|(name, _)| name)
         .collect();
@@ -1116,7 +1116,7 @@ fn instantiate_mapped_type_partial_makes_optional() {
     ));
     let mut c = Checker::new_checker(p.clone());
     let r = resolve_alias_type(&p, &mut c, "P");
-    let props = get_properties_of_type(&c, r);
+    let props = get_properties_of_type(&mut c, r);
     assert_eq!(props.len(), 2);
     for (name, sym) in props {
         assert!(
@@ -1151,7 +1151,7 @@ fn instantiate_mapped_type_readonly_adds_modifier() {
         crate::core::nodebuilder::type_to_string(&mut c, p.as_ref(), r),
         "{ readonly a: number; }"
     );
-    let props = get_properties_of_type(&c, r);
+    let props = get_properties_of_type(&mut c, r);
     let a = props[0].1;
     assert!(
         c.synthesized_symbol_check_flags(a)
@@ -1178,7 +1178,7 @@ fn instantiate_mapped_type_required_strips_optional() {
     ));
     let mut c = Checker::new_checker(p.clone());
     let r = resolve_alias_type(&p, &mut c, "R");
-    let props = get_properties_of_type(&c, r);
+    let props = get_properties_of_type(&mut c, r);
     assert_eq!(props.len(), 1);
     let a = props[0].1;
     assert!(

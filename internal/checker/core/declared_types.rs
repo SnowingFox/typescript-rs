@@ -94,7 +94,10 @@ pub fn get_declared_type_of_symbol(
 }
 
 // Go: internal/checker/checker.go:Checker.getDeclaredTypeOfTypeParameter
-fn get_declared_type_of_type_parameter(checker: &mut Checker, symbol: SymbolId) -> TypeId {
+pub(crate) fn get_declared_type_of_type_parameter(
+    checker: &mut Checker,
+    symbol: SymbolId,
+) -> TypeId {
     if let Some(cached) = checker
         .declared_type_links
         .try_get(&symbol)
@@ -379,7 +382,9 @@ fn get_declared_type_of_class_or_interface(
     if !base_types.is_empty() {
         let mut merged = SymbolTable::default();
         for &base in &base_types {
-            for (name, &member) in resolve_structured_type_members(checker, base).iter() {
+            for (name, &member) in
+                resolve_structured_type_members(checker, Some(program), base).iter()
+            {
                 merged.insert(name.clone(), member);
             }
         }
@@ -905,12 +910,40 @@ fn report_circular_base_type(
 ///
 /// Side effects: none (reads the already-resolved member tables).
 // Go: internal/checker/checker.go:Checker.resolveStructuredTypeMembers
-pub fn resolve_structured_type_members(checker: &Checker, t: TypeId) -> SymbolTable {
+pub fn resolve_structured_type_members(
+    checker: &mut Checker,
+    program: Option<&dyn BoundProgram>,
+    t: TypeId,
+) -> SymbolTable {
+    if let Some(cached) = checker.structured_members_cache.get(&t) {
+        return cached.clone();
+    }
     if let Some(obj) = checker.get_type(t).as_object() {
         if let Some(target) = obj.target {
-            return resolve_structured_type_members(checker, target);
+            let result = resolve_structured_type_members(checker, program, target);
+            checker.structured_members_cache.insert(t, result.clone());
+            return result;
         }
-        return obj.members.clone();
+        let object_flags = checker.get_type(t).object_flags();
+        if object_flags.contains(ObjectFlags::MAPPED)
+            && !object_flags.contains(ObjectFlags::MEMBERS_RESOLVED)
+        {
+            if let (Some(program), Some(declaration)) =
+                (program, checker.mapped_type_declaration(t))
+            {
+                super::mapped_types::resolve_mapped_type_members_lazy(
+                    checker,
+                    program,
+                    t,
+                    declaration,
+                );
+            }
+        }
+        let members = checker.get_type(t).as_object().map(|o| o.members.clone());
+        if let Some(members) = members {
+            checker.structured_members_cache.insert(t, members.clone());
+            return members;
+        }
     }
     SymbolTable::default()
 }
@@ -1265,6 +1298,22 @@ pub fn get_type_of_symbol(
     symbol: SymbolId,
     globals: Option<&SymbolTable>,
 ) -> TypeId {
+    if checker
+        .resolved_symbol_check_flags(program, symbol)
+        .contains(CheckFlags::INSTANTIATED)
+        || checker
+            .value_symbol_links
+            .try_get(&symbol)
+            .is_some_and(|l| l.target.is_some() && l.mapper.is_some())
+    {
+        return super::mapped_types::get_type_of_instantiated_symbol(checker, program, symbol);
+    }
+    if checker
+        .resolved_symbol_check_flags(program, symbol)
+        .contains(CheckFlags::MAPPED)
+    {
+        return super::mapped_types::get_type_of_mapped_symbol(checker, program, symbol);
+    }
     // A synthesized union/intersection property carries its combined type in the
     // checker's transient arena, not in the program (Go's transient symbol with
     // `valueSymbolLinks.resolvedType`).
@@ -2719,8 +2768,12 @@ pub fn instantiate_mapped_type(
     if !is_mapped_type_with_keyof_constraint(program, declaration) {
         return checker.new_mapped_type(declaration, Some(combined));
     }
-    let modifiers_type =
-        get_modifiers_type_from_mapped_type(checker, program, declaration, &combined);
+    let modifiers_type = super::mapped_types::modifiers_type_from_declaration(
+        checker,
+        program,
+        declaration,
+        Some(&combined),
+    );
     // A still-generic modifiers type keeps the mapped type deferred (Go's
     // `instantiateMappedType` returns the instantiated mapped type when the
     // homomorphic type variable is unchanged).
@@ -2937,29 +2990,6 @@ fn constraint_declaration_for_mapped_type(
         NodeData::TypeParameterDeclaration(d) => d.constraint,
         _ => None,
     }
-}
-
-// Returns the modifiers type `T` of a homomorphic mapped type (`{ [K in keyof
-// T]: V }`), instantiated through `mapper` (Go's `getModifiersTypeFromMappedType`
-// keyof branch: the modifiers type is the operand of the `keyof` constraint).
-// Go: internal/checker/checker.go:Checker.getModifiersTypeFromMappedType
-fn get_modifiers_type_from_mapped_type(
-    checker: &mut Checker,
-    program: &dyn BoundProgram,
-    declaration: NodeId,
-    mapper: &TypeMapper,
-) -> TypeId {
-    let Some(constraint) = constraint_declaration_for_mapped_type(program, declaration) else {
-        return checker.unknown_type();
-    };
-    // `getConstraintDeclarationForMappedType(t).Type()`: the operand of `keyof`.
-    let operand = match program.arena().data(constraint) {
-        NodeData::TypeOperator(d) => d.type_node,
-        _ => return checker.unknown_type(),
-    };
-    let globals = program.globals().cloned();
-    let base = get_type_from_type_node(checker, program, operand, globals.as_ref());
-    checker.instantiate_type(base, mapper)
 }
 
 /// Builds a template literal type from interleaved `texts` and placeholder
@@ -4482,7 +4512,7 @@ fn is_generic_index_type(checker: &Checker, t: TypeId) -> bool {
 // DEFER(phase-4-checker-C-C3): generic mapped and generic tuple types.
 // blocked-by: mapped types (C-C3) + generic tuples.
 // Go: internal/checker/checker.go:Checker.isGenericObjectType / getGenericObjectFlags
-fn is_generic_object_type(checker: &Checker, t: TypeId) -> bool {
+pub(crate) fn is_generic_object_type(checker: &Checker, t: TypeId) -> bool {
     let flags = checker.get_type(t).flags();
     if flags.intersects(TypeFlags::UNION_OR_INTERSECTION) {
         let members = union_or_intersection_members(checker, t);
@@ -4902,7 +4932,7 @@ pub fn get_type_of_property_of_type(
 ///
 /// Side effects: none (pure read over the type arena).
 // Go: internal/checker/checker.go:Checker.getPropertiesOfType / getNamedMembers(21907)
-pub fn get_properties_of_type(checker: &Checker, t: TypeId) -> Vec<(String, SymbolId)> {
+pub fn get_properties_of_type(checker: &mut Checker, t: TypeId) -> Vec<(String, SymbolId)> {
     let apparent = get_apparent_type(checker, t);
     if let Some(members) = checker.get_type(apparent).intersection_types() {
         let members = members.to_vec();
@@ -4916,7 +4946,8 @@ pub fn get_properties_of_type(checker: &Checker, t: TypeId) -> Vec<(String, Symb
         }
         return props;
     }
-    resolve_structured_type_members(checker, apparent)
+    let program = checker.retained_program();
+    resolve_structured_type_members(checker, program.as_deref(), apparent)
         .into_iter()
         .filter(|(name, _)| !is_reserved_member_name(name))
         .collect()

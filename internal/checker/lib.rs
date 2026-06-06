@@ -78,6 +78,10 @@ pub use core::emit_resolver::{
     EmitResolver, LiteralConstValue, SerializedTypeNode, TypeReferenceSerializationKind,
 };
 pub use core::inference::{InferenceContext, InferenceInfo, InferencePriority};
+pub use core::mapped_types::{
+    get_constraint_type_from_mapped_type, get_mapped_type, get_modifiers_type_from_mapped_type,
+    get_template_type_from_mapped_type, get_type_of_instantiated_symbol,
+};
 pub use core::mapper::TypeMapper;
 pub use core::nodebuilder::{
     symbol_to_string, type_to_string, type_to_type_node, SynthesizedProperty, SynthesizedTypeNode,
@@ -89,8 +93,8 @@ pub use core::signatures::{
 };
 pub use core::symbols::{
     resolve_name, skip_alias, AliasSymbolLinks, DeclaredTypeLinks, LateBoundLinks,
-    MembersAndExportsLinks, MergedSymbols, ModuleSymbolLinks, SymbolLinks, SymbolNodeLinks,
-    SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
+    MappedSymbolLinks, MappedTypeLinks, MembersAndExportsLinks, MergedSymbols, ModuleSymbolLinks,
+    SymbolLinks, SymbolNodeLinks, SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
 };
 pub use core::symbols_query::{
     get_resolved_signature, get_symbol_at_location, get_symbol_of_declaration, get_type_at_location,

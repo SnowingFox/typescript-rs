@@ -198,7 +198,7 @@ pub(crate) fn get_index_symbol(
 ) -> Option<SymbolId> {
     let globals = program.globals();
     let dt = declared_types::get_declared_type_of_symbol(checker, program, symbol, globals);
-    let members = declared_types::resolve_structured_type_members(checker, dt);
+    let members = declared_types::resolve_structured_type_members(checker, Some(program), dt);
     members.get(INTERNAL_SYMBOL_NAME_INDEX).copied()
 }
 

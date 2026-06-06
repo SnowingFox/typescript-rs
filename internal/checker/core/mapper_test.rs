@@ -363,6 +363,29 @@ fn instantiate_type_indexed_access_resolves_property() {
     );
 }
 
+// T1-E batch 11: instantiating a conditional with a retained program resolves
+// the branch when the check type becomes concrete.
+// Go: internal/checker/checker.go:Checker.instantiateType / getConditionalTypeInstantiation
+#[test]
+fn instantiate_type_conditional_resolves_with_program() {
+    let p = Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type IsString<T> = T extends string ? \"yes\" : \"no\";",
+    ));
+    let mut c = Checker::new_checker(p.clone());
+    let sym = local(&p, "IsString");
+    let cond = get_declared_type_of_symbol(&mut c, p.as_ref(), sym, None);
+    let tp = c
+        .get_type(cond)
+        .as_conditional()
+        .expect("conditional")
+        .root
+        .check_type;
+    let mapper = TypeMapper::unary(tp, c.string_type());
+    let resolved = c.instantiate_type(cond, &mapper);
+    assert_eq!(c.type_to_string(resolved), "\"yes\"");
+}
+
 // Go: internal/checker/checker.go:instantiateTypeWorker (TypeFlagsConditional arm)
 // Instantiating a deferred conditional without a retained program (an
 // intrinsic-only checker that cannot read the branch type nodes) leaves it
