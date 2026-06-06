@@ -2649,9 +2649,8 @@ fn class_correctly_implements_interface_reports_no_diagnostic() {
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
-    // `class C implements I { x: number = 1 }`: the class instance type has the
-    // required `x: number`, so it is assignable to `I` and nothing is reported.
-    assert!(c.get_diagnostics(root).is_empty());
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
 // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (extends compatibility, 2415)
@@ -11471,7 +11470,8 @@ fn property_definite_assignment_with_initializer_reports_1263() {
 // Go: internal/checker/checker.go:Checker.checkFunctionOrConstructorSymbol
 #[test]
 fn method_static_instance_overload_mismatch_reports_2387() {
-    let codes = diag_codes("class C {\n  foo(): void;\n  static foo(): void;\n  static foo() {}\n}");
+    let codes =
+        diag_codes("class C {\n  foo(): void;\n  static foo(): void;\n  static foo() {}\n}");
     assert!(
         codes.contains(&2387),
         "expected TS2387 static/instance overload mismatch; got {codes:?}"
@@ -11527,13 +11527,13 @@ fn class_implements_primitive_reports_2422() {
     );
 }
 
-// Go: internal/checker/checker.go:Checker.checkHeritageClause / resolveName (type-only)
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarHeritageClause (type alias as value)
 #[test]
-fn class_implements_type_only_alias_reports_2690() {
+fn class_implements_type_only_alias_reports_2693() {
     let codes = diag_codes("type T = { x: number };\nclass C implements T {}");
     assert!(
-        codes.contains(&2690),
-        "expected TS2690 type-only heritage name; got {codes:?}"
+        codes.contains(&2693),
+        "expected TS2693 type-alias-as-value; got {codes:?}"
     );
 }
 

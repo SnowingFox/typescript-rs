@@ -6525,7 +6525,6 @@ impl Checker {
     fn check_class_member(&mut self, program: &dyn BoundProgram, member: NodeId) {
         match program.arena().data(member) {
             NodeData::MethodDeclaration(_) => {
-                self.check_abstract_declaration(program, member);
                 self.check_method_declaration(program, member);
             }
             NodeData::GetAccessorDeclaration(_) | NodeData::SetAccessorDeclaration(_) => {
@@ -6539,7 +6538,6 @@ impl Checker {
                 self.check_statement(program, body);
             }
             NodeData::PropertyDeclaration(_) => {
-                self.check_abstract_declaration(program, member);
                 self.check_property_declaration_full(program, member);
             }
             _ => {}
@@ -6749,8 +6747,8 @@ impl Checker {
             false,
             globals,
         );
-        if type_sym.is_some()
-            && resolve_name(
+        if let Some(sym) = type_sym {
+            if resolve_name(
                 program,
                 expression,
                 &name,
@@ -6759,13 +6757,17 @@ impl Checker {
                 globals,
             )
             .is_none()
-        {
-            self.error(
-                program,
-                expression,
-                &tsgo_diagnostics::X_0_ONLY_REFERS_TO_A_TYPE_BUT_IS_BEING_USED_AS_A_VALUE_HERE,
-                &[&name],
-            );
+            {
+                let sym_flags = program.symbol(sym).flags;
+                if !sym_flags.intersects(SymbolFlags::INTERFACE | SymbolFlags::CLASS) {
+                    self.error(
+                        program,
+                        expression,
+                        &tsgo_diagnostics::X_0_ONLY_REFERS_TO_A_TYPE_BUT_IS_BEING_USED_AS_A_VALUE_HERE,
+                        &[&name],
+                    );
+                }
+            }
         }
     }
 
@@ -6810,34 +6812,6 @@ impl Checker {
                 &[name, name, class_name.as_str()],
             );
         }
-    }
-
-    /// Validates that an `abstract` member appears only inside an `abstract` class.
-    ///
-    /// # Diagnostics
-    ///
-    /// - TS1244 / TS1243: abstract method/property in a non-abstract class.
-    ///
-    /// # Side effects
-    ///
-    /// May push diagnostics (grammar may already have reported the same code).
-    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers (abstract)
-    fn check_abstract_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
-        if !has_abstract_modifier(program.arena(), node) {
-            return;
-        }
-        let Some(class) = get_containing_class(program, node) else {
-            return;
-        };
-        if has_abstract_modifier(program.arena(), class) {
-            return;
-        }
-        let msg = if program.arena().kind(node) == Kind::PropertyDeclaration {
-            &tsgo_diagnostics::ABSTRACT_PROPERTIES_CAN_ONLY_APPEAR_WITHIN_AN_ABSTRACT_CLASS
-        } else {
-            &tsgo_diagnostics::ABSTRACT_METHODS_CAN_ONLY_APPEAR_WITHIN_AN_ABSTRACT_CLASS
-        };
-        self.error(program, node, msg, &[]);
     }
 
     /// Checks get/set accessor pair modifier agreement (abstract flag, accessibility).
