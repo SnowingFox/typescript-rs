@@ -6497,6 +6497,9 @@ impl Checker {
             Kind::BigIntKeyword => return Some(self.bigint_type()),
             _ => return None,
         };
+        if let Some(intrinsic) = heritage_intrinsic_type(self, &name) {
+            return Some(intrinsic);
+        }
         let globals = program.globals();
         let symbol = resolve_name(
             program,
@@ -9794,6 +9797,24 @@ pub(crate) fn is_type_usable_as_property_name(flags: TypeFlags) -> bool {
 
 /// Returns the declaration of `kind` on `symbol`, if any.
 // Go: internal/ast/utilities.go:GetDeclarationOfKind
+/// Maps lowercase intrinsic type names in heritage clauses to checker intrinsics
+/// (so `implements number` resolves to the primitive, not the `Number` interface).
+fn heritage_intrinsic_type(checker: &Checker, name: &str) -> Option<TypeId> {
+    match name {
+        "number" => Some(checker.number_type()),
+        "string" => Some(checker.string_type()),
+        "boolean" => Some(checker.boolean_type()),
+        "bigint" => Some(checker.bigint_type()),
+        "void" => Some(checker.void_type()),
+        "undefined" => Some(checker.undefined_type()),
+        "null" => Some(checker.null_type()),
+        "never" => Some(checker.never_type()),
+        "unknown" => Some(checker.unknown_type()),
+        "any" => Some(checker.any_type()),
+        _ => None,
+    }
+}
+
 fn get_declaration_of_kind(
     program: &dyn BoundProgram,
     symbol: SymbolId,

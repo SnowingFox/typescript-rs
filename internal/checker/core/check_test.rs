@@ -11520,7 +11520,7 @@ fn check_abstract_declaration_method_in_plain_class_reports_1244() {
 // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (isValidBaseType)
 #[test]
 fn class_implements_primitive_reports_2422() {
-    let codes = diag_codes("class C2<T> implements T {}");
+    let codes = diag_codes("class C implements number {}");
     assert!(
         codes.contains(&2422),
         "expected TS2422 non-object implements; got {codes:?}"
