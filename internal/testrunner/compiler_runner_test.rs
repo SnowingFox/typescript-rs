@@ -1616,6 +1616,18 @@ fn panic_location_capture_records_panic_site() {
     }
 }
 
+#[test]
+#[ignore = "local repro for declaration emit panic backtrace"]
+fn repro_declaration_emit_no_crash_backtrace() {
+    let path = Path::new(tsgo_repo::test_data_path())
+        .join("tests/cases/compiler/declarationEmitNoCrashOnCommentCopiedFromOtherFile.ts");
+    let content = std::fs::read_to_string(&path).expect("read case");
+    let _ = error_baseline_for_test(
+        &content,
+        "declarationEmitNoCrashOnCommentCopiedFromOtherFile.ts",
+    );
+}
+
 // FULL compiler-corpus parity MEASUREMENT (opt-in / `#[ignore]`d so it does not
 // slow the default `cargo test`). Run explicitly:
 //
