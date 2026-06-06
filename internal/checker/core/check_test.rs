@@ -11428,3 +11428,131 @@ fn get_property_type_for_index_type_resolves_literal_key() {
         .expect("property type for 'a'");
     assert_eq!(prop, c.number_type());
 }
+
+// ---- T1-E batch 10: class member body checks ----
+
+fn diag_codes(src: &str) -> Vec<i32> {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.get_diagnostics(root)
+        .into_iter()
+        .map(|d| d.code)
+        .collect()
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassDeclaration / checkObjectTypeForDuplicateDeclarations
+#[test]
+fn class_duplicate_property_members_report_2300() {
+    let codes = diag_codes("class C { x: number; x: string; }");
+    assert!(
+        codes.iter().filter(|&&c| c == 2300).count() >= 2,
+        "expected TS2300 duplicates; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassForStaticPropertyNameConflicts
+#[test]
+fn class_static_name_property_conflicts_with_function_builtin_2699() {
+    let codes = diag_codes("class C { static name = 1; }");
+    assert!(
+        codes.contains(&2699),
+        "expected TS2699 for static `name`; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammar.rs:Checker.checkGrammarProperty (definite assignment)
+#[test]
+fn property_definite_assignment_with_initializer_reports_1263() {
+    let codes = diag_codes("class C { x!: string = \"a\"; }");
+    assert!(codes.contains(&1263), "expected TS1263; got {codes:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkFunctionOrConstructorSymbol
+#[test]
+fn method_static_instance_overload_mismatch_reports_2387() {
+    let codes = diag_codes("class C {\n  foo(): void;\n  static foo(): void;\n  static foo() {}\n}");
+    assert!(
+        codes.contains(&2387),
+        "expected TS2387 static/instance overload mismatch; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkConstructorDeclaration
+#[test]
+fn derived_class_constructor_without_super_reports_2377() {
+    let codes = diag_codes("class B {}\nclass D extends B { constructor() {} }");
+    assert!(
+        codes.contains(&2377),
+        "expected TS2377 missing super call; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkFunctionOrConstructorSymbol (constructor overloads)
+#[test]
+fn constructor_overloads_without_implementation_reports_2390() {
+    let codes = diag_codes("class C { constructor(x: number);\nconstructor(x: string); }");
+    assert!(
+        codes.contains(&2390),
+        "expected TS2390 missing constructor implementation; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAccessorDeclaration
+#[test]
+fn accessor_get_less_accessible_than_set_reports_2808() {
+    let codes = diag_codes(
+        "class E {\n  private get Baz(): number { return 0; }\n  public set Baz(n: number) {}\n}",
+    );
+    assert!(
+        codes.iter().filter(|&&c| c == 2808).count() >= 2,
+        "expected TS2808 on getter and setter; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers (abstract)
+#[test]
+fn check_abstract_declaration_method_in_plain_class_reports_1244() {
+    let codes = diag_codes("class B { abstract n(): void; }");
+    assert!(codes.contains(&1244), "expected TS1244; got {codes:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (isValidBaseType)
+#[test]
+fn class_implements_primitive_reports_2422() {
+    let codes = diag_codes("class C2<T> implements T {}");
+    assert!(
+        codes.contains(&2422),
+        "expected TS2422 non-object implements; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkHeritageClause / resolveName (type-only)
+#[test]
+fn class_implements_type_only_alias_reports_2690() {
+    let codes = diag_codes("type T = { x: number };\nclass C implements T {}");
+    assert!(
+        codes.contains(&2690),
+        "expected TS2690 type-only heritage name; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkSuperExpression
+#[test]
+fn super_in_class_without_extends_reports_2335() {
+    let codes = diag_codes("class C { m() { return super; } }");
+    assert!(
+        codes.contains(&2335),
+        "expected TS2335 super without extends; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkSuperExpression (super call in method)
+#[test]
+fn super_call_outside_constructor_reports_2337() {
+    let codes = diag_codes("class B {}\nclass D extends B { m() { super(); } }");
+    assert!(
+        codes.contains(&2337),
+        "expected TS2337 super() outside constructor; got {codes:?}"
+    );
+}

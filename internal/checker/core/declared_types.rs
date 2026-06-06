@@ -1048,7 +1048,7 @@ fn get_declared_type_of_enum(
 // the computed-member checks, and cross-file resolution.
 // blocked-by: full `resolveEntityName` + enum diagnostics.
 // Go: internal/checker/checker.go:Checker.computeEnumMemberValues
-fn compute_enum_member_values(
+pub(crate) fn compute_enum_member_values(
     program: &dyn BoundProgram,
     enum_declaration: NodeId,
 ) -> Vec<(NodeId, tsgo_evaluator::EvalValue)> {
@@ -1144,6 +1144,12 @@ fn enum_member_name_text(program: &dyn BoundProgram, member: NodeId) -> Option<S
         NodeData::EnumMember(d) => d.name,
         _ => return None,
     };
+    if matches!(
+        program.arena().data(name),
+        NodeData::ComputedPropertyName(_)
+    ) {
+        return None;
+    }
     Some(program.arena().text(name).to_string())
 }
 
@@ -1659,14 +1665,17 @@ fn get_external_module_member(
 /// `resolveExternalModuleName`: maps an import specifier string to the target
 /// module's symbol via the program's specifier -> module-symbol bridge.
 // Go: internal/checker/checker.go:Checker.resolveExternalModuleName (resolveExternalModule)
-fn resolve_external_module_name(program: &dyn BoundProgram, specifier: &str) -> Option<SymbolId> {
+pub(crate) fn resolve_external_module_name(
+    program: &dyn BoundProgram,
+    specifier: &str,
+) -> Option<SymbolId> {
     program.resolve_module_symbol(program.file_handle(), specifier)
 }
 
 /// `resolveExternalModuleSymbol`: a module defined by `export = x` resolves to
 /// that export's symbol; otherwise the module symbol itself.
 // Go: internal/checker/checker.go:Checker.resolveExternalModuleSymbol
-fn resolve_external_module_symbol(
+pub(crate) fn resolve_external_module_symbol(
     checker: &mut Checker,
     program: &dyn BoundProgram,
     module_symbol: SymbolId,

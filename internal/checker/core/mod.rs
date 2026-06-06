@@ -16,6 +16,7 @@ pub mod inference;
 pub mod jsx;
 pub mod late_binding;
 pub mod mapper;
+pub mod modules;
 pub mod name_resolution;
 pub mod nodebuilder;
 pub mod program;
@@ -45,8 +46,8 @@ use program::{default_compiler_options, BoundProgram};
 use relations::RelationCache;
 use signatures::{IndexInfo, IndexInfoArena, IndexInfoId, Signature, SignatureArena, SignatureId};
 use symbols::{
-    DeclaredTypeLinks, LateBoundLinks, MembersAndExportsLinks, SymbolLinks, SymbolNodeLinks,
-    SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
+    DeclaredTypeLinks, LateBoundLinks, MembersAndExportsLinks, ModuleSymbolLinks, SymbolLinks,
+    SymbolNodeLinks, SymbolReferenceLinks, TypeAliasLinks, ValueSymbolLinks,
 };
 use types::{
     ConditionalRoot, ConditionalType, IntersectionType, IntrinsicType, LiteralType, LiteralValue,
@@ -356,6 +357,14 @@ pub struct Checker {
     /// value-comparable payload because [`TypeMapper`] is not comparable (Go
     /// stores `mapper` on the `MappedType`).
     mapped_type_mappers: FxHashMap<TypeId, TypeMapper>,
+    /// Cached resolved exports per module symbol (Go's `moduleSymbolLinks`).
+    module_symbol_links: SymbolLinks<ModuleSymbolLinks>,
+    /// Module symbols whose exports have been resolved.
+    module_exports_cached: FxHashSet<SymbolId>,
+    /// Enum declarations whose member values have been computed.
+    enum_values_computed: FxHashSet<NodeId>,
+    /// Getter nodes whose get/set accessor pair was already consistency-checked.
+    accessor_pairs_checked: FxHashSet<NodeId>,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -559,6 +568,10 @@ impl Checker {
             contextual_infos: Vec::new(),
             resolved_signatures: FxHashMap::default(),
             type_reference_cache: FxHashMap::default(),
+            module_symbol_links: SymbolLinks::default(),
+            module_exports_cached: FxHashSet::default(),
+            enum_values_computed: FxHashSet::default(),
+            accessor_pairs_checked: FxHashSet::default(),
             any_type,
             auto_type,
             error_type,

@@ -456,6 +456,7 @@ impl Checker {
             Kind::AsExpression => self.check_assertion(program, node),
             Kind::SatisfiesExpression => self.check_satisfies_expression(program, node),
             Kind::MetaProperty => self.check_meta_property(program, node),
+            Kind::SuperKeyword => self.check_super_expression(program, node),
             // A parenthesized expression `(expr)` has the type of its inner
             // expression (Go's `checkParenthesizedExpression` ->
             // `checkExpressionEx(node.Expression())`).
@@ -4457,7 +4458,7 @@ impl Checker {
     /// blocked-by: alias-target resolution + emit helpers + global source file
     /// detection.
     // Go: internal/checker/checker.go:Checker.checkExportSpecifier(5525)
-    fn check_export_specifier(
+    pub(crate) fn check_export_specifier(
         &mut self,
         program: &dyn BoundProgram,
         node: NodeId,
@@ -4970,6 +4971,12 @@ impl Checker {
         if let NodeData::EnumDeclaration(_) = program.arena().data(node) {
             self.check_enum_declaration(program, node);
         }
+        if matches!(
+            program.arena().kind(node),
+            Kind::ImportDeclaration | Kind::JSImportDeclaration
+        ) {
+            self.check_import_declaration(program, node);
+        }
         if let NodeData::Block(_) = program.arena().data(node) {
             self.check_block(program, node);
         }
@@ -5241,23 +5248,9 @@ impl Checker {
                 self.check_statement(program, statement);
             }
         }
-        // An `export { x, y }` declaration checks each specifier (Go's
-        // `checkExportDeclaration` -> `forEach(exportClause.elements,
-        // checkExportSpecifier)`). With a module specifier (`export { x } from
-        // "m"`), no local-scope check is needed.
-        // DEFER(phase-4-checker): `checkGrammarModuleElementContext`,
-        // `checkGrammarExportDeclaration`, and re-export alias resolution.
         // Go: internal/checker/checker.go:Checker.checkExportDeclaration(5460)
-        if let NodeData::ExportDeclaration(d) = program.arena().data(node) {
-            let has_module_specifier = d.module_specifier.is_some();
-            if let Some(export_clause) = d.export_clause {
-                if let NodeData::NamedExports(ne) = program.arena().data(export_clause) {
-                    let specifiers = ne.elements.nodes.clone();
-                    for specifier in specifiers {
-                        self.check_export_specifier(program, specifier, has_module_specifier);
-                    }
-                }
-            }
+        if let NodeData::ExportDeclaration(_) = program.arena().data(node) {
+            self.check_export_declaration(program, node);
         }
         // An `export = X` / `export default X` assignment checks the exported
         // expression and validates the context (Go's `checkExportAssignment`).
@@ -5844,6 +5837,7 @@ impl Checker {
             self.check_decorators_on_node(program, member);
             self.check_class_member(program, member);
         }
+        self.check_class_method_overload_static_consistency(program, node);
         self.register_for_unused_identifiers_check(node);
     }
     fn check_interface_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
@@ -5906,6 +5900,7 @@ impl Checker {
         };
         let members = d.members.nodes.clone();
         self.check_grammar_modifiers(program, node);
+        self.compute_enum_member_values(program, node);
         for member in &members {
             self.check_enum_member(program, *member);
         }
@@ -6024,6 +6019,7 @@ impl Checker {
         };
         let (name, params, body) = (d.name, d.parameters.nodes.clone(), d.body);
         self.check_grammar_function_like_declaration(program, node);
+        self.check_function_or_method_declaration(program, node);
         if d.asterisk_token.is_some()
             && program.arena().kind(name) == Kind::Identifier
             && program.arena().text(name) == "constructor"
@@ -6069,6 +6065,26 @@ impl Checker {
         if let Some(body) = body {
             self.check_statement(program, body);
         }
+        if let Some(sym) = program.symbol_of_node(node) {
+            self.check_function_or_constructor_symbol(program, sym);
+        }
+        let Some(body) = body else {
+            return;
+        };
+        let Some(class_decl) = program.arena().parent(node) else {
+            return;
+        };
+        if get_extends_heritage_clause_element(program, class_decl).is_none() {
+            return;
+        }
+        if find_first_super_call(program, body).is_none() {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::CONSTRUCTORS_FOR_DERIVED_CLASSES_MUST_CONTAIN_A_SUPER_CALL,
+                &[],
+            );
+        }
     }
     fn check_accessor_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
         let (name, params, body) = match program.arena().data(node) {
@@ -6079,6 +6095,7 @@ impl Checker {
         };
         self.check_grammar_function_like_declaration(program, node);
         self.check_grammar_accessor(program, node);
+        self.check_accessor_pair_consistency(program, node);
         if program.arena().kind(name) == Kind::Identifier
             && program.arena().text(name) == "constructor"
             && get_containing_class(program, node).is_some()
@@ -6164,7 +6181,15 @@ impl Checker {
 
     // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4266)
     fn check_class_like_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        self.check_class_heritage(program, node);
         self.check_object_type_for_duplicate_declarations(program, node);
+        let in_ambient = program
+            .arena()
+            .flags(node)
+            .contains(tsgo_ast::NodeFlags::AMBIENT);
+        if !in_ambient {
+            self.check_class_for_static_property_name_conflicts(program, node);
+        }
         if let Some(sym) = program.symbol_of_node(node) {
             if !self.declared_type_links.get(sym).index_signatures_checked {
                 self.declared_type_links.get(sym).index_signatures_checked = true;
@@ -6218,6 +6243,15 @@ impl Checker {
             // A type that did not resolve is the error type; skip it (Go's
             // `if !c.isErrorType(t)`).
             if interface_type == self.error_type() {
+                continue;
+            }
+            if !self.is_valid_base_type(interface_type) {
+                self.error(
+                    program,
+                    type_node,
+                    &tsgo_diagnostics::A_CLASS_CAN_ONLY_IMPLEMENT_AN_OBJECT_TYPE_OR_INTERSECTION_OF_OBJECT_TYPES_WITH_STATICALLY_KNOWN_MEMBERS,
+                    &[],
+                );
                 continue;
             }
             // Monomorphic `baseWithThis` is the implemented interface type.
@@ -6455,10 +6489,14 @@ impl Checker {
             NodeData::ExpressionWithTypeArguments(e) => e.expression,
             _ => return None,
         };
-        if program.arena().kind(expression) != Kind::Identifier {
-            return None;
-        }
-        let name = program.arena().text(expression).to_string();
+        let name = match program.arena().kind(expression) {
+            Kind::Identifier => program.arena().text(expression).to_string(),
+            Kind::NumberKeyword => return Some(self.number_type()),
+            Kind::StringKeyword => return Some(self.string_type()),
+            Kind::BooleanKeyword => return Some(self.boolean_type()),
+            Kind::BigIntKeyword => return Some(self.bigint_type()),
+            _ => return None,
+        };
         let globals = program.globals();
         let symbol = resolve_name(
             program,
@@ -6484,6 +6522,7 @@ impl Checker {
     fn check_class_member(&mut self, program: &dyn BoundProgram, member: NodeId) {
         match program.arena().data(member) {
             NodeData::MethodDeclaration(_) => {
+                self.check_abstract_declaration(program, member);
                 self.check_method_declaration(program, member);
             }
             NodeData::GetAccessorDeclaration(_) | NodeData::SetAccessorDeclaration(_) => {
@@ -6497,6 +6536,7 @@ impl Checker {
                 self.check_statement(program, body);
             }
             NodeData::PropertyDeclaration(_) => {
+                self.check_abstract_declaration(program, member);
                 self.check_property_declaration_full(program, member);
             }
             _ => {}
@@ -6544,6 +6584,507 @@ impl Checker {
         {
             self.report_type_not_assignable(program, node, initializer_type, declared);
         }
+    }
+
+    /// Checks whether a `super` expression is used in a legal context and returns
+    /// its type (currently `errorType` until super typing is wired).
+    ///
+    /// # Diagnostics
+    ///
+    /// - TS2335: `super` referenced in a class with no `extends` clause.
+    /// - TS2337: `super()` outside a constructor (or nested in one).
+    /// - TS2338: `super` property access outside an allowed member container.
+    ///
+    /// # Side effects
+    ///
+    /// May push diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkSuperExpression(7822)
+    fn check_super_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let parent = program.arena().parent(node);
+        let is_call = parent.is_some_and(|p| {
+            matches!(program.arena().data(p), NodeData::CallExpression(d) if d.expression == node)
+        });
+        let mut container = get_super_container(program, node, true);
+        if !is_call {
+            while let Some(c) = container {
+                if program.arena().kind(c) == Kind::ArrowFunction {
+                    container = get_super_container(program, c, true);
+                } else {
+                    break;
+                }
+            }
+        }
+        let is_legal = || {
+            if is_call {
+                return container.is_some_and(|c| program.arena().kind(c) == Kind::Constructor);
+            }
+            let Some(c) = container else {
+                return false;
+            };
+            let Some(parent) = program.arena().parent(c) else {
+                return false;
+            };
+            if !matches!(
+                program.arena().kind(parent),
+                Kind::ClassDeclaration | Kind::ClassExpression | Kind::ObjectLiteralExpression
+            ) {
+                return false;
+            }
+            if has_static_modifier(program.arena(), c) {
+                matches!(
+                    program.arena().kind(c),
+                    Kind::MethodDeclaration
+                        | Kind::MethodSignature
+                        | Kind::GetAccessor
+                        | Kind::SetAccessor
+                        | Kind::PropertyDeclaration
+                        | Kind::ClassStaticBlockDeclaration
+                )
+            } else {
+                matches!(
+                    program.arena().kind(c),
+                    Kind::MethodDeclaration
+                        | Kind::MethodSignature
+                        | Kind::GetAccessor
+                        | Kind::SetAccessor
+                        | Kind::PropertyDeclaration
+                        | Kind::PropertySignature
+                        | Kind::Constructor
+                )
+            }
+        };
+        if container.is_none() || !is_legal() {
+            if is_call {
+                self.error(
+                    program,
+                    node,
+                    &tsgo_diagnostics::SUPER_CALLS_ARE_NOT_PERMITTED_OUTSIDE_CONSTRUCTORS_OR_IN_NESTED_FUNCTIONS_INSIDE_CONSTRUCTORS,
+                    &[],
+                );
+            } else {
+                self.error(
+                    program,
+                    node,
+                    &tsgo_diagnostics::X_SUPER_PROPERTY_ACCESS_IS_PERMITTED_ONLY_IN_A_CONSTRUCTOR_MEMBER_FUNCTION_OR_MEMBER_ACCESSOR_OF_A_DERIVED_CLASS,
+                    &[],
+                );
+            }
+            return self.error_type;
+        }
+        let Some(class_like) = get_containing_class(program, node) else {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::X_SUPER_CAN_ONLY_BE_REFERENCED_IN_A_DERIVED_CLASS,
+                &[],
+            );
+            return self.error_type;
+        };
+        if get_extends_heritage_clause_element(program, class_like).is_none() {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::X_SUPER_CAN_ONLY_BE_REFERENCED_IN_A_DERIVED_CLASS,
+                &[],
+            );
+            return self.error_type;
+        }
+        self.error_type
+    }
+
+    /// Heritage-clause checking for a class-like declaration: walks `extends` /
+    /// `implements` elements for grammar-level heritage diagnostics.
+    ///
+    /// # Side effects
+    ///
+    /// May push diagnostics via per-element heritage checks.
+    // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4287)
+    fn check_class_heritage(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let heritage = match program.arena().data(node) {
+            NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => {
+                d.heritage_clauses.clone()
+            }
+            _ => None,
+        };
+        let Some(clauses) = heritage else {
+            return;
+        };
+        for clause in clauses.nodes {
+            if let NodeData::HeritageClause(h) = program.arena().data(clause) {
+                for &type_node in &h.types.nodes {
+                    self.check_heritage_clause_element(program, type_node);
+                }
+            }
+        }
+    }
+
+    /// Checks a single `ExpressionWithTypeArguments` heritage element.
+    ///
+    /// # Diagnostics
+    ///
+    /// - TS2690: a type-only name used as a heritage value.
+    ///
+    /// # Side effects
+    ///
+    /// May push diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarHeritageClause(876)
+    fn check_heritage_clause_element(&mut self, program: &dyn BoundProgram, type_node: NodeId) {
+        let expression = match program.arena().data(type_node) {
+            NodeData::ExpressionWithTypeArguments(d) => d.expression,
+            _ => return,
+        };
+        if program.arena().kind(expression) != Kind::Identifier {
+            return;
+        }
+        let name = program.arena().text(expression).to_string();
+        let globals = program.globals();
+        let type_sym = resolve_name(
+            program,
+            expression,
+            &name,
+            SymbolFlags::TYPE,
+            false,
+            globals,
+        );
+        if type_sym.is_some()
+            && resolve_name(
+                program,
+                expression,
+                &name,
+                SymbolFlags::VALUE,
+                false,
+                globals,
+            )
+            .is_none()
+        {
+            self.error(
+                program,
+                expression,
+                &tsgo_diagnostics::X_0_ONLY_REFERS_TO_A_TYPE_BUT_IS_BEING_USED_AS_A_VALUE_HERE,
+                &[&name],
+            );
+        }
+    }
+
+    /// Reports when a static property name collides with built-in `Function`
+    /// properties (`name`, `length`, `caller`, `arguments`).
+    ///
+    /// # Diagnostics
+    ///
+    /// - TS2699: static property conflicts with `Function.{name}`.
+    ///
+    /// # Side effects
+    ///
+    /// May push diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkClassForStaticPropertyNameConflicts(4366)
+    fn check_class_for_static_property_name_conflicts(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) {
+        for member in object_type_member_nodes(program, node) {
+            if !has_static_modifier(program.arena(), member) {
+                continue;
+            }
+            let Some(name_node) = member_name_node_for_duplicate(program, member) else {
+                continue;
+            };
+            let name = program.arena().text(name_node);
+            if !matches!(name, "name" | "length" | "caller" | "arguments") {
+                continue;
+            }
+            let class_name = match program.arena().data(node) {
+                NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d
+                    .name
+                    .map(|n| program.arena().text(n).to_string())
+                    .unwrap_or_else(|| "<anonymous>".to_string()),
+                _ => "<anonymous>".to_string(),
+            };
+            self.error(
+                program,
+                name_node,
+                &tsgo_diagnostics::STATIC_PROPERTY_0_CONFLICTS_WITH_BUILT_IN_PROPERTY_FUNCTION_0_OF_CONSTRUCTOR_FUNCTION_1,
+                &[name, name, class_name.as_str()],
+            );
+        }
+    }
+
+    /// Validates that an `abstract` member appears only inside an `abstract` class.
+    ///
+    /// # Diagnostics
+    ///
+    /// - TS1244 / TS1243: abstract method/property in a non-abstract class.
+    ///
+    /// # Side effects
+    ///
+    /// May push diagnostics (grammar may already have reported the same code).
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers (abstract)
+    fn check_abstract_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        if !has_abstract_modifier(program.arena(), node) {
+            return;
+        }
+        let Some(class) = get_containing_class(program, node) else {
+            return;
+        };
+        if has_abstract_modifier(program.arena(), class) {
+            return;
+        }
+        let msg = if program.arena().kind(node) == Kind::PropertyDeclaration {
+            &tsgo_diagnostics::ABSTRACT_PROPERTIES_CAN_ONLY_APPEAR_WITHIN_AN_ABSTRACT_CLASS
+        } else {
+            &tsgo_diagnostics::ABSTRACT_METHODS_CAN_ONLY_APPEAR_WITHIN_AN_ABSTRACT_CLASS
+        };
+        self.error(program, node, msg, &[]);
+    }
+
+    /// Checks get/set accessor pair modifier agreement (abstract flag, accessibility).
+    ///
+    /// # Diagnostics
+    ///
+    /// - TS2808: get accessor less accessible than setter.
+    ///
+    /// # Side effects
+    ///
+    /// May push diagnostics once per accessor symbol.
+    // Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2936)
+    fn check_accessor_pair_consistency(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let Some(symbol) = program.symbol_of_node(node) else {
+            return;
+        };
+        let getter = get_declaration_of_kind(program, symbol, Kind::GetAccessor);
+        let setter = get_declaration_of_kind(program, symbol, Kind::SetAccessor);
+        let (Some(getter), Some(setter)) = (getter, setter) else {
+            return;
+        };
+        if self.accessor_pairs_checked.contains(&getter) {
+            return;
+        }
+        self.accessor_pairs_checked.insert(getter);
+        let getter_flags = modifier_flags_of(program.arena(), getter);
+        let setter_flags = modifier_flags_of(program.arena(), setter);
+        let getter_name = match program.arena().data(getter) {
+            NodeData::GetAccessorDeclaration(d) => d.name,
+            _ => return,
+        };
+        let setter_name = match program.arena().data(setter) {
+            NodeData::SetAccessorDeclaration(d) => d.name,
+            _ => return,
+        };
+        if (getter_flags.contains(tsgo_ast::ModifierFlags::PROTECTED)
+            && !setter_flags
+                .intersects(tsgo_ast::ModifierFlags::PROTECTED | tsgo_ast::ModifierFlags::PRIVATE))
+            || (getter_flags.contains(tsgo_ast::ModifierFlags::PRIVATE)
+                && !setter_flags.contains(tsgo_ast::ModifierFlags::PRIVATE))
+        {
+            self.error(
+                program,
+                getter_name,
+                &tsgo_diagnostics::A_GET_ACCESSOR_MUST_BE_AT_LEAST_AS_ACCESSIBLE_AS_THE_SETTER,
+                &[],
+            );
+            self.error(
+                program,
+                setter_name,
+                &tsgo_diagnostics::A_GET_ACCESSOR_MUST_BE_AT_LEAST_AS_ACCESSIBLE_AS_THE_SETTER,
+                &[],
+            );
+        }
+    }
+
+    /// Walks a class body's method declarations and reports static/instance overload
+    /// mismatches between consecutive overloads of the same name.
+    // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (overload pass)
+    fn check_class_method_overload_static_consistency(
+        &mut self,
+        program: &dyn BoundProgram,
+        class: NodeId,
+    ) {
+        for member in object_type_member_nodes(program, class) {
+            if program.arena().kind(member) == Kind::MethodDeclaration {
+                self.check_consecutive_method_overload_static_mismatch(program, member);
+            }
+        }
+    }
+
+    /// Reports when consecutive overload signatures of the same name disagree on
+    /// `static` (Go's `reportImplementationExpectedError` static/instance arm).
+    ///
+    /// # Diagnostics
+    ///
+    /// - TS2387 / TS2388: static/instance overload mismatch.
+    ///
+    /// # Side effects
+    ///
+    /// May push diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkFunctionOrConstructorSymbolWorker (reportImplementationExpectedError)
+    fn check_consecutive_method_overload_static_mismatch(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) {
+        if program.arena().kind(node) != Kind::MethodDeclaration {
+            return;
+        }
+        let Some(class) = get_containing_class(program, node) else {
+            return;
+        };
+        let members = object_type_member_nodes(program, class);
+        let Some(idx) = members.iter().position(|&m| m == node) else {
+            return;
+        };
+        if idx + 1 >= members.len() {
+            return;
+        }
+        let next = members[idx + 1];
+        if program.arena().kind(next) != Kind::MethodDeclaration {
+            return;
+        }
+        let name_a = match program.arena().data(node) {
+            NodeData::MethodDeclaration(d) => d.name,
+            _ => return,
+        };
+        let name_b = match program.arena().data(next) {
+            NodeData::MethodDeclaration(d) => d.name,
+            _ => return,
+        };
+        if program.arena().text(name_a) != program.arena().text(name_b) {
+            return;
+        }
+        if has_static_modifier(program.arena(), node) == has_static_modifier(program.arena(), next)
+        {
+            return;
+        }
+        let msg = if has_static_modifier(program.arena(), node) {
+            &tsgo_diagnostics::FUNCTION_OVERLOAD_MUST_NOT_BE_STATIC
+        } else {
+            &tsgo_diagnostics::FUNCTION_OVERLOAD_MUST_BE_STATIC
+        };
+        self.error(program, name_b, msg, &[]);
+    }
+
+    /// Method/function overload consistency: static/instance overload agreement and
+    /// missing implementation diagnostics.
+    ///
+    /// # Diagnostics
+    ///
+    /// - TS2387 / TS2388: static/instance overload mismatch.
+    /// - TS2390: constructor implementation missing.
+    ///
+    /// # Side effects
+    ///
+    /// May push diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkFunctionOrMethodDeclaration(3390)
+    fn check_function_or_method_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let Some(symbol) = program.symbol_of_node(node) else {
+            return;
+        };
+        self.check_function_or_constructor_symbol(program, symbol);
+    }
+
+    /// Checks a function/constructor symbol once for overload-list consistency.
+    ///
+    /// # Side effects
+    ///
+    /// May push diagnostics; marks the symbol as checked.
+    // Go: internal/checker/checker.go:Checker.checkFunctionOrConstructorSymbol(3437)
+    fn check_function_or_constructor_symbol(
+        &mut self,
+        program: &dyn BoundProgram,
+        symbol: SymbolId,
+    ) {
+        if self
+            .value_symbol_links
+            .get(symbol)
+            .function_or_constructor_checked
+        {
+            return;
+        }
+        self.value_symbol_links
+            .get(symbol)
+            .function_or_constructor_checked = true;
+        let decls = program.symbol(symbol).declarations.clone();
+        let is_constructor = program
+            .symbol(symbol)
+            .flags
+            .contains(SymbolFlags::CONSTRUCTOR);
+        let mut overloads: Vec<NodeId> = Vec::new();
+        let mut implementation: Option<NodeId> = None;
+        for decl in &decls {
+            let kind = program.arena().kind(*decl);
+            if !matches!(
+                kind,
+                Kind::FunctionDeclaration
+                    | Kind::MethodDeclaration
+                    | Kind::MethodSignature
+                    | Kind::Constructor
+            ) {
+                continue;
+            }
+            let has_body = node_has_present_body(program, *decl);
+            if has_body {
+                if implementation.is_none() {
+                    implementation = Some(*decl);
+                }
+            } else {
+                overloads.push(*decl);
+            }
+        }
+        if overloads.is_empty() {
+            return;
+        }
+        if implementation.is_none() {
+            let error_node = overloads.last().copied().unwrap_or(overloads[0]);
+            if is_constructor {
+                self.error(
+                    program,
+                    error_node,
+                    &tsgo_diagnostics::CONSTRUCTOR_IMPLEMENTATION_IS_MISSING,
+                    &[],
+                );
+            }
+            return;
+        }
+        let impl_node = implementation.expect("implementation");
+        for &overload in &overloads {
+            if program.arena().kind(overload) != program.arena().kind(impl_node) {
+                continue;
+            }
+            if has_static_modifier(program.arena(), overload)
+                != has_static_modifier(program.arena(), impl_node)
+            {
+                let msg = if has_static_modifier(program.arena(), overload) {
+                    &tsgo_diagnostics::FUNCTION_OVERLOAD_MUST_NOT_BE_STATIC
+                } else {
+                    &tsgo_diagnostics::FUNCTION_OVERLOAD_MUST_BE_STATIC
+                };
+                let name_node = declaration_name_node(program, overload).unwrap_or(overload);
+                self.error(program, name_node, msg, &[]);
+            }
+        }
+    }
+
+    /// Reports whether `t` is a valid `implements` / `extends` object type.
+    ///
+    /// Reachable subset of Go's `isValidBaseType`: object-like, `any`, or an
+    /// intersection of valid bases.
+    ///
+    /// # Side effects
+    ///
+    /// None (pure).
+    // Go: internal/checker/checker.go:Checker.isValidBaseType(19392)
+    fn is_valid_base_type(&self, type_id: TypeId) -> bool {
+        let ty = self.get_type(type_id);
+        let flags = ty.flags();
+        if flags.intersects(TypeFlags::OBJECT | TypeFlags::ANY | TypeFlags::NON_PRIMITIVE) {
+            return true;
+        }
+        if flags.intersects(TypeFlags::INTERSECTION) {
+            return ty
+                .intersection_types()
+                .map(|types| types.iter().all(|&t| self.is_valid_base_type(t)))
+                .unwrap_or(false);
+        }
+        false
     }
 
     /// Checks a parameter declaration for constructor parameter-property
@@ -8597,7 +9138,7 @@ fn is_class_like(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
 // Reports whether `node` was parsed in a JavaScript file (the parser sets
 // `NodeFlags::JAVA_SCRIPT_FILE` on every node of a `.js`/`.jsx`/`.json` file).
 // Go: internal/ast/utilities.go:IsInJSFile
-fn is_in_js_file(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+pub(crate) fn is_in_js_file(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
     arena
         .flags(node)
         .contains(tsgo_ast::NodeFlags::JAVA_SCRIPT_FILE)
@@ -9026,7 +9567,7 @@ fn property_name_text(program: &dyn BoundProgram, name_node: NodeId) -> Option<S
 // JS-number round-trip of its text is exactly the text (so `"0"`/`"1.5"` are
 // numeric but `"0xF00D"`/`"01"` are not).
 // Go: internal/checker/utilities.go:isNumericLiteralName(860)
-fn is_numeric_literal_name(name: &str) -> bool {
+pub(crate) fn is_numeric_literal_name(name: &str) -> bool {
     tsgo_jsnum::from_string(name).to_string() == name
 }
 
@@ -9251,6 +9792,126 @@ pub(crate) fn is_type_usable_as_property_name(flags: TypeFlags) -> bool {
     flags.intersects(TypeFlags::STRING_OR_NUMBER_LITERAL_OR_UNIQUE)
 }
 
+/// Returns the declaration of `kind` on `symbol`, if any.
+// Go: internal/ast/utilities.go:GetDeclarationOfKind
+fn get_declaration_of_kind(
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+    kind: Kind,
+) -> Option<NodeId> {
+    program
+        .symbol(symbol)
+        .declarations
+        .iter()
+        .find(|&&d| program.arena().kind(d) == kind)
+        .copied()
+}
+
+/// Reports whether `node` is a function-like declaration with a present body.
+fn node_has_present_body(program: &dyn BoundProgram, node: NodeId) -> bool {
+    match program.arena().data(node) {
+        NodeData::FunctionDeclaration(d) => d.body.is_some(),
+        NodeData::MethodDeclaration(d) => d.body.is_some(),
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+            d.body.is_some()
+        }
+        NodeData::ConstructorDeclaration(d) => d.body.is_some(),
+        _ => false,
+    }
+}
+
+/// Returns the `extends` heritage element of a class-like node, if any.
+// Go: internal/ast/utilities.go:GetExtendsHeritageClauseElement
+fn get_extends_heritage_clause_element(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    let heritage = match program.arena().data(node) {
+        NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d.heritage_clauses.clone(),
+        _ => None,
+    }?;
+    for clause in heritage.nodes {
+        if let NodeData::HeritageClause(h) = program.arena().data(clause) {
+            if h.token == Kind::ExtendsKeyword {
+                return h.types.nodes.first().copied();
+            }
+        }
+    }
+    None
+}
+
+/// Locates the first `super()` call in `node`'s subtree (skipping nested functions).
+// Go: internal/checker/checker.go:Checker.findFirstSuperCall(2871)
+fn find_first_super_call(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    fn visit(program: &dyn BoundProgram, node: NodeId, found: &mut Option<NodeId>) -> bool {
+        if is_super_call(program, node) {
+            *found = Some(node);
+            return true;
+        }
+        if matches!(
+            program.arena().kind(node),
+            Kind::FunctionDeclaration
+                | Kind::FunctionExpression
+                | Kind::ArrowFunction
+                | Kind::MethodDeclaration
+                | Kind::GetAccessor
+                | Kind::SetAccessor
+        ) {
+            return false;
+        }
+        program
+            .arena()
+            .for_each_child(node, &mut |child| visit(program, child, found))
+    }
+    let mut found = None;
+    visit(program, node, &mut found);
+    found
+}
+
+/// Reports whether `node` is a `super` call (`super` or `super(...)`).
+fn is_super_call(program: &dyn BoundProgram, node: NodeId) -> bool {
+    let inner = skip_outer_expressions(program, node);
+    if program.arena().kind(inner) == Kind::SuperKeyword {
+        return true;
+    }
+    matches!(
+        program.arena().data(inner),
+        NodeData::CallExpression(d) if program.arena().kind(d.expression) == Kind::SuperKeyword
+    )
+}
+
+/// Returns the innermost class member container for a `super` reference.
+// Go: internal/checker/utilities.go:getSuperContainer(1150)
+fn get_super_container(
+    program: &dyn BoundProgram,
+    node: NodeId,
+    stop_on_functions: bool,
+) -> Option<NodeId> {
+    let arena = program.arena();
+    let mut current = arena.parent(node)?;
+    loop {
+        match arena.kind(current) {
+            Kind::ComputedPropertyName => {
+                current = arena.parent(current)?;
+            }
+            Kind::FunctionDeclaration | Kind::FunctionExpression | Kind::ArrowFunction => {
+                if !stop_on_functions {
+                    current = arena.parent(current)?;
+                    continue;
+                }
+                return None;
+            }
+            Kind::PropertyDeclaration
+            | Kind::PropertySignature
+            | Kind::MethodDeclaration
+            | Kind::MethodSignature
+            | Kind::Constructor
+            | Kind::GetAccessor
+            | Kind::SetAccessor
+            | Kind::ClassStaticBlockDeclaration => return Some(current),
+            Kind::SourceFile => return None,
+            _ => current = arena.parent(current)?,
+        }
+    }
+}
+
 fn get_containing_class(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
     let arena = program.arena();
     let mut current = arena.parent(node);
@@ -9266,7 +9927,7 @@ fn get_containing_class(program: &dyn BoundProgram, node: NodeId) -> Option<Node
     None
 }
 
-fn is_enum_const(program: &dyn BoundProgram, node: NodeId) -> bool {
+pub(crate) fn is_enum_const(program: &dyn BoundProgram, node: NodeId) -> bool {
     modifier_flags_of(program.arena(), node).contains(tsgo_ast::ModifierFlags::CONST)
 }
 
