@@ -14525,3 +14525,43 @@ fn class_expression_parameter_property_and_property_duplicate_reports_2300() {
         "parameter property plus property in a class expression must report TS2300 twice"
     );
 }
+
+// ---- T1-E batch 49: class-expression method overload static consistency ----
+
+// Go: internal/checker/checker.go:Checker.checkClassExpression(10007) +
+// Checker.checkFunctionOrConstructorSymbolWorker (reportImplementationExpectedError)
+#[test]
+fn class_expression_method_static_instance_overload_mismatch_reports_2387() {
+    let codes = diag_codes(
+        "const C = class {\n  foo(): void;\n  static foo(): void;\n  static foo() {}\n};",
+    );
+    assert!(
+        codes.contains(&2387),
+        "expected TS2387 static/instance overload mismatch in a class expression; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3157)
+#[test]
+fn class_expression_parameter_property_and_get_accessor_duplicate_reports_2300() {
+    let count = duplicate_identifier_count(
+        "const C = class { constructor(public x: number) {} get x() { return 1; } };",
+    );
+    assert_eq!(
+        count, 2,
+        "parameter property plus get accessor in a class expression must report TS2300 twice"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3177)
+#[test]
+fn class_expression_static_and_instance_private_method_reports_2804() {
+    let count = diag_codes("const C = class { #foo() {} static #foo() {} };")
+        .into_iter()
+        .filter(|c| *c == 2804)
+        .count();
+    assert_eq!(
+        count, 2,
+        "instance and static private methods sharing `#foo` in a class expression must report TS2804 twice"
+    );
+}

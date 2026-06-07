@@ -7889,6 +7889,7 @@ impl Checker {
             self.check_decorators_on_node(program, member);
             self.check_class_member(program, member);
         }
+        self.check_class_method_overload_static_consistency(program, node);
         self.register_for_unused_identifiers_check(node);
         // DEFER(phase-4-checker-later): `checkClassExpressionExternalHelpers`.
         program
