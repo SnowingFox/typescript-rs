@@ -12290,3 +12290,109 @@ fn bitwise_or_on_boolean_literals_yields_number() {
     let mut c = Checker::new();
     assert_eq!(c.check_expression(&p, sub), c.number_type());
 }
+
+// ---- T1-E batch 19: bigint arithmetic, shift simplification, array spread ----
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12330)
+#[test]
+fn bigint_bitwise_and_literals_yields_bigint() {
+    let p = StubProgram::parse_and_bind("/a.ts", "1n & 2n;");
+    let sub = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, sub), c.bigint_type());
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12330)
+#[test]
+fn bigint_bitwise_or_literals_yields_bigint() {
+    let p = StubProgram::parse_and_bind("/a.ts", "1n | 2n;");
+    let sub = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, sub), c.bigint_type());
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12341)
+#[test]
+fn bigint_mixed_with_number_bitwise_reports_2365() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "1n & 1;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2365);
+    assert_eq!(
+        diags[0].message,
+        "Operator '&' cannot be applied to types '1n' and '1'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12333)
+#[test]
+fn bigint_unsigned_right_shift_reports_2365() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "1n >>> 1n;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2365);
+    assert!(
+        diags[0].message.contains(">>>"),
+        "expected unsigned-shift operator in message, got {:?}",
+        diags[0].message
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12351)
+#[test]
+fn enum_member_shift_by_32_reports_6807() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A = 1 << 32 }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 6807);
+    assert_eq!(
+        diags[0].message,
+        "This operation can be simplified. This shift is identical to `1 << 0`."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral(8003)
+#[test]
+fn array_literal_spread_nested_array_literal_yields_number_array() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\n[1, ...[2, 3]];",
+    );
+    let sub = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let result = c.check_expression(&p, sub);
+    let number = c.number_type();
+    let obj = c.get_type(result).as_object().expect("array reference");
+    assert_eq!(
+        obj.resolved_type_arguments,
+        vec![number],
+        "spread of a number array should yield Array<number>"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral(8032)
+#[test]
+fn array_literal_spread_number_array_variable_yields_number_array() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\ndeclare const a: number[];\n[0, ...a];",
+    );
+    let sub = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let result = c.check_expression(&p, sub);
+    let obj = c.get_type(result).as_object().expect("array reference");
+    assert_eq!(
+        obj.resolved_type_arguments,
+        vec![c.number_type()],
+        "spread of number[] should yield Array<number>"
+    );
+}

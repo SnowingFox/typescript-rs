@@ -470,6 +470,7 @@ impl EmitResolver {
                 };
                 Some(LiteralConstValue::Number { text, negative })
             }
+            LiteralValue::BigInt(_) => None,
         }
     }
 

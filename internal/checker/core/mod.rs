@@ -195,6 +195,9 @@ pub struct Checker {
     /// `+0`/`-0` are canonicalized so all `NaN`s share one type and `0`/`-0`
     /// collapse, matching Go's float map-key semantics + separate `nanType`.
     number_literal_types: FxHashMap<u64, TypeId>,
+    /// Interned bigint-literal types, keyed by the literal's source text (Go's
+    /// `bigintLiteralTypes map[jsnum.PseudoBigInt]*Type`).
+    bigint_literal_types: FxHashMap<String, TypeId>,
     /// Lazily-built declared types for interface/class/enum symbols.
     declared_type_links: SymbolLinks<DeclaredTypeLinks>,
     /// Lazily-built declared types for type-alias symbols.
@@ -546,6 +549,7 @@ impl Checker {
             intersection_types: FxHashMap::default(),
             string_literal_types: FxHashMap::default(),
             number_literal_types: FxHashMap::default(),
+            bigint_literal_types: FxHashMap::default(),
             declared_type_links: SymbolLinks::default(),
             type_alias_links: SymbolLinks::default(),
             type_aliases_resolving: rustc_hash::FxHashSet::default(),
@@ -1915,6 +1919,24 @@ impl Checker {
         id
     }
 
+    // Returns the interned bigint-literal type for `text` (the literal's source
+    // text including the trailing `n`), allocating it once and caching by text.
+    // Go: internal/checker/checker.go:Checker.getBigIntLiteralType(25190)
+    pub(crate) fn get_bigint_literal_type(&mut self, text: &str) -> TypeId {
+        if let Some(&id) = self.bigint_literal_types.get(text) {
+            return id;
+        }
+        let value = tsgo_jsnum::parse_valid_big_int(text);
+        let id = new_literal_type_in(
+            &mut self.types,
+            TypeFlags::BIG_INT_LITERAL,
+            LiteralValue::BigInt(value),
+            None,
+        );
+        self.bigint_literal_types.insert(text.to_string(), id);
+        id
+    }
+
     /// Returns the union of `members`, interned so equal unions share an id.
     ///
     /// 4b implements the structural core: constituents are deduplicated and
@@ -2608,6 +2630,7 @@ fn literal_value_to_string(value: &LiteralValue) -> String {
         LiteralValue::Boolean(false) => "false".to_string(),
         LiteralValue::String(s) => format!("\"{s}\""),
         LiteralValue::Number(n) => f64::from(*n).to_string(),
+        LiteralValue::BigInt(bi) => format!("{bi}n"),
     }
 }
 

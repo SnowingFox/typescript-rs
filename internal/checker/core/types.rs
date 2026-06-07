@@ -643,6 +643,8 @@ pub enum LiteralValue {
     String(String),
     /// A numeric literal value (JS `number` semantics, via `tsgo_jsnum`).
     Number(tsgo_jsnum::Number),
+    /// A bigint literal value (JS `bigint` semantics, via `tsgo_jsnum`).
+    BigInt(tsgo_jsnum::PseudoBigInt),
     /// A boolean literal value (`true` / `false`).
     Boolean(bool),
 }

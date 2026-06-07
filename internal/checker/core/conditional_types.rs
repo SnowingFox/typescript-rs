@@ -422,6 +422,7 @@ fn get_template_string_for_type(checker: &Checker, t: TypeId) -> String {
     match ty.literal_value() {
         Some(LiteralValue::String(s)) => s.clone(),
         Some(LiteralValue::Number(n)) => n.to_string(),
+        Some(LiteralValue::BigInt(bi)) => format!("{bi}n"),
         Some(LiteralValue::Boolean(b)) => {
             if *b {
                 "true".to_string()

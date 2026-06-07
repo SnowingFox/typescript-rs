@@ -435,6 +435,12 @@ impl Checker {
                 let regular = self.get_number_literal_type(value);
                 self.get_fresh_type_of_literal_type(regular)
             }
+            Kind::BigIntLiteral => {
+                // Go: getFreshTypeOfLiteralType(getBigIntLiteralType(...)).
+                let text = program.arena().text(node);
+                let regular = self.get_bigint_literal_type(text);
+                self.get_fresh_type_of_literal_type(regular)
+            }
             Kind::TrueKeyword => self.true_type,
             Kind::FalseKeyword => self.false_type,
             Kind::NullKeyword => self.null_type,
@@ -1218,8 +1224,8 @@ impl Checker {
     // fixed-arity tuple whose element types are the preserved literals (Go's
     // `inConstContext` -> `createTupleTypeEx(elementTypes, _, readonly=true)`).
     //
-    // DEFER(phase-4-checker-4bi+): spread (`[...a]`) and omitted elements, the
-    // non-const tuple contexts (`forceTuple` / a tuple-like contextual type),
+    // DEFER(phase-4-checker-4bi+): omitted elements, the non-const tuple
+    // contexts (`forceTuple` / a tuple-like contextual type),
     // contextual typing, and the `ObjectFlagsArrayLiteral` clone of
     // `createArrayLiteralType` (the reachable subset returns the plain `Array<T>`
     // reference / fixed-arity tuple, which is sufficient for element access +
@@ -1232,14 +1238,27 @@ impl Checker {
             NodeData::ArrayLiteralExpression(d) => d.list.nodes.clone(),
             _ => return self.error_type,
         };
-        // DEFER(phase-4-checker-4bg+): spread/omitted elements are typed through
-        // the plain mutable-location path here, which yields the `error` type
-        // for a `SpreadElement`/`OmittedExpression` (no clean element type),
-        // degrading the array element type. blocked-by: spread/iterator typing.
-        let element_types: Vec<TypeId> = elements
-            .iter()
-            .map(|&element| self.check_expression_for_mutable_location(program, element))
-            .collect();
+        // DEFER(phase-4-checker-4bi+): omitted elements, destructuring-pattern
+        // spread-as-rest, and array-like spread (`isArrayLikeType`) fast paths.
+        // blocked-by: omitted-expression typing + `isArrayLikeType`.
+        let iterable_exists = self.iterables_resolvable_via_protocol();
+        let mut element_types = Vec::with_capacity(elements.len());
+        for &element in &elements {
+            if let NodeData::SpreadElement(d) = program.arena().data(element) {
+                let spread_type = self.check_expression(program, d.expression);
+                let rest_element_type = self.check_iterated_type_or_element_type(
+                    program,
+                    spread_type,
+                    Some(d.expression),
+                    iterable_exists,
+                );
+                element_types.push(rest_element_type.unwrap_or(self.error_type));
+            } else {
+                element_types.push(
+                    self.check_expression_for_mutable_location(program, element),
+                );
+            }
+        }
         // In a const context (`[1, 2] as const`) the literal is a readonly tuple
         // whose element types are the preserved literals (the elements above were
         // typed in the same const context, so they are already regular literals,
@@ -2402,12 +2421,11 @@ impl Checker {
             // Arithmetic operators (`-`/`*`/`/`/`%`/`**`/shifts/bitwise) require
             // number-ish operands and yield `number` (Go's arithmetic arm).
             //
-            // DEFER(phase-4-checker-4o+): the `bigint` result + mixed-operand
-            // (`reportOperatorError`) path, the shift simplification suggestion,
-            // and compound assignments (`*=` etc., which also run
-            // `checkAssignmentOperator`). blocked-by: `maybeTypeOfKind` bigint
-            // handling + `evaluate`-based shift constants + compound-assign
-            // reference/write-type resolution.
+            // DEFER(phase-4-checker-4o+): the `await`-suggestion path on
+            // arithmetic operands and shift-simplification suggestions outside
+            // enum members (Go's `errorOrSuggestion` suggestion collection).
+            // blocked-by: awaited-type machinery (lib globals, P6) + suggestion
+            // diagnostic sink.
             Kind::MinusToken
             | Kind::AsteriskToken
             | Kind::AsteriskAsteriskToken
@@ -2462,12 +2480,74 @@ impl Checker {
                     right_type,
                     &tsgo_diagnostics::THE_RIGHT_HAND_SIDE_OF_AN_ARITHMETIC_OPERATION_MUST_BE_OF_TYPE_ANY_NUMBER_BIGINT_OR_AN_ENUM_TYPE,
                 );
-                let result_type = self.number_type;
-                // For a compound assignment (`*=` etc.), the implied result must
-                // be assignable to the (reference) left-hand side, but only once
-                // both operands type-checked (Go guards on `leftOk && rightOk`).
-                if left_ok && right_ok && is_compound_assignment(operator) {
-                    self.check_assignment_operator(program, left, left_type, result_type, None);
+                let result_type = if self.is_type_assignable_to_kind(
+                    program,
+                    left_type,
+                    TypeFlags::ANY_OR_UNKNOWN,
+                ) && self.is_type_assignable_to_kind(
+                    program,
+                    right_type,
+                    TypeFlags::ANY_OR_UNKNOWN,
+                ) || !self.maybe_type_of_kind(left_type, TypeFlags::BIG_INT_LIKE)
+                    && !self.maybe_type_of_kind(right_type, TypeFlags::BIG_INT_LIKE)
+                {
+                    self.number_type
+                } else if self.both_are_big_int_like(program, left_type, right_type) {
+                    if matches!(
+                        operator,
+                        Kind::GreaterThanGreaterThanGreaterThanToken
+                            | Kind::GreaterThanGreaterThanGreaterThanEqualsToken
+                    ) {
+                        self.report_binary_operator_error(
+                            program,
+                            node,
+                            operator_token,
+                            left_type,
+                            right_type,
+                        );
+                    }
+                    if matches!(
+                        operator,
+                        Kind::AsteriskAsteriskToken | Kind::AsteriskAsteriskEqualsToken
+                    ) && (self.compiler_options().target as i32)
+                        < (ScriptTarget::Es2016 as i32)
+                    {
+                        self.error(
+                            program,
+                            node,
+                            &tsgo_diagnostics::EXPONENTIATION_CANNOT_BE_PERFORMED_ON_BIGINT_VALUES_UNLESS_THE_TARGET_OPTION_IS_SET_TO_ES2016_OR_LATER,
+                            &[],
+                        );
+                    }
+                    self.bigint_type
+                } else {
+                    self.report_binary_operator_error(
+                        program,
+                        node,
+                        operator_token,
+                        left_type,
+                        right_type,
+                    );
+                    self.error_type
+                };
+                if left_ok && right_ok {
+                    if is_compound_assignment(operator) {
+                        self.check_assignment_operator(
+                            program,
+                            left,
+                            left_type,
+                            result_type,
+                            None,
+                        );
+                    }
+                    self.check_shift_simplification(
+                        program,
+                        node,
+                        operator,
+                        operator_token,
+                        left,
+                        right,
+                    );
                 }
                 result_type
             }
@@ -2971,6 +3051,16 @@ impl Checker {
     // DEFER(phase-4-checker-4p+): the other kinds (`ESSymbolLike`, `VoidLike`,
     // `BooleanLike`) and the non-strict variant. blocked-by: per-kind slices land
     // with the operators that need them.
+    // Go: internal/checker/checker.go:Checker.isTypeAssignableToKind(27453)
+    fn is_type_assignable_to_kind(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        kind: TypeFlags,
+    ) -> bool {
+        self.is_type_assignable_to_kind_ex(program, source, kind, false)
+    }
+
     // Go: internal/checker/checker.go:Checker.isTypeAssignableToKindEx(20196)
     fn is_type_assignable_to_kind_strict(
         &mut self,
@@ -2978,13 +3068,24 @@ impl Checker {
         source: TypeId,
         kind: TypeFlags,
     ) -> bool {
+        self.is_type_assignable_to_kind_ex(program, source, kind, true)
+    }
+
+    fn is_type_assignable_to_kind_ex(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        kind: TypeFlags,
+        strict: bool,
+    ) -> bool {
         let f = self.get_type(source).flags();
         if f.intersects(kind) {
             return true;
         }
         // Strict mode: the top/void/nullable types are not assignable to a
         // primitive kind (Go's `strict` guard).
-        if f.intersects(TypeFlags::ANY_OR_UNKNOWN | TypeFlags::VOID | TypeFlags::NULLABLE) {
+        if strict && f.intersects(TypeFlags::ANY_OR_UNKNOWN | TypeFlags::VOID | TypeFlags::NULLABLE)
+        {
             return false;
         }
         (kind.intersects(TypeFlags::NUMBER_LIKE)
@@ -2993,6 +3094,75 @@ impl Checker {
                 && self.is_type_assignable_to(program, source, self.string_type))
             || (kind.intersects(TypeFlags::BIG_INT_LIKE)
                 && self.is_type_assignable_to(program, source, self.bigint_type))
+            || (kind.intersects(TypeFlags::BOOLEAN_LIKE)
+                && self.is_type_assignable_to(program, source, self.boolean_type))
+    }
+
+    // Go: internal/checker/checker.go:Checker.bothAreBigIntLike(12727)
+    fn both_are_big_int_like(
+        &mut self,
+        program: &dyn BoundProgram,
+        left: TypeId,
+        right: TypeId,
+    ) -> bool {
+        self.is_type_assignable_to_kind(program, left, TypeFlags::BIG_INT_LIKE)
+            && self.is_type_assignable_to_kind(program, right, TypeFlags::BIG_INT_LIKE)
+    }
+
+    // When the right-hand side of a shift is a constant >= 32, reports that the
+    // shift is equivalent to shifting by the remainder mod 32. In enum members
+    // this is an error; elsewhere Go emits a suggestion (DEFER: suggestion sink).
+    // Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12347)
+    fn check_shift_simplification(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        operator: Kind,
+        _operator_token: NodeId,
+        left: NodeId,
+        right: NodeId,
+    ) {
+        if !matches!(
+            operator,
+            Kind::LessThanLessThanToken
+                | Kind::LessThanLessThanEqualsToken
+                | Kind::GreaterThanGreaterThanToken
+                | Kind::GreaterThanGreaterThanEqualsToken
+                | Kind::GreaterThanGreaterThanGreaterThanToken
+                | Kind::GreaterThanGreaterThanGreaterThanEqualsToken
+        ) {
+            return;
+        }
+        use tsgo_evaluator::{new_evaluator, new_result, EvalValue, OuterExpressionKinds};
+        let evaluator = new_evaluator(
+            |_arena, _expr, _loc| new_result(EvalValue::None, false, false, false),
+            OuterExpressionKinds::NONE,
+        );
+        let rhs_eval = evaluator.evaluate(program.arena(), right, Some(right));
+        let EvalValue::Num(num_value) = rhs_eval.value else {
+            return;
+        };
+        if num_value.abs() < tsgo_jsnum::Number::from(32.0) {
+            return;
+        }
+        let simplified = num_value.remainder(tsgo_jsnum::Number::from(32.0));
+        let simplified_text = shift_amount_display(simplified);
+        let is_enum_member = program
+            .arena()
+            .parent(right)
+            .and_then(|parent| program.arena().parent(parent))
+            .is_some_and(|grandparent| program.arena().kind(grandparent) == Kind::EnumMember);
+        if !is_enum_member {
+            return;
+        }
+        let left_text = program.arena().text(left);
+        let op = tsgo_scanner::token_to_string(operator);
+        self.error(
+            program,
+            node,
+            &tsgo_diagnostics::THIS_OPERATION_CAN_BE_SIMPLIFIED_THIS_SHIFT_IS_IDENTICAL_TO_0_1_2,
+            &[left_text, op, simplified_text.as_str()],
+        );
     }
 
     // Reports whether the (already base-typed) operands of a relational
@@ -6568,10 +6738,30 @@ impl Checker {
                 &[],
             );
         }
-        // DEFER(phase-4-checker): check_expression on initializer requires enum
-        // value computation to be complete first to avoid spurious 2304 on
-        // self-referential members like `E.A`. Go gates this through
-        // computeEnumMemberValues running before the check.
+        if let Some(init) = d.initializer {
+            self.check_enum_member_initializer_shifts(program, init);
+        }
+    }
+
+    fn check_enum_member_initializer_shifts(
+        &mut self,
+        program: &dyn BoundProgram,
+        expr: NodeId,
+    ) {
+        let node = skip_parentheses(program, expr);
+        if let NodeData::BinaryExpression(d) = program.arena().data(node) {
+            let operator = program.arena().kind(d.operator_token);
+            self.check_shift_simplification(
+                program,
+                node,
+                operator,
+                d.operator_token,
+                d.left,
+                d.right,
+            );
+            self.check_enum_member_initializer_shifts(program, d.left);
+            self.check_enum_member_initializer_shifts(program, d.right);
+        }
     }
     fn check_module_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
         let NodeData::ModuleDeclaration(d) = program.arena().data(node) else {
@@ -10701,6 +10891,15 @@ fn is_indirect_call(program: &dyn BoundProgram, comma_node: NodeId) -> bool {
     let right_kind = program.arena().kind(right);
     is_access_expression(right_kind)
         || (right_kind == Kind::Identifier && program.arena().text(right) == "eval")
+}
+
+fn shift_amount_display(amount: tsgo_jsnum::Number) -> String {
+    let n = f64::from(amount);
+    if n.fract() == 0.0 && n.is_finite() {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
 }
 
 fn is_compound_assignment(operator: Kind) -> bool {
