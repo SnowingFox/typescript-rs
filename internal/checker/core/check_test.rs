@@ -14420,3 +14420,61 @@ fn parameter_property_and_set_accessor_duplicate_reports_2300() {
         "parameter property plus set accessor with the same name must report TS2300 twice"
     );
 }
+
+// ---- T1-E batch 47: static prototype conflict + private-name static/instance ----
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3165)
+#[test]
+fn class_static_prototype_conflicts_with_function_builtin_2699() {
+    let codes = diag_codes("class C { static prototype: number; }");
+    assert!(
+        codes.contains(&2699),
+        "expected TS2699 when a class declares static `prototype`; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3165)
+#[test]
+fn declare_class_static_prototype_ambient_no_prototype_2699() {
+    let codes = diag_codes("declare class C { static prototype: number; }");
+    assert!(
+        !codes.contains(&2699),
+        "ambient classes skip the static `prototype` conflict check; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3177)
+#[test]
+fn class_static_and_instance_private_name_reports_2804() {
+    let count = diag_codes("class C { #foo = 1; static #foo = 2; }")
+        .into_iter()
+        .filter(|c| *c == 2804)
+        .count();
+    assert_eq!(
+        count, 2,
+        "instance and static members sharing `#foo` must report TS2804 twice"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3177)
+#[test]
+fn class_static_and_instance_private_method_reports_2804() {
+    let count = diag_codes("class C { #foo() {} static #foo() {} }")
+        .into_iter()
+        .filter(|c| *c == 2804)
+        .count();
+    assert_eq!(
+        count, 2,
+        "instance and static private methods sharing `#foo` must report TS2804 twice"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3177)
+#[test]
+fn class_instance_only_private_name_no_2804() {
+    let codes = diag_codes("class C { #foo = 1; }");
+    assert!(
+        !codes.iter().any(|&c| c == 2804),
+        "a lone instance private field must not report TS2804; got {codes:?}"
+    );
+}

@@ -8450,12 +8450,10 @@ impl Checker {
     // (no error), so this checker half only reports the property-vs-property and
     // property-vs-accessor combinations the binder intentionally lets merge.
     //
-    // DEFER(phase-4-checker): the `checkPrivateNames` static/instance private-name
-    // conflict, the static `prototype` name conflict, computed/late-bound names (the
-    // `__computed` members are bound anonymously and only merge after checker
-    // late-binding), and type-literal members. blocked-by: private-identifier
-    // symbol naming + parameter-property binding + checker late-binding +
-    // type-literal traversal in `check_type_node`.
+    // DEFER(phase-4-checker): computed/late-bound names (the `__computed` members
+    // are bound anonymously and only merge after checker late-binding), and
+    // type-literal members. blocked-by: checker late-binding + type-literal
+    // traversal in `check_type_node`.
     // Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3122)
     // When a class incorrectly extends a base class, try to report a
     // member-specific property incompatibility (TS2416) before falling back to
@@ -8515,9 +8513,19 @@ impl Checker {
         node: NodeId,
     ) {
         self.check_auto_accessor_conflicts_with_accessors(program, node);
+        let node_in_ambient = program
+            .arena()
+            .flags(node)
+            .contains(tsgo_ast::NodeFlags::AMBIENT);
+        let check_private_names = matches!(
+            program.arena().kind(node),
+            Kind::ClassDeclaration | Kind::ClassExpression
+        );
         let mut instance_names: std::collections::HashMap<String, i32> =
             std::collections::HashMap::new();
         let mut static_names: std::collections::HashMap<String, i32> =
+            std::collections::HashMap::new();
+        let mut private_names: std::collections::HashMap<String, i32> =
             std::collections::HashMap::new();
         for member in object_type_member_nodes(program, node) {
             if program.arena().kind(member) == Kind::Constructor {
@@ -8529,38 +8537,76 @@ impl Checker {
                 );
                 continue;
             }
-            let Some(symbol) = program.symbol_of_node(member) else {
-                continue;
-            };
-            let Some(kind) = classify_property_or_accessor(program, member) else {
-                continue;
-            };
+            let symbol = program.symbol_of_node(member);
             let is_static = has_static_modifier(program.arena(), member);
-            let name = program.symbol(symbol).name.clone();
-            let names = if is_static {
-                &mut static_names
-            } else {
-                &mut instance_names
-            };
-            if !is_static
-                && self.maybe_report_parameter_property_member_conflict(
-                    program, node, names, &name, kind, is_static,
-                )
-            {
-                continue;
+
+            // Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3165)
+            if !node_in_ambient && is_static {
+                if let Some(sym) = symbol {
+                    if program.symbol(sym).name == "prototype" {
+                        if let Some(name_node) =
+                            member_name_node_for_duplicate(program, member)
+                        {
+                            let class_display = class_like_display_name(program, node);
+                            self.error(
+                                program,
+                                name_node,
+                                &tsgo_diagnostics::STATIC_PROPERTY_0_CONFLICTS_WITH_BUILT_IN_PROPERTY_FUNCTION_0_OF_CONSTRUCTOR_FUNCTION_1,
+                                &["prototype", "prototype", class_display.as_str()],
+                            );
+                        }
+                    }
+                }
             }
-            // Only members that MERGED into one symbol can be duplicates.
-            if program.symbol(symbol).declarations.len() <= 1 {
-                continue;
+
+            if let Some(sym) = symbol {
+                if let Some(kind) = classify_property_or_accessor(program, member) {
+                    let name = program.symbol(sym).name.clone();
+                    let names = if is_static {
+                        &mut static_names
+                    } else {
+                        &mut instance_names
+                    };
+                    let skip_merged_duplicate_pass = !is_static
+                        && self.maybe_report_parameter_property_member_conflict(
+                            program, node, names, &name, kind, is_static,
+                        );
+                    // Only members that MERGED into one symbol can be duplicates.
+                    if !skip_merged_duplicate_pass
+                        && program.symbol(sym).declarations.len() > 1
+                    {
+                        let state = names.get(&name).copied().unwrap_or(0);
+                        if state == 0 {
+                            // On first occurrence just record the kind.
+                            names.insert(name, kind);
+                        } else if state == 1 || (state == 2 && kind != 2) {
+                            // Error on a second property, or a property/accessor combination.
+                            names.insert(name.clone(), 3);
+                            self.report_duplicate_member_errors(program, node, &name, is_static);
+                        }
+                    }
+                }
             }
-            let state = names.get(&name).copied().unwrap_or(0);
-            if state == 0 {
-                // On first occurrence just record the kind.
-                names.insert(name, kind);
-            } else if state == 1 || (state == 2 && kind != 2) {
-                // Error on a second property, or a property/accessor combination.
-                names.insert(name.clone(), 3);
-                self.report_duplicate_member_errors(program, node, &name, is_static);
+
+            // Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3177)
+            if check_private_names {
+                if let Some(sym) = symbol {
+                    if let Some(name_node) = member_name_node_for_duplicate(program, member) {
+                        if program.arena().kind(name_node) == Kind::PrivateIdentifier {
+                            let sym_name = program.symbol(sym).name.clone();
+                            let flags = private_names.get(&sym_name).copied().unwrap_or(0);
+                            if flags != 3 {
+                                let new_flags = flags | if is_static { 2 } else { 1 };
+                                private_names.insert(sym_name.clone(), new_flags);
+                                if new_flags == 3 {
+                                    self.report_duplicate_private_name_member_errors(
+                                        program, node, &sym_name,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -8730,6 +8776,35 @@ impl Checker {
                         &[&display],
                     );
                 }
+            }
+        }
+    }
+
+    // Reports TS2804 on every class member whose symbol shares the same mangled
+    // private-identifier name (Go's `reportDuplicateMemberErrors` with
+    // `checkStatic == false`).
+    // Go: internal/checker/checker.go:Checker.reportDuplicateMemberErrors(3193)
+    fn report_duplicate_private_name_member_errors(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        name: &str,
+    ) {
+        for member in object_type_member_nodes(program, node) {
+            let Some(symbol) = program.symbol_of_node(member) else {
+                continue;
+            };
+            if program.symbol(symbol).name != name {
+                continue;
+            }
+            if let Some(name_node) = member_name_node_for_duplicate(program, member) {
+                let display = super::nodebuilder::symbol_to_string(program, symbol);
+                self.error_skipping_leading_trivia(
+                    program,
+                    name_node,
+                    &tsgo_diagnostics::DUPLICATE_IDENTIFIER_0_STATIC_AND_INSTANCE_ELEMENTS_CANNOT_SHARE_THE_SAME_PRIVATE_NAME,
+                    &[&display],
+                );
             }
         }
     }
@@ -12469,6 +12544,22 @@ fn object_type_member_nodes(program: &dyn BoundProgram, node: NodeId) -> Vec<Nod
         | NodeData::ClassDeclaration(d)
         | NodeData::ClassExpression(d) => d.members.nodes.clone(),
         _ => Vec::new(),
+    }
+}
+
+// Display name for a class-like declaration (Go's `symbolToString` on the class
+// symbol from `getSymbolOfDeclaration(node)`).
+fn class_like_display_name(program: &dyn BoundProgram, node: NodeId) -> String {
+    if let Some(sym) = program.symbol_of_node(node) {
+        super::nodebuilder::symbol_to_string(program, sym)
+    } else {
+        match program.arena().data(node) {
+            NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d
+                .name
+                .map(|n| program.arena().text(n).to_string())
+                .unwrap_or_else(|| "<anonymous>".to_string()),
+            _ => "<anonymous>".to_string(),
+        }
     }
 }
 
