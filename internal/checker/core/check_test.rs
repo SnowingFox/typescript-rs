@@ -14708,3 +14708,50 @@ fn method_instance_static_overload_mismatch_reports_2388() {
         "expected TS2388 instance/static overload mismatch; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 52: implements-a-class hint + entity-name implements guard ----
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4348)
+#[test]
+fn class_incorrectly_implements_class_reports_2720() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B {\n  x: number = 1;\n}\nclass C implements B {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(
+        diags[0].code, 2720,
+        "implementing a class must report TS2720, not TS2420; got {diags:?}"
+    );
+    assert_eq!(
+        diags[0].message,
+        "Class 'C' incorrectly implements class 'B'. Did you mean to extend 'B' and inherit its members as a subclass?"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4340)
+#[test]
+fn class_implements_non_entity_name_expression_reports_2500() {
+    let codes = diag_codes("class C implements (1 as any) {}");
+    assert!(
+        codes.contains(&2500),
+        "non-entity-name implements expression must report TS2500; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4348)
+#[test]
+fn class_expression_incorrectly_implements_class_reports_2720() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B {\n  x: number = 1;\n}\nconst C = class implements B {};",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2720, "got {diags:?}");
+}

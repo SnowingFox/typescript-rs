@@ -7690,7 +7690,7 @@ impl Checker {
     // member-specific extends errors, the static-side extends check (2417), the
     // override-modifier walk (`checkKindsOfPropertyMemberOverrides` /
     // `checkMembersForOverrideModifier`), `implements` on a non-object type
-    // (2422), the `implements`-a-class hint (2720), base-type accessibility
+    // (2422), base-type accessibility
     // (private constructor, 2654), mixins / type-variable base constructors,
     // generic base classes with type arguments (the `getTypeWithThisArgument`
     // type-argument substitution beyond the monomorphic case), abstract-class
@@ -8357,6 +8357,24 @@ impl Checker {
         // assignable from the class instance type.
         // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4338)
         for type_node in self.implements_heritage_elements(program, node) {
+            let expression = match program.arena().data(type_node) {
+                NodeData::ExpressionWithTypeArguments(e) => e.expression,
+                _ => continue,
+            };
+            // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4340)
+            if !is_entity_name_expression(program.arena(), expression)
+                || program
+                    .arena()
+                    .flags(expression)
+                    .contains(NodeFlags::OPTIONAL_CHAIN)
+            {
+                self.error(
+                    program,
+                    expression,
+                    &tsgo_diagnostics::A_CLASS_CAN_ONLY_IMPLEMENT_AN_IDENTIFIER_SLASHQUALIFIED_NAME_WITH_OPTIONAL_TYPE_ARGUMENTS,
+                    &[],
+                );
+            }
             let Some(interface_type) = self.resolve_heritage_clause_type(program, type_node) else {
                 continue;
             };
@@ -8378,12 +8396,28 @@ impl Checker {
             if !self.is_type_assignable_to(program, type_with_this, interface_type) {
                 let interface_str =
                     super::nodebuilder::type_to_string(self, program, interface_type);
-                self.error(
-                    program,
-                    error_node,
-                    &tsgo_diagnostics::CLASS_0_INCORRECTLY_IMPLEMENTS_INTERFACE_1,
-                    &[class_str.as_str(), interface_str.as_str()],
-                );
+                // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4348)
+                let implements_class = self
+                    .get_type(interface_type)
+                    .symbol
+                    .is_some_and(|sym| {
+                        program.symbol(sym).flags.intersects(SymbolFlags::CLASS)
+                    });
+                if implements_class {
+                    self.error(
+                        program,
+                        error_node,
+                        &tsgo_diagnostics::CLASS_0_INCORRECTLY_IMPLEMENTS_CLASS_1_DID_YOU_MEAN_TO_EXTEND_1_AND_INHERIT_ITS_MEMBERS_AS_A_SUBCLASS,
+                        &[class_str.as_str(), interface_str.as_str()],
+                    );
+                } else {
+                    self.error(
+                        program,
+                        error_node,
+                        &tsgo_diagnostics::CLASS_0_INCORRECTLY_IMPLEMENTS_INTERFACE_1,
+                        &[class_str.as_str(), interface_str.as_str()],
+                    );
+                }
             }
         }
     }
