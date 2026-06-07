@@ -382,6 +382,14 @@ pub struct Checker {
     enum_values_computed: FxHashSet<NodeId>,
     /// Getter nodes whose get/set accessor pair was already consistency-checked.
     accessor_pairs_checked: FxHashSet<NodeId>,
+    /// Accessor symbols whose read type is currently being resolved, breaking
+    /// circular accessor references (Go's `pushTypeResolution(Type)` on
+    /// `getTypeOfAccessors`).
+    // Go: internal/checker/checker.go:Checker.getTypeOfAccessors (pushTypeResolution)
+    accessors_type_resolving: FxHashSet<SymbolId>,
+    /// Set when a re-entrant `get_type_of_accessors` detects a cycle; cleared
+    /// after the outermost resolution reports the circularity diagnostic.
+    accessor_type_resolution_cyclic: bool,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -604,6 +612,8 @@ impl Checker {
             module_exports_cached: FxHashSet::default(),
             enum_values_computed: FxHashSet::default(),
             accessor_pairs_checked: FxHashSet::default(),
+            accessors_type_resolving: FxHashSet::default(),
+            accessor_type_resolution_cyclic: false,
             any_type,
             auto_type,
             error_type,

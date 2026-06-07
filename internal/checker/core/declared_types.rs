@@ -2186,6 +2186,22 @@ pub(crate) fn get_explicit_accessor_return_type(
         })
 }
 
+// Returns the type-annotation node of an accessor declaration, if any (Go's
+// `getAnnotatedAccessorTypeNode`).
+// Go: internal/checker/checker.go:Checker.getAnnotatedAccessorTypeNode(19961)
+fn get_annotated_accessor_type_node(program: &dyn BoundProgram, accessor: NodeId) -> Option<NodeId> {
+    match program.arena().data(accessor) {
+        NodeData::GetAccessorDeclaration(d) => d.type_node,
+        NodeData::SetAccessorDeclaration(d) => d.parameters.nodes.first().and_then(|&param| {
+            match program.arena().data(param) {
+                NodeData::ParameterDeclaration(p) => p.type_node,
+                _ => None,
+            }
+        }),
+        _ => None,
+    }
+}
+
 // Returns the annotated type of an accessor declaration, if any (Go's
 // `getAnnotatedAccessorType`).
 // Go: internal/checker/checker.go:Checker.getAnnotatedAccessorType(19953)
@@ -2195,16 +2211,7 @@ fn get_annotated_accessor_type(
     accessor: NodeId,
     globals: Option<&SymbolTable>,
 ) -> Option<TypeId> {
-    let type_node = match program.arena().data(accessor) {
-        NodeData::GetAccessorDeclaration(d) => d.type_node,
-        NodeData::SetAccessorDeclaration(d) => d.parameters.nodes.first().and_then(|&param| {
-            match program.arena().data(param) {
-                NodeData::ParameterDeclaration(p) => p.type_node,
-                _ => None,
-            }
-        }),
-        _ => None,
-    }?;
+    let type_node = get_annotated_accessor_type_node(program, accessor)?;
     Some(get_type_from_type_node(checker, program, type_node, globals))
 }
 
@@ -2224,6 +2231,10 @@ pub fn get_type_of_accessors(
     {
         return cached;
     }
+    if !checker.accessors_type_resolving.insert(symbol) {
+        checker.accessor_type_resolution_cyclic = true;
+        return checker.error_type();
+    }
     let getter = declaration_of_kind(program, symbol, Kind::GetAccessor);
     let setter = declaration_of_kind(program, symbol, Kind::SetAccessor);
     let mut t = getter.and_then(|g| get_annotated_accessor_type(checker, program, g, globals));
@@ -2241,7 +2252,7 @@ pub fn get_type_of_accessors(
             }
         }
     }
-    let t = match t {
+    let mut t = match t {
         Some(t) => t,
         None => {
             let sym_name = super::nodebuilder::symbol_to_string(program, symbol);
@@ -2265,6 +2276,42 @@ pub fn get_type_of_accessors(
             checker.any_type()
         }
     };
+    checker.accessors_type_resolving.remove(&symbol);
+    if checker.accessor_type_resolution_cyclic {
+        let sym_name = super::nodebuilder::symbol_to_string(program, symbol);
+        if getter
+            .and_then(|g| get_annotated_accessor_type_node(program, g))
+            .is_some()
+        {
+            checker.error(
+                program,
+                getter.expect("getter annotation implies getter decl"),
+                &tsgo_diagnostics::X_0_IS_REFERENCED_DIRECTLY_OR_INDIRECTLY_IN_ITS_OWN_TYPE_ANNOTATION,
+                &[sym_name.as_str()],
+            );
+        } else if setter
+            .and_then(|s| get_annotated_accessor_type_node(program, s))
+            .is_some()
+        {
+            checker.error(
+                program,
+                setter.expect("setter annotation implies setter decl"),
+                &tsgo_diagnostics::X_0_IS_REFERENCED_DIRECTLY_OR_INDIRECTLY_IN_ITS_OWN_TYPE_ANNOTATION,
+                &[sym_name.as_str()],
+            );
+        } else if let Some(getter) = getter {
+            if checker.no_implicit_any() {
+                checker.error(
+                    program,
+                    getter,
+                    &tsgo_diagnostics::FUNCTION_IMPLICITLY_HAS_RETURN_TYPE_ANY_BECAUSE_IT_DOES_NOT_HAVE_A_RETURN_TYPE_ANNOTATION_AND_IS_REFERENCED_DIRECTLY_OR_INDIRECTLY_IN_ONE_OF_ITS_RETURN_EXPRESSIONS,
+                    &[sym_name.as_str()],
+                );
+            }
+        }
+        t = checker.any_type();
+        checker.accessor_type_resolution_cyclic = false;
+    }
     checker.value_symbol_links.get(symbol).resolved_type = Some(t);
     t
 }

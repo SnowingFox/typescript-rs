@@ -13649,3 +13649,83 @@ fn getter_return_mismatch_with_explicit_annotation_reports_2322() {
         "getter return expression must match the explicit return type annotation; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 37: accessor annotation priority, circularity guards ----
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18385)
+#[test]
+fn getter_annotation_takes_priority_over_setter_param_for_read_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { get x(): string { return \"\"; } set x(v: number) { } }\nconst c = new C();\nconst s: string = c.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "getter return-type annotation must win over setter parameter type for read type; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18385) / checkReturnExpression
+#[test]
+fn getter_body_checked_against_own_annotation_not_setter_param() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { get x(): number { return 1; } set x(v: string) { } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "getter body must be checked against its own annotation, not the setter parameter type; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2960) / checkParameter
+#[test]
+fn class_set_accessor_body_parameter_assignability_reports_2322() {
+    let codes = diag_codes("class C { set x(v: number) { v = \"\"; } }");
+    assert!(
+        codes.contains(&2322),
+        "setter body must check parameter assignments against the annotated parameter type; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18370)
+#[test]
+fn object_literal_set_only_accessor_read_type_from_setter_param() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o = { set x(v: number) { } };\nconst n: number = o.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "object-literal set-only accessor read type must come from the setter parameter annotation; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18410)
+#[test]
+fn accessor_circular_type_annotation_reports_2502() {
+    let codes = diag_codes("class C { get x(): C[\"x\"] { return this.x; } }");
+    assert!(
+        codes.contains(&2502),
+        "expected TS2502 when an accessor type annotation is circular; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18417)
+#[test]
+fn getter_circular_body_inference_reports_7024() {
+    let codes = diag_codes("class C { get x() { return this.x; } }");
+    assert!(
+        codes.contains(&7024),
+        "expected TS7024 when getter return type is inferred circularly from its body; got {codes:?}"
+    );
+}
