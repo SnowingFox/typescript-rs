@@ -2167,6 +2167,25 @@ fn declaration_of_kind(
         .copied()
 }
 
+// Returns the explicit read type of a getter symbol from a getter and/or setter
+// annotation (not body inference). Mirrors the annotation-resolution prefix of
+// Go's `getTypeOfAccessors`.
+// Go: internal/checker/checker.go:Checker.getAnnotatedAccessorType(19953)
+pub(crate) fn get_explicit_accessor_return_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+    globals: Option<&SymbolTable>,
+) -> Option<TypeId> {
+    let getter = declaration_of_kind(program, symbol, Kind::GetAccessor);
+    let setter = declaration_of_kind(program, symbol, Kind::SetAccessor);
+    getter
+        .and_then(|g| get_annotated_accessor_type(checker, program, g, globals))
+        .or_else(|| {
+            setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals))
+        })
+}
+
 // Returns the annotated type of an accessor declaration, if any (Go's
 // `getAnnotatedAccessorType`).
 // Go: internal/checker/checker.go:Checker.getAnnotatedAccessorType(19953)

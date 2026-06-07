@@ -13601,3 +13601,51 @@ fn class_accessor_computed_name_non_indexable_reports_2464() {
         "expected TS2464 computed accessor name must be string/number/symbol; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 36: accessor return paths, setter-annotated getter typing ----
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18370)
+#[test]
+fn set_only_accessor_read_type_from_setter_param() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { set x(v: number) { } }\nconst c = new C();\nconst n: number = c.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "set-only accessor read type must come from the setter parameter annotation; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18385) / checkReturnExpression
+#[test]
+fn getter_body_checked_against_setter_param_type() {
+    let codes = diag_codes("class C { set x(v: number) { } get x() { return \"hi\"; } }");
+    assert!(
+        codes.contains(&2322),
+        "getter body must be checked against the setter parameter type when the getter lacks an annotation; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAllCodePathsInNonVoidFunctionReturnOrThrow(3704)
+#[test]
+fn getter_incomplete_return_paths_reports_2366() {
+    let codes = diag_codes("let b = true;\nclass C { get x(): number { if (b) return 1; } }");
+    assert!(
+        codes.contains(&2366),
+        "expected TS2366 when an annotated getter can fall through without returning; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAllCodePathsInNonVoidFunctionReturnOrThrow(3704)
+#[test]
+fn getter_return_mismatch_with_explicit_annotation_reports_2322() {
+    let codes = diag_codes("class C { get x(): number { return \"hi\"; } }");
+    assert!(
+        codes.contains(&2322),
+        "getter return expression must match the explicit return type annotation; got {codes:?}"
+    );
+}

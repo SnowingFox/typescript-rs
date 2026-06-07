@@ -38,8 +38,8 @@ use super::declared_types::{
     get_default_from_type_parameter, get_index_info_of_type, get_index_infos_of_type,
     get_index_type_of_type, get_indexed_access_type, get_min_type_argument_count,
     get_property_of_type, get_property_of_union_or_intersection_type,
-    get_property_type_for_index_type, get_type_from_type_node, get_type_of_property_of_type,
-    get_type_of_symbol, is_generic_object_type, resolve_alias,
+    get_explicit_accessor_return_type, get_property_type_for_index_type, get_type_from_type_node,
+    get_type_of_property_of_type, get_type_of_symbol, is_generic_object_type, resolve_alias,
 };
 use super::inference::{InferenceContext, InferencePriority};
 use super::mapper::TypeMapper;
@@ -7451,8 +7451,7 @@ impl Checker {
     // annotation's type via `get_type_from_type_node`).
     //
     // DEFER(phase-4-checker-4r+): function/arrow expressions' contextual return
-    // types and the constructor/accessor special cases. blocked-by: contextual
-    // typing + accessor-pair resolution.
+    // types. blocked-by: contextual typing.
     // Go: internal/checker/checker.go:getContainingFunctionOrClassStaticBlock + getReturnTypeOfSignature
     fn enclosing_explicit_return_type(
         &mut self,
@@ -7461,25 +7460,77 @@ impl Checker {
     ) -> Option<TypeId> {
         let mut current = program.arena().parent(node);
         while let Some(id) = current {
-            let return_type_node = match program.arena().data(id) {
-                NodeData::FunctionDeclaration(d) => Some(d.type_node),
-                NodeData::MethodDeclaration(d) => Some(d.type_node),
-                NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
-                    Some(d.type_node)
+            if program.arena().kind(id) == Kind::GetAccessor {
+                if let Some(symbol) = program.symbol_of_node(id) {
+                    return get_explicit_accessor_return_type(
+                        self,
+                        program,
+                        symbol,
+                        program.globals(),
+                    );
                 }
-                NodeData::ConstructorDeclaration(d) => Some(d.type_node),
-                NodeData::FunctionExpression(d) => Some(d.type_node),
-                NodeData::ArrowFunction(d) => Some(d.type_node),
-                _ => None,
-            };
-            if let Some(return_type_node) = return_type_node {
-                return return_type_node.map(|n| {
-                    super::declared_types::get_type_from_type_node(self, program, n, None)
-                });
+                return None;
+            }
+            if let Some(return_type_node) = get_effective_return_type_node(program, id) {
+                return Some(get_type_from_type_node(
+                    self,
+                    program,
+                    return_type_node,
+                    None,
+                ));
+            }
+            if is_function_like_kind(program.arena().kind(id)) {
+                return None;
             }
             current = program.arena().parent(id);
         }
         None
+    }
+
+    /// Reports when a function-like declaration with an explicit non-void return
+    /// type can fall through without returning (`TS2366` under `strictNullChecks`).
+    ///
+    /// # Side effects
+    ///
+    /// May push diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkAllCodePathsInNonVoidFunctionReturnOrThrow(3704)
+    fn check_all_code_paths_in_non_void_function_return_or_throw(
+        &mut self,
+        program: &dyn BoundProgram,
+        fn_node: NodeId,
+        return_type: TypeId,
+    ) {
+        if self.maybe_type_of_kind(return_type, TypeFlags::VOID)
+            || self
+                .get_type(return_type)
+                .flags()
+                .intersects(TypeFlags::ANY | TypeFlags::UNDEFINED)
+        {
+            return;
+        }
+        let Some(body) = function_like_body(program, fn_node) else {
+            return;
+        };
+        if program.arena().kind(body) != Kind::Block {
+            return;
+        }
+        let flags = program.arena().flags(fn_node);
+        if !flags.contains(NodeFlags::HAS_IMPLICIT_RETURN) {
+            return;
+        }
+        if !self.strict_null_checks() {
+            return;
+        }
+        if self.is_type_assignable_to(program, self.undefined_type(), return_type) {
+            return;
+        }
+        let error_node = get_effective_return_type_node(program, fn_node).unwrap_or(fn_node);
+        self.error(
+            program,
+            error_node,
+            &tsgo_diagnostics::FUNCTION_LACKS_ENDING_RETURN_STATEMENT_AND_RETURN_TYPE_DOES_NOT_INCLUDE_UNDEFINED,
+            &[],
+        );
     }
 
     // Checks a `typeof expr` expression. The result type is `string` (Go's
@@ -8045,7 +8096,13 @@ impl Checker {
         }
         if let Some(symbol) = program.symbol_of_node(node) {
             let globals = program.globals();
-            super::declared_types::get_type_of_accessors(self, program, symbol, globals);
+            let return_type =
+                super::declared_types::get_type_of_accessors(self, program, symbol, globals);
+            if program.arena().kind(node) == Kind::GetAccessor {
+                self.check_all_code_paths_in_non_void_function_return_or_throw(
+                    program, node, return_type,
+                );
+            }
         }
         if let Some(body) = body {
             self.check_statement(program, body);
