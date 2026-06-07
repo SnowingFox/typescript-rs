@@ -11585,10 +11585,14 @@ fn class_duplicate_property_members_report_2300() {
 // Go: internal/checker/checker.go:Checker.checkClassForStaticPropertyNameConflicts
 #[test]
 fn class_static_name_property_conflicts_with_function_builtin_2699() {
-    let codes = diag_codes("class C { static name = 1; }");
+    let options = CompilerOptions {
+        use_define_for_class_fields: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let codes = diag_codes_with_options("class C { static name = 1; }", options);
     assert!(
         codes.contains(&2699),
-        "expected TS2699 for static `name`; got {codes:?}"
+        "expected TS2699 for static `name` when useDefineForClassFields is off; got {codes:?}"
     );
 }
 
@@ -14563,5 +14567,80 @@ fn class_expression_static_and_instance_private_method_reports_2804() {
     assert_eq!(
         count, 2,
         "instance and static private methods sharing `#foo` in a class expression must report TS2804 twice"
+    );
+}
+
+// ---- T1-E batch 50: useDefineForClassFields static-name conflict guard ----
+
+fn diag_codes_with_options(src: &str, options: CompilerOptions) -> Vec<i32> {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts", src, options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.get_diagnostics(root)
+        .into_iter()
+        .map(|d| d.code)
+        .collect()
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassForStaticPropertyNameConflicts(4367)
+#[test]
+fn class_static_name_no_2699_when_use_define_for_class_fields_enabled() {
+    let codes = diag_codes("class C { static name = 1; }");
+    assert!(
+        !codes.contains(&2699),
+        "with useDefineForClassFields (default), static `name` must not report TS2699; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassForStaticPropertyNameConflicts(4367)
+#[test]
+fn class_static_name_reports_2699_when_use_define_for_class_fields_disabled() {
+    let options = CompilerOptions {
+        use_define_for_class_fields: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let codes = diag_codes_with_options("class C { static name = 1; }", options);
+    assert!(
+        codes.contains(&2699),
+        "without useDefineForClassFields, static `name` must report TS2699; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassForStaticPropertyNameConflicts(4367)
+#[test]
+fn class_expression_static_name_no_2699_when_use_define_for_class_fields_enabled() {
+    let codes = diag_codes("const C = class { static name = 1; };");
+    assert!(
+        !codes.contains(&2699),
+        "with useDefineForClassFields (default), a class expression static `name` must not report TS2699; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassForStaticPropertyNameConflicts(4367)
+#[test]
+fn class_expression_static_name_reports_2699_when_use_define_for_class_fields_disabled() {
+    let options = CompilerOptions {
+        use_define_for_class_fields: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let codes = diag_codes_with_options("const C = class { static name = 1; };", options);
+    assert!(
+        codes.contains(&2699),
+        "without useDefineForClassFields, a class expression static `name` must report TS2699; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassExpression(10007) +
+// Checker.checkFunctionOrConstructorSymbolWorker (reportImplementationExpectedError)
+#[test]
+fn class_expression_method_instance_static_overload_mismatch_reports_2388() {
+    let codes = diag_codes(
+        "const C = class {\n  static foo(): void;\n  foo(): void;\n  foo() {}\n};",
+    );
+    assert!(
+        codes.contains(&2388),
+        "expected TS2388 instance/static overload mismatch in a class expression; got {codes:?}"
     );
 }

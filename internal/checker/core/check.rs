@@ -9179,6 +9179,13 @@ impl Checker {
         program: &dyn BoundProgram,
         node: NodeId,
     ) {
+        // Go skips this check when class fields are emitted via `Object.defineProperty`
+        // (`useDefineForClassFields`), since static builtins are not assigned on the
+        // constructor function in that mode.
+        // Go: internal/checker/checker.go:Checker.checkClassForStaticPropertyNameConflicts(4367)
+        if self.compiler_options().get_use_define_for_class_fields() {
+            return;
+        }
         for member in object_type_member_nodes(program, node) {
             if !has_static_modifier(program.arena(), member) {
                 continue;
