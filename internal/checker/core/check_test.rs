@@ -2654,7 +2654,7 @@ fn class_correctly_implements_interface_reports_no_diagnostic() {
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
-// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (extends compatibility, 2415)
+// Go: internal/checker/checker.go:Checker.issueMemberSpecificError (2416)
 #[test]
 fn class_incorrectly_extends_base_class_reports_diagnostic() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
@@ -2664,15 +2664,17 @@ fn class_incorrectly_extends_base_class_reports_diagnostic() {
     let root = p.root();
     let mut c = Checker::new_checker(p);
     // `class D extends B { x: string }` (B has `x: number`): the derived `x` is
-    // an incompatible override, so the derived instance type is not assignable to
-    // the base instance type and the class reports `2415` (Go's extends check ->
-    // `Class_0_incorrectly_extends_base_class_1`).
+    // an incompatible override, so the checker reports the member-specific
+    // `2416` before the broad `2415` extends error.
     let diags = c.get_diagnostics(root);
     assert_eq!(diags.len(), 1);
-    assert_eq!(diags[0].code, 2415);
-    assert_eq!(
-        diags[0].message,
-        "Class 'D' incorrectly extends base class 'B'."
+    assert_eq!(diags[0].code, 2416);
+    assert!(
+        diags[0]
+            .message
+            .contains("Property 'x' in type 'D' is not assignable to the same property in base type 'B'."),
+        "unexpected message: {}",
+        diags[0].message
     );
 }
 
@@ -2766,14 +2768,18 @@ fn class_extends_and_implements_both_relations_checked() {
     let root = p.root();
     let mut c = Checker::new_checker(p);
     // `class D extends B implements I { x: string }`: the override of `x` makes
-    // `D` incorrectly extend `B` (2415), and `D` also lacks `I`'s `y` member
-    // (2420). Both heritage relations are checked, extends before implements.
+    // `D` incorrectly extend `B` (2416 member-specific), and `D` also lacks
+    // `I`'s `y` member (2420). Both heritage relations are checked, extends
+    // before implements.
     let diags = c.get_diagnostics(root);
     assert_eq!(diags.len(), 2);
-    assert_eq!(diags[0].code, 2415);
-    assert_eq!(
-        diags[0].message,
-        "Class 'D' incorrectly extends base class 'B'."
+    assert_eq!(diags[0].code, 2416);
+    assert!(
+        diags[0]
+            .message
+            .contains("Property 'x' in type 'D' is not assignable to the same property in base type 'B'."),
+        "unexpected extends message: {}",
+        diags[0].message
     );
     assert_eq!(diags[1].code, 2420);
     assert_eq!(
@@ -14145,5 +14151,67 @@ fn abstract_auto_accessor_without_initializer_typechecks() {
     assert!(
         diags.is_empty(),
         "abstract auto-accessor declaration and concrete override must typecheck; got {diags:?}"
+    );
+}
+
+// ---- T1-E batch 43: auto-accessor override and modifier grammar ----
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(503)
+#[test]
+fn abstract_auto_accessor_private_identifier_reports_18019() {
+    let codes = diag_codes("abstract class C { abstract accessor #x: number; }");
+    assert!(
+        codes.contains(&18019),
+        "expected TS18019 when abstract auto-accessor uses a private identifier; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(326)
+#[test]
+fn override_must_precede_accessor_modifier_reports_1029() {
+    let codes = diag_codes("class C { accessor override x: number = 1; }");
+    assert!(
+        codes.contains(&1029),
+        "expected TS1029 when accessor precedes override; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.issueMemberSpecificError(4467)
+#[test]
+fn auto_accessor_override_incompatible_type_reports_2416() {
+    let codes = diag_codes(
+        "class B { accessor x: number = 1; }\nclass D extends B { override accessor x: string = \"a\"; }",
+    );
+    assert!(
+        codes.contains(&2416),
+        "incompatible auto-accessor override must report TS2416; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.issueMemberSpecificError(4467)
+#[test]
+fn abstract_auto_accessor_override_incompatible_type_reports_2416() {
+    let codes = diag_codes(
+        "abstract class C { abstract accessor x: number; }\nclass D extends C { accessor x: string = \"a\"; }",
+    );
+    assert!(
+        codes.contains(&2416),
+        "incompatible concrete auto-accessor override of abstract accessor must report TS2416; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.issueMemberSpecificError(4467)
+#[test]
+fn compatible_auto_accessor_override_reports_no_extends_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B { accessor x: number = 1; }\nclass D extends B { override accessor x: number = 2; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "compatible auto-accessor override must not report extends errors; got {diags:?}"
     );
 }

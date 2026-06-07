@@ -118,6 +118,27 @@ impl Checker {
                             &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
                             &["override", "declare"],
                         );
+                    } else if flags.contains(ModifierFlags::READONLY) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &["override", "readonly"],
+                        );
+                    } else if flags.contains(ModifierFlags::ACCESSOR) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &["override", "accessor"],
+                        );
+                    } else if flags.contains(ModifierFlags::ASYNC) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &["override", "async"],
+                        );
                     }
                     flags |= ModifierFlags::OVERRIDE;
                     last_override = Some(modifier);
@@ -403,6 +424,16 @@ impl Checker {
                                 &["abstract", "accessor"],
                             );
                         }
+                    }
+                    if declaration_name_node(arena, node)
+                        .is_some_and(|name| arena.kind(name) == Kind::PrivateIdentifier)
+                    {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_A_PRIVATE_IDENTIFIER,
+                            &["abstract"],
+                        );
                     }
                     flags |= ModifierFlags::ABSTRACT;
                 }
@@ -2503,6 +2534,16 @@ fn is_accessor(arena: &NodeArena, node: NodeId) -> bool {
 /// `HasSyntacticModifier`).
 // Go: internal/ast/utilities.go:HasSyntacticModifier
 // Go: internal/ast/utilities.go:IsAutoAccessorPropertyDeclaration
+fn declaration_name_node(arena: &NodeArena, node: NodeId) -> Option<NodeId> {
+    match arena.data(node) {
+        NodeData::PropertyDeclaration(d) => Some(d.name),
+        NodeData::MethodDeclaration(d) => Some(d.name),
+        NodeData::GetAccessorDeclaration(d) => Some(d.name),
+        NodeData::SetAccessorDeclaration(d) => Some(d.name),
+        _ => None,
+    }
+}
+
 fn is_auto_accessor_property_declaration(arena: &NodeArena, node: NodeId) -> bool {
     arena.kind(node) == Kind::PropertyDeclaration
         && has_syntactic_modifier(arena, node, ModifierFlags::ACCESSOR)

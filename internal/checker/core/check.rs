@@ -7693,9 +7693,8 @@ impl Checker {
     // apparent type is requested), so `typeWithThis == classType` and
     // `baseWithThis == baseType`.
     //
-    // DEFER(phase-4-checker-4bm+): the member-specific elaboration
-    // (`issueMemberSpecificError` -> 2416 `Property_0_in_type_1_is_not_assignable_to_the_same_property_in_base_type_2`
-    // and the nested 2741/2322 chain), the static-side extends check (2417), the
+    // DEFER(phase-4-checker-4bm+): the nested 2741/2322 diagnostic chain on
+    // member-specific extends errors, the static-side extends check (2417), the
     // override-modifier walk (`checkKindsOfPropertyMemberOverrides` /
     // `checkMembersForOverrideModifier`), `implements` on a non-object type
     // (2422), the `implements`-a-class hint (2720), base-type accessibility
@@ -8313,12 +8312,19 @@ impl Checker {
         if let Some(&base_type) = base_types.first() {
             if !self.is_type_assignable_to(program, type_with_this, base_type) {
                 let base_str = super::nodebuilder::type_to_string(self, program, base_type);
-                self.error(
+                if !self.issue_member_specific_error(
                     program,
-                    error_node,
-                    &tsgo_diagnostics::CLASS_0_INCORRECTLY_EXTENDS_BASE_CLASS_1,
-                    &[class_str.as_str(), base_str.as_str()],
-                );
+                    node,
+                    type_with_this,
+                    base_type,
+                ) {
+                    self.error(
+                        program,
+                        error_node,
+                        &tsgo_diagnostics::CLASS_0_INCORRECTLY_EXTENDS_BASE_CLASS_1,
+                        &[class_str.as_str(), base_str.as_str()],
+                    );
+                }
             }
         }
 
@@ -8452,6 +8458,58 @@ impl Checker {
     // symbol naming + parameter-property binding + checker late-binding +
     // type-literal traversal in `check_type_node`.
     // Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3122)
+    // When a class incorrectly extends a base class, try to report a
+    // member-specific property incompatibility (TS2416) before falling back to
+    // the broad extends error (TS2415). Go's `issueMemberSpecificError`.
+    // Go: internal/checker/checker.go:Checker.issueMemberSpecificError(4467)
+    fn issue_member_specific_error(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        type_with_this: TypeId,
+        base_with_this: TypeId,
+    ) -> bool {
+        let globals = program.globals();
+        let mut issued_member_error = false;
+        for member in object_type_member_nodes(program, node) {
+            if has_static_modifier(program.arena(), member) {
+                continue;
+            }
+            let Some(declared_prop) = program.symbol_of_node(member) else {
+                continue;
+            };
+            let sym_name = &program.symbol(declared_prop).name;
+            if sym_name == INTERNAL_SYMBOL_NAME_COMPUTED {
+                continue;
+            }
+            let Some(prop) = get_property_of_type(self, type_with_this, sym_name) else {
+                continue;
+            };
+            let Some(base_prop) = get_property_of_type(self, base_with_this, sym_name) else {
+                continue;
+            };
+            let prop_type = get_type_of_symbol(self, program, prop, globals);
+            let base_prop_type = get_type_of_symbol(self, program, base_prop, globals);
+            if !self.is_type_assignable_to(program, prop_type, base_prop_type) {
+                let type_str =
+                    super::nodebuilder::type_to_string(self, program, type_with_this);
+                let base_str =
+                    super::nodebuilder::type_to_string(self, program, base_with_this);
+                let prop_str = super::nodebuilder::symbol_to_string(program, declared_prop);
+                let report_node = member_name_node_for_duplicate(program, member)
+                    .unwrap_or(node);
+                self.error(
+                    program,
+                    report_node,
+                    &tsgo_diagnostics::PROPERTY_0_IN_TYPE_1_IS_NOT_ASSIGNABLE_TO_THE_SAME_PROPERTY_IN_BASE_TYPE_2,
+                    &[prop_str.as_str(), type_str.as_str(), base_str.as_str()],
+                );
+                issued_member_error = true;
+            }
+        }
+        issued_member_error
+    }
+
     fn check_object_type_for_duplicate_declarations(
         &mut self,
         program: &dyn BoundProgram,
