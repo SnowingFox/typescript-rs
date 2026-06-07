@@ -644,6 +644,15 @@ impl Checker {
     // and full accessor typing (`getTypeOfAccessors`).
     // Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076)
     fn check_object_literal(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        if !self.object_literals_resolving.insert(node) {
+            return self.error_type;
+        }
+        let result = self.check_object_literal_worker(program, node);
+        self.object_literals_resolving.remove(&node);
+        result
+    }
+
+    fn check_object_literal_worker(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let members_nodes = match program.arena().data(node) {
             NodeData::ObjectLiteralExpression(d) => d.list.nodes.clone(),
             _ => return self.error_type,

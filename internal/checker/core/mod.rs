@@ -390,6 +390,18 @@ pub struct Checker {
     /// Set when a re-entrant `get_type_of_accessors` detects a cycle; cleared
     /// after the outermost resolution reports the circularity diagnostic.
     accessor_type_resolution_cyclic: bool,
+    /// Object-literal expression nodes currently being type-checked, breaking
+    /// `const o = { get x() { return o.x; } }` cycles during accessor return-type
+    /// inference (Go's object-literal resolution stack).
+    // Go: internal/checker/checker.go:Checker.checkObjectLiteral (resolution)
+    object_literals_resolving: FxHashSet<NodeId>,
+    /// Accessor symbols whose write type is currently being resolved (Go's
+    /// `pushTypeResolution(TypeSystemPropertyNameWriteType)` on
+    /// `getWriteTypeOfAccessors`).
+    // Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors (pushTypeResolution)
+    accessors_write_type_resolving: FxHashSet<SymbolId>,
+    /// Set when a re-entrant `get_write_type_of_accessors` detects a cycle.
+    accessor_write_type_resolution_cyclic: bool,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -614,6 +626,9 @@ impl Checker {
             accessor_pairs_checked: FxHashSet::default(),
             accessors_type_resolving: FxHashSet::default(),
             accessor_type_resolution_cyclic: false,
+            object_literals_resolving: FxHashSet::default(),
+            accessors_write_type_resolving: FxHashSet::default(),
+            accessor_write_type_resolution_cyclic: false,
             any_type,
             auto_type,
             error_type,

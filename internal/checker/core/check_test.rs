@@ -13729,3 +13729,137 @@ fn getter_circular_body_inference_reports_7024() {
         "expected TS7024 when getter return type is inferred circularly from its body; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 38: object-literal accessor circularity, write-type guards ----
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18411)
+#[test]
+fn setter_circular_type_annotation_reports_2502() {
+    let codes = diag_codes("class C { set x(v: C[\"x\"]) { } }");
+    assert!(
+        codes.contains(&2502),
+        "expected TS2502 when a setter parameter type annotation is circular; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors(18433)
+#[test]
+fn set_only_accessor_write_type_resolution_is_reentrant_safe() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { set x(v: C[\"x\"]) { } }\nconst c = new C();\nc.x = c.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2502),
+        "set-only accessor write/read uses must surface TS2502 for a circular setter annotation; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors(18429)
+#[test]
+fn set_only_accessor_write_type_falls_back_to_read_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { set x(v: number) { } }\nconst c = new C();\nc.x = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "set-only accessor assignment must use read type when no explicit write annotation exists; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2936)
+#[test]
+fn protected_getter_private_setter_is_accessible() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  protected get x(): number { return 1; }\n  private set x(v: number) { }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2808),
+        "protected getter with private setter must not report TS2808; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2936)
+#[test]
+fn abstract_setter_concrete_getter_reports_2676() {
+    let codes = diag_codes(
+        "abstract class C {\n  abstract set x(v: number);\n  get x() { return 1; }\n}",
+    );
+    assert!(
+        codes.iter().filter(|&&c| c == 2676).count() >= 2,
+        "expected TS2676 when abstractness mismatches on setter vs getter; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2936)
+#[test]
+fn public_getter_private_setter_is_accessible() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  public get x(): number { return 1; }\n  private set x(v: number) { }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2808),
+        "public getter with private setter must not report TS2808; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18417)
+#[test]
+fn object_literal_getter_circular_body_inference_reports_7024() {
+    let codes = diag_codes("const o = { get x() { return o.x; } };");
+    assert!(
+        codes.contains(&7024),
+        "expected TS7024 when an object-literal getter infers its return type circularly; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors(18454)
+#[test]
+fn get_only_accessor_assignment_uses_read_type_and_reports_2322() {
+    let codes = diag_codes("class C { get x(): number { return 1; } }\nconst c = new C();\nc.x = \"\";");
+    assert!(
+        codes.contains(&2322),
+        "get-only accessor assignment must use read type as write type and reject mismatched values; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) / checkReturnExpression
+#[test]
+fn object_literal_getter_contextual_return_type_mismatch_reports_2322() {
+    let codes = diag_codes("const o: { get x(): string; } = { get x() { return 1; } };");
+    assert!(
+        codes.contains(&2322),
+        "object-literal getter body must be checked against contextual return type; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18404)
+#[test]
+fn getter_without_annotation_infers_from_body_when_setter_annotated() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { get x() { return 1; } set x(v: number) { } }\nconst c = new C();\nconst n: number = c.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "getter without annotation must infer read type from body even when setter is annotated; got {diags:?}"
+    );
+}

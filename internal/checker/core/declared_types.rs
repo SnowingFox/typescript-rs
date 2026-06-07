@@ -2332,10 +2332,32 @@ pub fn get_write_type_of_accessors(
     {
         return cached;
     }
+    if !checker.accessors_write_type_resolving.insert(symbol) {
+        checker.accessor_write_type_resolution_cyclic = true;
+        return checker.error_type();
+    }
     let setter = declaration_of_kind(program, symbol, Kind::SetAccessor);
-    let write_type = setter
-        .and_then(|s| get_annotated_accessor_type(checker, program, s, globals))
-        .unwrap_or_else(|| get_type_of_accessors(checker, program, symbol, globals));
+    let mut write_type = setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals));
+    checker.accessors_write_type_resolving.remove(&symbol);
+    if checker.accessor_write_type_resolution_cyclic {
+        let sym_name = super::nodebuilder::symbol_to_string(program, symbol);
+        if let Some(setter) = setter {
+            if get_annotated_accessor_type_node(program, setter).is_some() {
+                checker.error(
+                    program,
+                    setter,
+                    &tsgo_diagnostics::X_0_IS_REFERENCED_DIRECTLY_OR_INDIRECTLY_IN_ITS_OWN_TYPE_ANNOTATION,
+                    &[sym_name.as_str()],
+                );
+            }
+        }
+        write_type = Some(checker.any_type());
+        checker.accessor_write_type_resolution_cyclic = false;
+    }
+    let write_type = match write_type {
+        Some(t) => t,
+        None => get_type_of_accessors(checker, program, symbol, globals),
+    };
     checker.value_symbol_links.get(symbol).write_type = Some(write_type);
     write_type
 }
@@ -2439,8 +2461,20 @@ fn get_type_of_variable_or_property(
         // inference, binding patterns, and the circular-initializer resolution
         // stack. blocked-by: object-literal widening + binding-element typing +
         // `pushTypeResolution`.
-        let initializer_type = checker.check_expression(program, initializer);
-        get_widened_literal_type_for_initializer(checker, program, decl, initializer_type)
+        if program.arena().kind(initializer) == Kind::ObjectLiteralExpression
+            && checker.object_literals_resolving.contains(&initializer)
+            && !checker.accessors_type_resolving.is_empty()
+        {
+            // An accessor inside the object literal references the outer binding
+            // (`const o = { get x() { return o.x; } }`) while its read type is
+            // still being inferred — mark the cycle for TS7024 instead of
+            // recursing through `check_object_literal` again.
+            checker.accessor_type_resolution_cyclic = true;
+            checker.error_type()
+        } else {
+            let initializer_type = checker.check_expression(program, initializer);
+            get_widened_literal_type_for_initializer(checker, program, decl, initializer_type)
+        }
     } else {
         // No annotation and nothing to infer from (Go falls back to `any`).
         checker.any_type()
