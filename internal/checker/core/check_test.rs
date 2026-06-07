@@ -14942,3 +14942,139 @@ fn class_instance_extends_failure_skips_static_side_check() {
     assert_eq!(diags.len(), 1, "expected only instance extends error; got {diags:?}");
     assert_eq!(diags[0].code, 2416, "static-side 2417 must be skipped when instance extends fails");
 }
+
+// ---- T1-E batch 57: override modifiers, base accessibility, abstract members, property init ----
+
+// Go: internal/checker/checker.go:Checker.checkBaseTypeAccessibility(4454)
+#[test]
+fn class_extending_private_constructor_class_reports_2675() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class Base {\n  private constructor() {}\n}\nclass Derived extends Base {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2675);
+    assert_eq!(
+        diags[0].message,
+        "Cannot extend a class 'Base'. Class constructor is marked as private."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkMemberForOverrideModifier(4706)
+#[test]
+fn override_modifier_without_extends_reports_4112() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  override x = 1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 4112);
+    assert_eq!(
+        diags[0].message,
+        "This member cannot have an 'override' modifier because its containing class 'C' does not extend another class."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkMemberForOverrideModifier(4732)
+#[test]
+fn override_modifier_for_nonexistent_base_member_reports_4113() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B {\n  x = 1;\n}\nclass D extends B {\n  override y = 2;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 4113);
+    assert_eq!(
+        diags[0].message,
+        "This member cannot have an 'override' modifier because it is not declared in the base class 'B'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkMemberForOverrideModifier(4741)
+#[test]
+fn missing_override_modifier_with_no_implicit_override_reports_4114() {
+    let options = CompilerOptions {
+        no_implicit_override: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "class B {\n  x = 1;\n}\nclass D extends B {\n  x = 2;\n}",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 4114);
+    assert_eq!(
+        diags[0].message,
+        "This member must have an 'override' modifier because it overrides a member in the base class 'B'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkKindsOfPropertyMemberOverrides(4645)
+#[test]
+fn non_abstract_class_missing_abstract_member_reports_2515() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "abstract class B {\n  abstract m(): void;\n}\nclass D extends B {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2515);
+    assert_eq!(
+        diags[0].message,
+        "Non-abstract class 'D' does not implement inherited abstract member m from class 'B'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPropertyInitialization(4907)
+#[test]
+fn uninitialized_property_with_strict_property_initialization_reports_2564() {
+    let options = CompilerOptions {
+        strict_null_checks: Tristate::True,
+        strict_property_initialization: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "class C {\n  x: string;\n}",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2564);
+    assert_eq!(
+        diags[0].message,
+        "Property 'x' has no initializer and is not definitely assigned in the constructor."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkMemberForOverrideModifier (valid override -> ok)
+#[test]
+fn valid_override_modifier_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B {\n  x = 1;\n}\nclass D extends B {\n  override x = 2;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "valid override must not report override-modifier errors"
+    );
+}

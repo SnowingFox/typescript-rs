@@ -8336,6 +8336,12 @@ impl Checker {
             .map(|o| o.base_types.clone())
             .unwrap_or_default();
         if let Some(&base_type) = base_types.first() {
+            // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4295)
+            if let Some(base_type_node) = get_extends_heritage_clause_element(program, node) {
+                if let Some(base_sym) = self.get_type(base_type).symbol {
+                    self.check_base_type_accessibility(program, base_sym, base_type_node);
+                }
+            }
             if self.is_type_assignable_to(program, type_with_this, base_type) {
                 // Static-side extends (2417) runs only when the instance side is
                 // assignable (Go's `else` arm after the instance check).
@@ -8373,7 +8379,18 @@ impl Checker {
                     );
                 }
             }
+            // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4334)
+            self.check_kinds_of_property_member_overrides(program, node, class_type, base_type);
         }
+
+        // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4337)
+        self.check_members_for_override_modifier(
+            program,
+            node,
+            class_type,
+            type_with_this,
+            symbol,
+        );
 
         // `implements`-clause satisfaction (2420). Each implemented type must be
         // assignable from the class instance type.
@@ -8447,6 +8464,319 @@ impl Checker {
         self.check_index_constraints(program, class_type, symbol, false);
         let static_type = get_type_of_symbol(self, program, symbol, globals);
         self.check_index_constraints(program, static_type, symbol, true);
+
+        // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4363)
+        self.check_property_initialization(program, node);
+    }
+
+    // Go: internal/checker/checker.go:Checker.checkBaseTypeAccessibility(4454)
+    fn check_base_type_accessibility(
+        &mut self,
+        program: &dyn BoundProgram,
+        base_class_sym: SymbolId,
+        extends_node: NodeId,
+    ) {
+        let Some(class_decl) = get_class_like_declaration_of_symbol(program, base_class_sym) else {
+            return;
+        };
+        for member in object_type_member_nodes(program, class_decl) {
+            if program.arena().kind(member) != Kind::Constructor {
+                continue;
+            }
+            if modifier_flags_of(program.arena(), member).contains(ModifierFlags::PRIVATE)
+                && !is_node_within_class(program, extends_node, class_decl)
+            {
+                let base_name = super::nodebuilder::symbol_to_string(program, base_class_sym);
+                self.error(
+                    program,
+                    extends_node,
+                    &tsgo_diagnostics::CANNOT_EXTEND_A_CLASS_0_CLASS_CONSTRUCTOR_IS_MARKED_AS_PRIVATE,
+                    &[base_name.as_str()],
+                );
+            }
+            return;
+        }
+    }
+
+    // Go: internal/checker/checker.go:Checker.checkKindsOfPropertyMemberOverrides(4510)
+    fn check_kinds_of_property_member_overrides(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        class_type: TypeId,
+        base_type: TypeId,
+    ) {
+        let mut missed: Vec<String> = Vec::new();
+        for (name, base_prop) in get_properties_of_type(self, base_type) {
+            if program
+                .symbol(base_prop)
+                .flags
+                .intersects(SymbolFlags::PROTOTYPE)
+            {
+                continue;
+            }
+            let Some(derived_prop) = get_property_of_type(self, class_type, &name) else {
+                continue;
+            };
+            if derived_prop != base_prop {
+                continue;
+            }
+            let base_flags =
+                declaration_modifier_flags_from_symbol(self, program, base_prop, false);
+            if !base_flags.contains(ModifierFlags::ABSTRACT) {
+                continue;
+            }
+            if has_abstract_modifier(program.arena(), node) {
+                continue;
+            }
+            missed.push(super::nodebuilder::symbol_to_string(program, base_prop));
+        }
+        if missed.is_empty() {
+            return;
+        }
+        let base_name = super::nodebuilder::type_to_string(self, program, base_type);
+        let class_name = class_like_display_name(program, node);
+        if missed.len() == 1 {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::NON_ABSTRACT_CLASS_0_DOES_NOT_IMPLEMENT_INHERITED_ABSTRACT_MEMBER_1_FROM_CLASS_2,
+                &[class_name.as_str(), missed[0].as_str(), base_name.as_str()],
+            );
+        } else {
+            let props = missed
+                .iter()
+                .map(|p| format!("'{p}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::NON_ABSTRACT_CLASS_0_IS_MISSING_IMPLEMENTATIONS_FOR_THE_FOLLOWING_MEMBERS_OF_1_COLON_2,
+                &[class_name.as_str(), base_name.as_str(), props.as_str()],
+            );
+        }
+    }
+
+    // Go: internal/checker/checker.go:Checker.checkMembersForOverrideModifier(4678)
+    fn check_members_for_override_modifier(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        class_type: TypeId,
+        type_with_this: TypeId,
+        class_symbol: SymbolId,
+    ) {
+        let globals = program.globals();
+        let base_with_this = self
+            .get_type(class_type)
+            .as_object()
+            .and_then(|o| o.base_types.first().copied());
+        let base_static_type = base_with_this.and_then(|base| {
+            self.get_type(base)
+                .symbol
+                .map(|sym| get_type_of_symbol(self, program, sym, globals))
+        });
+        for member in object_type_member_nodes(program, node) {
+            if has_ambient_modifier(program, member) {
+                continue;
+            }
+            if program.arena().kind(member) == Kind::Constructor {
+                if let NodeData::ConstructorDeclaration(d) = program.arena().data(member) {
+                    for &param in &d.parameters.nodes {
+                        if is_parameter_property_declaration(program, param) {
+                            self.check_member_for_override_modifier(
+                                program,
+                                node,
+                                class_type,
+                                type_with_this,
+                                base_with_this,
+                                base_static_type,
+                                class_symbol,
+                                param,
+                            );
+                        }
+                    }
+                }
+            } else {
+                self.check_member_for_override_modifier(
+                    program,
+                    node,
+                    class_type,
+                    type_with_this,
+                    base_with_this,
+                    base_static_type,
+                    class_symbol,
+                    member,
+                );
+            }
+        }
+    }
+
+    // Go: internal/checker/checker.go:Checker.checkMemberForOverrideModifier(4703)
+    fn check_member_for_override_modifier(
+        &mut self,
+        program: &dyn BoundProgram,
+        class_node: NodeId,
+        class_type: TypeId,
+        type_with_this: TypeId,
+        base_with_this: Option<TypeId>,
+        base_static_type: Option<TypeId>,
+        class_symbol: SymbolId,
+        member: NodeId,
+    ) {
+        let member_has_override = has_override_modifier(program.arena(), member);
+        let class_name = super::nodebuilder::type_to_string(self, program, class_type);
+        if base_with_this.is_none() {
+            if member_has_override {
+                self.error(
+                    program,
+                    member,
+                    &tsgo_diagnostics::THIS_MEMBER_CANNOT_HAVE_AN_OVERRIDE_MODIFIER_BECAUSE_ITS_CONTAINING_CLASS_0_DOES_NOT_EXTEND_ANOTHER_CLASS,
+                    &[class_name.as_str()],
+                );
+            }
+            return;
+        }
+        if !member_has_override
+            && !self
+                .compiler_options()
+                .no_implicit_override
+                .is_true()
+        {
+            return;
+        }
+        let Some(member_sym) = program.symbol_of_node(member) else {
+            return;
+        };
+        let member_name = program.symbol(member_sym).name.clone();
+        let member_is_static = has_static_modifier(program.arena(), member);
+        let this_type = if member_is_static {
+            get_type_of_symbol(self, program, class_symbol, program.globals())
+        } else {
+            type_with_this
+        };
+        if get_property_of_type(self, this_type, &member_name).is_none() {
+            return;
+        }
+        let base_type = if member_is_static {
+            base_static_type
+        } else {
+            base_with_this
+        };
+        let Some(base_type) = base_type else {
+            return;
+        };
+        let base_prop = get_property_of_type(self, base_type, &member_name);
+        if base_prop.is_none() && member_has_override {
+            let base_name = super::nodebuilder::type_to_string(self, program, base_type);
+            self.error(
+                program,
+                member,
+                &tsgo_diagnostics::THIS_MEMBER_CANNOT_HAVE_AN_OVERRIDE_MODIFIER_BECAUSE_IT_IS_NOT_DECLARED_IN_THE_BASE_CLASS_0,
+                &[base_name.as_str()],
+            );
+            return;
+        }
+        if base_prop.is_some()
+            && !member_has_override
+            && self.compiler_options().no_implicit_override.is_true()
+            && !program
+                .arena()
+                .flags(class_node)
+                .contains(NodeFlags::AMBIENT)
+        {
+            let base_has_abstract = base_prop.is_some_and(|prop| {
+                declaration_modifier_flags_from_symbol(self, program, prop, false)
+                    .contains(ModifierFlags::ABSTRACT)
+            });
+            if !base_has_abstract {
+                let base_name = super::nodebuilder::type_to_string(
+                    self,
+                    program,
+                    base_with_this.unwrap(),
+                );
+                let message = if program.arena().kind(member) == Kind::Parameter {
+                    &tsgo_diagnostics::THIS_PARAMETER_PROPERTY_MUST_HAVE_AN_OVERRIDE_MODIFIER_BECAUSE_IT_OVERRIDES_A_MEMBER_IN_BASE_CLASS_0
+                } else {
+                    &tsgo_diagnostics::THIS_MEMBER_MUST_HAVE_AN_OVERRIDE_MODIFIER_BECAUSE_IT_OVERRIDES_A_MEMBER_IN_THE_BASE_CLASS_0
+                };
+                self.error(program, member, message, &[base_name.as_str()]);
+            } else if has_abstract_modifier(program.arena(), member) && base_has_abstract {
+                let base_name = super::nodebuilder::type_to_string(
+                    self,
+                    program,
+                    base_with_this.unwrap(),
+                );
+                self.error(
+                    program,
+                    member,
+                    &tsgo_diagnostics::THIS_MEMBER_MUST_HAVE_AN_OVERRIDE_MODIFIER_BECAUSE_IT_OVERRIDES_AN_ABSTRACT_METHOD_THAT_IS_DECLARED_IN_THE_BASE_CLASS_0,
+                    &[base_name.as_str()],
+                );
+            }
+        }
+    }
+
+    // Go: internal/checker/checker.go:Checker.checkPropertyInitialization(4907)
+    fn check_property_initialization(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        if !self.strict_null_checks()
+            || !self
+                .compiler_options()
+                .strict_property_initialization
+                .is_true()
+            || program.arena().flags(node).contains(NodeFlags::AMBIENT)
+        {
+            return;
+        }
+        let constructor = find_constructor_declaration(program, node);
+        let globals = program.globals();
+        for member in object_type_member_nodes(program, node) {
+            if has_ambient_modifier(program, member) || has_static_modifier(program.arena(), member)
+            {
+                continue;
+            }
+            if !is_property_without_initializer(program, member) {
+                continue;
+            }
+            let Some(prop_name) = property_declaration_name_node(program, member) else {
+                continue;
+            };
+            let Some(prop_sym) = program.symbol_of_node(member) else {
+                continue;
+            };
+            let prop_type = get_type_of_symbol(self, program, prop_sym, globals);
+            if self.is_any_or_unknown_type(prop_type) || self.contains_undefined_type(prop_type) {
+                continue;
+            }
+            if constructor.is_none() {
+                let name = declaration_name_to_string(program, prop_name);
+                self.error(
+                    program,
+                    prop_name,
+                    &tsgo_diagnostics::PROPERTY_0_HAS_NO_INITIALIZER_AND_IS_NOT_DEFINITELY_ASSIGNED_IN_THE_CONSTRUCTOR,
+                    &[name.as_str()],
+                );
+            }
+        }
+    }
+
+    fn is_any_or_unknown_type(&self, t: TypeId) -> bool {
+        self.get_type(t)
+            .flags()
+            .intersects(TypeFlags::ANY | TypeFlags::UNKNOWN)
+    }
+
+    fn contains_undefined_type(&self, t: TypeId) -> bool {
+        if t == self.undefined_type() {
+            return true;
+        }
+        if let Some(union) = self.get_type(t).union_types() {
+            return union
+                .iter()
+                .any(|&u| self.contains_undefined_type(u));
+        }
+        false
     }
 
     // Verifies that declared properties are assignable to applicable index
@@ -13229,6 +13559,55 @@ fn node_has_present_body(program: &dyn BoundProgram, node: NodeId) -> bool {
         NodeData::ConstructorDeclaration(d) => d.body.is_some(),
         _ => false,
     }
+}
+
+fn has_override_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    modifier_flags_of(arena, node).contains(ModifierFlags::OVERRIDE)
+}
+
+fn has_ambient_modifier(program: &dyn BoundProgram, node: NodeId) -> bool {
+    modifier_flags_of(program.arena(), node).contains(ModifierFlags::AMBIENT)
+}
+
+// Go: internal/checker/checker.go:Checker.isPropertyWithoutInitializer(4930)
+fn is_property_without_initializer(program: &dyn BoundProgram, node: NodeId) -> bool {
+    if program.arena().kind(node) != Kind::PropertyDeclaration {
+        return false;
+    }
+    let NodeData::PropertyDeclaration(d) = program.arena().data(node) else {
+        return false;
+    };
+    !has_abstract_modifier(program.arena(), node)
+        && !d
+            .postfix_token
+            .is_some_and(|tok| program.arena().kind(tok) == Kind::ExclamationToken)
+        && d.initializer.is_none()
+}
+
+fn property_declaration_name_node(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    match program.arena().data(node) {
+        NodeData::PropertyDeclaration(d) => {
+            let name = d.name;
+            match program.arena().kind(name) {
+                Kind::Identifier | Kind::PrivateIdentifier | Kind::ComputedPropertyName => {
+                    Some(name)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn declaration_name_to_string(program: &dyn BoundProgram, name: NodeId) -> String {
+    program.arena().text(name).to_string()
+}
+
+// Go: internal/ast/utilities.go:FindConstructorDeclaration
+fn find_constructor_declaration(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    object_type_member_nodes(program, node)
+        .into_iter()
+        .find(|&m| program.arena().kind(m) == Kind::Constructor)
 }
 
 /// Returns the `extends` heritage element of a class-like node, if any.
