@@ -672,13 +672,14 @@ impl Checker {
         let mut has_computed_string_property = false;
         let mut has_computed_number_property = false;
         let mut has_computed_symbol_property = false;
+        let spread_only = members_nodes.len() == 1;
         for member_decl in members_nodes {
             // DEFER(phase-4-checker-4bh+): accessor (`get`/`set`) and method
             // (`m(){}`) members are skipped; property assignments, shorthand
             // properties, and spread assignments are typed.
             if let NodeData::SpreadAssignment(d) = program.arena().data(member_decl) {
                 let spread_type = self.check_expression(program, d.expression);
-                if !self.is_valid_spread_type(spread_type) {
+                if !self.is_valid_spread_type(program, spread_type) {
                     self.error(
                         program,
                         member_decl,
@@ -686,6 +687,17 @@ impl Checker {
                         &[],
                     );
                     continue;
+                }
+                // A spread-only object literal whose operand is a union of object
+                // types yields that union (Go's `getSpreadType(empty, A | B)`).
+                if members.is_empty() && all_members.is_empty() && spread_only {
+                    if let Some(union_members) = self
+                        .get_type(spread_type)
+                        .union_types()
+                        .map(|m| m.to_vec())
+                    {
+                        return self.get_union_type(&union_members);
+                    }
                 }
                 self.merge_spread_into_object_literal(
                     program,
@@ -837,16 +849,25 @@ impl Checker {
     // Reports whether `t` may be spread into an object literal (Go's
     // `isValidSpreadType` reachable subset: `any`, `object`, `nonPrimitive`).
     //
-    // DEFER(phase-4-checker-4bh+): union/intersection constituents, instantiable
-    // non-primitive, and the `removeDefinitelyFalsyTypes`/`getBaseConstraint`
-    // normalization. blocked-by: full spread-type merge.
+    // DEFER(phase-4-checker-4bh+): instantiable non-primitive and the
+    // `removeDefinitelyFalsyTypes` normalization. blocked-by: full spread-type merge.
     // Go: internal/checker/checker.go:Checker.isValidSpreadType(13418)
-    fn is_valid_spread_type(&self, t: TypeId) -> bool {
-        let flags = self.get_type(t).flags();
+    fn is_valid_spread_type(&mut self, program: &dyn BoundProgram, t: TypeId) -> bool {
+        let base = self.get_base_constraint_or_type(program, t);
+        let flags = self.get_type(base).flags();
+        if flags.intersects(TypeFlags::UNION | TypeFlags::INTERSECTION) {
+            let members: Vec<TypeId> = self
+                .get_type(base)
+                .union_types()
+                .or_else(|| self.get_type(base).intersection_types())
+                .unwrap_or(&[])
+                .to_vec();
+            return members
+                .iter()
+                .all(|&m| self.is_valid_spread_type(program, m));
+        }
         flags.intersects(
-            TypeFlags::ANY
-                | TypeFlags::NON_PRIMITIVE
-                | TypeFlags::OBJECT,
+            TypeFlags::ANY | TypeFlags::NON_PRIMITIVE | TypeFlags::OBJECT,
         )
     }
 
@@ -2278,11 +2299,11 @@ impl Checker {
                 let operand_type =
                     self.check_non_null_type(program, operand_type, operand);
                 let op = tsgo_scanner::token_to_string(operator);
-                if self
-                    .get_type(operand_type)
-                    .flags()
-                    .intersects(TypeFlags::ES_SYMBOL_LIKE)
-                {
+                if self.maybe_type_of_kind_considering_base_constraint(
+                    program,
+                    operand_type,
+                    TypeFlags::ES_SYMBOL_LIKE,
+                ) {
                     self.error(
                         program,
                         operand,
@@ -2332,6 +2353,7 @@ impl Checker {
                     operand,
                     non_null,
                     &tsgo_diagnostics::AN_ARITHMETIC_OPERAND_MUST_BE_OF_TYPE_ANY_NUMBER_BIGINT_OR_AN_ENUM_TYPE,
+                    true,
                 );
                 if ok {
                     self.check_reference_expression(
@@ -2367,6 +2389,7 @@ impl Checker {
             operand,
             non_null,
             &tsgo_diagnostics::AN_ARITHMETIC_OPERAND_MUST_BE_OF_TYPE_ANY_NUMBER_BIGINT_OR_AN_ENUM_TYPE,
+            true,
         );
         if ok {
             self.check_reference_expression(
@@ -2458,16 +2481,28 @@ impl Checker {
             | Kind::GreaterThanToken
             | Kind::LessThanEqualsToken
             | Kind::GreaterThanEqualsToken => {
-                let left_base = self.get_base_type_of_literal_type_for_comparison(left_type);
-                let right_base = self.get_base_type_of_literal_type_for_comparison(right_type);
-                if !self.relational_operands_comparable(program, left_base, right_base) {
-                    self.report_binary_operator_error(
-                        program,
-                        node,
-                        operator_token,
-                        left_base,
-                        right_base,
-                    );
+                if self.check_for_disallowed_es_symbol_operand(
+                    program,
+                    left,
+                    right,
+                    left_type,
+                    right_type,
+                    operator,
+                ) {
+                    let left_base =
+                        self.get_base_type_of_literal_type_for_comparison(left_type);
+                    let right_base =
+                        self.get_base_type_of_literal_type_for_comparison(right_type);
+                    if !self.relational_operands_comparable(program, left_base, right_base) {
+                        self.report_binary_operator_error(
+                            program,
+                            node,
+                            operator_token,
+                            left_base,
+                            right_base,
+                            false,
+                        );
+                    }
                 }
                 self.boolean_type
             }
@@ -2495,6 +2530,7 @@ impl Checker {
                         operator_token,
                         error_left,
                         error_right,
+                        false,
                     );
                 }
                 self.boolean_type
@@ -2551,12 +2587,14 @@ impl Checker {
                     left,
                     left_type,
                     &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_AN_ARITHMETIC_OPERATION_MUST_BE_OF_TYPE_ANY_NUMBER_BIGINT_OR_AN_ENUM_TYPE,
+                    true,
                 );
                 let right_ok = self.check_arithmetic_operand_type(
                     program,
                     right,
                     right_type,
                     &tsgo_diagnostics::THE_RIGHT_HAND_SIDE_OF_AN_ARITHMETIC_OPERATION_MUST_BE_OF_TYPE_ANY_NUMBER_BIGINT_OR_AN_ENUM_TYPE,
+                    true,
                 );
                 let result_type = if self.is_type_assignable_to_kind(
                     program,
@@ -2582,6 +2620,7 @@ impl Checker {
                             operator_token,
                             left_type,
                             right_type,
+                            false,
                         );
                     }
                     if matches!(
@@ -2605,6 +2644,7 @@ impl Checker {
                         operator_token,
                         left_type,
                         right_type,
+                        false,
                     );
                     self.error_type
                 };
@@ -2758,6 +2798,16 @@ impl Checker {
                 };
                 match result {
                     Some(rt) => {
+                        if !self.check_for_disallowed_es_symbol_operand(
+                            program,
+                            left,
+                            right,
+                            left_type,
+                            right_type,
+                            operator,
+                        ) {
+                            return rt;
+                        }
                         // For `+=`, the result must be assignable to the
                         // (reference) left-hand side (Go runs `checkAssignmentOperator`
                         // only when a valid result exists).
@@ -2771,12 +2821,24 @@ impl Checker {
                         // DEFER(phase-4-checker-4p+): literal-operand generalization
                         // for the message (`getBaseTypesIfUnrelated`). blocked-by:
                         // the literal-generalization helper.
+                        let close_enough = TypeFlags::NUMBER_LIKE
+                            | TypeFlags::BIG_INT_LIKE
+                            | TypeFlags::STRING_LIKE
+                            | TypeFlags::ANY_OR_UNKNOWN;
+                        let awaited_left = self.get_awaited_type_no_alias(left_type);
+                        let awaited_right = self.get_awaited_type_no_alias(right_type);
+                        let would_work_with_await = (awaited_left != left_type
+                            || awaited_right != right_type)
+                            && self.is_type_assignable_to_kind(program, awaited_left, close_enough)
+                            && self
+                                .is_type_assignable_to_kind(program, awaited_right, close_enough);
                         self.report_binary_operator_error(
                             program,
                             node,
                             operator_token,
                             left_type,
                             right_type,
+                            would_work_with_await,
                         );
                         self.any_type
                     }
@@ -3098,12 +3160,105 @@ impl Checker {
         false
     }
 
+    // Returns the base constraint of a type parameter, or `t` itself (Go's
+    // `getBaseConstraintOrType` reachable subset).
+    // Go: internal/checker/checker.go:Checker.getBaseConstraintOrType(27246)
+    fn get_base_constraint_or_type(&mut self, program: &dyn BoundProgram, t: TypeId) -> TypeId {
+        super::declared_types::get_constraint_of_type_parameter(self, program, t).unwrap_or(t)
+    }
+
+    // Reports whether `t` is, or its base constraint is, a type with flag bits
+    // in `kind` (Go's `maybeTypeOfKindConsideringBaseConstraint`).
+    // Go: internal/checker/checker.go:Checker.maybeTypeOfKindConsideringBaseConstraint(27432)
+    fn maybe_type_of_kind_considering_base_constraint(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        kind: TypeFlags,
+    ) -> bool {
+        if self.maybe_type_of_kind(t, kind) {
+            return true;
+        }
+        let base = self.get_base_constraint_or_type(program, t);
+        base != t && self.maybe_type_of_kind(base, kind)
+    }
+
+    // Reports whether `t` is a reference to the global `Promise` type.
+    // Go: internal/checker/checker.go:Checker.isReferenceToType (Promise arm)
+    fn is_reference_to_type(&self, t: TypeId, target: TypeId) -> bool {
+        self.get_type(t)
+            .as_object()
+            .and_then(|o| o.target)
+            .is_some_and(|tgt| tgt == target)
+    }
+
+    // Returns the type argument of a `Promise<T>` reference, if any (Go's
+    // `getPromisedTypeOfPromise` reachable subset: global `Promise` only).
+    // Go: internal/checker/checker.go:Checker.getPromisedTypeOfPromise(28595)
+    fn get_promised_type_of_promise(&mut self, t: TypeId) -> Option<TypeId> {
+        if self.get_type(t).flags().intersects(TypeFlags::ANY) {
+            return None;
+        }
+        let promise_type = self.get_global_promise_type()?;
+        if self.is_reference_to_type(t, promise_type) {
+            return self
+                .get_type(t)
+                .as_object()
+                .and_then(|o| o.resolved_type_arguments.first().copied());
+        }
+        None
+    }
+
+    // Returns the awaited type of `t` without alias expansion (Go's
+    // `getAwaitedTypeNoAlias` reachable subset).
+    // Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias
+    fn get_awaited_type_no_alias(&mut self, t: TypeId) -> TypeId {
+        self.get_promised_type_of_promise(t).unwrap_or(t)
+    }
+
+    // Returns `true` when no ES-symbol operand error was reported (Go's
+    // `checkForDisallowedESSymbolOperand`).
+    // Go: internal/checker/checker.go:Checker.checkForDisallowedESSymbolOperand(12756)
+    fn check_for_disallowed_es_symbol_operand(
+        &mut self,
+        program: &dyn BoundProgram,
+        left: NodeId,
+        right: NodeId,
+        left_type: TypeId,
+        right_type: TypeId,
+        operator: Kind,
+    ) -> bool {
+        let offending = if self.maybe_type_of_kind_considering_base_constraint(
+            program,
+            left_type,
+            TypeFlags::ES_SYMBOL_LIKE,
+        ) {
+            Some(left)
+        } else if self.maybe_type_of_kind_considering_base_constraint(
+            program,
+            right_type,
+            TypeFlags::ES_SYMBOL_LIKE,
+        ) {
+            Some(right)
+        } else {
+            None
+        };
+        if let Some(operand) = offending {
+            let op = tsgo_scanner::token_to_string(operator);
+            self.error(
+                program,
+                operand,
+                &tsgo_diagnostics::THE_0_OPERATOR_CANNOT_BE_APPLIED_TO_TYPE_SYMBOL,
+                &[&op],
+            );
+            return false;
+        }
+        true
+    }
+
     // Checks that an arithmetic `operand` of type `t` is number-ish (assignable
     // to `number | bigint`), reporting `diagnostic` at the operand otherwise.
     // Returns `true` when no error was reported (Go's `checkArithmeticOperandType`).
-    //
-    // DEFER(phase-4-checker-4o+): the `await`-suggestion path
-    // (`getAwaitedTypeOfPromise`). blocked-by: awaited-type machinery (lib globals, P6).
     // Go: internal/checker/checker.go:Checker.checkArithmeticOperandType(12743)
     fn check_arithmetic_operand_type(
         &mut self,
@@ -3111,10 +3266,23 @@ impl Checker {
         operand: NodeId,
         t: TypeId,
         diagnostic: &'static Message,
+        is_await_valid: bool,
     ) -> bool {
         let number_or_bigint = self.number_or_bigint_type;
         if !self.is_type_assignable_to(program, t, number_or_bigint) {
-            self.error(program, operand, diagnostic, &[]);
+            let maybe_missing_await = is_await_valid
+                && self
+                    .get_promised_type_of_promise(t)
+                    .is_some_and(|awaited| {
+                        self.is_type_assignable_to(program, awaited, number_or_bigint)
+                    });
+            self.error_and_maybe_suggest_await(
+                program,
+                operand,
+                maybe_missing_await,
+                diagnostic,
+                &[],
+            );
             return false;
         }
         true
@@ -3349,9 +3517,7 @@ impl Checker {
     // `reportOperatorError`, 4o subset): equality operators use the "no overlap"
     // message (`2367`); the rest use "Operator '{0}' cannot be applied" (`2365`).
     //
-    // DEFER(phase-4-checker-4o+): the `await`-suggestion variant
-    // (`errorAndMaybeSuggestAwait`) and the equal-printed-name fully-qualified
-    // fallback. blocked-by: awaited-type machinery (lib globals, P6).
+    // DEFER(phase-4-checker-4o+): the equal-printed-name fully-qualified fallback.
     // Go: internal/checker/checker.go:Checker.reportOperatorError(12662)
     fn report_binary_operator_error(
         &mut self,
@@ -3360,6 +3526,7 @@ impl Checker {
         operator_token: NodeId,
         left: TypeId,
         right: TypeId,
+        would_work_with_await: bool,
     ) {
         let left_str = super::nodebuilder::type_to_string(self, program, left);
         let right_str = super::nodebuilder::type_to_string(self, program, right);
@@ -3369,18 +3536,20 @@ impl Checker {
             | Kind::ExclamationEqualsToken
             | Kind::EqualsEqualsEqualsToken
             | Kind::ExclamationEqualsEqualsToken => {
-                self.error(
+                self.error_and_maybe_suggest_await(
                     program,
                     node,
+                    would_work_with_await,
                     &tsgo_diagnostics::THIS_COMPARISON_APPEARS_TO_BE_UNINTENTIONAL_BECAUSE_THE_TYPES_0_AND_1_HAVE_NO_OVERLAP,
                     &[left_str.as_str(), right_str.as_str()],
                 );
             }
             _ => {
                 let op = tsgo_scanner::token_to_string(operator);
-                self.error(
+                self.error_and_maybe_suggest_await(
                     program,
                     node,
+                    would_work_with_await,
                     &tsgo_diagnostics::OPERATOR_0_CANNOT_BE_APPLIED_TO_TYPES_1_AND_2,
                     &[op, left_str.as_str(), right_str.as_str()],
                 );
@@ -9005,6 +9174,31 @@ impl Checker {
         args: &[&str],
     ) {
         let diagnostic = self.diagnostic_for_node(program, node, message, args);
+        self.add_diagnostic(program, diagnostic);
+    }
+
+    // Reports an error and, when `maybe_missing_await` is set, attaches the
+    // "Did you forget to use 'await'?" related diagnostic (Go's
+    // `errorAndMaybeSuggestAwait`).
+    // Go: internal/checker/checker.go:Checker.errorAndMaybeSuggestAwait(13909)
+    fn error_and_maybe_suggest_await(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        maybe_missing_await: bool,
+        message: &'static Message,
+        args: &[&str],
+    ) {
+        let mut diagnostic = self.diagnostic_for_node(program, node, message, args);
+        if maybe_missing_await {
+            let related = self.diagnostic_for_node(
+                program,
+                node,
+                &tsgo_diagnostics::DID_YOU_FORGET_TO_USE_AWAIT,
+                &[],
+            );
+            diagnostic.add_related_info(related);
+        }
         self.add_diagnostic(program, diagnostic);
     }
 

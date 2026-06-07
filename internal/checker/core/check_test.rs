@@ -12484,3 +12484,113 @@ fn object_literal_spread_overrides_same_named_property() {
     let mut c = Checker::new();
     assert_eq!(c.check_expression(&p, access), c.number_type());
 }
+
+// ---- T1-E batch 21: ES-symbol guard, union spread, await suggestion ----
+
+// Go: internal/checker/checker.go:Checker.checkForDisallowedESSymbolOperand(12756)
+#[test]
+fn plus_with_symbol_operand_reports_2469() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const s: symbol;\ns + \"\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2469);
+    assert_eq!(
+        diags[0].message,
+        "The '+' operator cannot be applied to type 'symbol'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkForDisallowedESSymbolOperand(12756)
+#[test]
+fn relational_with_symbol_operand_reports_2469() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const s: symbol;\ns < 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2469);
+    assert_eq!(
+        diags[0].message,
+        "The '<' operator cannot be applied to type 'symbol'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isValidSpreadType(13418)
+#[test]
+fn object_spread_union_of_objects_is_valid() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | { b: number };\nconst o = { ...x };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2698),
+        "union of object types should be a valid spread; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isValidSpreadType(13418)
+#[test]
+fn object_spread_union_with_non_object_reports_2698() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | number;\nconst o = { ...x };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2698);
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType (union distribution)
+#[test]
+fn object_spread_only_union_yields_union_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | { b: number };\nconst o = { ...x };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ a: number; } | { b: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType(12743)
+#[test]
+fn arithmetic_on_promise_operand_suggests_await() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\ndeclare const p: Promise<number>;\np - 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let left_side = diags
+        .iter()
+        .find(|d| d.code == 2362)
+        .expect("expected left-hand arithmetic operand error");
+    assert_eq!(
+        left_side.message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+    assert_eq!(left_side.related_information.len(), 1);
+    assert_eq!(left_side.related_information[0].code, 2773);
+    assert_eq!(
+        left_side.related_information[0].message,
+        "Did you forget to use 'await'?"
+    );
+}
