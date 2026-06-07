@@ -216,7 +216,7 @@ impl Checker {
     }
 
     // Go: internal/checker/inference.go:Checker.inferFromTypes
-    fn infer_from_types(
+    pub(crate) fn infer_from_types(
         &mut self,
         program: &dyn BoundProgram,
         inferences: &mut [InferenceInfo],

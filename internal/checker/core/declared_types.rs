@@ -4138,7 +4138,7 @@ fn is_applicable_index_type(
 ///
 /// Side effects: may instantiate index infos for generic references.
 // Go: internal/checker/checker.go:Checker.getApplicableIndexInfo / findApplicableIndexInfo
-fn get_applicable_index_info(
+pub(crate) fn get_applicable_index_info(
     checker: &mut Checker,
     program: &dyn BoundProgram,
     t: TypeId,
@@ -4731,7 +4731,7 @@ pub fn get_property_of_type(checker: &Checker, t: TypeId, name: &str) -> Option<
 // a name found in two or more constituents mints a synthesized property whose
 // type is the intersection of the per-constituent types.
 // Go: internal/checker/checker.go:Checker.createUnionOrIntersectionProperty (intersection)
-fn get_intersection_property(checker: &Checker, t: TypeId, name: &str) -> Option<SymbolId> {
+pub(crate) fn get_intersection_property(checker: &Checker, t: TypeId, name: &str) -> Option<SymbolId> {
     if let Some(cached) = checker.cached_synthesized_property(t, name) {
         return cached;
     }
@@ -4794,7 +4794,7 @@ fn intersection_optional_flag(checker: &Checker, props: &[SymbolId]) -> SymbolFl
 // contribute the same symbol it is returned directly; distinct symbols mint a
 // synthesized property whose type is the union of the per-constituent types.
 // Go: internal/checker/checker.go:Checker.createUnionOrIntersectionProperty (union)
-fn get_union_property(checker: &Checker, t: TypeId, name: &str) -> Option<SymbolId> {
+pub(crate) fn get_union_property(checker: &Checker, t: TypeId, name: &str) -> Option<SymbolId> {
     if let Some(cached) = checker.cached_synthesized_property(t, name) {
         return cached;
     }
