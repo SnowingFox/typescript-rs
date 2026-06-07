@@ -12027,3 +12027,67 @@ fn prefix_increment_on_string_operand_reports_2356() {
         "expected TS2356 on ++string; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 16: comma operator ----
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (KindCommaToken)
+#[test]
+fn comma_operator_yields_right_operand_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: string;\ndeclare const b: number;\na, b;",
+    );
+    let comma = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, comma), c.number_type());
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (KindCommaToken)
+#[test]
+fn comma_operator_chained_yields_last_operand_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "1, 2, 3;");
+    let comma = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    // `1, 2, 3` parses as `(1, 2), 3`; the result is the last operand's type.
+    let ty = c.check_expression(&p, comma);
+    assert_eq!(c.type_to_string(ty), "3");
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (KindCommaToken, 2695)
+#[test]
+fn comma_operator_unused_side_effect_free_left_reports_2695() {
+    let codes = diag_codes("1, 2;");
+    assert!(
+        codes.contains(&2695),
+        "expected TS2695 on unused comma left; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (KindCommaToken)
+#[test]
+fn comma_operator_assignment_left_has_side_effects_no_2695() {
+    let codes = diag_codes("let n = 0;\nn = 1, 2;");
+    assert!(
+        !codes.contains(&2695),
+        "assignment left of comma has side effects; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (KindCommaToken, allowUnreachableCode)
+#[test]
+fn comma_operator_allow_unreachable_code_suppresses_2695() {
+    let opts = CompilerOptions {
+        allow_unreachable_code: Tristate::True,
+        ..Default::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts", "1, 2;", opts,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2695),
+        "allowUnreachableCode should suppress TS2695; got {diags:?}"
+    );
+}

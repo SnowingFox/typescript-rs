@@ -9,7 +9,7 @@
 //! while / do / for / for-in / for-of / try / switch); the type of each
 //! expression feeds the 4f flow engine.
 //!
-//! DEFER(phase-4-checker-4ab+): the comma operator, the `with` statement
+//! DEFER(phase-4-checker-4ab+): the `with` statement
 //! (reachable path is grammar-only), module declaration bodies, contextual
 //! typing, unused checks, and the full node builder. The logical (`&&`/`||`/`??`)
 //! and `+` operators, compound assignments, and `throw`/labeled statements landed
@@ -17,15 +17,16 @@
 //! member bodies / property initializers, and function-body descent with
 //! return-statement / annotated return-type checking in 4r; the `instanceof`
 //! (`2358`/`2359`, driven by a synthetic global `Function`) and `in`
-//! (operand assignability `2322`) operators in 4ab.
+//! (operand assignability `2322`) operators in 4ab; the comma operator in 4ab
+//! slice 2 (result type + `2695` unused-left diagnostic).
 
 use std::rc::Rc;
 
 use rustc_hash::FxHashSet;
 use tsgo_ast::symbol::{INTERNAL_SYMBOL_NAME_COMPUTED, INTERNAL_SYMBOL_NAME_EXPORT_EQUALS};
 use tsgo_ast::{
-    CheckFlags, Kind, ModifierFlags, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId,
-    SymbolTable,
+    utilities::is_assignment_operator, CheckFlags, Kind, ModifierFlags, NodeData, NodeFlags,
+    NodeId, SymbolFlags, SymbolId, SymbolTable,
 };
 use tsgo_core::compileroptions::ScriptTarget;
 use tsgo_diagnostics::{Category, Message};
@@ -2331,11 +2332,11 @@ impl Checker {
         true
     }
 
-    // DEFER(phase-4-checker-4ab+): the comma operator and
-    // destructuring-assignment targets, plus the per-operator refinements noted
-    // on each arm below. blocked-by: per-operator slices land later; lib globals
-    // (P6) for the ES-symbol operand / awaited types, `strictNullChecks` wiring
-    // for `??`, and 4b union literal/subtype reduction for the logical results.
+    // DEFER(phase-4-checker-4ab+): destructuring-assignment targets, plus the
+    // per-operator refinements noted on each arm below. blocked-by: per-operator
+    // slices land later; lib globals (P6) for the ES-symbol operand / awaited
+    // types, `strictNullChecks` wiring for `??`, and 4b union literal/subtype
+    // reduction for the logical results.
     // Go: internal/checker/checker.go:Checker.checkBinaryExpression(12275)/checkBinaryLikeExpression(12280)
     fn check_binary_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let (left, operator_token, right) = match program.arena().data(node) {
@@ -2623,9 +2624,86 @@ impl Checker {
             Kind::InKeyword => {
                 self.check_in_expression(program, left, right, left_type, right_type)
             }
-            // DEFER(phase-4-checker-4ab+): the comma operator. The operands are
-            // still checked above, so diagnostics inside them are reported.
+            // The comma operator (Go's `KindCommaToken` arm): the result is the
+            // right operand's type. When `allowUnreachableCode` is not true and
+            // the left operand has no side effects (and the comma is not an
+            // indirect call like `(0, eval)(...)`), reports `2695`.
+            //
+            // DEFER(phase-4-checker-later): the JSX `2657` suppression that skips
+            // `2695` when the comma sits inside a JSX expression with multiple
+            // roots. blocked-by: JSX checking.
+            Kind::CommaToken => {
+                if !self.compiler_options().allow_unreachable_code.is_true()
+                    && self.is_side_effect_free(program, left)
+                    && !is_indirect_call(program, node)
+                {
+                    self.error(
+                        program,
+                        left,
+                        &tsgo_diagnostics::LEFT_SIDE_OF_COMMA_OPERATOR_IS_UNUSED_AND_HAS_NO_SIDE_EFFECTS,
+                        &[],
+                    );
+                }
+                right_type
+            }
             _ => self.error_type,
+        }
+    }
+
+    // Shallow side-effect test for discarded-value positions (comma operator).
+    //
+    // DEFER(phase-4-checker-later): JSX element nodes. blocked-by: JSX checking.
+    // Go: internal/checker/checker.go:Checker.isSideEffectFree(12943)
+    fn is_side_effect_free(&self, program: &dyn BoundProgram, expr: NodeId) -> bool {
+        let node = skip_parentheses(program, expr);
+        let kind = program.arena().kind(node);
+        match kind {
+            Kind::Identifier
+            | Kind::StringLiteral
+            | Kind::RegularExpressionLiteral
+            | Kind::TaggedTemplateExpression
+            | Kind::TemplateExpression
+            | Kind::NoSubstitutionTemplateLiteral
+            | Kind::NumericLiteral
+            | Kind::BigIntLiteral
+            | Kind::TrueKeyword
+            | Kind::FalseKeyword
+            | Kind::NullKeyword
+            | Kind::UndefinedKeyword
+            | Kind::FunctionExpression
+            | Kind::ClassExpression
+            | Kind::ArrowFunction
+            | Kind::ArrayLiteralExpression
+            | Kind::ObjectLiteralExpression
+            | Kind::TypeOfExpression
+            | Kind::NonNullExpression => true,
+            Kind::ConditionalExpression => {
+                let NodeData::ConditionalExpression(d) = program.arena().data(node) else {
+                    return false;
+                };
+                self.is_side_effect_free(program, d.when_true)
+                    && self.is_side_effect_free(program, d.when_false)
+            }
+            Kind::BinaryExpression => {
+                let NodeData::BinaryExpression(d) = program.arena().data(node) else {
+                    return false;
+                };
+                if is_assignment_operator(program.arena().kind(d.operator_token)) {
+                    return false;
+                }
+                self.is_side_effect_free(program, d.left)
+                    && self.is_side_effect_free(program, d.right)
+            }
+            Kind::PrefixUnaryExpression => {
+                let NodeData::PrefixUnaryExpression(d) = program.arena().data(node) else {
+                    return false;
+                };
+                matches!(
+                    d.operator,
+                    Kind::ExclamationToken | Kind::PlusToken | Kind::MinusToken | Kind::TildeToken
+                )
+            }
+            _ => false,
         }
     }
 
@@ -10472,6 +10550,44 @@ fn entity_name_to_string(arena: &tsgo_ast::NodeArena, node: NodeId) -> String {
 // ...), i.e. an assignment operator other than plain `=` (Go's
 // `KindFirstCompoundAssignment ..= KindLastCompoundAssignment`).
 // Go: internal/ast/ast.go:IsCompoundAssignment
+// Returns true for indirect calls like `(0, x.f)(...)` or `(0, eval)(...)`,
+// where the comma operator's left operand is intentionally discarded.
+//
+// Go: internal/checker/checker.go:Checker.isIndirectCall(12971)
+fn is_indirect_call(program: &dyn BoundProgram, comma_node: NodeId) -> bool {
+    let parent = match program.arena().parent(comma_node) {
+        Some(p) => p,
+        None => return false,
+    };
+    if program.arena().kind(parent) != Kind::ParenthesizedExpression {
+        return false;
+    }
+    let (left, right) = match program.arena().data(comma_node) {
+        NodeData::BinaryExpression(d) => (d.left, d.right),
+        _ => return false,
+    };
+    if program.arena().kind(left) != Kind::NumericLiteral
+        || program.arena().text(left) != "0"
+    {
+        return false;
+    }
+    let grandparent = match program.arena().parent(parent) {
+        Some(gp) => gp,
+        None => return false,
+    };
+    let is_call_or_tagged = match program.arena().data(grandparent) {
+        NodeData::CallExpression(d) => d.expression == parent,
+        NodeData::TaggedTemplateExpression(d) => d.tag == parent,
+        _ => false,
+    };
+    if !is_call_or_tagged {
+        return false;
+    }
+    let right_kind = program.arena().kind(right);
+    is_access_expression(right_kind)
+        || (right_kind == Kind::Identifier && program.arena().text(right) == "eval")
+}
+
 fn is_compound_assignment(operator: Kind) -> bool {
     matches!(
         operator,
