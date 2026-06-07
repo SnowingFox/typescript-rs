@@ -14893,3 +14893,52 @@ fn class_static_incompatible_index_signatures_reports_2413() {
         "'number' index type 'string' is not assignable to 'string' index type 'number'."
     );
 }
+
+// ---- T1-E batch 56: static-side extends check (2417) ----
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4310)
+#[test]
+fn class_static_side_incorrectly_extends_base_reports_2417() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class A {\n  static x: string = \"a\";\n}\nclass B extends A {\n  static x: number = 1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2417);
+    assert_eq!(
+        diags[0].message,
+        "Class static side 'typeof B' incorrectly extends base class static side 'typeof A'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4310)
+#[test]
+fn class_static_side_compatible_extends_base_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class A {\n  static x: string = \"a\";\n}\nclass B extends A {\n  static x: string = \"b\";\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "compatible static override must not report static-side extends error"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4309)
+#[test]
+fn class_instance_extends_failure_skips_static_side_check() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class A {\n  x: number = 0;\n  static x: string = \"a\";\n}\nclass B extends A {\n  x: string = \"s\";\n  static x: number = 1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected only instance extends error; got {diags:?}");
+    assert_eq!(diags[0].code, 2416, "static-side 2417 must be skipped when instance extends fails");
+}

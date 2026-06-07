@@ -40,7 +40,8 @@ use super::declared_types::{
     get_index_type_of_type, get_indexed_access_type, get_min_type_argument_count,
     get_property_of_type,     get_property_of_union_or_intersection_type, get_properties_of_type,
     get_explicit_accessor_return_type, get_property_type_for_index_type, get_type_from_type_node,
-    get_type_of_property_of_type, get_type_of_symbol, is_generic_object_type, resolve_alias,
+    get_type_of_property_of_type, get_type_of_symbol, get_type_without_signatures,
+    is_generic_object_type, resolve_alias,
 };
 use super::inference::{InferenceContext, InferencePriority};
 use super::mapper::TypeMapper;
@@ -7688,8 +7689,7 @@ impl Checker {
     // `baseWithThis == baseType`.
     //
     // DEFER(phase-4-checker-4bm+): the nested 2741/2322 diagnostic chain on
-    // member-specific extends errors, the static-side extends check (2417), the
-    // override-modifier walk (`checkKindsOfPropertyMemberOverrides` /
+    // member-specific extends errors, the override-modifier walk (`checkKindsOfPropertyMemberOverrides` /
     // `checkMembersForOverrideModifier`), `implements` on a non-object type
     // (2422), base-type accessibility
     // (private constructor, 2654), mixins / type-variable base constructors,
@@ -8336,7 +8336,28 @@ impl Checker {
             .map(|o| o.base_types.clone())
             .unwrap_or_default();
         if let Some(&base_type) = base_types.first() {
-            if !self.is_type_assignable_to(program, type_with_this, base_type) {
+            if self.is_type_assignable_to(program, type_with_this, base_type) {
+                // Static-side extends (2417) runs only when the instance side is
+                // assignable (Go's `else` arm after the instance check).
+                // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4310)
+                let static_type = get_type_of_symbol(self, program, symbol, globals);
+                if let Some(base_sym) = self.get_type(base_type).symbol {
+                    let static_base = get_type_of_symbol(self, program, base_sym, globals);
+                    let static_base = get_apparent_type(self, static_base);
+                    let static_base = get_type_without_signatures(self, static_base);
+                    if !self.is_type_assignable_to(program, static_type, static_base) {
+                        let static_str = format!("typeof {class_str}");
+                        let base_name = super::nodebuilder::symbol_to_string(program, base_sym);
+                        let static_base_str = format!("typeof {base_name}");
+                        self.error(
+                            program,
+                            error_node,
+                            &tsgo_diagnostics::CLASS_STATIC_SIDE_0_INCORRECTLY_EXTENDS_BASE_CLASS_STATIC_SIDE_1,
+                            &[static_str.as_str(), static_base_str.as_str()],
+                        );
+                    }
+                }
+            } else {
                 let base_str = super::nodebuilder::type_to_string(self, program, base_type);
                 if !self.issue_member_specific_error(
                     program,

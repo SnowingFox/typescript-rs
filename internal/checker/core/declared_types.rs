@@ -4024,6 +4024,39 @@ pub fn get_apparent_type(checker: &Checker, t: TypeId) -> TypeId {
     t
 }
 
+/// Strips call/construct signatures from an object or intersection type.
+///
+/// Used when comparing class static sides: the static base type is compared
+/// without its constructor signatures (Go's `getTypeWithoutSignatures`).
+// Go: internal/checker/checker.go:Checker.getTypeWithoutSignatures(4493)
+pub fn get_type_without_signatures(checker: &mut Checker, t: TypeId) -> TypeId {
+    if let TypeData::Intersection(i) = &checker.get_type(t).data {
+        let members = i.types.clone();
+        let types: Vec<TypeId> = members
+            .iter()
+            .map(|&ty| get_type_without_signatures(checker, ty))
+            .collect();
+        return checker.get_intersection_type(&types);
+    }
+    if let Some(obj) = checker.get_type(t).as_object() {
+        if !obj.call_signatures.is_empty() || !obj.construct_signatures.is_empty() {
+            let stripped = ObjectType {
+                members: obj.members.clone(),
+                properties: obj.properties.clone(),
+                index_infos: obj.index_infos.clone(),
+                ..Default::default()
+            };
+            let sym = checker.get_type(t).symbol;
+            return checker.new_object_type(
+                ObjectFlags::ANONYMOUS | ObjectFlags::MEMBERS_RESOLVED,
+                sym,
+                stripped,
+            );
+        }
+    }
+    t
+}
+
 /// Returns the index signatures of `t` (after apparent-type mapping and generic
 /// reference instantiation).
 ///
