@@ -1366,7 +1366,15 @@ impl Checker {
             index_infos,
             ..Default::default()
         };
-        self.new_object_type(ObjectFlags::ANONYMOUS, None, object)
+        // Go's `getSpreadType` non-generic arm sets `ObjectFlagsObjectLiteral |
+        // ObjectFlagsContainsObjectOrArrayLiteral` on the merged spread type.
+        self.new_object_type(
+            ObjectFlags::ANONYMOUS
+                | ObjectFlags::OBJECT_LITERAL
+                | ObjectFlags::CONTAINS_OBJECT_OR_ARRAY_LITERAL,
+            None,
+            object,
+        )
     }
 
     fn get_spread_property_symbol(

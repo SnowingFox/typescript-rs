@@ -13067,3 +13067,106 @@ fn const_assertion_on_spread_object_literal_prints_readonly_members() {
         "{ readonly x: number; readonly y: 1; }"
     );
 }
+
+// ---- T1-E batch 28: const-context index readonly, generic spread alone ----
+
+#[test]
+fn non_generic_interface_is_not_generic_object_type() {
+    use crate::core::declared_types::{get_declared_type_of_symbol, is_generic_object_type};
+    use crate::core::symbols::resolve_name;
+    let p = StubProgram::parse_and_bind("/a.ts", "interface A { x: number; }");
+    let sym = resolve_name(
+        &p,
+        p.root(),
+        "A",
+        tsgo_ast::SymbolFlags::TYPE,
+        false,
+        p.globals(),
+    )
+    .expect("interface A");
+    let mut c = Checker::new();
+    let t = get_declared_type_of_symbol(&mut c, &p, sym, p.globals());
+    assert!(
+        !is_generic_object_type(&c, t),
+        "a non-generic interface must not be a generic object type"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getIndexInfoWithReadonly(13411) / getSpreadType(13301)
+#[test]
+fn const_assertion_on_spread_object_literal_marks_index_signature_readonly() {
+    use crate::core::types::TypeData;
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { [k: string]: number; }\ndeclare const a: A;\nconst o = { ...a } as const;\no;",
+    );
+    let usage = expr_stmt_expression(&p, 3);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    let index_infos = match &c.get_type(t).data {
+        TypeData::Object(o) => o.index_infos.clone(),
+        _ => panic!("spread result must be an object type"),
+    };
+    assert_eq!(index_infos.len(), 1, "expected one string index signature");
+    assert!(
+        c.index_info(index_infos[0]).is_readonly,
+        "a const-context spread index signature must be readonly"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13335)
+#[test]
+fn object_spread_generic_type_parameter_alone_yields_type_parameter() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T>(t: T) {\n  const o = { ...t };\n  o;\n}",
+    );
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let body = match arena.data(stmts[0]) {
+        NodeData::FunctionDeclaration(d) => d.body.expect("function body"),
+        _ => panic!("function declaration"),
+    };
+    let body_stmts = match arena.data(body) {
+        NodeData::Block(d) => d.list.nodes.clone(),
+        _ => panic!("block"),
+    };
+    let usage = match arena.data(body_stmts[1]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expression statement"),
+    };
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "T"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13301)
+#[test]
+fn object_spread_result_carries_object_literal_flags() {
+    use crate::core::types::TypeData;
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { x: number; }\ndeclare const a: A;\n({ ...a });",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    let object_flags = match &c.get_type(t).data {
+        TypeData::Object(_) => c.get_type(t).object_flags(),
+        _ => panic!("spread result must be an object type"),
+    };
+    assert!(
+        object_flags.contains(ObjectFlags::OBJECT_LITERAL),
+        "spread result must carry ObjectFlagsObjectLiteral"
+    );
+    assert!(
+        object_flags.contains(ObjectFlags::CONTAINS_OBJECT_OR_ARRAY_LITERAL),
+        "spread result must carry ObjectFlagsContainsObjectOrArrayLiteral"
+    );
+}
