@@ -8128,6 +8128,12 @@ impl Checker {
             let ns = program.arena().text(name).to_string();
             self.error(program, node, &tsgo_diagnostics::PROPERTY_0_CANNOT_HAVE_AN_INITIALIZER_BECAUSE_IT_IS_MARKED_ABSTRACT, &[&ns]);
         }
+        if has_accessor_modifier(program.arena(), node) {
+            if let Some(symbol) = program.symbol_of_node(node) {
+                let globals = program.globals();
+                super::declared_types::get_type_of_accessors(self, program, symbol, globals);
+            }
+        }
     }
     fn check_type_parameter_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
         let NodeData::TypeParameterDeclaration(d) = program.arena().data(node) else {

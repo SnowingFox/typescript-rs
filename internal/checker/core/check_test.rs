@@ -13863,3 +13863,83 @@ fn getter_without_annotation_infers_from_body_when_setter_annotated() {
         "getter without annotation must infer read type from body even when setter is annotated; got {diags:?}"
     );
 }
+
+// ---- T1-E batch 39: auto-accessor property read/write typing ----
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18370)
+#[test]
+fn auto_accessor_annotated_read_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { accessor x: number; }\nconst c = new C();\nconst n: number = c.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "annotated auto-accessor read type must resolve from the property annotation; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors(18429)
+#[test]
+fn auto_accessor_assignment_uses_annotation_as_write_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { accessor x: number; }\nconst c = new C();\nc.x = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "auto-accessor assignment must use the property type annotation as write type; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors(18429)
+#[test]
+fn auto_accessor_assignment_mismatch_reports_2322() {
+    let codes = diag_codes("class C { accessor x: number; }\nconst c = new C();\nc.x = \"\";");
+    assert!(
+        codes.contains(&2322),
+        "auto-accessor assignment must reject values not assignable to the annotated write type; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18398)
+#[test]
+fn auto_accessor_infers_read_type_from_initializer() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { accessor x = 1; }\nconst c = new C();\nconst n: number = c.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "auto-accessor without annotation must infer read type from its initializer; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18405)
+#[test]
+fn auto_accessor_without_type_or_initializer_reports_7008() {
+    let codes = diag_codes("class C { accessor x; }");
+    assert!(
+        codes.contains(&7008),
+        "expected TS7008 when an auto-accessor lacks both type annotation and initializer; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18411)
+#[test]
+fn auto_accessor_circular_type_annotation_reports_2502() {
+    let codes = diag_codes("class C { accessor x: C[\"x\"]; }");
+    assert!(
+        codes.contains(&2502),
+        "expected TS2502 when an auto-accessor type annotation is circular; got {codes:?}"
+    );
+}

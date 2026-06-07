@@ -1390,8 +1390,8 @@ pub fn get_type_of_symbol(
     if flags.intersects(SymbolFlags::FUNCTION | SymbolFlags::METHOD) {
         return get_type_of_func_class_enum_module(checker, program, symbol);
     }
-    if flags.intersects(SymbolFlags::GET_ACCESSOR | SymbolFlags::SET_ACCESSOR) {
-        return get_type_of_variable_or_property(checker, program, symbol, globals);
+    if flags.intersects(SymbolFlags::ACCESSOR) {
+        return get_type_of_accessors(checker, program, symbol, globals);
     }
     // A namespace/module symbol's value type is an anonymous object whose
     // members are the namespace's exports, so `N.x` reads an exported member's
@@ -1414,9 +1414,6 @@ pub fn get_type_of_symbol(
             None => checker.error_type(),
         };
     }
-    // DEFER(phase-4-checker-C-D2+): accessor value types (the class-value /
-    // static-side type is handled above via `get_type_of_func_class_enum_module`).
-    // blocked-by: accessor signature collection.
     checker.error_type()
 }
 
@@ -2167,6 +2164,30 @@ fn declaration_of_kind(
         .copied()
 }
 
+// Returns the auto-accessor property declaration for a symbol, if any (Go's
+// `IsAutoAccessorPropertyDeclaration` on `GetDeclarationOfKind(..., PropertyDeclaration)`).
+fn auto_accessor_property_declaration(
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> Option<NodeId> {
+    declaration_of_kind(program, symbol, Kind::PropertyDeclaration).filter(|&decl| {
+        is_auto_accessor_property_declaration(program.arena(), decl)
+    })
+}
+
+fn is_auto_accessor_property_declaration(arena: &NodeArena, node: NodeId) -> bool {
+    if arena.kind(node) != Kind::PropertyDeclaration {
+        return false;
+    }
+    let modifiers = match arena.data(node) {
+        NodeData::PropertyDeclaration(d) => d.modifiers.as_ref(),
+        _ => return false,
+    };
+    modifiers
+        .map(|m| m.modifier_flags.contains(ModifierFlags::ACCESSOR))
+        .unwrap_or(false)
+}
+
 // Returns the explicit read type of a getter symbol from a getter and/or setter
 // annotation (not body inference). Mirrors the annotation-resolution prefix of
 // Go's `getTypeOfAccessors`.
@@ -2179,10 +2200,14 @@ pub(crate) fn get_explicit_accessor_return_type(
 ) -> Option<TypeId> {
     let getter = declaration_of_kind(program, symbol, Kind::GetAccessor);
     let setter = declaration_of_kind(program, symbol, Kind::SetAccessor);
+    let auto_accessor = auto_accessor_property_declaration(program, symbol);
     getter
         .and_then(|g| get_annotated_accessor_type(checker, program, g, globals))
         .or_else(|| {
             setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals))
+        })
+        .or_else(|| {
+            auto_accessor.and_then(|a| get_annotated_accessor_type(checker, program, a, globals))
         })
 }
 
@@ -2192,6 +2217,7 @@ pub(crate) fn get_explicit_accessor_return_type(
 fn get_annotated_accessor_type_node(program: &dyn BoundProgram, accessor: NodeId) -> Option<NodeId> {
     match program.arena().data(accessor) {
         NodeData::GetAccessorDeclaration(d) => d.type_node,
+        NodeData::PropertyDeclaration(d) => d.type_node,
         NodeData::SetAccessorDeclaration(d) => d.parameters.nodes.first().and_then(|&param| {
             match program.arena().data(param) {
                 NodeData::ParameterDeclaration(p) => p.type_node,
@@ -2235,11 +2261,16 @@ pub fn get_type_of_accessors(
         checker.accessor_type_resolution_cyclic = true;
         return checker.error_type();
     }
+    let auto_accessor = auto_accessor_property_declaration(program, symbol);
     let getter = declaration_of_kind(program, symbol, Kind::GetAccessor);
     let setter = declaration_of_kind(program, symbol, Kind::SetAccessor);
     let mut t = getter.and_then(|g| get_annotated_accessor_type(checker, program, g, globals));
     if t.is_none() {
         t = setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals));
+    }
+    if t.is_none() {
+        t = auto_accessor
+            .and_then(|a| get_annotated_accessor_type(checker, program, a, globals));
     }
     if t.is_none() {
         if let Some(getter) = getter {
@@ -2249,6 +2280,20 @@ pub fn get_type_of_accessors(
             };
             if has_body {
                 t = Some(checker.get_return_type_from_body(program, getter));
+            }
+        }
+    }
+    if t.is_none() {
+        if let Some(accessor) = auto_accessor {
+            if let Some(initializer) = variable_declaration_initializer(program, accessor) {
+                let initializer_type = checker.check_expression(program, initializer);
+                let inferred = get_widened_literal_type_for_initializer(
+                    checker,
+                    program,
+                    accessor,
+                    initializer_type,
+                );
+                t = Some(checker.get_widened_type(inferred));
             }
         }
     }
@@ -2271,6 +2316,14 @@ pub fn get_type_of_accessors(
                     getter,
                     &tsgo_diagnostics::PROPERTY_0_IMPLICITLY_HAS_TYPE_ANY_BECAUSE_ITS_GET_ACCESSOR_LACKS_A_RETURN_TYPE_ANNOTATION,
                     &[sym_name.as_str()],
+                );
+            } else if let Some(accessor) = auto_accessor {
+                checker.add_error_or_suggestion(
+                    program,
+                    checker.no_implicit_any(),
+                    accessor,
+                    &tsgo_diagnostics::MEMBER_0_IMPLICITLY_HAS_AN_1_TYPE,
+                    &[sym_name.as_str(), "any"],
                 );
             }
             checker.any_type()
@@ -2296,6 +2349,16 @@ pub fn get_type_of_accessors(
             checker.error(
                 program,
                 setter.expect("setter annotation implies setter decl"),
+                &tsgo_diagnostics::X_0_IS_REFERENCED_DIRECTLY_OR_INDIRECTLY_IN_ITS_OWN_TYPE_ANNOTATION,
+                &[sym_name.as_str()],
+            );
+        } else if auto_accessor
+            .and_then(|a| get_annotated_accessor_type_node(program, a))
+            .is_some()
+        {
+            checker.error(
+                program,
+                auto_accessor.expect("auto-accessor annotation implies property decl"),
                 &tsgo_diagnostics::X_0_IS_REFERENCED_DIRECTLY_OR_INDIRECTLY_IN_ITS_OWN_TYPE_ANNOTATION,
                 &[sym_name.as_str()],
             );
@@ -2336,7 +2399,10 @@ pub fn get_write_type_of_accessors(
         checker.accessor_write_type_resolution_cyclic = true;
         return checker.error_type();
     }
-    let setter = declaration_of_kind(program, symbol, Kind::SetAccessor);
+    let mut setter = declaration_of_kind(program, symbol, Kind::SetAccessor);
+    if setter.is_none() {
+        setter = auto_accessor_property_declaration(program, symbol);
+    }
     let mut write_type = setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals));
     checker.accessors_write_type_resolving.remove(&symbol);
     if checker.accessor_write_type_resolution_cyclic {
