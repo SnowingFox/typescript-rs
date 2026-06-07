@@ -20,7 +20,7 @@ use tsgo_ast::{
     SymbolTable,
 };
 
-use super::inference::InferenceContext;
+use super::conditional_types::is_distributive_conditional_type;
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
 use super::signatures::{IndexInfo, IndexInfoId, Signature, SignatureFlags, SignatureId};
@@ -1486,13 +1486,19 @@ pub(crate) fn get_declaration_of_alias_symbol(
     program: &dyn BoundProgram,
     symbol: SymbolId,
 ) -> Option<NodeId> {
-    program
-        .symbol(symbol)
+    // Read declaration nodes through the view that owns `symbol`: in a
+    // multi-file program each file keeps its own arena, so a merged symbol's
+    // `declarations` may reference nodes in another file (e.g. the exported
+    // function behind `import { foo } from "./other"`). Using
+    // `program.arena()` (the file currently under check) would index OOB.
+    let owner = program.view_for_symbol(symbol);
+    let prog: &dyn BoundProgram = owner.as_deref().unwrap_or(program);
+    prog.symbol(symbol)
         .declarations
         .iter()
         .rev()
         .copied()
-        .find(|&d| is_alias_symbol_declaration(program.arena(), d))
+        .find(|&d| is_alias_symbol_declaration(prog.arena(), d))
 }
 
 /// Resolves an alias `symbol` to the non-alias symbol it ultimately denotes
@@ -1514,8 +1520,11 @@ pub(crate) fn resolve_alias(
         checker.alias_targets.insert(symbol, None);
         return None;
     }
-    let target = get_declaration_of_alias_symbol(program, symbol)
-        .and_then(|node| get_target_of_alias_declaration(checker, program, node));
+    let target = get_declaration_of_alias_symbol(program, symbol).and_then(|node| {
+        let owner = program.view_for_symbol(symbol);
+        let prog: &dyn BoundProgram = owner.as_deref().unwrap_or(program);
+        get_target_of_alias_declaration(checker, prog, node)
+    });
     checker.aliases_resolving.remove(&symbol);
     checker.alias_targets.insert(symbol, target);
     target
@@ -2638,10 +2647,7 @@ fn get_type_from_conditional_type_node(
     let extends_type = get_type_from_type_node(checker, program, extends_type_node, globals);
     // A conditional whose check type is a naked type parameter distributes over
     // a union check type (Go: `checkType.flags&TypeFlagsTypeParameter != 0`).
-    let is_distributive = checker
-        .get_type(check_type)
-        .flags()
-        .contains(TypeFlags::TYPE_PARAMETER);
+    let is_distributive = is_distributive_conditional_type(checker, check_type);
     let infer_type_parameters = get_infer_type_parameters(checker, program, node);
     let outer_type_parameters = get_outer_type_parameters(checker, program, node);
     let root = ConditionalRoot {
@@ -2992,486 +2998,12 @@ fn constraint_declaration_for_mapped_type(
     }
 }
 
-/// Builds a template literal type from interleaved `texts` and placeholder
-/// `types` (`texts.len() == types.len() + 1`).
-///
-/// Mirrors Go's `getTemplateLiteralType`: concrete (literal) placeholders fold
-/// into the surrounding text (yielding a single string literal type); a
-/// union/`never` placeholder distributes the template over its members; a
-/// generic placeholder (a type variable / `keyof T` / string-mapping) is kept,
-/// producing an interned deferred template literal type.
-///
-/// DEFER(phase-4-checker-later): the cross-product-union size guard
-/// (`checkCrossProductUnion`), the wildcard arm, and the `${Mapping<xxx>}`
-/// single-pattern normalization. blocked-by: the wildcard type + the
-/// cross-product limiter.
-///
-/// # Examples
-/// ```
-/// use tsgo_checker::{get_template_literal_type, Checker, TypeId};
-/// fn demo(c: &mut Checker, ph: TypeId) {
-///     let _ = get_template_literal_type(c, &["a".into(), "b".into()], &[ph]);
-/// }
-/// ```
-///
-/// Side effects: may allocate string-literal/union/template-literal types.
-// Go: internal/checker/checker.go:Checker.getTemplateLiteralType
-pub fn get_template_literal_type(
-    checker: &mut Checker,
-    texts: &[String],
-    types: &[TypeId],
-) -> TypeId {
-    // Distribute over the first union/`never` placeholder.
-    let union_index = types.iter().position(|&t| {
-        checker
-            .get_type(t)
-            .flags()
-            .intersects(TypeFlags::NEVER | TypeFlags::UNION)
-    });
-    if let Some(idx) = union_index {
-        // DEFER(phase-4-checker-later): `checkCrossProductUnion` size guard.
-        // blocked-by: the cross-product union limiter. Always permitted here.
-        let member_type = types[idx];
-        let members = checker
-            .get_type(member_type)
-            .union_types()
-            .map(|m| m.to_vec())
-            .unwrap_or_default();
-        let mut results: Vec<TypeId> = Vec::with_capacity(members.len());
-        for m in members {
-            let mut new_types = types.to_vec();
-            new_types[idx] = m;
-            results.push(get_template_literal_type(checker, texts, &new_types));
-        }
-        return checker.get_union_type(&results);
-    }
-    let mut sb = String::new();
-    sb.push_str(&texts[0]);
-    let mut new_texts: Vec<String> = Vec::new();
-    let mut new_types: Vec<TypeId> = Vec::new();
-    if !add_template_spans(
-        checker,
-        &mut sb,
-        &mut new_texts,
-        &mut new_types,
-        texts,
-        types,
-    ) {
-        return checker.string_type();
-    }
-    if new_types.is_empty() {
-        return checker.get_string_literal_type(&sb);
-    }
-    new_texts.push(sb);
-    // `${T}` with all-empty surrounding text where every placeholder is the
-    // `string` primitive collapses to `string` (Go's all-empty/all-string arm).
-    if new_texts.iter().all(|t| t.is_empty())
-        && new_types
-            .iter()
-            .all(|&t| checker.get_type(t).flags().contains(TypeFlags::STRING))
-    {
-        return checker.string_type();
-    }
-    checker.new_template_literal_type(new_texts, new_types)
-}
-
-// Appends the spans of a template literal into `sb`/`new_texts`/`new_types`,
-// returning `false` when a placeholder is not a valid template part (Go's inner
-// `addSpans`). A literal/nullable placeholder folds its printed value into the
-// running text; a nested template literal is spliced in; a generic placeholder
-// closes the current text run and is kept as a deferred span.
-// Go: internal/checker/checker.go:Checker.getTemplateLiteralType (addSpans)
-fn add_template_spans(
-    checker: &mut Checker,
-    sb: &mut String,
-    new_texts: &mut Vec<String>,
-    new_types: &mut Vec<TypeId>,
-    texts: &[String],
-    types: &[TypeId],
-) -> bool {
-    for (i, &t) in types.iter().enumerate() {
-        let flags = checker.get_type(t).flags();
-        if flags.intersects(TypeFlags::LITERAL | TypeFlags::NULL | TypeFlags::UNDEFINED) {
-            sb.push_str(&get_template_string_for_type(checker, t));
-            sb.push_str(&texts[i + 1]);
-        } else if flags.contains(TypeFlags::TEMPLATE_LITERAL) {
-            let (inner_texts, inner_types) = {
-                let d = checker
-                    .get_type(t)
-                    .as_template_literal()
-                    .expect("template literal");
-                (d.texts.clone(), d.types.clone())
-            };
-            sb.push_str(&inner_texts[0]);
-            if !add_template_spans(
-                checker,
-                sb,
-                new_texts,
-                new_types,
-                &inner_texts,
-                &inner_types,
-            ) {
-                return false;
-            }
-            sb.push_str(&texts[i + 1]);
-        } else if is_generic_index_type(checker, t)
-            || is_pattern_literal_placeholder_type(checker, t)
-        {
-            new_types.push(t);
-            new_texts.push(std::mem::take(sb));
-            sb.push_str(&texts[i + 1]);
-        } else {
-            return false;
-        }
-    }
-    true
-}
-
-// Returns the string a literal/nullable type contributes to a template literal
-// (Go's `getTemplateStringForType`): a literal's printed value, or a nullable
-// type's intrinsic name (`"null"`/`"undefined"`).
-// Go: internal/checker/checker.go:Checker.getTemplateStringForType
-fn get_template_string_for_type(checker: &Checker, t: TypeId) -> String {
-    let ty = checker.get_type(t);
-    match ty.literal_value() {
-        Some(LiteralValue::String(s)) => s.clone(),
-        Some(LiteralValue::Number(n)) => n.to_string(),
-        Some(LiteralValue::Boolean(b)) => {
-            if *b {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            }
-        }
-        None if ty.flags().intersects(TypeFlags::NULLABLE) => {
-            ty.intrinsic_name().unwrap_or_default().to_string()
-        }
-        None => String::new(),
-    }
-}
-
-// Reports whether `t` is a pattern-literal placeholder — a type usable as a
-// template literal placeholder that keeps the template deferred (Go's
-// `isPatternLiteralPlaceholderType`, reachable subset: the primitive
-// `any`/`string`/`number`/`bigint` placeholders).
-//
-// DEFER(phase-4-checker-later): the nested-pattern-template and string-mapping
-// pattern arms. blocked-by: full pattern-literal classification.
-// Go: internal/checker/checker.go:Checker.isPatternLiteralPlaceholderType
-fn is_pattern_literal_placeholder_type(checker: &Checker, t: TypeId) -> bool {
-    checker
-        .get_type(t)
-        .flags()
-        .intersects(TypeFlags::ANY | TypeFlags::STRING | TypeFlags::NUMBER | TypeFlags::BIG_INT)
-}
-
-/// Applies an intrinsic string-mapping type `kind<t>` (`Uppercase<S>` etc.).
-///
-/// Mirrors Go's `getStringMappingType`: distributes over a union/`never`,
-/// transforms a concrete string literal eagerly, and keeps a generic/string
-/// target deferred as an interned [`crate::StringMappingType`].
-///
-/// DEFER(phase-4-checker-later): the template-literal target arm
-/// (`applyTemplateStringMapping`) and the pattern-literal-placeholder
-/// normalization. blocked-by: template-literal string mapping + pattern-literal
-/// classification.
-///
-/// # Examples
-/// ```
-/// use tsgo_checker::{get_string_mapping_type, Checker, LiteralValue, StringMappingKind, TypeFlags};
-/// let mut c = Checker::new();
-/// let lit = c.new_literal_type(TypeFlags::STRING_LITERAL, LiteralValue::String("abc".into()), None);
-/// let up = get_string_mapping_type(&mut c, StringMappingKind::Uppercase, lit);
-/// assert_eq!(c.type_to_string(up), "\"ABC\"");
-/// ```
-///
-/// Side effects: may allocate string-literal/union/string-mapping types.
-// Go: internal/checker/checker.go:Checker.getStringMappingType
-pub fn get_string_mapping_type(
-    checker: &mut Checker,
-    kind: StringMappingKind,
-    t: TypeId,
-) -> TypeId {
-    let flags = checker.get_type(t).flags();
-    // Distribute over a union / `never`.
-    if flags.intersects(TypeFlags::UNION | TypeFlags::NEVER) {
-        let members = checker
-            .get_type(t)
-            .union_types()
-            .map(|m| m.to_vec())
-            .unwrap_or_default();
-        let mapped: Vec<TypeId> = members
-            .iter()
-            .map(|&m| get_string_mapping_type(checker, kind, m))
-            .collect();
-        return checker.get_union_type(&mapped);
-    }
-    // A concrete string literal folds to its transformed literal.
-    if flags.contains(TypeFlags::STRING_LITERAL) {
-        if let Some(LiteralValue::String(s)) = checker.get_type(t).literal_value().cloned() {
-            return checker.get_string_literal_type(&apply_string_mapping(kind, &s));
-        }
-    }
-    // `Uppercase<Uppercase<S>>` collapses (idempotent same-kind mapping).
-    if flags.contains(TypeFlags::STRING_MAPPING)
-        && checker.get_type(t).as_string_mapping().map(|m| m.kind) == Some(kind)
-    {
-        return t;
-    }
-    // A generic/string target is kept as a deferred, interned string mapping.
-    // DEFER(phase-4-checker-later): the template-literal target arm.
-    if flags.intersects(TypeFlags::ANY | TypeFlags::STRING | TypeFlags::STRING_MAPPING)
-        || is_generic_index_type(checker, t)
-    {
-        return checker.new_string_mapping_type(kind, t);
-    }
-    t
-}
-
-// Applies the intrinsic string transform to a literal value (Go's
-// `applyStringMapping`). `Uppercase`/`Lowercase` transform the whole string;
-// `Capitalize`/`Uncapitalize` transform only the first character.
-// Go: internal/checker/checker.go:applyStringMapping
-fn apply_string_mapping(kind: StringMappingKind, s: &str) -> String {
-    match kind {
-        StringMappingKind::Uppercase => s.to_uppercase(),
-        StringMappingKind::Lowercase => s.to_lowercase(),
-        StringMappingKind::Capitalize => map_first_char(s, true),
-        StringMappingKind::Uncapitalize => map_first_char(s, false),
-    }
-}
-
-// Transforms the first character of `s` to upper- (or lower-) case, leaving the
-// rest unchanged.
-fn map_first_char(s: &str, upper: bool) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => {
-            let head: String = if upper {
-                first.to_uppercase().collect()
-            } else {
-                first.to_lowercase().collect()
-            };
-            head + chars.as_str()
-        }
-        None => String::new(),
-    }
-}
-
-/// Resolves a conditional type `T extends U ? X : Y` for `root` under an
-/// optional `mapper`.
-///
-/// Instantiates the check/extends types through `mapper`; when both are concrete
-/// (non-generic), evaluates the `extends` relation (`isTypeAssignableTo`) and
-/// returns the (instantiated) true or false branch. `infer R` type parameters in
-/// the `extends` clause are inferred by matching the check type against the
-/// extends type, and their inferences thread into the chosen branch. When the
-/// check type is still generic, a deferred conditional type is created that
-/// re-resolves on instantiation.
-///
-/// DEFER(phase-4-checker-C-C3): the tail-recursion loop for nested false-branch
-/// conditionals, the permissive/restrictive instantiations (identity for the
-/// concrete reachable subset), the `any` check-type `X | Y` distribution
-/// (`extraTypes`), the `forConstraint` distributive-constraint path, the
-/// wildcard type, and alias attribution. blocked-by: those machinery pieces +
-/// the wildcard/alias types.
-///
-/// # Examples
-/// ```
-/// use tsgo_checker::{get_conditional_type, BoundProgram, Checker, ConditionalRoot};
-/// use tsgo_ast::NodeId;
-/// fn demo<P: BoundProgram>(c: &mut Checker, p: &P, root: &ConditionalRoot) {
-///     let _ = get_conditional_type(c, p, root, None);
-/// }
-/// ```
-///
-/// Side effects: may allocate branch/union/conditional types and run inference.
-// Go: internal/checker/checker.go:Checker.getConditionalType
-pub fn get_conditional_type(
-    checker: &mut Checker,
-    program: &dyn BoundProgram,
-    root: &ConditionalRoot,
-    mapper: Option<&TypeMapper>,
-) -> TypeId {
-    // Instantiation here uses the program-aware `instantiate_param_type` so an
-    // anonymous object/function-type operand (e.g. an `extends (...a: any[]) =>
-    // infer R` clause) has its member/return type variables substituted — the
-    // program-less `instantiate_type` leaves an anonymous object unchanged, which
-    // would strand an `infer R` in a function return position.
-    let check_type = match mapper {
-        Some(m) => {
-            let m = m.clone();
-            checker.instantiate_param_type(program, root.check_type, &m)
-        }
-        None => root.check_type,
-    };
-    let extends_type = match mapper {
-        Some(m) => {
-            let m = m.clone();
-            checker.instantiate_param_type(program, root.extends_type, &m)
-        }
-        None => root.extends_type,
-    };
-    let error = checker.error_type();
-    if check_type == error || extends_type == error {
-        return error;
-    }
-    let check_type_deferred = is_generic_type(checker, check_type);
-    // When the conditional declares `infer R` type parameters, infer them by
-    // matching the (concrete) check type against the extends type, building the
-    // combined mapper used to instantiate the true branch (Go's
-    // `combinedMapper = combineTypeMappers(context.mapper, mapper)`).
-    let mut combined_mapper: Option<TypeMapper> = None;
-    if !root.infer_type_parameters.is_empty() {
-        let mut context = InferenceContext::new(&root.infer_type_parameters);
-        if !check_type_deferred {
-            checker.infer_types(program, &mut context.inferences, check_type, extends_type);
-        }
-        let inference_mapper = checker.get_inference_mapper(program, &mut context);
-        combined_mapper = Some(match mapper {
-            Some(m) => TypeMapper::merge(inference_mapper, m.clone()),
-            None => inference_mapper,
-        });
-    }
-    // The extends type including `infer R` inferences (Go's `inferredExtendsType`).
-    let inferred_extends_type = match &combined_mapper {
-        Some(cm) => {
-            let cm = cm.clone();
-            checker.instantiate_param_type(program, root.extends_type, &cm)
-        }
-        None => extends_type,
-    };
-    if !check_type_deferred && !is_generic_type(checker, inferred_extends_type) {
-        let extends_any_or_unknown = checker
-            .get_type(inferred_extends_type)
-            .flags()
-            .intersects(TypeFlags::ANY_OR_UNKNOWN);
-        let (true_node, false_node) = conditional_branch_nodes(program, root.node);
-        // A definitely-false `extends` check resolves to the false branch.
-        if !extends_any_or_unknown
-            && !checker.is_type_assignable_to(program, check_type, inferred_extends_type)
-        {
-            let false_type = get_type_from_type_node(checker, program, false_node, None);
-            return match mapper {
-                Some(m) => {
-                    let m = m.clone();
-                    checker.instantiate_param_type(program, false_type, &m)
-                }
-                None => false_type,
-            };
-        }
-        // A definitely-true `extends` check resolves to the true branch,
-        // instantiated through the combined (inference) mapper so `infer R`
-        // type parameters in the branch are substituted.
-        if extends_any_or_unknown
-            || checker.is_type_assignable_to(program, check_type, inferred_extends_type)
-        {
-            let true_type = get_type_from_type_node(checker, program, true_node, None);
-            return match combined_mapper.as_ref().or(mapper) {
-                Some(m) => {
-                    let m = m.clone();
-                    checker.instantiate_param_type(program, true_type, &m)
-                }
-                None => true_type,
-            };
-        }
-    }
-    // The check is neither definitely true nor definitely false: defer. The
-    // combined inference mapper is not retained on the deferred type (see
-    // `ConditionalMappers`); it is rebuilt when the conditional re-resolves.
-    checker.new_conditional_type(root.clone(), mapper.cloned())
-}
-
-// Returns the `(trueType, falseType)` branch type nodes of a conditional type
-// node.
-fn conditional_branch_nodes(program: &dyn BoundProgram, node: NodeId) -> (NodeId, NodeId) {
-    match program.arena().data(node) {
-        NodeData::ConditionalType(d) => (d.true_type, d.false_type),
-        _ => (node, node),
-    }
-}
-
-/// Re-resolves a deferred conditional type `t` under `mapper`, mapping the
-/// conditional root's outer type parameters and (for a distributive conditional
-/// whose check type becomes a union) distributing the conditional over the
-/// union members (Go's `getConditionalTypeInstantiation`).
-///
-/// Side effects: may allocate branch/union/conditional types; caches the
-/// instantiation per `(node, type arguments)`.
-// Go: internal/checker/checker.go:Checker.getConditionalTypeInstantiation
-pub(crate) fn get_conditional_type_instantiation(
-    checker: &mut Checker,
-    program: &dyn BoundProgram,
-    t: TypeId,
-    mapper: &TypeMapper,
-) -> TypeId {
-    let root = checker
-        .get_type(t)
-        .as_conditional()
-        .expect("conditional type")
-        .root
-        .clone();
-    if root.outer_type_parameters.is_empty() {
-        return t;
-    }
-    let type_arguments: Vec<TypeId> = root
-        .outer_type_parameters
-        .iter()
-        .map(|&tp| checker.map_type(mapper, tp))
-        .collect();
-    if let Some(cached) = checker.conditional_instantiation(root.node, &type_arguments) {
-        return cached;
-    }
-    let new_mapper = TypeMapper::new(&root.outer_type_parameters, &type_arguments);
-    let mut result: Option<TypeId> = None;
-    // Distributive conditional types distribute over a union check type: for
-    // `T extends U ? X : Y` instantiated with `A | B` for `T`, the result is
-    // `(A extends U ? X : Y) | (B extends U ? X : Y)`.
-    if root.is_distributive {
-        let distribution_type = checker.map_type(&new_mapper, root.check_type);
-        if distribution_type != root.check_type {
-            let dflags = checker.get_type(distribution_type).flags();
-            if dflags.contains(TypeFlags::UNION) {
-                let members = checker
-                    .get_type(distribution_type)
-                    .union_types()
-                    .unwrap_or(&[])
-                    .to_vec();
-                let mut mapped = Vec::with_capacity(members.len());
-                for m in members {
-                    let inst_mapper = TypeMapper::merge(
-                        TypeMapper::unary(root.check_type, m),
-                        new_mapper.clone(),
-                    );
-                    let r = get_conditional_type(checker, program, &root, Some(&inst_mapper));
-                    mapped.push(r);
-                }
-                result = Some(checker.get_union_type(&mapped));
-            } else if dflags.contains(TypeFlags::NEVER) {
-                result = Some(checker.never_type());
-            }
-        }
-    }
-    let result =
-        result.unwrap_or_else(|| get_conditional_type(checker, program, &root, Some(&new_mapper)));
-    checker.set_conditional_instantiation(root.node, type_arguments, result);
-    result
-}
-
-// Reports whether `t` is a generic (instantiable) type — a deferred conditional
-// resolves its branches only once its check/extends types are non-generic (Go's
-// `isGenericType` / `isDeferredType` reachable subset, without the simple-tuple
-// deferral).
-// Go: internal/checker/checker.go:Checker.isGenericType / isDeferredType
-fn is_generic_type(checker: &Checker, t: TypeId) -> bool {
-    is_generic_object_type(checker, t) || is_generic_index_type(checker, t)
-}
+pub use super::conditional_types::{
+    get_conditional_type, get_string_mapping_type, get_template_literal_type,
+};
 
 // Collects the `infer R` type parameters declared in a conditional type's
-// `extends` clause (Go's `getInferTypeParameters`, which reads `node.Locals()`).
-// The port walks the extends-type subtree instead, because the binder scopes an
-// `infer` parameter anonymously (`bindAnonymousDeclaration`) rather than into
-// the conditional node's locals.
+// `extends` clause (Go's `getInferTypeParameters`).
 // Go: internal/checker/checker.go:Checker.getInferTypeParameters
 fn get_infer_type_parameters(
     checker: &mut Checker,
@@ -4191,6 +3723,43 @@ pub(crate) fn get_applicable_index_info_for_name(
     get_applicable_index_info(checker, program, t, key)
 }
 
+/// Returns the index signature of `t` keyed exactly by `key_type`.
+///
+/// Side effects: may instantiate index infos for generic references.
+// Go: internal/checker/checker.go:Checker.getIndexInfoOfType
+pub fn get_index_info_of_type(
+    checker: &mut Checker,
+    t: TypeId,
+    key_type: TypeId,
+) -> Option<IndexInfoId> {
+    let index_infos = get_index_infos_of_type(checker, t);
+    find_index_info(checker, &index_infos, key_type)
+}
+
+/// Returns the value type of the index signature of `t` keyed by `key_type`.
+///
+/// Side effects: may instantiate index infos for generic references.
+// Go: internal/checker/checker.go:Checker.getIndexTypeOfType
+pub fn get_index_type_of_type(
+    checker: &mut Checker,
+    t: TypeId,
+    key_type: TypeId,
+) -> Option<TypeId> {
+    get_index_info_of_type(checker, t, key_type).map(|id| checker.index_info(id).value_type)
+}
+
+// Go: internal/checker/checker.go:findIndexInfo
+fn find_index_info(
+    checker: &Checker,
+    index_infos: &[IndexInfoId],
+    key_type: TypeId,
+) -> Option<IndexInfoId> {
+    index_infos
+        .iter()
+        .copied()
+        .find(|&id| checker.index_info(id).key_type == key_type)
+}
+
 /// Returns the index type `keyof t` (Go's `getIndexType`).
 ///
 /// For a concrete object type this is the union of its property-name literal
@@ -4726,12 +4295,34 @@ pub fn get_property_of_type(checker: &Checker, t: TypeId, name: &str) -> Option<
     }
 }
 
+/// Resolves `name` on a union or intersection type.
+///
+/// Side effects: may cache a synthesized property symbol.
+// Go: internal/checker/checker.go:Checker.getPropertyOfUnionOrIntersectionType
+pub(crate) fn get_property_of_union_or_intersection_type(
+    checker: &Checker,
+    t: TypeId,
+    name: &str,
+) -> Option<SymbolId> {
+    if checker.get_type(t).intersection_types().is_some() {
+        return get_intersection_property(checker, t, name);
+    }
+    if checker.get_type(t).union_types().is_some() {
+        return get_union_property(checker, t, name);
+    }
+    None
+}
+
 // Resolves `name` on an intersection type. A name found in exactly one
 // constituent returns that constituent's own symbol (Go's `singleProp` return);
 // a name found in two or more constituents mints a synthesized property whose
 // type is the intersection of the per-constituent types.
 // Go: internal/checker/checker.go:Checker.createUnionOrIntersectionProperty (intersection)
-pub(crate) fn get_intersection_property(checker: &Checker, t: TypeId, name: &str) -> Option<SymbolId> {
+pub(crate) fn get_intersection_property(
+    checker: &Checker,
+    t: TypeId,
+    name: &str,
+) -> Option<SymbolId> {
     if let Some(cached) = checker.cached_synthesized_property(t, name) {
         return cached;
     }

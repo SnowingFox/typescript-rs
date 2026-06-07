@@ -188,7 +188,9 @@ fn get_type_only_alias_declaration_ex(
             break;
         }
         if let Some(decl) = get_declaration_of_alias_symbol(program, symbol) {
-            if is_type_only_import_or_export_declaration(arena, decl) {
+            let owner = program.view_for_symbol(symbol);
+            let decl_arena = owner.as_deref().map(|v| v.arena()).unwrap_or(arena);
+            if is_type_only_import_or_export_declaration(decl_arena, decl) {
                 return Some(decl);
             }
         }

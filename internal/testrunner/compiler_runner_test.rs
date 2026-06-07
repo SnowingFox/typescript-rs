@@ -1628,9 +1628,11 @@ fn panic_location_capture_records_panic_site() {
     }
 }
 
+// Corpus no-crash guards: multi-file cases whose merged symbols carry
+// declaration nodes in a sibling file's arena (index OOB if read through the
+// file-under-check's arena). See `get_declaration_of_alias_symbol`.
 #[test]
-#[ignore = "local repro for declaration emit panic backtrace"]
-fn repro_declaration_emit_no_crash_backtrace() {
+fn declaration_emit_no_crash_on_comment_copied_from_other_file() {
     let path = Path::new(tsgo_repo::test_data_path())
         .join("tests/cases/compiler/declarationEmitNoCrashOnCommentCopiedFromOtherFile.ts");
     let content = std::fs::read_to_string(&path).expect("read case");
@@ -1641,12 +1643,19 @@ fn repro_declaration_emit_no_crash_backtrace() {
 }
 
 #[test]
-#[ignore = "local repro for declaration emit cross-file node panic backtrace"]
-fn repro_declaration_emit_no_crash_cross_file_node_backtrace() {
+fn declaration_emit_no_crash_on_cross_file_node() {
     let path = Path::new(tsgo_repo::test_data_path())
         .join("tests/cases/compiler/declarationEmitNoCrashOnCrossFileNode.ts");
     let content = std::fs::read_to_string(&path).expect("read case");
     let _ = error_baseline_for_test(&content, "declarationEmitNoCrashOnCrossFileNode.ts");
+}
+
+#[test]
+fn export_assignment_merging10_no_crash() {
+    let path = Path::new(tsgo_repo::test_data_path())
+        .join("tests/cases/compiler/exportAssignmentMerging10.ts");
+    let content = std::fs::read_to_string(&path).expect("read case");
+    let _ = error_baseline_for_test(&content, "exportAssignmentMerging10.ts");
 }
 
 // FULL compiler-corpus parity MEASUREMENT (opt-in / `#[ignore]`d so it does not
