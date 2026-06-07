@@ -466,6 +466,7 @@ impl Checker {
             Kind::ObjectLiteralExpression => self.check_object_literal(program, node),
             Kind::ArrayLiteralExpression => self.check_array_literal(program, node),
             Kind::FunctionExpression => self.check_function_expression(program, node),
+            Kind::ClassExpression => self.check_class_expression(program, node),
             Kind::ArrowFunction => self.check_arrow_function(program, node),
             Kind::NonNullExpression => self.check_non_null_assertion(program, node),
             Kind::AsExpression => self.check_assertion(program, node),
@@ -6868,16 +6869,8 @@ impl Checker {
         if let NodeData::ClassDeclaration(_) = program.arena().data(node) {
             self.check_class_declaration(program, node);
         }
-        if let NodeData::ClassExpression(d) = program.arena().data(node) {
-            let members = d.members.nodes.clone();
-            self.check_decorators_on_node(program, node);
-            self.check_grammar_class_like_declaration(program, node);
-            self.check_class_like_declaration(program, node);
-            for member in members {
-                self.check_grammar_modifiers(program, member);
-                self.check_decorators_on_node(program, member);
-                self.check_class_member(program, member);
-            }
+        if matches!(program.arena().kind(node), Kind::ClassExpression) {
+            let _ = self.check_class_expression(program, node);
         }
         if let NodeData::ExpressionStatement(_) = program.arena().data(node) {
             self.check_expression_statement(program, node);
@@ -7873,6 +7866,37 @@ impl Checker {
         self.check_class_method_overload_static_consistency(program, node);
         self.register_for_unused_identifiers_check(node);
     }
+
+    // Checks a class expression in an expression position (Go's
+    // `checkClassExpression`): heritage/duplicate-member checks, then member
+    // bodies. External-helper checks are deferred.
+    // Go: internal/checker/checker.go:Checker.checkClassExpression(10007)
+    fn check_class_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let NodeData::ClassExpression(d) = program.arena().data(node) else {
+            return self.error_type;
+        };
+        let members = d.members.nodes.clone();
+        self.check_decorators_on_node(program, node);
+        self.check_grammar_class_like_declaration(program, node);
+        self.check_class_like_declaration(program, node);
+        for member in members {
+            if !matches!(
+                program.arena().kind(member),
+                Kind::MethodDeclaration | Kind::GetAccessor | Kind::SetAccessor
+            ) {
+                self.check_grammar_modifiers(program, member);
+            }
+            self.check_decorators_on_node(program, member);
+            self.check_class_member(program, member);
+        }
+        self.register_for_unused_identifiers_check(node);
+        // DEFER(phase-4-checker-later): `checkClassExpressionExternalHelpers`.
+        program
+            .symbol_of_node(node)
+            .map(|sym| get_type_of_symbol(self, program, sym, program.globals()))
+            .unwrap_or(self.error_type)
+    }
+
     fn check_interface_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
         let NodeData::InterfaceDeclaration(d) = program.arena().data(node) else {
             return;

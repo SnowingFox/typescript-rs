@@ -14478,3 +14478,50 @@ fn class_instance_only_private_name_no_2804() {
         "a lone instance private field must not report TS2804; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 48: class-expression duplicate declarations ----
+
+// Go: internal/checker/checker.go:Checker.checkClassExpression(10007)
+#[test]
+fn class_expression_duplicate_properties_reports_2300() {
+    let count = duplicate_identifier_count("const C = class { x: number; x: string; };");
+    assert_eq!(
+        count, 2,
+        "duplicate properties in a class expression must report TS2300 twice"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3165)
+#[test]
+fn class_expression_static_prototype_conflicts_with_function_builtin_2699() {
+    let codes = diag_codes("const C = class { static prototype: number; };");
+    assert!(
+        codes.contains(&2699),
+        "expected TS2699 when a class expression declares static `prototype`; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3177)
+#[test]
+fn class_expression_static_and_instance_private_name_reports_2804() {
+    let count = diag_codes("const C = class { #foo = 1; static #foo = 2; };")
+        .into_iter()
+        .filter(|c| *c == 2804)
+        .count();
+    assert_eq!(
+        count, 2,
+        "instance and static private fields sharing `#foo` in a class expression must report TS2804 twice"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3157)
+#[test]
+fn class_expression_parameter_property_and_property_duplicate_reports_2300() {
+    let count = duplicate_identifier_count(
+        "const C = class { constructor(public x: number) {} x: string; };",
+    );
+    assert_eq!(
+        count, 2,
+        "parameter property plus property in a class expression must report TS2300 twice"
+    );
+}
