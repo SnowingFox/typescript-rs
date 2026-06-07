@@ -1,9 +1,10 @@
+use crate::core::check::get_effective_return_type_node;
 use crate::core::program::BoundProgram;
 use crate::core::signatures::{Signature, SignatureFlags};
 use crate::core::test_support::{MultiFileProgram, StubProgram};
 use crate::core::types::{ObjectFlags, ObjectType};
 use crate::core::Checker;
-use tsgo_ast::NodeData;
+use tsgo_ast::{Kind, NodeData, SymbolId};
 use tsgo_core::compileroptions::CompilerOptions;
 use tsgo_core::tristate::Tristate;
 
@@ -11633,4 +11634,156 @@ fn is_valid_property_access_public_member_is_true() {
     let access = expr_stmt_expression(&p, 2);
     let mut c = Checker::new();
     assert!(c.is_valid_property_access(&p, access, "x"));
+}
+
+// ---- T1-E batch 13: function body checking + return types ----
+
+// Go: internal/checker/checker.go:Checker.getWidenedTypeForReturnExpression (per-expr arm)
+#[test]
+fn get_widened_type_for_return_expression_widens_string_literal() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const f = (x: number) => \"s\";");
+    let arena = p.arena();
+    let arrow = {
+        let stmts = match arena.data(p.root()) {
+            NodeData::SourceFile(d) => d.statements.nodes.clone(),
+            _ => panic!("source file"),
+        };
+        let list = match arena.data(stmts[0]) {
+            NodeData::VariableStatement(d) => d.declaration_list,
+            _ => panic!("variable statement"),
+        };
+        let decl = match arena.data(list) {
+            NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+            _ => panic!("declaration list"),
+        };
+        match arena.data(decl) {
+            NodeData::VariableDeclaration(d) => d.initializer.expect("initializer"),
+            _ => panic!("variable declaration"),
+        }
+    };
+    let body = match arena.data(arrow) {
+        NodeData::ArrowFunction(d) => d.body,
+        _ => panic!("arrow"),
+    };
+    let mut c = Checker::new();
+    assert_eq!(
+        c.get_widened_type_for_return_expression(&p, body),
+        c.string_type(),
+        "fresh string literal widens to string"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getReturnTypeFromBody (block body)
+#[test]
+fn get_return_type_from_body_block_unions_widened_returns() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() { if (true) { return 1; } else { return \"s\"; } }",
+    );
+    let arena = p.arena();
+    let fn_decl = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes[0],
+        _ => panic!("function decl"),
+    };
+    let mut c = Checker::new();
+    let num = c.number_type();
+    let str = c.string_type();
+    let union = c.get_union_type(&[num, str]);
+    assert_eq!(
+        c.get_return_type_from_body(&p, fn_decl),
+        union,
+        "block with number|string returns should union-widen"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getReturnTypeFromAnnotation (declaration.Type())
+#[test]
+fn get_effective_return_type_node_finds_function_annotation() {
+    let p = StubProgram::parse_and_bind("/a.ts", "function f(): number { return 1; }");
+    let arena = p.arena();
+    let fn_decl = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes[0],
+        _ => panic!("function decl"),
+    };
+    let type_node = get_effective_return_type_node(&p, fn_decl).expect("return type node");
+    assert_eq!(arena.kind(type_node), Kind::NumberKeyword);
+}
+
+// Go: internal/checker/relater.go:Checker.hasEffectiveRestParameter(1746)
+#[test]
+fn has_effective_rest_parameter_when_rest_flag_set() {
+    let mut c = Checker::new();
+    let mut sig = Signature::new(SignatureFlags::HAS_REST_PARAMETER);
+    sig.parameters = vec![SymbolId(1)];
+    let sig_id = c.new_signature(sig);
+    assert!(c.has_effective_rest_parameter(sig_id));
+    let plain = c.new_signature(Signature::new(SignatureFlags::NONE));
+    assert!(!c.has_effective_rest_parameter(plain));
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarParameterList (TS1016)
+#[test]
+fn check_parameter_declaration_required_after_optional_reports_1016() {
+    let codes = diag_codes("function f(a?: number, b: number) {}");
+    assert!(
+        codes.contains(&1016),
+        "expected TS1016 required after optional; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarParameterList (TS1014)
+#[test]
+fn check_rest_parameter_not_last_reports_1014() {
+    let codes = diag_codes("function f(...a: number[], b: number) {}");
+    assert!(
+        codes.contains(&1014),
+        "expected TS1014 rest must be last; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkFunctionDeclaration / checkFunctionOrConstructorSymbolWorker
+#[test]
+fn check_function_declaration_duplicate_implementation_reports_2393() {
+    let codes = diag_codes("function f() {}\nfunction f() {}");
+    assert!(
+        codes.iter().filter(|&&c| c == 2393).count() >= 2,
+        "expected TS2393 on duplicate implementations; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkFunctionOrConstructorSymbolWorker (ambient overload)
+#[test]
+fn check_function_declaration_ambient_overload_mismatch_reports_2384() {
+    let codes = diag_codes("declare function foo(x: number): void;\nfunction foo(x: string) {}");
+    assert!(
+        codes.contains(&2384),
+        "expected TS2384 ambient/non-ambient overload mix; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkFunctionExpressionOrObjectLiteralMethod (widen return)
+#[test]
+fn check_function_expression_or_object_literal_method_widens_concise_return() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const f: () => string = () => \"s\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2322),
+        "widened string literal should satisfy () => string; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkReturnStatement
+#[test]
+fn check_return_statement_void_annotation_rejects_value_reports_2322() {
+    let codes = diag_codes("function f(): void { return 1; }");
+    assert!(
+        codes.contains(&2322),
+        "expected TS2322 returning number to void; got {codes:?}"
+    );
 }

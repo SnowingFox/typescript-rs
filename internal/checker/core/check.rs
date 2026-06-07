@@ -3340,26 +3340,41 @@ impl Checker {
             } else {
                 let types: Vec<TypeId> = return_exprs
                     .into_iter()
-                    .map(|e| {
-                        let t = self.check_expression(program, e);
-                        self.get_widened_literal_type(t)
-                    })
+                    .map(|e| self.get_widened_type_for_return_expression(program, e))
                     .collect();
                 let union = self.get_union_type(&types);
                 self.get_widened_type(union)
             }
         } else {
-            // A concise body's literal return type is widened to its base
-            // (Go's `getReturnTypeFromBody` -> `getWidenedType`): `() => "s"`
-            // returns `string`, not `"s"`.
-            let t = self.check_expression(program, body);
-            let widened = self.get_widened_literal_type(t);
-            self.get_widened_type(widened)
+            self.get_widened_type_for_return_expression(program, body)
         };
         if let Some(diagnostics) = self.diagnostics_by_file.get_mut(&handle) {
             diagnostics.truncate(before);
         }
         result
+    }
+
+    /// Widens the type of a return-position expression after checking it (Go's
+    /// `checkAndAggregateReturnExpressionTypes` per-expression widening followed
+    /// by `getWidenedType`).
+    ///
+    /// # Examples
+    ///
+    /// A fresh string literal `"s"` widens to `string`.
+    ///
+    /// # Side effects
+    ///
+    /// May record diagnostics from `check_expression` (callers that infer return
+    /// types roll these back).
+    // Go: internal/checker/checker.go:Checker.checkAndAggregateReturnExpressionTypes (per expr)
+    pub(crate) fn get_widened_type_for_return_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        expression: NodeId,
+    ) -> TypeId {
+        let t = self.check_expression(program, expression);
+        let widened = self.get_widened_literal_type(t);
+        self.get_widened_type(widened)
     }
 
     // Builds the lazy inference mapper that fixes the type variables inferred so
@@ -5391,10 +5406,8 @@ impl Checker {
         // the implicit-return / missing-return analysis. blocked-by: contextual
         // return-type inference + generator/async awaited types (lib globals, P6)
         // + grammar infrastructure + flow reachability.
-        if let NodeData::ReturnStatement(d) = program.arena().data(node) {
-            if let Some(expression) = d.expression {
-                self.check_return_statement_expression(program, node, expression);
-            }
+        if program.arena().kind(node) == Kind::ReturnStatement {
+            self.check_return_statement(program, node);
         }
         // A `namespace N { ... }` / `module "m" { ... }` declaration descends
         // into its body (Go's `checkModuleDeclaration` -> `checkSourceElement(body)`),
@@ -5454,20 +5467,7 @@ impl Checker {
     // body return-type inference.
     // Go: internal/checker/checker.go:Checker.checkFunctionExpressionOrObjectLiteralMethod
     fn check_function_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
-        // Assign contextual parameter types to un-annotated parameters before the
-        // body is descended into, so a body reference to such a parameter
-        // resolves with its contextual type (4bj).
-        self.contextually_check_function_expression(program, node);
-        if let NodeData::FunctionExpression(d) = program.arena().data(node) {
-            let params = d.parameters.nodes.clone();
-            for param in params {
-                self.check_parameter(program, param);
-            }
-            if let Some(body) = d.body {
-                self.check_statement(program, body);
-            }
-        }
-        self.error_type
+        self.check_function_expression_or_object_literal_method(program, node)
     }
 
     // Checks an arrow function (`(): T => { ... }`) appearing in an expression
@@ -5496,22 +5496,49 @@ impl Checker {
     // anonymous function typing + signature/`this` machinery + awaited types (P6).
     // Go: internal/checker/checker.go:Checker.checkArrowFunction / checkFunctionExpressionOrObjectLiteralMethodDeferred
     fn check_arrow_function(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        self.check_function_expression_or_object_literal_method(program, node)
+    }
+
+    /// Checks a function expression, arrow function, or object-literal method:
+    /// grammar, contextual parameter types, per-parameter checks, body descent,
+    /// and (when un-annotated) widened return-type inference from the body.
+    ///
+    /// # Side effects
+    ///
+    /// May record diagnostics; may infer a widened return type via
+    /// [`Checker::get_return_type_from_body`].
+    // Go: internal/checker/checker.go:Checker.checkFunctionExpressionOrObjectLiteralMethod(10074)
+    fn check_function_expression_or_object_literal_method(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
         self.check_grammar_function_like_declaration(program, node);
-        // Assign contextual parameter types to un-annotated parameters before the
-        // body is descended into, so a body reference to such a parameter
-        // resolves with its contextual type (4bj).
         self.contextually_check_function_expression(program, node);
-        if let NodeData::ArrowFunction(d) = program.arena().data(node) {
-            let params = d.parameters.nodes.clone();
-            let body = d.body;
-            for param in params {
-                self.check_parameter(program, param);
+        let params = function_like_parameters(program, node);
+        for (index, &param) in params.iter().enumerate() {
+            self.check_parameter_declaration(program, node, index, param);
+        }
+        match program.arena().data(node) {
+            NodeData::FunctionExpression(d) => {
+                if let Some(body) = d.body {
+                    if program.arena().kind(body) == Kind::Block {
+                        self.check_statement(program, body);
+                    }
+                }
             }
-            if program.arena().kind(body) == Kind::Block {
-                self.check_statement(program, body);
-            } else {
-                self.check_return_statement_expression(program, body, body);
+            NodeData::ArrowFunction(d) => {
+                let body = d.body;
+                if program.arena().kind(body) == Kind::Block {
+                    self.check_statement(program, body);
+                } else {
+                    self.check_return_statement_expression(program, body, body);
+                }
             }
+            _ => {}
+        }
+        if get_effective_return_type_node(program, node).is_none() {
+            let _ = self.get_return_type_from_body(program, node);
         }
         self.error_type
     }
@@ -5679,17 +5706,38 @@ impl Checker {
         false
     }
 
-    // Checks a `return <expr>` (Go's `checkReturnStatement`): the returned
-    // expression is always checked; when the enclosing function-like declaration
-    // carries an explicit return-type annotation (reachable via 4q's signature
-    // machinery), the returned expression's type must be assignable to that
-    // annotated return type, else `2322`.
+    /// Checks a `return` statement (Go's `checkReturnStatement` reachable subset):
+    /// grammar in ambient context, then assignability of the returned expression
+    /// to the enclosing function's explicit return-type annotation (`2322`).
+    ///
+    /// # Side effects
+    ///
+    /// May record diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkReturnStatement(4062)
+    fn check_return_statement(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        if self.check_grammar_statement_in_ambient_context(program, node) {
+            return;
+        }
+        let NodeData::ReturnStatement(d) = program.arena().data(node) else {
+            return;
+        };
+        if let Some(expression) = d.expression {
+            self.check_return_statement_expression(program, node, expression);
+        }
+    }
+
+    // Checks a `return <expr>` expression assignability (Go's
+    // `checkReturnExpression` / the expression half of `checkReturnStatement`):
+    // the returned expression is always checked; when the enclosing function-like
+    // declaration carries an explicit return-type annotation (reachable via 4q's
+    // signature machinery), the returned expression's type must be assignable to
+    // that annotated return type, else `2322`.
     //
     // DEFER(phase-4-checker-4r+): contextual return-type inference for an
     // un-annotated function, generator/async return unwrapping, and the
     // void/never special cases. blocked-by: contextual return-type inference +
     // generator/async awaited types (lib globals, P6).
-    // Go: internal/checker/checker.go:Checker.checkReturnStatement
+    // Go: internal/checker/checker.go:Checker.checkReturnExpression
     fn check_return_statement_expression(
         &mut self,
         program: &dyn BoundProgram,
@@ -6170,9 +6218,10 @@ impl Checker {
         };
         let (params, return_type, body) = (d.parameters.nodes.clone(), d.type_node, d.body);
         self.check_grammar_function_like_declaration(program, node);
+        self.check_function_or_method_declaration(program, node);
         self.check_return_type_predicate(program, &params, return_type);
-        for param in &params {
-            self.check_parameter(program, *param);
+        for (index, &param) in params.iter().enumerate() {
+            self.check_parameter_declaration(program, node, index, param);
         }
         if let Some(body) = body {
             self.check_statement(program, body);
@@ -7150,8 +7199,11 @@ impl Checker {
             .symbol(symbol)
             .flags
             .contains(SymbolFlags::CONSTRUCTOR);
+        let mut function_decls: Vec<NodeId> = Vec::new();
         let mut overloads: Vec<NodeId> = Vec::new();
         let mut implementation: Option<NodeId> = None;
+        let mut duplicate_function_implementation = false;
+        let mut body_declaration_count = 0usize;
         for decl in &decls {
             let kind = program.arena().kind(*decl);
             if !matches!(
@@ -7163,13 +7215,49 @@ impl Checker {
             ) {
                 continue;
             }
+            function_decls.push(*decl);
             let has_body = node_has_present_body(program, *decl);
             if has_body {
+                body_declaration_count += 1;
+                if body_declaration_count > 1 && !is_constructor {
+                    duplicate_function_implementation = true;
+                }
                 if implementation.is_none() {
                     implementation = Some(*decl);
                 }
             } else {
                 overloads.push(*decl);
+            }
+        }
+        if duplicate_function_implementation {
+            for decl in &function_decls {
+                let error_node = declaration_name_node(program, *decl).unwrap_or(*decl);
+                self.error(
+                    program,
+                    error_node,
+                    &tsgo_diagnostics::DUPLICATE_FUNCTION_IMPLEMENTATION,
+                    &[],
+                );
+            }
+        }
+        if !overloads.is_empty() {
+            let mut some_ambient = false;
+            let mut all_ambient = true;
+            for decl in &function_decls {
+                let ambient = is_effective_ambient_declaration(program, *decl);
+                some_ambient |= ambient;
+                all_ambient &= ambient;
+            }
+            if some_ambient && !all_ambient {
+                for decl in &function_decls {
+                    let error_node = declaration_name_node(program, *decl).unwrap_or(*decl);
+                    self.error(
+                        program,
+                        error_node,
+                        &tsgo_diagnostics::OVERLOAD_SIGNATURES_MUST_ALL_BE_AMBIENT_OR_NON_AMBIENT,
+                        &[],
+                    );
+                }
             }
         }
         if overloads.is_empty() {
@@ -7245,6 +7333,95 @@ impl Checker {
     /// # Side effects
     ///
     /// May push diagnostics.
+    /// Grammar-checks a rest parameter's position and modifiers (TS1014/1047/1048).
+    ///
+    /// # Side effects
+    ///
+    /// May record diagnostics.
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarParameterList (rest arm)
+    fn check_rest_parameter(
+        &mut self,
+        program: &dyn BoundProgram,
+        parameters: &[NodeId],
+        index: usize,
+        param: NodeId,
+    ) {
+        let NodeData::ParameterDeclaration(d) = program.arena().data(param) else {
+            return;
+        };
+        let Some(dot_dot_dot) = d.dot_dot_dot_token else {
+            return;
+        };
+        if index != parameters.len().saturating_sub(1) {
+            self.grammar_error_on_node(
+                program,
+                dot_dot_dot,
+                &tsgo_diagnostics::A_REST_PARAMETER_MUST_BE_LAST_IN_A_PARAMETER_LIST,
+                &[],
+            );
+        }
+        if d.question_token.is_some() {
+            self.grammar_error_on_node(
+                program,
+                d.question_token.unwrap(),
+                &tsgo_diagnostics::A_REST_PARAMETER_CANNOT_BE_OPTIONAL,
+                &[],
+            );
+        }
+        if d.initializer.is_some() {
+            self.grammar_error_on_node(
+                program,
+                d.name,
+                &tsgo_diagnostics::A_REST_PARAMETER_CANNOT_HAVE_AN_INITIALIZER,
+                &[],
+            );
+        }
+    }
+
+    /// Checks one parameter declaration: semantic rules plus list-position grammar
+    /// (required-after-optional TS1016 and rest-parameter rules).
+    ///
+    /// # Side effects
+    ///
+    /// May record diagnostics.
+    // Go: internal/checker/checker.go:Checker.checkParameter(2636) +
+    // internal/checker/grammarchecks.go:Checker.checkGrammarParameterList
+    fn check_parameter_declaration(
+        &mut self,
+        program: &dyn BoundProgram,
+        fn_node: NodeId,
+        index: usize,
+        param: NodeId,
+    ) {
+        self.check_parameter(program, param);
+        let params = function_like_parameters(program, fn_node);
+        self.check_rest_parameter(program, &params, index, param);
+        let mut seen_optional = false;
+        for (i, &p) in params.iter().enumerate() {
+            if i == index {
+                let NodeData::ParameterDeclaration(d) = program.arena().data(p) else {
+                    break;
+                };
+                if d.dot_dot_dot_token.is_none()
+                    && !is_optional_parameter(program, p)
+                    && d.initializer.is_none()
+                    && seen_optional
+                {
+                    self.grammar_error_on_node(
+                        program,
+                        d.name,
+                        &tsgo_diagnostics::A_REQUIRED_PARAMETER_CANNOT_FOLLOW_AN_OPTIONAL_PARAMETER,
+                        &[],
+                    );
+                }
+                break;
+            }
+            if is_optional_parameter(program, p) {
+                seen_optional = true;
+            }
+        }
+    }
+
     // Go: internal/checker/checker.go:Checker.checkParameter(2636)
     fn check_parameter(&mut self, program: &dyn BoundProgram, node: NodeId) {
         let param_data = match program.arena().data(node) {
@@ -9528,11 +9705,46 @@ fn function_like_body(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId
 // Returns the (return-type) annotation node of an arrow/function expression.
 // Go: internal/ast: FunctionLikeData type
 fn arrow_return_type_node(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    get_effective_return_type_node(program, node)
+}
+
+/// Returns the explicit return-type annotation node of a function-like
+/// declaration, if any (Go's `node.Type()` / `getReturnTypeFromAnnotation` input).
+///
+/// # Examples
+///
+/// `function f(): number` → `Some(type_node_for_number)`.
+///
+/// # Side effects
+///
+/// None (pure).
+// Go: internal/checker/checker.go:Checker.getReturnTypeFromAnnotation (declaration.Type())
+pub(crate) fn get_effective_return_type_node(
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Option<NodeId> {
     match program.arena().data(node) {
-        NodeData::ArrowFunction(d) => d.type_node,
+        NodeData::FunctionDeclaration(d) => d.type_node,
+        NodeData::MethodDeclaration(d) => d.type_node,
         NodeData::FunctionExpression(d) => d.type_node,
+        NodeData::ArrowFunction(d) => d.type_node,
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => d.type_node,
+        NodeData::ConstructorDeclaration(d) => d.type_node,
         _ => None,
     }
+}
+
+/// Reports whether a declaration is effectively ambient for overload-flag agreement
+/// (Go's `getEffectiveDeclarationFlags` ambient bit).
+fn is_effective_ambient_declaration(program: &dyn BoundProgram, node: NodeId) -> bool {
+    if program
+        .arena()
+        .flags(node)
+        .contains(tsgo_ast::NodeFlags::AMBIENT)
+    {
+        return true;
+    }
+    combined_modifier_flags(program, node).contains(ModifierFlags::AMBIENT)
 }
 
 // Reports whether a parameter declaration is optional for arity (a `?`,
