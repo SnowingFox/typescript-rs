@@ -39,7 +39,7 @@ use super::declared_types::{
     get_index_type_of_type, get_indexed_access_type, get_min_type_argument_count,
     get_property_of_type, get_property_of_union_or_intersection_type,
     get_property_type_for_index_type, get_type_from_type_node, get_type_of_property_of_type,
-    get_type_of_symbol, resolve_alias,
+    get_type_of_symbol, is_generic_object_type, resolve_alias,
 };
 use super::inference::{InferenceContext, InferencePriority};
 use super::mapper::TypeMapper;
@@ -858,10 +858,21 @@ impl Checker {
             );
             index_infos.push(info);
         }
-        if members.is_empty() && all_members.is_empty() {
-            if let Some(spread) = spread_acc {
+        if let Some(spread) = spread_acc {
+            if members.is_empty() && all_members.is_empty() {
                 return spread;
             }
+            // Go folds trailing named members into the accumulated spread at the
+            // end of `checkObjectLiteral` (`getSpreadType(spread,
+            // createObjectLiteralType())`).
+            let trailing = self.materialize_object_literal_type(
+                program,
+                node,
+                &members,
+                &properties,
+                &index_infos,
+            );
+            return self.get_spread_type(program, spread, trailing);
         }
         let object = ObjectType {
             members,
@@ -1102,7 +1113,35 @@ impl Checker {
         ) {
             return left;
         }
+        if is_generic_object_type(self, left) || is_generic_object_type(self, right) {
+            if self.is_empty_object_type(left) {
+                return right;
+            }
+            if self.get_type(left).flags().intersects(TypeFlags::INTERSECTION) {
+                if let Some(mut types) = self.get_type(left).intersection_types().map(|m| m.to_vec())
+                {
+                    if let Some(last_left) = types.last().copied() {
+                        if self.is_non_generic_object_type(last_left)
+                            && self.is_non_generic_object_type(right)
+                        {
+                            let last = types.len() - 1;
+                            types[last] = self.get_spread_type(program, types[last], right);
+                            return self.get_intersection_type(&types);
+                        }
+                    }
+                }
+            }
+            return self.get_intersection_type(&[left, right]);
+        }
         self.merge_object_types_for_spread(program, left, right)
+    }
+
+    // Reports whether `t` is a concrete (non-generic) object type (Go's
+    // `isNonGenericObjectType`).
+    // Go: internal/checker/checker.go:Checker.isNonGenericObjectType(13440)
+    fn is_non_generic_object_type(&mut self, t: TypeId) -> bool {
+        self.get_type(t).flags().intersects(TypeFlags::OBJECT)
+            && !is_generic_object_type(self, t)
     }
 
     // When a union is exactly one object type plus members that spread into an

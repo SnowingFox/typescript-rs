@@ -12916,3 +12916,85 @@ fn object_spread_intersection_type_merges_all_properties() {
         "{ a: string; b: number; }"
     );
 }
+
+// ---- T1-E batch 26: spread_acc trailing merge, generic intersection, never/any ----
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) / getSpreadType(13301)
+#[test]
+fn object_spread_before_named_property_merges_spread_acc() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: { x: number };\nconst o = { ...a, b: 1 };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ x: number; b: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13335)
+#[test]
+fn object_spread_generic_intersection_left_merges_last_object_constituent() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T>(t: T & { a: string }) {\n  const o = { ...t, b: 1 };\n  o;\n}",
+    );
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let body = match arena.data(stmts[0]) {
+        NodeData::FunctionDeclaration(d) => d.body.expect("function body"),
+        _ => panic!("function declaration"),
+    };
+    let body_stmts = match arena.data(body) {
+        NodeData::Block(d) => d.list.nodes.clone(),
+        _ => panic!("block"),
+    };
+    let usage = match arena.data(body_stmts[1]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expression statement"),
+    };
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "T & { a: string; b: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13308)
+#[test]
+fn object_spread_never_right_operand_returns_left() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const left: { a: number };\ndeclare const n: never;\nconst o = { ...left, ...n };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 3);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ a: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13302)
+#[test]
+fn object_spread_any_operand_yields_any() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: any;\nconst o = { ...a };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "any"
+    );
+}
