@@ -768,3 +768,18 @@ fn get_widened_literal_like_type_for_contextual_type_preserves_or_widens() {
         string
     );
 }
+
+// ---- T1-E batch 32: object-literal method/accessor members, unique symbol in type literals ----
+
+// Go: internal/checker/checker.go:Checker.getContextualTypeForObjectLiteralElement(29596)
+#[test]
+fn get_contextual_type_of_object_literal_set_accessor_is_property_type() {
+    let p =
+        StubProgram::parse_and_bind("/a.ts", "const o: { set x(v: number) } = { set x(v) { } };");
+    let setter = object_literal_member(&p, 0);
+    let mut c = Checker::new();
+    assert_eq!(
+        c.get_contextual_type(&p, setter, ContextFlags::NONE),
+        Some(c.number_type())
+    );
+}

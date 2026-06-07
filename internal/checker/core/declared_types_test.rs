@@ -21,6 +21,22 @@ fn member_symbol(p: &StubProgram, enum_name: &str, member: &str) -> SymbolId {
         .unwrap_or_else(|| panic!("missing member {enum_name}.{member}"))
 }
 
+// Go: internal/checker/checker.go:Checker.getTypeFromTypeOperatorNode(22826)
+#[test]
+fn property_signature_unique_symbol_type_is_unique_es_symbol() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface I { readonly sym: unique symbol; }");
+    let mut c = Checker::new();
+    let i_type = get_declared_type_of_symbol(&mut c, &p, local(&p, "I"), None);
+    let prop = get_property_of_type(&c, i_type, "sym").expect("sym member");
+    let t = get_type_of_symbol(&mut c, &p, prop, None);
+    assert!(
+        c.get_type(t)
+            .flags()
+            .intersects(TypeFlags::UNIQUE_ES_SYMBOL),
+        "interface `readonly sym: unique symbol` must resolve to a unique symbol type"
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.getPropertiesOfType / getNamedMembers(21907)
 #[test]
 fn get_properties_of_type_excludes_reserved_index_member() {

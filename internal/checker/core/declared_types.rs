@@ -2185,6 +2185,14 @@ fn get_type_of_variable_or_property(
         NodeData::VariableDeclaration(d) => d.type_node,
         NodeData::PropertySignature(d) | NodeData::PropertyDeclaration(d) => d.type_node,
         NodeData::GetAccessorDeclaration(d) => d.type_node,
+        // A setter's declared type is its value-parameter annotation (Go's
+        // `getAnnotatedAccessorType` / `getEffectiveSetAccessorTypeAnnotationNode`).
+        NodeData::SetAccessorDeclaration(d) => d.parameters.nodes.first().and_then(|&param| {
+            match program.arena().data(param) {
+                NodeData::ParameterDeclaration(p) => p.type_node,
+                _ => None,
+            }
+        }),
         // A parameter symbol's type comes from its annotation (Go's
         // `getTypeOfParameter` -> `getTypeOfSymbol` -> annotation), so a
         // signature's parameter types resolve for call checking (4q).

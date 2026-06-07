@@ -2404,7 +2404,7 @@ fn modifier_nodes(arena: &NodeArena, node: NodeId) -> Vec<NodeId> {
     let modifiers = match arena.data(node) {
         NodeData::FunctionDeclaration(d) => d.modifiers.as_ref(),
         NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d.modifiers.as_ref(),
-        NodeData::PropertyDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::PropertyDeclaration(d) | NodeData::PropertySignature(d) => d.modifiers.as_ref(),
         NodeData::MethodDeclaration(d) => d.modifiers.as_ref(),
         NodeData::ConstructorDeclaration(d) => d.modifiers.as_ref(),
         NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {

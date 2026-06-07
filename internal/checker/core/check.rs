@@ -637,12 +637,11 @@ impl Checker {
     // `checkExpressionForMutableLocation` path); the index signatures are
     // readonly too.
     //
-    // DEFER(phase-4-checker-4bi+): spread members (`{...o}`), get/set/method
-    // members, contextual typing (the type flowing INTO the literal), the
-    // unique-symbol computed names (`getPropertyNameFromType` for unique ESSymbol),
-    // and the destructuring-pattern member optionality. blocked-by: full
-    // `getSpreadType` (union/index/private), accessor/method signature collection,
-    // contextual type propagation, late binding, and destructuring-assignment typing.
+    // DEFER(phase-4-checker-4bi+): contextual typing (the type flowing INTO the
+    // literal) for destructuring patterns, generic object-literal method
+    // instantiation, and accessor body return-type inference without annotations.
+    // blocked-by: destructuring-assignment typing, generic call-site inference,
+    // and full accessor typing (`getTypeOfAccessors`).
     // Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076)
     fn check_object_literal(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let members_nodes = match program.arena().data(node) {
@@ -677,9 +676,6 @@ impl Checker {
         let mut spread_acc: Option<TypeId> = None;
         let spread_only = members_nodes.len() == 1;
         for member_decl in members_nodes {
-            // DEFER(phase-4-checker-4bh+): accessor (`get`/`set`) and method
-            // (`m(){}`) members are skipped; property assignments, shorthand
-            // properties, and spread assignments are typed.
             if let NodeData::SpreadAssignment(d) = program.arena().data(member_decl) {
                 let raw_spread_type = self.check_expression(program, d.expression);
                 let spread_type =
@@ -753,9 +749,70 @@ impl Checker {
                 }
                 continue;
             }
+            let member_kind = program.arena().kind(member_decl);
+            if matches!(member_kind, Kind::GetAccessor | Kind::SetAccessor) {
+                let name_node = match program.arena().data(member_decl) {
+                    NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
+                        d.name
+                    }
+                    _ => continue,
+                };
+                let computed_name_type =
+                    if program.arena().kind(name_node) == Kind::ComputedPropertyName {
+                        Some(self.check_computed_property_name(program, name_node))
+                    } else {
+                        None
+                    };
+                self.check_accessor_declaration(program, member_decl);
+                let Some(symbol) = program.symbol_of_node(member_decl) else {
+                    continue;
+                };
+                if let Some(name_type) = computed_name_type {
+                    if !self
+                        .get_type(name_type)
+                        .flags()
+                        .intersects(TypeFlags::STRING_OR_NUMBER_LITERAL_OR_UNIQUE)
+                    {
+                        let string_number_symbol = self.get_union_type(&[
+                            self.string_type,
+                            self.number_type,
+                            self.es_symbol_type,
+                        ]);
+                        if self.is_type_assignable_to(program, name_type, string_number_symbol) {
+                            if self.is_type_assignable_to(program, name_type, self.number_type) {
+                                has_computed_number_property = true;
+                            } else if self
+                                .is_type_assignable_to(program, name_type, self.es_symbol_type)
+                            {
+                                has_computed_symbol_property = true;
+                            } else {
+                                has_computed_string_property = true;
+                            }
+                        }
+                    } else {
+                        let name = get_property_name_from_type(self, name_type);
+                        members.insert(name.clone(), symbol);
+                        properties.push(symbol);
+                        all_members.push(ObjectLiteralMember {
+                            symbol,
+                            computed_name_type: Some(name_type),
+                        });
+                    }
+                    continue;
+                }
+                let name = program.symbol(symbol).name.clone();
+                members.insert(name.clone(), symbol);
+                properties.push(symbol);
+                all_members.push(ObjectLiteralMember {
+                    symbol,
+                    computed_name_type: None,
+                });
+                continue;
+            }
             let name_node = match program.arena().data(member_decl) {
                 NodeData::PropertyAssignment(d) => d.name,
                 NodeData::ShorthandPropertyAssignment(d) => d.name,
+                NodeData::MethodDeclaration(d) => d.name,
                 _ => continue,
             };
             // A computed property name (`[expr]: v`) types its bracket
@@ -769,12 +826,14 @@ impl Checker {
                 };
             // Go's member loop dispatches on the member kind: a property
             // assignment types its initializer, a shorthand property types the
-            // referenced identifier (Go's `checkObjectLiteral` switch).
-            let member_type = match program.arena().kind(member_decl) {
+            // referenced identifier, and a method is checked like a function
+            // expression (Go's `checkObjectLiteral` switch).
+            let member_type = match member_kind {
                 Kind::PropertyAssignment => self.check_property_assignment(program, member_decl),
                 Kind::ShorthandPropertyAssignment => {
                     self.check_shorthand_property_assignment(program, member_decl)
                 }
+                Kind::MethodDeclaration => self.check_object_literal_method(program, member_decl),
                 _ => continue,
             };
             // A non-literal computed name assignable to `string | number |
@@ -837,11 +896,15 @@ impl Checker {
             };
             // Go: `newSymbolEx(SymbolFlagsProperty | member.Flags, member.Name, checkFlags)`
             // then `links.resolvedType = t`. Object-literal properties are never
-            // optional in the reachable subset, so only `Property` is carried;
-            // `member_check_flags` carries `Readonly` in a const context.
+            // optional in the reachable subset; methods carry the binder's method
+            // flags in addition to `Property`.
+            let member_flags = program
+                .symbol_of_node(member_decl)
+                .map(|s| program.symbol(s).flags)
+                .unwrap_or(SymbolFlags::empty());
             let prop = self.new_object_literal_property(
                 &name,
-                SymbolFlags::PROPERTY,
+                SymbolFlags::PROPERTY | member_flags,
                 member_check_flags,
                 member_type,
             );
@@ -7081,12 +7144,38 @@ impl Checker {
                     self.check_return_statement_expression(program, body, body);
                 }
             }
+            NodeData::MethodDeclaration(d) => {
+                if let Some(body) = d.body {
+                    self.check_statement(program, body);
+                }
+            }
             _ => {}
         }
         if get_effective_return_type_node(program, node).is_none() {
             let _ = self.get_return_type_from_body(program, node);
         }
+        if program.arena().kind(node) == Kind::MethodDeclaration {
+            if let Some(symbol) = program.symbol_of_node(node) {
+                return get_type_of_symbol(self, program, symbol, program.globals());
+            }
+        }
         self.error_type
+    }
+
+    // Types an object-literal method member: grammar, computed-name check (when
+    // the caller has not already done so), function-body checking, and the
+    // method's declared/call signature type (Go's `checkObjectLiteralMethod`).
+    //
+    // DEFER(phase-4-checker-later): `instantiateTypeWithSingleGenericCallSignature`
+    // for generic object-literal methods. blocked-by: generic call-site inference.
+    // Go: internal/checker/checker.go:Checker.checkObjectLiteralMethod(13771)
+    fn check_object_literal_method(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
+        self.check_grammar_function_like_declaration(program, node);
+        self.check_function_expression_or_object_literal_method(program, node)
     }
 
     // Checks a function-like declaration's return-type annotation when it is a

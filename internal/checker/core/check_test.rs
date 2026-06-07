@@ -13368,3 +13368,86 @@ fn source_statements(p: &StubProgram) -> Vec<tsgo_ast::NodeId> {
         _ => panic!("source file"),
     }
 }
+
+// ---- T1-E batch 32: object-literal method/accessor members, unique symbol in type literals ----
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076)
+#[test]
+fn object_literal_method_member_is_callable_property() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { m() { return 1 } };\no.m;");
+    let literal = var_decl_initializer_batch5(&p, 0);
+    let access = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let o_type = c.check_expression(&p, literal);
+    let m_type = c.check_expression(&p, access);
+    let prop = crate::core::declared_types::get_property_of_type(&c, o_type, "m")
+        .expect("object literal with a method must expose the method as a named property");
+    let prop_type = crate::core::declared_types::get_type_of_symbol(&mut c, &p, prop, None);
+    assert_eq!(m_type, prop_type);
+    assert_eq!(c.get_signatures_of_type(prop_type).len(), 1);
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteralMethod(13771)
+#[test]
+fn object_literal_method_contextual_return_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { m(): number } = { m() { return 1 } };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "a contextually typed object-literal method body must satisfy the contextual return type; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) (accessor arm)
+#[test]
+fn object_literal_get_accessor_member_is_readable_property() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { get x() { return 1 } };\no.x;");
+    let literal = var_decl_initializer_batch5(&p, 0);
+    let access = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let o_type = c.check_expression(&p, literal);
+    let x_type = c.check_expression(&p, access);
+    let prop = crate::core::declared_types::get_property_of_type(&c, o_type, "x")
+        .expect("object literal with a getter must expose the accessor as a named property");
+    let prop_type = crate::core::declared_types::get_type_of_symbol(&mut c, &p, prop, None);
+    assert_eq!(x_type, prop_type);
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) (accessor arm)
+#[test]
+fn object_literal_get_accessor_contextual_return_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { get x(): number } = { get x() { return 1 } };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "a contextually typed object-literal getter body must satisfy the contextual return type; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromTypeOperatorNode(22826)
+#[test]
+fn type_literal_unique_symbol_property_is_unique_es_symbol() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { readonly sym: unique symbol; }\ndeclare const i: I;\ni.sym;",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let sym_type = c.check_expression(&p, access);
+    assert!(
+        c.get_type(sym_type)
+            .flags()
+            .intersects(crate::core::types::TypeFlags::UNIQUE_ES_SYMBOL),
+        "a `readonly sym: unique symbol` property must resolve to a unique symbol type"
+    );
+}
