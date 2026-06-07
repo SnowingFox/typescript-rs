@@ -639,9 +639,9 @@ impl Checker {
     // members, contextual typing (the type flowing INTO the literal), the
     // late-bound *named* member for a string/number-literal or unique-symbol
     // computed name (`isTypeUsableAsPropertyName` -> `getPropertyNameFromType`),
-    // and the destructuring-pattern member optionality. blocked-by: spread-type
-    // merge (`getSpreadType`), accessor/method signature collection, contextual
-    // type propagation, late binding, and destructuring-assignment typing.
+    // and the destructuring-pattern member optionality. blocked-by: full
+    // `getSpreadType` (union/index/private), accessor/method signature collection,
+    // contextual type propagation, late binding, and destructuring-assignment typing.
     // Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076)
     fn check_object_literal(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let members_nodes = match program.arena().data(node) {
@@ -673,9 +673,30 @@ impl Checker {
         let mut has_computed_number_property = false;
         let mut has_computed_symbol_property = false;
         for member_decl in members_nodes {
-            // DEFER(phase-4-checker-4bh+): spread (`{...o}`), accessor
-            // (`get`/`set`), and method (`m(){}`) members are skipped; only
-            // property assignments and shorthand properties are typed.
+            // DEFER(phase-4-checker-4bh+): accessor (`get`/`set`) and method
+            // (`m(){}`) members are skipped; property assignments, shorthand
+            // properties, and spread assignments are typed.
+            if let NodeData::SpreadAssignment(d) = program.arena().data(member_decl) {
+                let spread_type = self.check_expression(program, d.expression);
+                if !self.is_valid_spread_type(spread_type) {
+                    self.error(
+                        program,
+                        member_decl,
+                        &tsgo_diagnostics::SPREAD_TYPES_MAY_ONLY_BE_CREATED_FROM_OBJECT_TYPES,
+                        &[],
+                    );
+                    continue;
+                }
+                self.merge_spread_into_object_literal(
+                    program,
+                    spread_type,
+                    member_check_flags,
+                    &mut members,
+                    &mut properties,
+                    &mut all_members,
+                );
+                continue;
+            }
             let name_node = match program.arena().data(member_decl) {
                 NodeData::PropertyAssignment(d) => d.name,
                 NodeData::ShorthandPropertyAssignment(d) => d.name,
@@ -811,6 +832,59 @@ impl Checker {
             symbol,
             super::types::TypeData::Object(object),
         )
+    }
+
+    // Reports whether `t` may be spread into an object literal (Go's
+    // `isValidSpreadType` reachable subset: `any`, `object`, `nonPrimitive`).
+    //
+    // DEFER(phase-4-checker-4bh+): union/intersection constituents, instantiable
+    // non-primitive, and the `removeDefinitelyFalsyTypes`/`getBaseConstraint`
+    // normalization. blocked-by: full spread-type merge.
+    // Go: internal/checker/checker.go:Checker.isValidSpreadType(13418)
+    fn is_valid_spread_type(&self, t: TypeId) -> bool {
+        let flags = self.get_type(t).flags();
+        flags.intersects(
+            TypeFlags::ANY
+                | TypeFlags::NON_PRIMITIVE
+                | TypeFlags::OBJECT,
+        )
+    }
+
+    // Merges the own properties of `spread_type` into an object literal under
+    // construction; spread properties override same-named properties already
+    // present (Go's `getSpreadType` for non-generic object types).
+    //
+    // DEFER(phase-4-checker-4bh+): private/protected skipping, accessors/methods,
+    // index-signature merge, and readonly propagation. blocked-by: full
+    // `getSpreadType`.
+    // Go: internal/checker/checker.go:Checker.getSpreadType(13301)
+    fn merge_spread_into_object_literal(
+        &mut self,
+        program: &dyn BoundProgram,
+        spread_type: TypeId,
+        member_check_flags: tsgo_ast::CheckFlags,
+        members: &mut SymbolTable,
+        properties: &mut Vec<tsgo_ast::SymbolId>,
+        all_members: &mut Vec<ObjectLiteralMember>,
+    ) {
+        use super::declared_types::{get_apparent_type, get_properties_of_type, get_type_of_symbol};
+        let apparent = get_apparent_type(self, spread_type);
+        let globals = program.globals();
+        for (name, prop_sym) in get_properties_of_type(self, apparent) {
+            let prop_type = get_type_of_symbol(self, program, prop_sym, globals);
+            let prop = self.new_object_literal_property(
+                &name,
+                SymbolFlags::PROPERTY,
+                member_check_flags,
+                prop_type,
+            );
+            members.insert(name, prop);
+            properties.push(prop);
+            all_members.push(ObjectLiteralMember {
+                symbol: prop,
+                computed_name_type: None,
+            });
+        }
     }
 
     // Builds the index signature of kind `key_type` (`string`/`number`/`symbol`)
@@ -2161,10 +2235,10 @@ impl Checker {
     //
     // Checks a prefix unary expression (`-x`, `!x`, `++x`, ...).
     //
-    // DEFER(phase-4-checker-4o+): bigint-literal fast paths (`-1n`), the
-    // `maybeTypeOfKindConsideringBaseConstraint` ES-symbol guard, and the
-    // `await`-suggestion path on arithmetic operands. blocked-by: bigint literal
-    // typing + base-constraint type facts.
+    // DEFER(phase-4-checker-4o+): the
+    // `maybeTypeOfKindConsideringBaseConstraint` ES-symbol guard and the
+    // `await`-suggestion path on arithmetic operands. blocked-by: base-constraint
+    // type facts + awaited-type machinery (lib globals, P6).
     // Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression(10814)
     fn check_prefix_unary_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let (operator, operand) = match program.arena().data(node) {
@@ -2191,6 +2265,13 @@ impl Checker {
                 }
                 _ => {}
             }
+        }
+        if operand_kind == Kind::BigIntLiteral && operator == Kind::MinusToken {
+            let magnitude = tsgo_jsnum::parse_pseudo_big_int(program.arena().text(operand));
+            let negated = tsgo_jsnum::PseudoBigInt::new(&magnitude, true);
+            let negated_text = format!("{negated}n");
+            let regular = self.get_bigint_literal_type(&negated_text);
+            return self.get_fresh_type_of_literal_type(regular);
         }
         match operator {
             Kind::PlusToken | Kind::MinusToken | Kind::TildeToken => {
@@ -2422,10 +2503,7 @@ impl Checker {
             // number-ish operands and yield `number` (Go's arithmetic arm).
             //
             // DEFER(phase-4-checker-4o+): the `await`-suggestion path on
-            // arithmetic operands and shift-simplification suggestions outside
-            // enum members (Go's `errorOrSuggestion` suggestion collection).
-            // blocked-by: awaited-type machinery (lib globals, P6) + suggestion
-            // diagnostic sink.
+            // arithmetic operands. blocked-by: awaited-type machinery (lib globals, P6).
             Kind::MinusToken
             | Kind::AsteriskToken
             | Kind::AsteriskAsteriskToken
@@ -3111,7 +3189,7 @@ impl Checker {
 
     // When the right-hand side of a shift is a constant >= 32, reports that the
     // shift is equivalent to shifting by the remainder mod 32. In enum members
-    // this is an error; elsewhere Go emits a suggestion (DEFER: suggestion sink).
+    // this is an error; elsewhere it is a suggestion.
     // Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12347)
     fn check_shift_simplification(
         &mut self,
@@ -3152,13 +3230,11 @@ impl Checker {
             .parent(right)
             .and_then(|parent| program.arena().parent(parent))
             .is_some_and(|grandparent| program.arena().kind(grandparent) == Kind::EnumMember);
-        if !is_enum_member {
-            return;
-        }
         let left_text = program.arena().text(left);
         let op = tsgo_scanner::token_to_string(operator);
-        self.error(
+        self.add_error_or_suggestion(
             program,
+            is_enum_member,
             node,
             &tsgo_diagnostics::THIS_OPERATION_CAN_BE_SIMPLIFIED_THIS_SHIFT_IS_IDENTICAL_TO_0_1_2,
             &[left_text, op, simplified_text.as_str()],
@@ -8895,6 +8971,17 @@ impl Checker {
             .unwrap_or(&[])
     }
 
+    /// Returns suggestion diagnostics for `file`, type-checking it first if needed
+    /// (Go's `getSuggestionDiagnostics`).
+    // Go: internal/checker/checker.go:Checker.getSuggestionDiagnostics(13861)
+    pub fn get_suggestion_diagnostics(&mut self, file: NodeId) -> &[Diagnostic] {
+        self.check_source_file(file);
+        self.suggestion_diagnostics_by_file
+            .get(&file)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     /// Returns diagnostics already recorded for `file` without type-checking.
     #[cfg(test)]
     pub(crate) fn peek_recorded_diagnostics(&self, file: NodeId) -> &[Diagnostic] {
@@ -9432,6 +9519,42 @@ impl Checker {
             .entry(program.file_handle())
             .or_default()
             .push(diagnostic);
+    }
+
+    // Records a suggestion diagnostic at `node` (Go's `addErrorOrSuggestion` when
+    // `isError` is false).
+    // Go: internal/checker/checker.go:Checker.addErrorOrSuggestion(13917)
+    pub(crate) fn add_suggestion(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        message: &'static Message,
+        args: &[&str],
+    ) {
+        let mut diagnostic = self.diagnostic_for_node(program, node, message, args);
+        diagnostic.category = Category::Suggestion;
+        self.suggestion_diagnostics_by_file
+            .entry(program.file_handle())
+            .or_default()
+            .push(diagnostic);
+    }
+
+    // Routes a diagnostic to the error or suggestion collection (Go's
+    // `addErrorOrSuggestion`).
+    // Go: internal/checker/checker.go:Checker.addErrorOrSuggestion(13917)
+    pub(crate) fn add_error_or_suggestion(
+        &mut self,
+        program: &dyn BoundProgram,
+        is_error: bool,
+        node: NodeId,
+        message: &'static Message,
+        args: &[&str],
+    ) {
+        if is_error {
+            self.error(program, node, message, args);
+        } else {
+            self.add_suggestion(program, node, message, args);
+        }
     }
 
     // -- Unused-identifiers subsystem (T1-C5) ---------------------------------

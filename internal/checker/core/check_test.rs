@@ -12396,3 +12396,91 @@ fn array_literal_spread_number_array_variable_yields_number_array() {
         "spread of number[] should yield Array<number>"
     );
 }
+
+// ---- T1-E batch 20: object spread, shift suggestions, prefix -1n ----
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12347) / errorOrSuggestion
+#[test]
+fn shift_by_32_outside_enum_reports_6807_as_suggestion() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "1 << 32;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(root);
+    let suggestions = c.get_suggestion_diagnostics(root);
+    assert_eq!(
+        suggestions.len(),
+        1,
+        "expected one suggestion, got {suggestions:?}"
+    );
+    assert_eq!(suggestions[0].code, 6807);
+    assert_eq!(
+        suggestions[0].category,
+        tsgo_diagnostics::Category::Suggestion
+    );
+    assert_eq!(
+        suggestions[0].message,
+        "This operation can be simplified. This shift is identical to `1 << 0`."
+    );
+    let errors = c.peek_recorded_diagnostics(root);
+    assert!(
+        errors.is_empty(),
+        "shift simplification outside enum must not be an error; got {errors:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression(10828)
+#[test]
+fn prefix_minus_bigint_literal_yields_negated_fresh_bigint() {
+    let p = StubProgram::parse_and_bind("/a.ts", "-1n;");
+    let sub = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    let neg_one = c.get_bigint_literal_type("-1n");
+    let expected = c.get_fresh_type_of_literal_type(neg_one);
+    assert_eq!(c.check_expression(&p, sub), expected);
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12330)
+#[test]
+fn bigint_left_shift_literals_yields_bigint() {
+    let p = StubProgram::parse_and_bind("/a.ts", "1n << 2n;");
+    let sub = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, sub), c.bigint_type());
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13210)
+#[test]
+fn object_literal_spread_merges_spread_properties() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: 1, ...{ b: 2 } };\no;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ a: number; b: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13231)
+#[test]
+fn object_literal_spread_non_object_reports_2698() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "const o = { ...1 };"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2698);
+    assert_eq!(
+        diags[0].message,
+        "Spread types may only be created from object types."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType (right overrides left)
+#[test]
+fn object_literal_spread_overrides_same_named_property() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { a: \"x\", ...{ a: 1 } };\no.a;");
+    let access = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, access), c.number_type());
+}

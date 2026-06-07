@@ -274,6 +274,10 @@ pub struct Checker {
     /// per-file `DiagnosticsCollection` / `collection.GetDiagnosticsForFile`).
     /// Each file's `Vec` preserves production order.
     diagnostics_by_file: FxHashMap<NodeId, Vec<check::Diagnostic>>,
+    /// Suggestion diagnostics (Go's `suggestionDiagnostics`), partitioned by
+    /// file like [`Checker::diagnostics_by_file`].
+    // Go: internal/checker/checker.go:Checker.suggestionDiagnostics
+    suggestion_diagnostics_by_file: FxHashMap<NodeId, Vec<check::Diagnostic>>,
     /// The `JSX.IntrinsicElements` type, used to resolve intrinsic (lowercase)
     /// JSX tags. Resolved from lib globals in Go; until those land (P6) callers
     /// inject it via [`Checker::set_jsx_intrinsic_elements`].
@@ -571,6 +575,7 @@ impl Checker {
             instantiation_count: 0,
             current_node: None,
             diagnostics_by_file: FxHashMap::default(),
+            suggestion_diagnostics_by_file: FxHashMap::default(),
             jsx_intrinsic_elements: None,
             emit_resolver: OnceCell::new(),
             program: None,
