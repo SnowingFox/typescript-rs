@@ -12668,3 +12668,87 @@ fn arithmetic_on_thenable_operand_suggests_await() {
         "Did you forget to use 'await'?"
     );
 }
+
+// ---- T1-E batch 23: spread falsy filter, index merge, awaited unwrap ----
+
+// Go: internal/checker/checker.go:Checker.isValidSpreadType(13418)
+#[test]
+fn object_spread_nullable_object_union_is_valid() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | null;\nconst o = { ...x };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2698),
+        "null should be stripped before spread validation; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isValidSpreadType(13418)
+#[test]
+fn object_spread_falsy_literal_union_is_valid() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | false;\nconst o = { ...x };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2698),
+        "false should be stripped before spread validation; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13301) / getUnionIndexInfos(13424)
+#[test]
+fn object_spread_merges_string_index_signatures() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A {\n  [k: string]: number;\n}\ninterface B {\n  [k: string]: string;\n}\ndeclare const a: A;\ndeclare const b: B;\nconst o = { ...a, ...b };\ndeclare const key: string;\no[key];",
+    );
+    let access = expr_stmt_expression(&p, 6);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, access);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "string | number"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias(30941)
+#[test]
+fn arithmetic_on_nested_promise_operand_suggests_await() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\ndeclare const p: Promise<Promise<number>>;\np - 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let left_side = diags
+        .iter()
+        .find(|d| d.code == 2362)
+        .expect("expected left-hand arithmetic operand error");
+    assert_eq!(left_side.related_information.len(), 1);
+    assert_eq!(left_side.related_information[0].code, 2773);
+    assert_eq!(
+        left_side.related_information[0].message,
+        "Did you forget to use 'await'?"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isValidSpreadType(13418) / getSpreadType(13301)
+#[test]
+fn object_spread_after_falsy_removal_yields_object_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: null | { a: number };\nconst o = { ...x };\no.a;",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, access), c.number_type());
+}

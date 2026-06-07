@@ -35,7 +35,8 @@ use super::contextual::ContextFlags;
 use super::declared_types::{
     fill_missing_type_arguments, get_apparent_type, get_applicable_index_info_for_name,
     get_constraint_of_type_parameter, get_declaration_of_alias_symbol, get_declared_type_of_symbol,
-    get_default_from_type_parameter, get_indexed_access_type, get_min_type_argument_count,
+    get_default_from_type_parameter, get_index_info_of_type, get_index_infos_of_type,
+    get_index_type_of_type, get_indexed_access_type, get_min_type_argument_count,
     get_property_of_type, get_property_of_union_or_intersection_type,
     get_property_type_for_index_type, get_type_from_type_node, get_type_of_property_of_type,
     get_type_of_symbol, resolve_alias,
@@ -673,13 +674,16 @@ impl Checker {
         let mut has_computed_number_property = false;
         let mut has_computed_symbol_property = false;
         let mut index_infos: Vec<IndexInfoId> = Vec::new();
+        let mut spread_acc: Option<TypeId> = None;
         let spread_only = members_nodes.len() == 1;
         for member_decl in members_nodes {
             // DEFER(phase-4-checker-4bh+): accessor (`get`/`set`) and method
             // (`m(){}`) members are skipped; property assignments, shorthand
             // properties, and spread assignments are typed.
             if let NodeData::SpreadAssignment(d) = program.arena().data(member_decl) {
-                let spread_type = self.check_expression(program, d.expression);
+                let raw_spread_type = self.check_expression(program, d.expression);
+                let spread_type =
+                    self.normalize_type_for_spread_validation(program, raw_spread_type);
                 if !self.is_valid_spread_type(program, spread_type) {
                     self.error(
                         program,
@@ -716,14 +720,22 @@ impl Checker {
                         return self.get_union_type(&spread_results);
                     }
                 }
-                self.merge_spread_into_object_literal(
-                    program,
-                    spread_type,
-                    member_check_flags,
-                    &mut members,
-                    &mut properties,
-                    &mut all_members,
-                );
+                if members.is_empty() && all_members.is_empty() {
+                    spread_acc = Some(match spread_acc {
+                        None => spread_type,
+                        Some(left) => self.get_spread_type(program, left, spread_type),
+                    });
+                } else {
+                    self.merge_spread_into_object_literal(
+                        program,
+                        spread_type,
+                        member_check_flags,
+                        &mut members,
+                        &mut properties,
+                        &mut all_members,
+                    );
+                    spread_acc = None;
+                }
                 continue;
             }
             let name_node = match program.arena().data(member_decl) {
@@ -841,6 +853,11 @@ impl Checker {
             );
             index_infos.push(info);
         }
+        if members.is_empty() && all_members.is_empty() {
+            if let Some(spread) = spread_acc {
+                return spread;
+            }
+        }
         let object = ObjectType {
             members,
             properties,
@@ -869,13 +886,13 @@ impl Checker {
     // `removeDefinitelyFalsyTypes` normalization. blocked-by: full spread-type merge.
     // Go: internal/checker/checker.go:Checker.isValidSpreadType(13418)
     fn is_valid_spread_type(&mut self, program: &dyn BoundProgram, t: TypeId) -> bool {
-        let base = self.get_base_constraint_or_type(program, t);
-        let flags = self.get_type(base).flags();
+        let t = self.normalize_type_for_spread_validation(program, t);
+        let flags = self.get_type(t).flags();
         if flags.intersects(TypeFlags::UNION | TypeFlags::INTERSECTION) {
             let members: Vec<TypeId> = self
-                .get_type(base)
+                .get_type(t)
                 .union_types()
-                .or_else(|| self.get_type(base).intersection_types())
+                .or_else(|| self.get_type(t).intersection_types())
                 .unwrap_or(&[])
                 .to_vec();
             return members
@@ -883,8 +900,32 @@ impl Checker {
                 .all(|&m| self.is_valid_spread_type(program, m));
         }
         flags.intersects(
-            TypeFlags::ANY | TypeFlags::NON_PRIMITIVE | TypeFlags::OBJECT,
+            TypeFlags::ANY
+                | TypeFlags::NON_PRIMITIVE
+                | TypeFlags::OBJECT
+                | TypeFlags::INSTANTIABLE_NON_PRIMITIVE,
         )
+    }
+
+    // Normalizes a spread operand the way Go's `isValidSpreadType` does:
+    // `removeDefinitelyFalsyTypes(mapType(t, getBaseConstraintOrType))`.
+    // Go: internal/checker/checker.go:Checker.isValidSpreadType(13418)
+    fn normalize_type_for_spread_validation(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> TypeId {
+        let mapped = if self.get_type(t).flags().intersects(TypeFlags::UNION) {
+            let members: Vec<TypeId> = self
+                .distributed_types(t)
+                .into_iter()
+                .map(|m| self.get_base_constraint_or_type(program, m))
+                .collect();
+            self.get_union_type(&members)
+        } else {
+            self.get_base_constraint_or_type(program, t)
+        };
+        self.remove_definitely_falsy_types(mapped)
     }
 
     // Merges the own properties of `spread_type` into an object literal under
@@ -1038,12 +1079,49 @@ impl Checker {
             }
             members.insert(name, prop);
         }
+        let index_infos = self.get_union_index_infos(&[left, right]);
         let object = ObjectType {
             members,
             properties,
+            index_infos,
             ..Default::default()
         };
         self.new_object_type(ObjectFlags::ANONYMOUS, None, object)
+    }
+
+    // Unions the index signatures shared by every type in `types` (Go's
+    // `getUnionIndexInfos`).
+    // Go: internal/checker/checker.go:Checker.getUnionIndexInfos(13424)
+    fn get_union_index_infos(&mut self, types: &[TypeId]) -> Vec<IndexInfoId> {
+        if types.is_empty() {
+            return Vec::new();
+        }
+        let source_infos = get_index_infos_of_type(self, types[0]);
+        let mut result = Vec::new();
+        for id in source_infos {
+            let index_type = self.index_info(id).key_type;
+            if types
+                .iter()
+                .all(|&t| get_index_info_of_type(self, t, index_type).is_some())
+            {
+                let value_types: Vec<TypeId> = types
+                    .iter()
+                    .map(|&t| get_index_type_of_type(self, t, index_type).unwrap())
+                    .collect();
+                let value_type = self.get_union_type(&value_types);
+                let is_readonly = types.iter().any(|&t| {
+                    get_index_info_of_type(self, t, index_type)
+                        .map(|info_id| self.index_info(info_id).is_readonly)
+                        .unwrap_or(false)
+                });
+                result.push(self.new_index_info(IndexInfo::new(
+                    index_type,
+                    value_type,
+                    is_readonly,
+                )));
+            }
+        }
+        result
     }
 
     // Builds the index signature of kind `key_type` (`string`/`number`/`symbol`)
@@ -3431,7 +3509,41 @@ impl Checker {
     // `getAwaitedTypeNoAlias` reachable subset).
     // Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias
     fn get_awaited_type_no_alias(&mut self, program: &dyn BoundProgram, t: TypeId) -> TypeId {
-        self.get_promised_type_of_promise(program, t).unwrap_or(t)
+        self.get_awaited_type_no_alias_impl(program, t, &mut Vec::new())
+    }
+
+    fn get_awaited_type_no_alias_impl(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        stack: &mut Vec<TypeId>,
+    ) -> TypeId {
+        if self.get_type(t).flags().intersects(TypeFlags::ANY) {
+            return t;
+        }
+        if self.get_type(t).flags().intersects(TypeFlags::UNION) {
+            let members: Vec<TypeId> = self
+                .distributed_types(t)
+                .into_iter()
+                .map(|m| self.get_awaited_type_no_alias_impl(program, m, stack))
+                .collect();
+            return self.get_union_type(&members);
+        }
+        if stack.contains(&t) {
+            return t;
+        }
+        stack.push(t);
+        let result = if let Some(promised) = self.get_promised_type_of_promise(program, t) {
+            if promised == t {
+                t
+            } else {
+                self.get_awaited_type_no_alias_impl(program, promised, stack)
+            }
+        } else {
+            t
+        };
+        stack.pop();
+        result
     }
 
     // Generalizes literal operands for operator-error display when their base
@@ -3507,12 +3619,10 @@ impl Checker {
     ) -> bool {
         let number_or_bigint = self.number_or_bigint_type;
         if !self.is_type_assignable_to(program, t, number_or_bigint) {
+            let awaited = self.get_awaited_type_no_alias(program, t);
             let maybe_missing_await = is_await_valid
-                && self
-                    .get_promised_type_of_promise(program, t)
-                    .is_some_and(|awaited| {
-                        self.is_type_assignable_to(program, awaited, number_or_bigint)
-                    });
+                && awaited != t
+                && self.is_type_assignable_to(program, awaited, number_or_bigint);
             self.error_and_maybe_suggest_await(
                 program,
                 operand,
