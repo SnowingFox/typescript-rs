@@ -14073,3 +14073,77 @@ fn private_auto_accessor_write_rejects_incompatible_assignment() {
         "private auto-accessor assignment must use write type; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 42: auto-accessor modifier ordering and static typing ----
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(499)
+#[test]
+fn abstract_must_precede_accessor_modifier_reports_1029() {
+    let codes = diag_codes("abstract class C { accessor abstract x: number; }");
+    assert!(
+        codes.contains(&1029),
+        "expected TS1029 when accessor precedes abstract; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18370)
+#[test]
+fn static_auto_accessor_read_type_resolves() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { static accessor x: number = 1; }\nconst n: number = C.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "static auto-accessor read type must resolve from annotation; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors(18429)
+#[test]
+fn static_auto_accessor_assignment_rejects_incompatible_value() {
+    let codes = diag_codes("class C { static accessor x: number = 1; }\nC.x = \"\";");
+    assert!(
+        codes.contains(&2322),
+        "static auto-accessor assignment must reject incompatible values; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(369)
+#[test]
+fn static_must_precede_accessor_modifier_reports_1029() {
+    let codes = diag_codes("class C { accessor static x: number = 1; }");
+    assert!(
+        codes.contains(&1029),
+        "expected TS1029 when accessor precedes static; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(478)
+#[test]
+fn abstract_auto_accessor_outside_abstract_class_reports_1253() {
+    let codes = diag_codes("class C { abstract accessor x: number; }");
+    assert!(
+        codes.contains(&1253),
+        "expected TS1253 when abstract auto-accessor appears outside an abstract class; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18370)
+#[test]
+fn abstract_auto_accessor_without_initializer_typechecks() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "abstract class C { abstract accessor x: number; }\nclass D extends C { accessor x: number = 1; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "abstract auto-accessor declaration and concrete override must typecheck; got {diags:?}"
+    );
+}

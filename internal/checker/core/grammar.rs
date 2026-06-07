@@ -181,6 +181,13 @@ impl Checker {
                             &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_PARAMETER,
                             &["static"],
                         );
+                    } else if flags.contains(ModifierFlags::ACCESSOR) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &["static", "accessor"],
+                        );
                     } else if flags.contains(ModifierFlags::ABSTRACT) {
                         return self.grammar_error_on_node(
                             program,
@@ -387,6 +394,14 @@ impl Checker {
                                     &["async", "abstract"],
                                 );
                             }
+                        }
+                        if flags.contains(ModifierFlags::ACCESSOR) {
+                            return self.grammar_error_on_node(
+                                program,
+                                modifier,
+                                &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                                &["abstract", "accessor"],
+                            );
                         }
                     }
                     flags |= ModifierFlags::ABSTRACT;
