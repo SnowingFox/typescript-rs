@@ -14371,3 +14371,52 @@ fn declare_class_get_accessor_auto_accessor_set_duplicate_reports_2300() {
         "get, auto-accessor, and set with the same name must report TS2300 three times (C3)"
     );
 }
+
+// ---- T1-E batch 46: constructor parameter-property duplicate members ----
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3157)
+#[test]
+fn parameter_property_and_property_duplicate_reports_2300() {
+    let count =
+        duplicate_identifier_count("class C { constructor(public x: number) {} x: string; }");
+    assert_eq!(
+        count, 2,
+        "parameter property plus property with the same name must report TS2300 twice"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3157)
+#[test]
+fn parameter_property_and_get_accessor_duplicate_reports_2300() {
+    let count = duplicate_identifier_count(
+        "class C { constructor(public x: number) {} get x() { return 1; } }",
+    );
+    assert_eq!(
+        count, 2,
+        "parameter property plus get accessor with the same name must report TS2300 twice"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3157)
+#[test]
+fn parameter_property_and_auto_accessor_duplicate_reports_2300() {
+    let count = duplicate_identifier_count(
+        "class C { constructor(public x: number) {} accessor x: string = \"a\"; }",
+    );
+    assert_eq!(
+        count, 2,
+        "parameter property plus auto-accessor with the same name must report TS2300 twice"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3157)
+#[test]
+fn parameter_property_and_set_accessor_duplicate_reports_2300() {
+    let count = duplicate_identifier_count(
+        "class C { constructor(public x: number) {} set x(value: number) {} }",
+    );
+    assert_eq!(
+        count, 2,
+        "parameter property plus set accessor with the same name must report TS2300 twice"
+    );
+}

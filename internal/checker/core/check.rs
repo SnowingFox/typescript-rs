@@ -8451,8 +8451,7 @@ impl Checker {
     // property-vs-accessor combinations the binder intentionally lets merge.
     //
     // DEFER(phase-4-checker): the `checkPrivateNames` static/instance private-name
-    // conflict, the static `prototype` name conflict, constructor
-    // parameter-property declarations, computed/late-bound names (the
+    // conflict, the static `prototype` name conflict, computed/late-bound names (the
     // `__computed` members are bound anonymously and only merge after checker
     // late-binding), and type-literal members. blocked-by: private-identifier
     // symbol naming + parameter-property binding + checker late-binding +
@@ -8521,8 +8520,13 @@ impl Checker {
         let mut static_names: std::collections::HashMap<String, i32> =
             std::collections::HashMap::new();
         for member in object_type_member_nodes(program, node) {
-            // DEFER: constructor parameter-property declarations.
             if program.arena().kind(member) == Kind::Constructor {
+                self.register_constructor_parameter_property_names(
+                    program,
+                    node,
+                    member,
+                    &mut instance_names,
+                );
                 continue;
             }
             let Some(symbol) = program.symbol_of_node(member) else {
@@ -8531,10 +8535,6 @@ impl Checker {
             let Some(kind) = classify_property_or_accessor(program, member) else {
                 continue;
             };
-            // Only members that MERGED into one symbol can be duplicates.
-            if program.symbol(symbol).declarations.len() <= 1 {
-                continue;
-            }
             let is_static = has_static_modifier(program.arena(), member);
             let name = program.symbol(symbol).name.clone();
             let names = if is_static {
@@ -8542,6 +8542,17 @@ impl Checker {
             } else {
                 &mut instance_names
             };
+            if !is_static
+                && self.maybe_report_parameter_property_member_conflict(
+                    program, node, names, &name, kind, is_static,
+                )
+            {
+                continue;
+            }
+            // Only members that MERGED into one symbol can be duplicates.
+            if program.symbol(symbol).declarations.len() <= 1 {
+                continue;
+            }
             let state = names.get(&name).copied().unwrap_or(0);
             if state == 0 {
                 // On first occurrence just record the kind.
@@ -8552,6 +8563,67 @@ impl Checker {
                 self.report_duplicate_member_errors(program, node, &name, is_static);
             }
         }
+    }
+
+    // Records constructor parameter-property names for duplicate detection against
+    // class members. Parameter properties do not yet merge into class-member symbols
+    // at bind time, so this pass seeds the instance-name state machine before the
+    // merged-symbol walk (Go `checkObjectTypeForDuplicateDeclarations` 3157-3159).
+    // Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3157)
+    fn register_constructor_parameter_property_names(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        constructor: NodeId,
+        instance_names: &mut std::collections::HashMap<String, i32>,
+    ) {
+        let NodeData::ConstructorDeclaration(d) = program.arena().data(constructor) else {
+            return;
+        };
+        for &param in &d.parameters.nodes {
+            if !is_parameter_property_declaration(program, param)
+                || is_parameter_property_binding_pattern(program, param)
+            {
+                continue;
+            }
+            let NodeData::ParameterDeclaration(pd) = program.arena().data(param) else {
+                continue;
+            };
+            let Some(name) = property_name_text(program, pd.name) else {
+                continue;
+            };
+            let state = instance_names.get(&name).copied().unwrap_or(0);
+            if state == 0 {
+                instance_names.insert(name, 1);
+            } else if state == 1 {
+                instance_names.insert(name.clone(), 3);
+                self.report_duplicate_member_errors(program, node, &name, false);
+            }
+        }
+    }
+
+    // When a parameter property already registered `name`, report a class member
+    // with an incompatible kind (property vs accessor). Returns `true` when the
+    // conflict was reported and the merged-symbol pass should be skipped.
+    fn maybe_report_parameter_property_member_conflict(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        names: &mut std::collections::HashMap<String, i32>,
+        name: &str,
+        kind: i32,
+        is_static: bool,
+    ) -> bool {
+        let state = names.get(name).copied().unwrap_or(0);
+        if state == 0 || state == 3 {
+            return false;
+        }
+        if state == 1 || (state == 2 && kind != 2) {
+            names.insert(name.to_string(), 3);
+            self.report_duplicate_member_errors(program, node, name, is_static);
+            return true;
+        }
+        false
     }
 
     // Auto-accessors bind as accessor symbols and conflict with standalone get/set
@@ -8615,6 +8687,32 @@ impl Checker {
     ) {
         for member in object_type_member_nodes(program, node) {
             if program.arena().kind(member) == Kind::Constructor {
+                if let NodeData::ConstructorDeclaration(d) = program.arena().data(member) {
+                    for &param in &d.parameters.nodes {
+                        if !is_parameter_property_declaration(program, param)
+                            || is_parameter_property_binding_pattern(program, param)
+                        {
+                            continue;
+                        }
+                        let NodeData::ParameterDeclaration(pd) = program.arena().data(param)
+                        else {
+                            continue;
+                        };
+                        if property_name_text(program, pd.name).as_deref() != Some(name) {
+                            continue;
+                        }
+                        let Some(symbol) = program.symbol_of_node(param) else {
+                            continue;
+                        };
+                        let display = super::nodebuilder::symbol_to_string(program, symbol);
+                        self.error_skipping_leading_trivia(
+                            program,
+                            pd.name,
+                            &tsgo_diagnostics::DUPLICATE_IDENTIFIER_0,
+                            &[&display],
+                        );
+                    }
+                }
                 continue;
             }
             let Some(symbol) = program.symbol_of_node(member) else {
@@ -11645,6 +11743,16 @@ fn is_parameter_property_declaration(program: &dyn BoundProgram, node: NodeId) -
             node,
             tsgo_ast::ModifierFlags::PARAMETER_PROPERTY_MODIFIER,
         )
+}
+
+fn is_parameter_property_binding_pattern(program: &dyn BoundProgram, param: NodeId) -> bool {
+    let NodeData::ParameterDeclaration(d) = program.arena().data(param) else {
+        return false;
+    };
+    matches!(
+        program.arena().kind(d.name),
+        Kind::ObjectBindingPattern | Kind::ArrayBindingPattern
+    )
 }
 
 // Reports whether `node` has the given syntactic modifier.
