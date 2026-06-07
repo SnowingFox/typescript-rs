@@ -11912,3 +11912,118 @@ fn check_return_statement_void_annotation_rejects_value_reports_2322() {
         "expected TS2322 returning number to void; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 15: prefix/postfix unary expressions ----
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (numeric literal)
+#[test]
+fn prefix_minus_on_numeric_literal_yields_negated_fresh_literal() {
+    let p = StubProgram::parse_and_bind("/a.ts", "-1;");
+    let expr = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    let ty = c.check_expression(&p, expr);
+    let neg_one = c.get_number_literal_type(tsgo_jsnum::Number::from(-1.0));
+    let fresh = c.get_fresh_type_of_literal_type(neg_one);
+    assert_eq!(ty, fresh);
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (numeric literal)
+#[test]
+fn prefix_plus_on_numeric_literal_yields_fresh_positive_literal() {
+    let p = StubProgram::parse_and_bind("/a.ts", "+42;");
+    let expr = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    let ty = c.check_expression(&p, expr);
+    let lit = c.get_number_literal_type(tsgo_jsnum::Number::from(42.0));
+    assert_eq!(ty, c.get_fresh_type_of_literal_type(lit));
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (ExclamationToken)
+#[test]
+fn prefix_bang_on_true_returns_false_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "!true;");
+    let expr = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, expr), c.false_type());
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (ExclamationToken)
+#[test]
+fn prefix_bang_on_false_returns_true_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "!false;");
+    let expr = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, expr), c.true_type());
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (ExclamationToken)
+#[test]
+fn prefix_bang_on_boolean_variable_returns_boolean() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const b: boolean;\n!b;");
+    let expr = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, expr), c.boolean_type());
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (MinusToken)
+#[test]
+fn prefix_minus_on_number_variable_returns_number() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const n: number;\n-n;");
+    let expr = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, expr), c.number_type());
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (PlusPlusToken)
+#[test]
+fn prefix_increment_on_number_variable_returns_number() {
+    let p = StubProgram::parse_and_bind("/a.ts", "let n = 0;\n++n;");
+    let expr = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, expr), c.number_type());
+}
+
+// Go: internal/checker/checker.go:Checker.checkReferenceExpression (2357)
+#[test]
+fn prefix_increment_on_non_reference_reports_2357() {
+    let codes = diag_codes("++1;");
+    assert!(
+        codes.contains(&2357),
+        "expected TS2357 on ++literal; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPostfixUnaryExpression
+#[test]
+fn postfix_decrement_on_number_variable_returns_number() {
+    let p = StubProgram::parse_and_bind("/a.ts", "let n = 0;\nn--;");
+    let expr = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, expr), c.number_type());
+}
+
+// Go: internal/checker/checker.go:Checker.getUnaryResultType
+#[test]
+fn get_unary_result_type_bigint_operand_returns_bigint() {
+    let c = Checker::new();
+    assert_eq!(
+        c.get_unary_result_type(c.bigint_type()),
+        c.bigint_type(),
+        "bigint operand yields bigint unary result"
+    );
+    assert_eq!(
+        c.get_unary_result_type(c.number_type()),
+        c.number_type(),
+        "number operand yields number unary result"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (2356)
+#[test]
+fn prefix_increment_on_string_operand_reports_2356() {
+    let codes = diag_codes("let s = \"x\";\n++s;");
+    assert!(
+        codes.contains(&2356),
+        "expected TS2356 on ++string; got {codes:?}"
+    );
+}

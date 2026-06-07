@@ -448,6 +448,8 @@ impl Checker {
                 }
             }
             Kind::NewExpression => self.check_new_expression(program, node),
+            Kind::PrefixUnaryExpression => self.check_prefix_unary_expression(program, node),
+            Kind::PostfixUnaryExpression => self.check_postfix_unary_expression(program, node),
             Kind::BinaryExpression => self.check_binary_expression(program, node),
             Kind::JsxSelfClosingElement => self.check_jsx_self_closing_element(program, node),
             Kind::JsxElement => self.check_jsx_element(program, node),
@@ -2137,6 +2139,198 @@ impl Checker {
     // right-operand `2359` via the synthetic global `Function`) and `in` (result
     // `boolean`; operand assignability `2322`) arms.
     //
+    // Checks a prefix unary expression (`-x`, `!x`, `++x`, ...).
+    //
+    // DEFER(phase-4-checker-4o+): bigint-literal fast paths (`-1n`), the
+    // `maybeTypeOfKindConsideringBaseConstraint` ES-symbol guard, and the
+    // `await`-suggestion path on arithmetic operands. blocked-by: bigint literal
+    // typing + base-constraint type facts.
+    // Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression(10814)
+    fn check_prefix_unary_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let (operator, operand) = match program.arena().data(node) {
+            NodeData::PrefixUnaryExpression(d) => (d.operator, d.operand),
+            _ => return self.error_type,
+        };
+        let operand_type = self.check_expression(program, operand);
+        if operand_type == self.silent_never_type {
+            return self.silent_never_type;
+        }
+        let operand_kind = program.arena().kind(operand);
+        if operand_kind == Kind::NumericLiteral {
+            match operator {
+                Kind::MinusToken => {
+                    let value = tsgo_jsnum::from_string(program.arena().text(operand));
+                    let negated = tsgo_jsnum::Number::from(-f64::from(value));
+                    let regular = self.get_number_literal_type(negated);
+                    return self.get_fresh_type_of_literal_type(regular);
+                }
+                Kind::PlusToken => {
+                    let value = tsgo_jsnum::from_string(program.arena().text(operand));
+                    let regular = self.get_number_literal_type(value);
+                    return self.get_fresh_type_of_literal_type(regular);
+                }
+                _ => {}
+            }
+        }
+        match operator {
+            Kind::PlusToken | Kind::MinusToken | Kind::TildeToken => {
+                let operand_type =
+                    self.check_non_null_type(program, operand_type, operand);
+                let op = tsgo_scanner::token_to_string(operator);
+                if self
+                    .get_type(operand_type)
+                    .flags()
+                    .intersects(TypeFlags::ES_SYMBOL_LIKE)
+                {
+                    self.error(
+                        program,
+                        operand,
+                        &tsgo_diagnostics::THE_0_OPERATOR_CANNOT_BE_APPLIED_TO_TYPE_SYMBOL,
+                        &[&op],
+                    );
+                }
+                if operator == Kind::PlusToken {
+                    if self
+                        .get_type(operand_type)
+                        .flags()
+                        .intersects(TypeFlags::BIG_INT_LIKE)
+                    {
+                        let ty_str = super::nodebuilder::type_to_string(
+                            self,
+                            program,
+                            self.get_base_type_of_literal_type(operand_type),
+                        );
+                        self.error(
+                            program,
+                            operand,
+                            &tsgo_diagnostics::OPERATOR_0_CANNOT_BE_APPLIED_TO_TYPE_1,
+                            &[&op, ty_str.as_str()],
+                        );
+                    }
+                    return self.number_type;
+                }
+                return self.get_unary_result_type(operand_type);
+            }
+            Kind::ExclamationToken => {
+                self.check_truthiness_of_type(program, operand_type, operand);
+                let facts =
+                    self.get_type_facts(operand_type) & (TypeFacts::TRUTHY | TypeFacts::FALSY);
+                return if facts == TypeFacts::TRUTHY {
+                    self.false_type
+                } else if facts == TypeFacts::FALSY {
+                    self.true_type
+                } else {
+                    self.boolean_type
+                };
+            }
+            Kind::PlusPlusToken | Kind::MinusMinusToken => {
+                let non_null =
+                    self.check_non_null_type(program, operand_type, operand);
+                let ok = self.check_arithmetic_operand_type(
+                    program,
+                    operand,
+                    non_null,
+                    &tsgo_diagnostics::AN_ARITHMETIC_OPERAND_MUST_BE_OF_TYPE_ANY_NUMBER_BIGINT_OR_AN_ENUM_TYPE,
+                );
+                if ok {
+                    self.check_reference_expression(
+                        program,
+                        operand,
+                        &tsgo_diagnostics::THE_OPERAND_OF_AN_INCREMENT_OR_DECREMENT_OPERATOR_MUST_BE_A_VARIABLE_OR_A_PROPERTY_ACCESS,
+                        &tsgo_diagnostics::THE_OPERAND_OF_AN_INCREMENT_OR_DECREMENT_OPERATOR_MAY_NOT_BE_AN_OPTIONAL_PROPERTY_ACCESS,
+                    );
+                }
+                return self.get_unary_result_type(operand_type);
+            }
+            _ => self.error_type,
+        }
+    }
+
+    // Checks a postfix unary expression (`x++`, `x--`).
+    //
+    // DEFER(phase-4-checker-4o+): the `await`-suggestion path on arithmetic
+    // operands. blocked-by: awaited-type machinery (lib globals, P6).
+    // Go: internal/checker/checker.go:Checker.checkPostfixUnaryExpression(10868)
+    fn check_postfix_unary_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let operand = match program.arena().data(node) {
+            NodeData::PostfixUnaryExpression(d) => d.operand,
+            _ => return self.error_type,
+        };
+        let operand_type = self.check_expression(program, operand);
+        if operand_type == self.silent_never_type {
+            return self.silent_never_type;
+        }
+        let non_null = self.check_non_null_type(program, operand_type, operand);
+        let ok = self.check_arithmetic_operand_type(
+            program,
+            operand,
+            non_null,
+            &tsgo_diagnostics::AN_ARITHMETIC_OPERAND_MUST_BE_OF_TYPE_ANY_NUMBER_BIGINT_OR_AN_ENUM_TYPE,
+        );
+        if ok {
+            self.check_reference_expression(
+                program,
+                operand,
+                &tsgo_diagnostics::THE_OPERAND_OF_AN_INCREMENT_OR_DECREMENT_OPERATOR_MUST_BE_A_VARIABLE_OR_A_PROPERTY_ACCESS,
+                &tsgo_diagnostics::THE_OPERAND_OF_AN_INCREMENT_OR_DECREMENT_OPERATOR_MAY_NOT_BE_AN_OPTIONAL_PROPERTY_ACCESS,
+            );
+        }
+        self.get_unary_result_type(operand_type)
+    }
+
+    // Returns the result type of a unary `-`/`~`/`++`/`--` on `operand_type`
+    // (Go's `getUnaryResultType`).
+    //
+    // DEFER(phase-4-checker-4o+): the `isTypeAssignableToKind` any/unknown arm
+    // that widens bigint results to `number | bigint`. blocked-by: per-kind
+    // assignability slices.
+    // Go: internal/checker/checker.go:Checker.getUnaryResultType(10882)
+    pub(crate) fn get_unary_result_type(&self, operand_type: TypeId) -> TypeId {
+        if self
+            .get_type(operand_type)
+            .flags()
+            .intersects(TypeFlags::BIG_INT_LIKE)
+        {
+            if self.get_type(operand_type).flags().intersects(
+                TypeFlags::ANY | TypeFlags::UNKNOWN | TypeFlags::NUMBER_LIKE,
+            ) {
+                return self.number_or_bigint_type;
+            }
+            return self.bigint_type;
+        }
+        self.number_type
+    }
+
+    // Validates that `expr` is a reference suitable for `++`/`--` (identifier or
+    // access expression, not an optional chain).
+    //
+    // DEFER(phase-4-checker-4n+): destructuring targets and private identifiers.
+    // blocked-by: destructuring reference forms.
+    // Go: internal/checker/checker.go:Checker.checkReferenceExpression(13062)
+    fn check_reference_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        expr: NodeId,
+        invalid_reference_message: &'static Message,
+        invalid_optional_chain_message: &'static Message,
+    ) -> bool {
+        let node = skip_outer_expressions(program, expr);
+        let kind = program.arena().kind(node);
+        if kind != Kind::Identifier && !is_access_expression(kind) {
+            self.error(program, expr, invalid_reference_message, &[]);
+            return false;
+        }
+        if program
+            .arena()
+            .flags(node)
+            .contains(NodeFlags::OPTIONAL_CHAIN)
+        {
+            self.error(program, expr, invalid_optional_chain_message, &[]);
+            return false;
+        }
+        true
+    }
+
     // DEFER(phase-4-checker-4ab+): the comma operator and
     // destructuring-assignment targets, plus the per-operator refinements noted
     // on each arm below. blocked-by: per-operator slices land later; lib globals
