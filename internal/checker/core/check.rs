@@ -8515,6 +8515,7 @@ impl Checker {
         program: &dyn BoundProgram,
         node: NodeId,
     ) {
+        self.check_auto_accessor_conflicts_with_accessors(program, node);
         let mut instance_names: std::collections::HashMap<String, i32> =
             std::collections::HashMap::new();
         let mut static_names: std::collections::HashMap<String, i32> =
@@ -8548,6 +8549,52 @@ impl Checker {
             } else if state == 1 || (state == 2 && kind != 2) {
                 // Error on a second property, or a property/accessor combination.
                 names.insert(name.clone(), 3);
+                self.report_duplicate_member_errors(program, node, &name, is_static);
+            }
+        }
+    }
+
+    // Auto-accessors bind as accessor symbols and conflict with standalone get/set
+    // accessors at bind time (Go's `SymbolFlagsAccessorExcludes`), so they never
+    // merge into one multi-declaration symbol. The merged-symbol duplicate pass
+    // below therefore misses `get x` + `accessor x` combinations; flag every
+    // same-named get/set/auto-accessor member when an auto-accessor coexists with
+    // a standalone accessor (Go `duplicateIdentifierChecks.ts` C3/C4).
+    // Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3122)
+    fn check_auto_accessor_conflicts_with_accessors(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) {
+        let mut groups: std::collections::HashMap<(bool, String), Vec<NodeId>> =
+            std::collections::HashMap::new();
+        for member in object_type_member_nodes(program, node) {
+            if !is_class_accessor_member(program, member) {
+                continue;
+            }
+            let Some(name_node) = member_name_node_for_duplicate(program, member) else {
+                continue;
+            };
+            let Some(name) = property_name_text(program, name_node) else {
+                continue;
+            };
+            let is_static = has_static_modifier(program.arena(), member);
+            groups.entry((is_static, name)).or_default().push(member);
+        }
+        for ((is_static, name), members) in groups {
+            if members.len() < 2 {
+                continue;
+            }
+            let has_auto_accessor = members
+                .iter()
+                .any(|&member| is_auto_accessor_member(program, member));
+            let has_get = members
+                .iter()
+                .any(|&member| program.arena().kind(member) == Kind::GetAccessor);
+            let has_set = members
+                .iter()
+                .any(|&member| program.arena().kind(member) == Kind::SetAccessor);
+            if has_auto_accessor && (has_get || has_set) {
                 self.report_duplicate_member_errors(program, node, &name, is_static);
             }
         }
@@ -12336,6 +12383,18 @@ fn classify_property_or_accessor(program: &dyn BoundProgram, member: NodeId) -> 
         Kind::GetAccessor | Kind::SetAccessor => Some(2),
         _ => None,
     }
+}
+
+fn is_class_accessor_member(program: &dyn BoundProgram, member: NodeId) -> bool {
+    matches!(
+        program.arena().kind(member),
+        Kind::GetAccessor | Kind::SetAccessor
+    ) || is_auto_accessor_member(program, member)
+}
+
+fn is_auto_accessor_member(program: &dyn BoundProgram, member: NodeId) -> bool {
+    program.arena().kind(member) == Kind::PropertyDeclaration
+        && has_accessor_modifier(program.arena(), member)
 }
 
 // Reports whether `node` carries the `accessor` modifier (an auto-accessor

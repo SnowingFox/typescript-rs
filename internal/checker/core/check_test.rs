@@ -14277,3 +14277,97 @@ fn declare_accessor_conflict_reports_1243() {
         "expected TS1243 when declare combines with accessor; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 45: auto-accessor modifier conflicts and duplicate members ----
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(383)
+#[test]
+fn duplicate_accessor_modifier_reports_1030() {
+    let codes = diag_codes("class C { accessor accessor x: number = 1; }");
+    assert!(
+        codes.contains(&1030),
+        "expected TS1030 when accessor modifier is duplicated; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(385)
+#[test]
+fn readonly_accessor_conflict_reports_1243() {
+    let codes = diag_codes("class C { readonly accessor x: number = 1; }");
+    assert!(
+        codes.contains(&1243),
+        "expected TS1243 when readonly combines with accessor; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(400)
+#[test]
+fn accessor_readonly_conflict_reports_1243() {
+    let codes = diag_codes("class C { accessor readonly x: number = 1; }");
+    assert!(
+        codes.contains(&1243),
+        "expected TS1243 when accessor precedes readonly; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(358)
+#[test]
+fn protected_auto_accessor_private_identifier_reports_18010() {
+    let codes = diag_codes("class C { protected accessor #x: number = 1; }");
+    assert!(
+        codes.contains(&18010),
+        "expected TS18010 when protected accessibility combines with a private identifier; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(358)
+#[test]
+fn private_auto_accessor_private_identifier_reports_18010() {
+    let codes = diag_codes("class C { private accessor #x: number = 1; }");
+    assert!(
+        codes.contains(&18010),
+        "expected TS18010 when private accessibility combines with a private identifier; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(443)
+#[test]
+fn abstract_static_auto_accessor_conflict_reports_1243() {
+    let codes = diag_codes("abstract class C { static abstract accessor x: number; }");
+    assert!(
+        codes.contains(&1243),
+        "expected TS1243 when static combines with abstract on an auto-accessor; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(450)
+#[test]
+fn abstract_private_auto_accessor_conflict_reports_1243() {
+    let codes = diag_codes("abstract class C { private abstract accessor x: number; }");
+    assert!(
+        codes.contains(&1243),
+        "expected TS1243 when private combines with abstract on an auto-accessor; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3122)
+#[test]
+fn class_get_accessor_and_auto_accessor_duplicate_reports_2300() {
+    let count = duplicate_identifier_count("class C { get x() { return 1; } accessor x: number = 1; }");
+    assert_eq!(
+        count, 2,
+        "get accessor plus auto-accessor with the same name must report TS2300 twice"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3122)
+#[test]
+fn declare_class_get_accessor_auto_accessor_set_duplicate_reports_2300() {
+    let count = duplicate_identifier_count(
+        "declare class C { get x(): number; accessor x: number; set x(value: number); }",
+    );
+    assert_eq!(
+        count, 3,
+        "get, auto-accessor, and set with the same name must report TS2300 three times (C3)"
+    );
+}
