@@ -23,15 +23,19 @@ use std::rc::Rc;
 
 use rustc_hash::FxHashSet;
 use tsgo_ast::symbol::{INTERNAL_SYMBOL_NAME_COMPUTED, INTERNAL_SYMBOL_NAME_EXPORT_EQUALS};
-use tsgo_ast::{Kind, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId, SymbolTable};
+use tsgo_ast::{
+    CheckFlags, Kind, ModifierFlags, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId,
+    SymbolTable,
+};
 use tsgo_core::compileroptions::ScriptTarget;
 use tsgo_diagnostics::{Category, Message};
 
 use super::contextual::ContextFlags;
 use super::declared_types::{
-    fill_missing_type_arguments, get_apparent_type, get_constraint_of_type_parameter,
-    get_declaration_of_alias_symbol, get_declared_type_of_symbol, get_default_from_type_parameter,
-    get_indexed_access_type, get_min_type_argument_count, get_property_of_type,
+    fill_missing_type_arguments, get_apparent_type, get_applicable_index_info_for_name,
+    get_constraint_of_type_parameter, get_declaration_of_alias_symbol, get_declared_type_of_symbol,
+    get_default_from_type_parameter, get_indexed_access_type, get_min_type_argument_count,
+    get_property_of_type, get_property_of_union_or_intersection_type,
     get_property_type_for_index_type, get_type_from_type_node, get_type_of_property_of_type,
     get_type_of_symbol, resolve_alias,
 };
@@ -1889,19 +1893,181 @@ impl Checker {
             return object_type;
         }
         let name = program.arena().text(name_node).to_string();
-        match self.get_type_of_property_of_type(program, object_type, &name) {
-            Some(t) => t,
-            None => {
-                let type_str = super::nodebuilder::type_to_string(self, program, object_type);
-                self.error(
+        let is_super = program.arena().kind(expr) == Kind::SuperKeyword;
+        let apparent = get_apparent_type(self, object_type);
+        if let Some(t) = self.get_type_of_property_of_type(program, apparent, &name) {
+            if let Some(prop) = get_property_of_type(self, apparent, &name)
+                .or_else(|| get_property_of_union_or_intersection_type(self, apparent, &name))
+            {
+                if !self.check_property_accessibility(
                     program,
-                    name_node,
-                    &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
-                    &[name.as_str(), type_str.as_str()],
-                );
-                self.error_type
+                    node,
+                    is_super,
+                    apparent,
+                    prop,
+                    Some(name_node),
+                ) {
+                    return self.error_type;
+                }
             }
+            return t;
         }
+        if let Some(info) = get_applicable_index_info_for_name(self, program, apparent, &name) {
+            return self.index_info(info).value_type;
+        }
+        let type_str = super::nodebuilder::type_to_string(self, program, object_type);
+        self.error(
+            program,
+            name_node,
+            &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
+            &[name.as_str(), type_str.as_str()],
+        );
+        self.error_type
+    }
+
+    /// Reports whether `node` is a valid property access of `property_name`.
+    ///
+    /// Side effects: may type-check the receiver expression.
+    // Go: internal/checker/services.go:Checker.isValidPropertyAccess
+    pub fn is_valid_property_access(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        property_name: &str,
+    ) -> bool {
+        let data = match program.arena().data(node) {
+            NodeData::PropertyAccessExpression(d) => d,
+            _ => return false,
+        };
+        let is_super = program.arena().kind(data.expression) == Kind::SuperKeyword;
+        let expr_type = self.check_expression(program, data.expression);
+        let receiver = self.get_widened_type(expr_type);
+        self.is_valid_property_access_with_type(program, node, is_super, property_name, receiver)
+    }
+
+    fn is_valid_property_access_with_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        is_super: bool,
+        property_name: &str,
+        t: TypeId,
+    ) -> bool {
+        if self.get_type(t).flags().intersects(TypeFlags::ANY) {
+            return true;
+        }
+        let apparent = get_apparent_type(self, t);
+        let prop = get_property_of_type(self, apparent, property_name)
+            .or_else(|| get_property_of_union_or_intersection_type(self, apparent, property_name));
+        prop.is_some_and(|p| {
+            self.is_property_accessible(program, node, is_super, false, apparent, p)
+        })
+    }
+
+    fn is_property_accessible(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        is_super: bool,
+        is_write: bool,
+        containing_type: TypeId,
+        property: SymbolId,
+    ) -> bool {
+        if self
+            .get_type(containing_type)
+            .flags()
+            .intersects(TypeFlags::ANY)
+        {
+            return true;
+        }
+        self.check_property_accessibility_at_location(
+            program,
+            node,
+            is_super,
+            is_write,
+            containing_type,
+            property,
+            None,
+        )
+    }
+
+    fn check_property_accessibility(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        is_super: bool,
+        containing_type: TypeId,
+        prop: SymbolId,
+        error_node: Option<NodeId>,
+    ) -> bool {
+        self.check_property_accessibility_at_location(
+            program,
+            node,
+            is_super,
+            false,
+            containing_type,
+            prop,
+            error_node,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Go: checkPropertyAccessibilityAtLocation arity
+    fn check_property_accessibility_at_location(
+        &mut self,
+        program: &dyn BoundProgram,
+        location: NodeId,
+        is_super: bool,
+        _writing: bool,
+        _containing_type: TypeId,
+        prop: SymbolId,
+        error_node: Option<NodeId>,
+    ) -> bool {
+        let flags = declaration_modifier_flags_from_symbol(self, program, prop, false);
+        if is_super && flags.contains(ModifierFlags::ABSTRACT) {
+            return false;
+        }
+        if !flags.intersects(ModifierFlags::NON_PUBLIC_ACCESSIBILITY_MODIFIER) {
+            return true;
+        }
+        if flags.contains(ModifierFlags::PRIVATE) {
+            let Some(class_decl) = get_declaring_class_declaration(program, prop) else {
+                return true;
+            };
+            if !is_node_within_class(program, location, class_decl) {
+                if let Some(err) = error_node {
+                    let prop_name = self.resolved_symbol_name(program, prop);
+                    let class_name = declaring_class_name(program, prop);
+                    self.error(
+                        program,
+                        err,
+                        &tsgo_diagnostics::PROPERTY_0_IS_PRIVATE_AND_ONLY_ACCESSIBLE_WITHIN_CLASS_1,
+                        &[prop_name.as_str(), class_name.as_str()],
+                    );
+                }
+                return false;
+            }
+            return true;
+        }
+        if is_super {
+            return true;
+        }
+        let Some(class_decl) = get_declaring_class_declaration(program, prop) else {
+            return true;
+        };
+        if is_node_within_class(program, location, class_decl) {
+            return true;
+        }
+        if let Some(err) = error_node {
+            let prop_name = self.resolved_symbol_name(program, prop);
+            let class_name = declaring_class_name(program, prop);
+            self.error(
+                program,
+                err,
+                &tsgo_diagnostics::PROPERTY_0_IS_PROTECTED_AND_ONLY_ACCESSIBLE_WITHIN_CLASS_1_AND_ITS_SUBCLASSES,
+                &[prop_name.as_str(), class_name.as_str()],
+            );
+        }
+        false
     }
 
     // Checks an element access `obj[index]`. String-literal indices first try a
@@ -10037,6 +10203,130 @@ pub(crate) fn is_expression_node(program: &dyn BoundProgram, node: NodeId) -> bo
             | Kind::JsxFragment
             | Kind::MetaProperty
     )
+}
+
+fn declaration_modifier_flags_from_symbol(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+    is_write: bool,
+) -> ModifierFlags {
+    if super::is_synthesized_symbol(symbol) {
+        let check_flags = checker.synthesized_symbol_check_flags(symbol);
+        let access = if check_flags.contains(CheckFlags::CONTAINS_PRIVATE) {
+            ModifierFlags::PRIVATE
+        } else if check_flags.contains(CheckFlags::CONTAINS_PROTECTED) {
+            ModifierFlags::PROTECTED
+        } else {
+            ModifierFlags::PUBLIC
+        };
+        let static_mod = if check_flags.contains(CheckFlags::CONTAINS_STATIC) {
+            ModifierFlags::STATIC
+        } else {
+            ModifierFlags::empty()
+        };
+        return access | static_mod;
+    }
+    let sym = program.symbol(symbol);
+    if let Some(mut decl) = sym.value_declaration {
+        if is_write {
+            decl = sym
+                .declarations
+                .iter()
+                .copied()
+                .find(|&d| program.arena().kind(d) == Kind::SetAccessor)
+                .unwrap_or(decl);
+        } else if sym.flags.intersects(SymbolFlags::GET_ACCESSOR) {
+            if let Some(getter) = sym
+                .declarations
+                .iter()
+                .copied()
+                .find(|&d| program.arena().kind(d) == Kind::GetAccessor)
+            {
+                decl = getter;
+            }
+        }
+        let flags = combined_modifier_flags(program, decl);
+        if sym
+            .parent
+            .is_some_and(|p| program.symbol(p).flags.intersects(SymbolFlags::CLASS))
+        {
+            return flags;
+        }
+        return flags & !ModifierFlags::ACCESSIBILITY_MODIFIER;
+    }
+    if sym.flags.intersects(SymbolFlags::PROTOTYPE) {
+        return ModifierFlags::PUBLIC | ModifierFlags::STATIC;
+    }
+    ModifierFlags::empty()
+}
+
+fn combined_modifier_flags(program: &dyn BoundProgram, node: NodeId) -> ModifierFlags {
+    let node = get_root_declaration(program, node);
+    let mut flags = modifier_flags_of(program.arena(), node);
+    let mut current = node;
+    if program.arena().kind(current) == Kind::VariableDeclaration {
+        if let Some(parent) = program.arena().parent(current) {
+            current = parent;
+        }
+    }
+    if program.arena().kind(current) == Kind::VariableDeclarationList {
+        flags |= modifier_flags_of(program.arena(), current);
+        if let Some(parent) = program.arena().parent(current) {
+            current = parent;
+        }
+    }
+    if program.arena().kind(current) == Kind::VariableStatement {
+        flags |= modifier_flags_of(program.arena(), current);
+    }
+    flags
+}
+
+fn get_declaring_class_declaration(program: &dyn BoundProgram, prop: SymbolId) -> Option<NodeId> {
+    let parent = program.symbol(prop).parent?;
+    get_class_like_declaration_of_symbol(program, parent)
+}
+
+fn get_class_like_declaration_of_symbol(
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> Option<NodeId> {
+    let sym = program.symbol(symbol);
+    sym.value_declaration
+        .or_else(|| sym.declarations.first().copied())
+}
+
+fn property_symbol_name(checker: &Checker, program: &dyn BoundProgram, prop: SymbolId) -> String {
+    if super::is_synthesized_symbol(prop) {
+        return checker.synthesized_symbol_name(prop);
+    }
+    program.symbol(prop).name.clone()
+}
+
+fn declaring_class_name(program: &dyn BoundProgram, prop: SymbolId) -> String {
+    if super::is_synthesized_symbol(prop) {
+        return String::new();
+    }
+    program
+        .symbol(prop)
+        .parent
+        .map(|p| program.symbol(p).name.clone())
+        .unwrap_or_default()
+}
+
+fn is_node_within_class(
+    program: &dyn BoundProgram,
+    node: NodeId,
+    class_declaration: NodeId,
+) -> bool {
+    let mut container = get_containing_class(program, node);
+    while let Some(class) = container {
+        if class == class_declaration {
+            return true;
+        }
+        container = get_containing_class(program, class);
+    }
+    false
 }
 
 /// Reports whether `node` is the right-hand name of `a.b` / `a?.b` (Go's

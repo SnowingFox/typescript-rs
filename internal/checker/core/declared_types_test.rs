@@ -1370,3 +1370,15 @@ fn resolve_entity_name_resolves_qualified_namespace_member() {
     assert_eq!(p.symbol(resolved).name, "T");
     assert!(p.symbol(resolved).flags.intersects(SymbolFlags::TYPE_ALIAS));
 }
+
+#[test]
+fn get_index_type_of_type_string_index_returns_value_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "interface S {\n  [k: string]: number;\n}");
+    let mut c = Checker::new();
+    let string_t = c.string_type();
+    let number_t = c.number_type();
+    let s = get_declared_type_of_symbol(&mut c, &p, local(&p, "S"), None);
+    let value = get_index_type_of_type(&mut c, s, string_t);
+    assert_eq!(value, Some(number_t));
+    assert_eq!(get_index_type_of_type(&mut c, s, number_t), None);
+}

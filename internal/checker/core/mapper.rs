@@ -415,7 +415,7 @@ impl Checker {
             let own_mapper = self.conditional_mapper(t);
             let combined = TypeMapper::combine(own_mapper, mapper.clone());
             return match self.retained_program() {
-                Some(program) => super::declared_types::get_conditional_type_instantiation(
+                Some(program) => super::conditional_types::get_conditional_type_instantiation(
                     self,
                     program.as_ref(),
                     t,
@@ -444,7 +444,7 @@ impl Checker {
             if new_types == types {
                 return t;
             }
-            return super::declared_types::get_template_literal_type(self, &texts, &new_types);
+            return super::conditional_types::get_template_literal_type(self, &texts, &new_types);
         }
         // A string-mapping type `Uppercase<S>`: instantiate the target, then
         // re-apply the mapping so a concrete string literal folds to its mapped
@@ -459,7 +459,7 @@ impl Checker {
             if new_target == d.target {
                 return t;
             }
-            return super::declared_types::get_string_mapping_type(self, d.kind, new_target);
+            return super::conditional_types::get_string_mapping_type(self, d.kind, new_target);
         }
         // DEFER(phase-4-checker-C-C3): substitution-type instantiation.
         // blocked-by: substitution types land later.

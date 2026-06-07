@@ -11556,3 +11556,81 @@ fn super_call_outside_constructor_reports_2337() {
         "expected TS2337 super() outside constructor; got {codes:?}"
     );
 }
+
+#[test]
+fn property_access_string_index_signature_yields_value_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Dict {\n  [k: string]: number;\n}\ndeclare const d: Dict;\nd.foo;",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, access), c.number_type());
+}
+
+#[test]
+fn property_access_string_index_signature_reports_no_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Dict {\n  [k: string]: number;\n}\ndeclare const d: Dict;\nd.foo;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2339),
+        "index-signature property access must not report 2339, got {diags:?}"
+    );
+}
+
+#[test]
+fn private_property_access_outside_class_reports_2341() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { private x: number; }\nconst c = new C();\nc.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2341);
+    assert_eq!(
+        diags[0].message,
+        "Property 'x' is private and only accessible within class 'C'."
+    );
+}
+
+#[test]
+fn private_property_access_inside_class_reports_nothing() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { private x: number; m() { this.x; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2341),
+        "private member access inside declaring class must not report 2341, got {diags:?}"
+    );
+}
+
+#[test]
+fn is_valid_property_access_private_outside_class_is_false() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { private x: number; }\nconst c = new C();\nc.x;",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    assert!(!c.is_valid_property_access(&p, access, "x"));
+}
+
+#[test]
+fn is_valid_property_access_public_member_is_true() {
+    let p =
+        StubProgram::parse_and_bind("/a.ts", "class C { x: number; }\nconst c = new C();\nc.x;");
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    assert!(c.is_valid_property_access(&p, access, "x"));
+}

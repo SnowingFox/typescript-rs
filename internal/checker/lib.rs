@@ -65,14 +65,18 @@ pub mod core;
 pub mod tracer;
 
 pub use core::check::{Diagnostic, DiagnosticMessageChain};
+pub use core::conditional_types::{
+    get_conditional_type, get_false_type_from_conditional_type, get_string_mapping_type,
+    get_template_literal_type, get_true_type_from_conditional_type,
+    is_distributive_conditional_type, is_pattern_literal_type,
+};
 pub use core::declared_types::{
-    fill_missing_type_arguments, get_apparent_type, get_conditional_type,
-    get_constraint_of_type_parameter, get_declared_type_of_symbol, get_default_from_type_parameter,
-    get_global_type, get_index_infos_of_type, get_index_type, get_indexed_access_type,
-    get_min_type_argument_count, get_properties_of_type, get_property_of_type,
-    get_string_mapping_type, get_template_literal_type, get_type_from_type_node,
-    get_type_of_property_of_type, get_type_of_symbol, instantiate_mapped_type,
-    resolve_structured_type_members,
+    fill_missing_type_arguments, get_apparent_type, get_constraint_of_type_parameter,
+    get_declared_type_of_symbol, get_default_from_type_parameter, get_global_type,
+    get_index_info_of_type, get_index_infos_of_type, get_index_type, get_index_type_of_type,
+    get_indexed_access_type, get_min_type_argument_count, get_properties_of_type,
+    get_property_of_type, get_type_from_type_node, get_type_of_property_of_type,
+    get_type_of_symbol, instantiate_mapped_type, resolve_structured_type_members,
 };
 pub use core::emit_resolver::{
     EmitResolver, LiteralConstValue, SerializedTypeNode, TypeReferenceSerializationKind,

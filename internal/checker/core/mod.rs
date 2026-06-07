@@ -7,6 +7,7 @@
 //! `instantiation`, `flow`, and the rest.
 
 pub mod check;
+pub mod conditional_types;
 pub mod contextual;
 pub mod declared_types;
 pub mod emit_resolver;
@@ -87,8 +88,9 @@ impl std::fmt::Debug for RetainedProgram {
 /// blocked-by: deferred-conditional-vs-conditional relation comparison.
 #[derive(Clone, Debug, Default)]
 struct ConditionalMappers {
-    /// The mapper that produced this conditional's check/extends types.
     mapper: Option<TypeMapper>,
+    resolved_true_type: Option<TypeId>,
+    resolved_false_type: Option<TypeId>,
 }
 
 /// High bit set on the [`SymbolId`] of a checker-synthesized symbol, so its id
@@ -1200,8 +1202,13 @@ impl Checker {
                 extends_type,
             }),
         );
-        self.conditional_mappers
-            .insert(t, ConditionalMappers { mapper });
+        self.conditional_mappers.insert(
+            t,
+            ConditionalMappers {
+                mapper,
+                ..Default::default()
+            },
+        );
         t
     }
 
@@ -1213,6 +1220,34 @@ impl Checker {
         self.conditional_mappers
             .get(&t)
             .and_then(|m| m.mapper.clone())
+    }
+
+    pub(crate) fn conditional_resolved_true_type(&self, t: TypeId) -> Option<TypeId> {
+        self.conditional_mappers
+            .get(&t)
+            .and_then(|m| m.resolved_true_type)
+    }
+
+    pub(crate) fn set_conditional_resolved_true_type(&mut self, t: TypeId, branch: TypeId) {
+        if let Some(entry) = self.conditional_mappers.get_mut(&t) {
+            entry.resolved_true_type = Some(branch);
+        }
+    }
+
+    pub(crate) fn conditional_resolved_false_type(&self, t: TypeId) -> Option<TypeId> {
+        self.conditional_mappers
+            .get(&t)
+            .and_then(|m| m.resolved_false_type)
+    }
+
+    pub(crate) fn set_conditional_resolved_false_type(&mut self, t: TypeId, branch: TypeId) {
+        if let Some(entry) = self.conditional_mappers.get_mut(&t) {
+            entry.resolved_false_type = Some(branch);
+        }
+    }
+
+    pub(crate) fn resolve_type_node(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        declared_types::get_type_from_type_node(self, program, node, None)
     }
 
     /// Returns the cached resolved type of conditional-type node `node`, if it
