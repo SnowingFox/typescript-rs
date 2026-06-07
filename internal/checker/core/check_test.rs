@@ -12998,3 +12998,72 @@ fn object_spread_any_operand_yields_any() {
         "any"
     );
 }
+
+// ---- T1-E batch 27: unknown/never operands, const-context spread readonly ----
+
+// Go: internal/checker/checker.go:Checker.tryMergeUnionOfObjectTypeAndEmptyObject(13444) / getSpreadType(13301)
+#[test]
+fn object_spread_const_context_union_empty_makes_readonly_optional_property() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | {};\nconst o = { ...x } as const;\no;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ readonly a?: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13308)
+#[test]
+fn object_spread_never_left_operand_returns_right() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const n: never;\ndeclare const right: { a: number };\nconst o = { ...n, ...right };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 3);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ a: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13301) / getSpreadSymbol(13499)
+#[test]
+fn const_assertion_on_spread_object_literal_marks_spread_property_readonly() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: { x: number };\nconst o = { ...a, y: 1 } as const;\no;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    let x = crate::core::declared_types::get_property_of_type(&c, t, "x")
+        .expect("spread property `x`");
+    assert!(
+        c.synthesized_symbol_check_flags(x)
+            .contains(tsgo_ast::CheckFlags::READONLY),
+        "a const-context spread property must carry the Readonly check flag"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13301) / getSpreadSymbol(13499)
+#[test]
+fn const_assertion_on_spread_object_literal_prints_readonly_members() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: { x: number };\nconst o = { ...a, y: 1 } as const;\no;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ readonly x: number; readonly y: 1; }"
+    );
+}

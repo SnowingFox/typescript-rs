@@ -706,6 +706,7 @@ impl Checker {
                             program,
                             self.empty_object_type(),
                             spread_type,
+                            in_const_context,
                         );
                     }
                     // Spreading a union after named members distributes
@@ -720,15 +721,24 @@ impl Checker {
                         );
                         let spread_results: Vec<TypeId> = union_members
                             .iter()
-                            .map(|&right| self.get_spread_type(program, left, right))
+                            .map(|&right| {
+                                self.get_spread_type(program, left, right, in_const_context)
+                            })
                             .collect();
                         return self.get_union_type(&spread_results);
                     }
                 }
                 if members.is_empty() && all_members.is_empty() {
                     spread_acc = Some(match spread_acc {
-                        None => self.get_spread_type(program, self.empty_object_type(), spread_type),
-                        Some(left) => self.get_spread_type(program, left, spread_type),
+                        None => self.get_spread_type(
+                            program,
+                            self.empty_object_type(),
+                            spread_type,
+                            in_const_context,
+                        ),
+                        Some(left) => {
+                            self.get_spread_type(program, left, spread_type, in_const_context)
+                        }
                     });
                 } else {
                     self.merge_spread_into_object_literal(
@@ -872,7 +882,7 @@ impl Checker {
                 &properties,
                 &index_infos,
             );
-            return self.get_spread_type(program, spread, trailing);
+            return self.get_spread_type(program, spread, trailing, in_const_context);
         }
         let object = ObjectType {
             members,
@@ -1070,6 +1080,7 @@ impl Checker {
         program: &dyn BoundProgram,
         left: TypeId,
         right: TypeId,
+        readonly: bool,
     ) -> TypeId {
         let left_flags = self.get_type(left).flags();
         let right_flags = self.get_type(right).flags();
@@ -1085,20 +1096,20 @@ impl Checker {
         if right_flags.intersects(TypeFlags::NEVER) {
             return left;
         }
-        let left = self.try_merge_union_of_object_type_and_empty_object(program, left, false);
+        let left = self.try_merge_union_of_object_type_and_empty_object(program, left, readonly);
         if let Some(members) = self.get_type(left).union_types().map(|m| m.to_vec()) {
             let mapped: Vec<TypeId> = members
                 .iter()
-                .map(|&member| self.get_spread_type(program, member, right))
+                .map(|&member| self.get_spread_type(program, member, right, readonly))
                 .collect();
             return self.get_union_type(&mapped);
         }
-        let right = self.try_merge_union_of_object_type_and_empty_object(program, right, false);
+        let right = self.try_merge_union_of_object_type_and_empty_object(program, right, readonly);
         let right_flags = self.get_type(right).flags();
         if let Some(members) = self.get_type(right).union_types().map(|m| m.to_vec()) {
             let mapped: Vec<TypeId> = members
                 .iter()
-                .map(|&member| self.get_spread_type(program, left, member))
+                .map(|&member| self.get_spread_type(program, left, member, readonly))
                 .collect();
             return self.get_union_type(&mapped);
         }
@@ -1125,7 +1136,7 @@ impl Checker {
                             && self.is_non_generic_object_type(right)
                         {
                             let last = types.len() - 1;
-                            types[last] = self.get_spread_type(program, types[last], right);
+                            types[last] = self.get_spread_type(program, types[last], right, readonly);
                             return self.get_intersection_type(&types);
                         }
                     }
@@ -1133,7 +1144,7 @@ impl Checker {
             }
             return self.get_intersection_type(&[left, right]);
         }
-        self.merge_object_types_for_spread(program, left, right)
+        self.merge_object_types_for_spread(program, left, right, readonly)
     }
 
     // Reports whether `t` is a concrete (non-generic) object type (Go's
@@ -1262,17 +1273,24 @@ impl Checker {
         program: &dyn BoundProgram,
         left: TypeId,
         right: TypeId,
+        readonly: bool,
     ) -> TypeId {
         use super::declared_types::{get_properties_of_type, get_type_of_symbol};
         let globals = program.globals();
+        let spread_check_flags = if readonly {
+            tsgo_ast::CheckFlags::READONLY
+        } else {
+            tsgo_ast::CheckFlags::empty()
+        };
         let mut members = SymbolTable::default();
         let mut properties: Vec<tsgo_ast::SymbolId> = Vec::new();
         let mut skipped_private_members = FxHashSet::default();
-        let index_infos = if left == self.empty_object_type() {
+        let raw_index_infos = if left == self.empty_object_type() {
             get_index_infos_of_type(self, right)
         } else {
             self.get_union_index_infos(&[left, right])
         };
+        let index_infos = self.apply_readonly_to_index_infos(raw_index_infos, readonly);
         for (name, prop_sym) in get_properties_of_type(self, right) {
             if is_private_or_protected_member(self, program, prop_sym) {
                 skipped_private_members.insert(name);
@@ -1286,7 +1304,7 @@ impl Checker {
                 &name,
                 prop_sym,
                 globals,
-                tsgo_ast::CheckFlags::empty(),
+                spread_check_flags,
             );
             members.insert(name.clone(), prop);
         }
@@ -1305,7 +1323,7 @@ impl Checker {
                     let prop = self.new_object_literal_property(
                         &name,
                         flags,
-                        tsgo_ast::CheckFlags::empty(),
+                        spread_check_flags,
                         merged,
                     );
                     members.insert(name, prop);
@@ -1317,7 +1335,7 @@ impl Checker {
                 &name,
                 prop_sym,
                 globals,
-                tsgo_ast::CheckFlags::empty(),
+                spread_check_flags,
             );
             members.insert(name.clone(), prop);
         }
@@ -1419,6 +1437,34 @@ impl Checker {
         } else {
             self.get_union_type(&[left_type, right_without_undefined])
         }
+    }
+
+    // Applies the spread `readonly` flag to each index signature (Go's
+    // `getIndexInfoWithReadonly`).
+    // Go: internal/checker/checker.go:Checker.getIndexInfoWithReadonly(13411)
+    fn apply_readonly_to_index_infos(
+        &mut self,
+        infos: Vec<IndexInfoId>,
+        readonly: bool,
+    ) -> Vec<IndexInfoId> {
+        if !readonly {
+            return infos;
+        }
+        infos
+            .into_iter()
+            .map(|id| {
+                let info = self.index_info(id);
+                if info.is_readonly {
+                    id
+                } else {
+                    self.new_index_info(IndexInfo::new(
+                        info.key_type,
+                        info.value_type,
+                        true,
+                    ))
+                }
+            })
+            .collect()
     }
 
     // Unions the index signatures shared by every type in `types` (Go's
