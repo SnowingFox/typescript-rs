@@ -54,8 +54,8 @@ use symbols::{
 };
 use types::{
     ConditionalRoot, ConditionalType, IntersectionType, IntrinsicType, LiteralType, LiteralValue,
-    ObjectFlags, ObjectType, StringMappingKind, StringMappingType, TemplateLiteralType, Type,
-    TypeArena, TypeData, TypeFlags, TypeId, TypeParameter, UnionType,
+    ObjectFlags, ObjectType, StringMappingKind, StringMappingType, TemplateLiteralType,
+    UniqueESSymbolType, Type, TypeArena, TypeData, TypeFlags, TypeId, TypeParameter, UnionType,
 };
 
 /// The bound program a checker retains (Go's `c.program` pointer field).
@@ -198,6 +198,9 @@ pub struct Checker {
     /// Interned bigint-literal types, keyed by the literal's source text (Go's
     /// `bigintLiteralTypes map[jsnum.PseudoBigInt]*Type`).
     bigint_literal_types: FxHashMap<String, TypeId>,
+    /// Cached `unique symbol` types per declaration symbol (Go's
+    /// `uniqueESSymbolTypes map[*Symbol]*Type`).
+    pub(crate) unique_es_symbol_types: FxHashMap<symbols::SymbolId, TypeId>,
     /// Lazily-built declared types for interface/class/enum symbols.
     declared_type_links: SymbolLinks<DeclaredTypeLinks>,
     /// Lazily-built declared types for type-alias symbols.
@@ -563,6 +566,7 @@ impl Checker {
             string_literal_types: FxHashMap::default(),
             number_literal_types: FxHashMap::default(),
             bigint_literal_types: FxHashMap::default(),
+            unique_es_symbol_types: FxHashMap::default(),
             declared_type_links: SymbolLinks::default(),
             type_alias_links: SymbolLinks::default(),
             type_aliases_resolving: rustc_hash::FxHashSet::default(),
@@ -1029,6 +1033,7 @@ impl Checker {
         match &self.types.get(id).data {
             TypeData::Intrinsic(d) => d.intrinsic_name.clone(),
             TypeData::Literal(d) => literal_value_to_string(&d.value),
+            TypeData::UniqueESSymbol(_) => "unique symbol".to_string(),
             TypeData::Union(d) => d
                 .types
                 .iter()
@@ -1912,6 +1917,25 @@ impl Checker {
         );
         self.string_literal_types.insert(value.to_string(), id);
         id
+    }
+
+    /// Allocates a `unique symbol` type for `symbol` with internal name `name`.
+    ///
+    /// Side effects: allocates a type in the checker's arena.
+    // Go: internal/checker/checker.go:Checker.newUniqueESSymbolType(24916)
+    pub(crate) fn new_unique_es_symbol_type(
+        &mut self,
+        symbol: SymbolId,
+        name: &str,
+    ) -> TypeId {
+        self.types.alloc(
+            TypeFlags::UNIQUE_ES_SYMBOL,
+            ObjectFlags::empty(),
+            Some(symbol),
+            TypeData::UniqueESSymbol(UniqueESSymbolType {
+                name: name.to_string(),
+            }),
+        )
     }
 
     // Returns the interned number-literal type for `value`, allocating it once

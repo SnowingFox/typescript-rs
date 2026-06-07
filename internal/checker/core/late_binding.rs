@@ -24,6 +24,12 @@ pub(crate) fn get_property_name_from_type(checker: &Checker, t: TypeId) -> Strin
             _ => {}
         }
     }
+    if flags.intersects(TypeFlags::UNIQUE_ES_SYMBOL) {
+        return ty
+            .unique_es_symbol_name()
+            .expect("unique symbol type has a name")
+            .to_string();
+    }
     panic!("Unhandled case in get_property_name_from_type")
 }
 

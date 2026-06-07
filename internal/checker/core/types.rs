@@ -649,6 +649,16 @@ pub enum LiteralValue {
     Boolean(bool),
 }
 
+/// The payload of a `unique symbol` type tied to a specific declaration.
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go:UniqueESSymbolType
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UniqueESSymbolType {
+    /// The late-bound internal property name (`\u{fe}@sym@<id>`).
+    pub name: String,
+}
+
 /// The payload of a literal type (`"a"`, `1`, `true`, `false`).
 ///
 /// `fresh_type` / `regular_type` mirror Go's fresh/regular literal pairing: a
@@ -1010,6 +1020,8 @@ pub enum TypeData {
     Intrinsic(IntrinsicType),
     /// A literal type (`"a"`, `1`, `true`, `false`).
     Literal(LiteralType),
+    /// A `unique symbol` type.
+    UniqueESSymbol(UniqueESSymbolType),
     /// A union type (`A | B`).
     Union(UnionType),
     /// An intersection type (`A & B`).
@@ -1123,6 +1135,17 @@ impl Type {
     pub fn literal_value(&self) -> Option<&LiteralValue> {
         match &self.data {
             TypeData::Literal(d) => Some(&d.value),
+            _ => None,
+        }
+    }
+
+    /// Returns the internal name if this is a `unique symbol` type, else `None`.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/types.go:UniqueESSymbolType.name
+    pub fn unique_es_symbol_name(&self) -> Option<&str> {
+        match &self.data {
+            TypeData::UniqueESSymbol(d) => Some(&d.name),
             _ => None,
         }
     }

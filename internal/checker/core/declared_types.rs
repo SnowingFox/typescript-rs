@@ -14,6 +14,7 @@ use rustc_hash::FxHashMap;
 
 use tsgo_ast::symbol::{
     INTERNAL_SYMBOL_NAME_CALL, INTERNAL_SYMBOL_NAME_INDEX, INTERNAL_SYMBOL_NAME_NEW,
+    INTERNAL_SYMBOL_NAME_PREFIX,
 };
 use tsgo_ast::{
     CheckFlags, Kind, ModifierFlags, NodeArena, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId,
@@ -21,10 +22,12 @@ use tsgo_ast::{
 };
 
 use super::conditional_types::is_distributive_conditional_type;
+use super::grammar;
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
 use super::signatures::{IndexInfo, IndexInfoId, Signature, SignatureFlags, SignatureId};
 use super::symbols::resolve_name;
+use super::symbols_query::get_symbol_of_declaration;
 use super::types::{
     AccessFlags, ConditionalRoot, IndexFlags, LiteralValue, MappedTypeModifiers, ObjectFlags,
     ObjectType, StringMappingKind, TypeData, TypeFlags, TypeId,
@@ -3155,10 +3158,91 @@ fn get_type_from_type_operator_node(
             let operand_type = get_type_from_type_node(checker, program, operand, globals);
             get_index_type(checker, operand_type)
         }
-        // DEFER(phase-4-checker-later): `unique symbol`
-        // (`getESSymbolLikeTypeForNode`). blocked-by: unique-ES-symbol typing.
+        Kind::UniqueKeyword => {
+            if program.arena().kind(operand) == Kind::SymbolKeyword {
+                let parent = program.arena().parent(node).unwrap_or(node);
+                get_es_symbol_like_type_for_node(
+                    checker,
+                    program,
+                    walk_up_parenthesized_types(program.arena(), parent),
+                )
+            } else {
+                checker.error_type()
+            }
+        }
         _ => checker.error_type(),
     }
+}
+
+// Walks up `ParenthesizedType` wrappers (Go's `WalkUpParenthesizedTypes`).
+fn walk_up_parenthesized_types(arena: &NodeArena, mut node: NodeId) -> NodeId {
+    while arena.kind(node) == Kind::ParenthesizedType {
+        node = arena.parent(node).expect("parenthesized type has parent");
+    }
+    node
+}
+
+// Reports whether `node` is a declaration that may carry a `unique symbol` type
+// (Go's `isValidESSymbolDeclaration`).
+// Go: internal/checker/utilities.go:isValidESSymbolDeclaration(923)
+fn is_valid_es_symbol_declaration(program: &dyn BoundProgram, node: NodeId) -> bool {
+    let arena = program.arena();
+    match arena.kind(node) {
+        Kind::VariableDeclaration => {
+            combined_node_flags(program, node).intersects(NodeFlags::CONSTANT)
+                && matches!(
+                    arena.data(node),
+                    NodeData::VariableDeclaration(d) if arena.kind(d.name) == Kind::Identifier
+                )
+                && arena.parent(node).is_some_and(|list| {
+                    arena.kind(list) == Kind::VariableDeclarationList
+                        && arena.parent(list).is_some_and(|stmt| {
+                            arena.kind(stmt) == Kind::VariableStatement
+                        })
+                })
+        }
+        Kind::PropertyDeclaration => {
+            node_has_modifier(arena, node, Kind::ReadonlyKeyword)
+                && node_has_modifier(arena, node, Kind::StaticKeyword)
+        }
+        Kind::PropertySignature => node_has_modifier(arena, node, Kind::ReadonlyKeyword),
+        _ => false,
+    }
+}
+
+fn node_has_modifier(arena: &NodeArena, node: NodeId, modifier: Kind) -> bool {
+    grammar::modifier_nodes_pub(arena, node)
+        .into_iter()
+        .any(|m| arena.kind(m) == modifier)
+}
+
+// Resolves `unique symbol` for a valid declaration, else the intrinsic `symbol`
+// type (Go's `getESSymbolLikeTypeForNode`).
+// Go: internal/checker/checker.go:Checker.getESSymbolLikeTypeForNode(22841)
+pub(crate) fn get_es_symbol_like_type_for_node(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> TypeId {
+    if !is_valid_es_symbol_declaration(program, node) {
+        return checker.es_symbol_type();
+    }
+    let Some(symbol) = get_symbol_of_declaration(program, node) else {
+        return checker.es_symbol_type();
+    };
+    if let Some(&cached) = checker.unique_es_symbol_types.get(&symbol) {
+        return cached;
+    }
+    let sym = program.symbol(symbol);
+    let name = format!(
+        "{INTERNAL_SYMBOL_NAME_PREFIX}@{}@{}",
+        sym.name, symbol.0
+    );
+    let unique_type = checker.new_unique_es_symbol_type(symbol, &name);
+    checker
+        .unique_es_symbol_types
+        .insert(symbol, unique_type);
+    unique_type
 }
 
 // Resolves a `TupleType` node (`[A, B]`) to a fixed-arity tuple type whose
@@ -4123,16 +4207,18 @@ fn get_or_create_indexed_access_type(
 // Returns the property name a string/number-literal index selects (Go's
 // `getPropertyNameFromIndex` / `getPropertyNameFromType` for the literal cases).
 //
-// DEFER(phase-4-checker-later): numeric-literal property names on a non-tuple
-// object (`{ 0: T }[0]`), unique-symbol names, and the `accessNode`-driven
-// computed/private name cases. blocked-by: numeric property naming + ES symbol
-// names + access-node plumbing.
+// Resolves a string/number/`unique symbol` literal index to a property name.
+//
+// DEFER(phase-4-checker-later): the `accessNode`-driven computed/private name
+// cases. blocked-by: access-node plumbing.
 // Go: internal/checker/checker.go:Checker.getPropertyNameFromIndex
 fn get_property_name_from_index(checker: &Checker, index_type: TypeId) -> Option<String> {
-    match checker.get_type(index_type).literal_value() {
-        Some(LiteralValue::String(s)) => Some(s.clone()),
-        _ => None,
+    if super::check::is_type_usable_as_property_name(checker.get_type(index_type).flags()) {
+        return Some(super::late_binding::get_property_name_from_type(
+            checker, index_type,
+        ));
     }
+    None
 }
 
 // Resolves `tuple[index]` to the element type at a constant position when the

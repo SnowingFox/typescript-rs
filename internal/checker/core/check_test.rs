@@ -13241,3 +13241,77 @@ fn object_literal_literal_computed_name_carries_late_check_flag() {
         "a literal computed-name property must carry the Late check flag"
     );
 }
+
+// ---- T1-E batch 30: unique-symbol computed names ----
+
+// Go: internal/checker/checker.go:Checker.getESSymbolLikeTypeForNode(22841)
+#[test]
+fn declare_const_unique_symbol_has_unique_es_symbol_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const sym: unique symbol;\nsym;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert!(
+        c.get_type(t)
+            .flags()
+            .contains(crate::core::types::TypeFlags::UNIQUE_ES_SYMBOL),
+        "a `declare const sym: unique symbol` reference must be a unique symbol type"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13165) / getPropertyNameFromType
+#[test]
+fn object_literal_unique_symbol_computed_name_creates_named_property() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const sym: unique symbol;\nconst o = { [sym]: 1 };\no[sym];",
+    );
+    let access = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, access);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "number"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13165) (CheckFlagsLate)
+#[test]
+fn object_literal_unique_symbol_computed_name_carries_late_check_flag() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const sym: unique symbol;\nconst o = { [sym]: 1 };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let o_type = c.check_expression(&p, usage);
+    let sym_expr = match p.arena().data(source_statements(&p)[0]) {
+        NodeData::VariableStatement(d) => {
+            let list = match p.arena().data(d.declaration_list) {
+                NodeData::VariableDeclarationList(dl) => dl.declarations.nodes[0],
+                _ => panic!("declaration list"),
+            };
+            match p.arena().data(list) {
+                NodeData::VariableDeclaration(vd) => vd.name,
+                _ => panic!("variable declaration"),
+            }
+        }
+        _ => panic!("variable statement"),
+    };
+    let sym_type = c.check_expression(&p, sym_expr);
+    let prop_name = crate::core::late_binding::get_property_name_from_type(&c, sym_type);
+    let prop = crate::core::declared_types::get_property_of_type(&c, o_type, &prop_name)
+        .expect("unique-symbol computed name must be a named property");
+    assert!(
+        c.synthesized_symbol_check_flags(prop)
+            .contains(tsgo_ast::CheckFlags::LATE),
+        "a unique-symbol computed-name property must carry the Late check flag"
+    );
+}
+
+fn source_statements(p: &StubProgram) -> Vec<tsgo_ast::NodeId> {
+    match p.arena().data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    }
+}

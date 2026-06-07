@@ -167,3 +167,17 @@ fn get_property_name_from_number_literal() {
     let t = c.get_number_literal_type(tsgo_jsnum::Number::from(42.0));
     assert_eq!(get_property_name_from_type(&c, t), "42");
 }
+
+#[test]
+fn get_property_name_from_unique_es_symbol_type() {
+    let mut c = Checker::new();
+    let t = c.new_unique_es_symbol_type(tsgo_ast::SymbolId(7), "\u{fe}@sym@7");
+    assert_eq!(get_property_name_from_type(&c, t), "\u{fe}@sym@7");
+}
+
+#[test]
+fn is_type_usable_as_property_name_unique_es_symbol() {
+    assert!(is_type_usable_as_property_name(
+        crate::core::types::TypeFlags::UNIQUE_ES_SYMBOL
+    ));
+}
