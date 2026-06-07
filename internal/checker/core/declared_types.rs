@@ -2154,6 +2154,79 @@ fn get_type_of_synthesized_symbol(
     resolved
 }
 
+fn declaration_of_kind(
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+    kind: Kind,
+) -> Option<NodeId> {
+    program
+        .symbol(symbol)
+        .declarations
+        .iter()
+        .find(|&&d| program.arena().kind(d) == kind)
+        .copied()
+}
+
+// Returns the annotated type of an accessor declaration, if any (Go's
+// `getAnnotatedAccessorType`).
+// Go: internal/checker/checker.go:Checker.getAnnotatedAccessorType(19953)
+fn get_annotated_accessor_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    accessor: NodeId,
+    globals: Option<&SymbolTable>,
+) -> Option<TypeId> {
+    let type_node = match program.arena().data(accessor) {
+        NodeData::GetAccessorDeclaration(d) => d.type_node,
+        NodeData::SetAccessorDeclaration(d) => d.parameters.nodes.first().and_then(|&param| {
+            match program.arena().data(param) {
+                NodeData::ParameterDeclaration(p) => p.type_node,
+                _ => None,
+            }
+        }),
+        _ => None,
+    }?;
+    Some(get_type_from_type_node(checker, program, type_node, globals))
+}
+
+// Resolves the read type of an accessor symbol: getter annotation, else setter
+// annotation, else getter body return-type inference (Go's `getTypeOfAccessors`).
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18370)
+fn get_type_of_accessors(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+    globals: Option<&SymbolTable>,
+) -> TypeId {
+    if let Some(cached) = checker
+        .value_symbol_links
+        .try_get(&symbol)
+        .and_then(|l| l.resolved_type)
+    {
+        return cached;
+    }
+    let getter = declaration_of_kind(program, symbol, Kind::GetAccessor);
+    let setter = declaration_of_kind(program, symbol, Kind::SetAccessor);
+    let mut t = getter.and_then(|g| get_annotated_accessor_type(checker, program, g, globals));
+    if t.is_none() {
+        t = setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals));
+    }
+    if t.is_none() {
+        if let Some(getter) = getter {
+            let has_body = match program.arena().data(getter) {
+                NodeData::GetAccessorDeclaration(d) => d.body.is_some(),
+                _ => false,
+            };
+            if has_body {
+                t = Some(checker.get_return_type_from_body(program, getter));
+            }
+        }
+    }
+    let t = t.unwrap_or_else(|| checker.any_type());
+    checker.value_symbol_links.get(symbol).resolved_type = Some(t);
+    t
+}
+
 // Go: internal/checker/checker.go:Checker.getTypeOfVariableOrParameterOrProperty
 fn get_type_of_variable_or_property(
     checker: &mut Checker,
@@ -2172,6 +2245,14 @@ fn get_type_of_variable_or_property(
     let declaration = sym
         .value_declaration
         .or_else(|| sym.declarations.first().copied());
+    if declaration.is_some_and(|decl| {
+        matches!(
+            program.arena().kind(decl),
+            Kind::GetAccessor | Kind::SetAccessor
+        )
+    }) {
+        return get_type_of_accessors(checker, program, symbol, globals);
+    }
     // An assignment-declaration symbol (`f.x = v` / `this.x = v`, a binary
     // expression value declaration) takes its type from the assigned value(s)
     // (Go's `getTypeOfVariableOrParameterOrPropertyWorker` KindBinaryExpression

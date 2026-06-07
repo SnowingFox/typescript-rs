@@ -13451,3 +13451,51 @@ fn type_literal_unique_symbol_property_is_unique_es_symbol() {
         "a `readonly sym: unique symbol` property must resolve to a unique symbol type"
     );
 }
+
+// ---- T1-E batch 33: getTypeOfAccessors, set-accessor member typing ----
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18370)
+#[test]
+fn object_literal_get_accessor_infers_return_type_from_body() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { get x() { return 1 } };\no.x;");
+    let literal = var_decl_initializer_batch5(&p, 0);
+    let access = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let _ = c.check_expression(&p, literal);
+    let x_type = c.check_expression(&p, access);
+    assert_eq!(x_type, c.number_type());
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) (accessor arm)
+#[test]
+fn object_literal_set_accessor_member_is_writable_property() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o = { set x(v: number) { } };\no.x = 1;",
+    );
+    let literal = var_decl_initializer_batch5(&p, 0);
+    let assign = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let o_type = c.check_expression(&p, literal);
+    let _ = c.check_expression(&p, assign);
+    let prop = crate::core::declared_types::get_property_of_type(&c, o_type, "x")
+        .expect("object literal with a setter must expose the accessor as a named property");
+    let prop_type = crate::core::declared_types::get_type_of_symbol(&mut c, &p, prop, None);
+    assert_eq!(prop_type, c.number_type());
+}
+
+// Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2912)
+#[test]
+fn object_literal_set_accessor_contextual_parameter_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { set x(v: number) } = { set x(v) { v = \"\"; } };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.is_empty(),
+        "a contextually typed object-literal setter parameter must be checked against the contextual type"
+    );
+}

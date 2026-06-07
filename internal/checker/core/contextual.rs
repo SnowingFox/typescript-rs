@@ -209,6 +209,16 @@ impl Checker {
         parameter: NodeId,
     ) -> Option<TypeId> {
         let fn_node = program.arena().parent(parameter)?;
+        // A set-accessor value parameter without an annotation takes its type from
+        // the enclosing object literal's contextual property type (Go's
+        // `getContextualTypeForObjectLiteralElement` on the setter).
+        if program.arena().kind(fn_node) == Kind::SetAccessor {
+            return self.get_contextual_type_for_object_literal_element(
+                program,
+                fn_node,
+                ContextFlags::NONE,
+            );
+        }
         if !is_function_expression_or_arrow(program, fn_node) {
             return None;
         }
