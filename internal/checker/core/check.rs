@@ -9198,6 +9198,133 @@ impl Checker {
         self.is_array_type(t) || self.is_tuple_type(t)
     }
 
+    /// Returns the element type of an array type reference (`Array<T>` /
+    /// `ReadonlyArray<T>`), or `None` when `t` is not an array type.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// let mut c = Checker::new();
+    /// let n = c.number_type();
+    /// let arr = c.create_array_type(n);
+    /// assert_eq!(c.get_element_type_of_array_type(arr), Some(n));
+    /// assert_eq!(c.get_element_type_of_array_type(n), None);
+    /// ```
+    ///
+    /// Side effects: none (pure read over the type arena).
+    // Go: internal/checker/checker.go:Checker.getElementTypeOfArrayType(23374)
+    pub fn get_element_type_of_array_type(&self, t: TypeId) -> Option<TypeId> {
+        if !self.is_array_type(t) {
+            return None;
+        }
+        self.get_type(t)
+            .as_object()
+            .and_then(|obj| obj.resolved_type_arguments.first().copied())
+    }
+
+    /// Returns the element type at `index` in a tuple or tuple-like type (Go's
+    /// `getTupleElementType`): in-range indices read the positional element;
+    /// out-of-range indices on a tuple resolve through the rest element (when
+    /// present) or `undefined`.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// let mut c = Checker::new();
+    /// let s = c.string_type();
+    /// let n = c.number_type();
+    /// let tuple = c.create_tuple_type(vec![s, n]);
+    /// assert_eq!(c.get_tuple_element_type(tuple, 0), Some(s));
+    /// assert_eq!(c.get_tuple_element_type(tuple, 1), Some(n));
+    /// ```
+    ///
+    /// Side effects: may allocate union types for out-of-range access.
+    // Go: internal/checker/checker.go:Checker.getTupleElementType(23425)
+    pub fn get_tuple_element_type(&mut self, t: TypeId, index: usize) -> Option<TypeId> {
+        let name = index.to_string();
+        if let Some(program) = self.retained_program() {
+            if let Some(prop_type) = self.get_type_of_property_of_type(program.as_ref(), t, &name) {
+                return Some(prop_type);
+            }
+        }
+        if self.is_tuple_type(t) {
+            if let Some(obj) = self.get_type(t).as_object() {
+                if let Some(&element) = obj.resolved_type_arguments.get(index) {
+                    return Some(element);
+                }
+            }
+            return Some(self.get_tuple_element_type_out_of_start_count(t, index));
+        }
+        if self.every_type_is_tuple(t) {
+            return Some(self.get_tuple_element_type_out_of_start_count(t, index));
+        }
+        None
+    }
+
+    /// Returns the rest-element type of a tuple (the union of element types
+    /// from `fixedLength` onward), or `None` when the tuple has no rest element.
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// let mut c = Checker::new();
+    /// let s = c.string_type();
+    /// let n = c.number_type();
+    /// let tuple = c.create_tuple_type(vec![s, n]);
+    /// assert_eq!(c.get_rest_type_of_tuple_type(tuple), None);
+    /// ```
+    ///
+    /// Side effects: may allocate union types.
+    // Go: internal/checker/checker.go:Checker.getRestTypeOfTupleType(24712)
+    pub fn get_rest_type_of_tuple_type(&mut self, t: TypeId) -> Option<TypeId> {
+        let fixed_length = self.tuple_fixed_length(t)?;
+        self.get_element_type_of_slice_of_tuple_type(t, fixed_length, 0, false)
+    }
+
+    /// Slices a tuple type from `index`, optionally skipping `end_skip_count`
+    /// elements at the end (Go's `sliceTupleType`).
+    ///
+    /// # Examples
+    /// ```
+    /// use tsgo_checker::Checker;
+    /// let mut c = Checker::new();
+    /// let s = c.string_type();
+    /// let n = c.number_type();
+    /// let tuple = c.create_tuple_type(vec![s, n]);
+    /// let tail = c.slice_tuple_type(tuple, 1, 0);
+    /// assert_eq!(c.get_tuple_element_type(tail, 0), Some(n));
+    /// ```
+    ///
+    /// Side effects: mutates the checker's type arena.
+    // Go: internal/checker/relater.go:Checker.sliceTupleType(1879)
+    pub fn slice_tuple_type(&mut self, t: TypeId, index: usize, end_skip_count: usize) -> TypeId {
+        let fixed_length = self.tuple_fixed_length(t).unwrap_or(0);
+        let end_index = self
+            .tuple_reference_arity(t)
+            .unwrap_or(0)
+            .saturating_sub(end_skip_count);
+        if index > fixed_length {
+            if let Some(rest_array) = self.get_rest_array_type_of_tuple_type(t) {
+                return rest_array;
+            }
+            return self.create_tuple_type(vec![]);
+        }
+        if index >= end_index {
+            return self.create_tuple_type(vec![]);
+        }
+        let elements = self
+            .get_type(t)
+            .as_object()
+            .map(|o| o.resolved_type_arguments.clone())
+            .unwrap_or_default();
+        let readonly = self
+            .get_type(t)
+            .as_object()
+            .map(|o| o.readonly)
+            .unwrap_or(false);
+        self.create_tuple_type_ex(elements[index..end_index].to_vec(), readonly)
+    }
+
     /// Creates an array type by wrapping `element_type` in a generic type
     /// reference to a named array target.
     // Go: internal/checker/checker.go:Checker.createArrayType(24562)
@@ -9231,6 +9358,114 @@ impl Checker {
         });
         self.global_types.insert(name.to_string(), target);
         target
+    }
+
+    // Returns the union of element types from `index` through the end of a tuple
+    // (minus `end_skip_count` trailing elements), or `None` when `index` is
+    // out of range. The `writing` flag selects intersection vs union (Go uses
+    // union for read contexts and intersection for write contexts).
+    //
+    // DEFER(phase-4-checker-4af+): variadic tuple elements (`ElementFlagsVariadic`
+    // -> indexed access over the variadic type). blocked-by: tuple element flags.
+    // Go: internal/checker/checker.go:Checker.getElementTypeOfSliceOfTupleType(24691)
+    fn get_element_type_of_slice_of_tuple_type(
+        &mut self,
+        t: TypeId,
+        index: usize,
+        end_skip_count: usize,
+        writing: bool,
+    ) -> Option<TypeId> {
+        let length = self
+            .tuple_reference_arity(t)?
+            .saturating_sub(end_skip_count);
+        if index >= length {
+            return None;
+        }
+        let elements = self
+            .get_type(t)
+            .as_object()?
+            .resolved_type_arguments
+            .clone();
+        let slice = &elements[index..length];
+        if writing {
+            Some(self.get_intersection_type(slice))
+        } else {
+            Some(self.get_union_type(slice))
+        }
+    }
+
+    // Returns `Array<restElementType>` when the tuple has a rest element, or
+    // `None` when it does not.
+    // Go: internal/checker/relater.go:Checker.getRestArrayTypeOfTupleType(1904)
+    fn get_rest_array_type_of_tuple_type(&mut self, t: TypeId) -> Option<TypeId> {
+        let rest = self.get_rest_type_of_tuple_type(t)?;
+        Some(self.create_array_type(rest))
+    }
+
+    // Resolves an out-of-range tuple index to the rest element type (when
+    // present) or `undefined` (Go's `getTupleElementTypeOutOfStartCount`).
+    //
+    // DEFER(phase-4-checker-4af+): variadic/rest tuples and
+    // `noUncheckedIndexedAccess` (union with `undefined` when enabled).
+    // blocked-by: tuple element flags + compiler-option wiring.
+    // Go: internal/checker/checker.go:Checker.getTupleElementTypeOutOfStartCount(24716)
+    fn get_tuple_element_type_out_of_start_count(&mut self, t: TypeId, index: usize) -> TypeId {
+        let undefined_like = if self
+            .compiler_options()
+            .no_unchecked_indexed_access
+            .is_true()
+        {
+            Some(self.undefined_type)
+        } else {
+            None
+        };
+        let members = self.distributed_types(t);
+        let mut mapped = Vec::with_capacity(members.len());
+        for member in members {
+            if let Some(rest) = self.get_rest_type_of_tuple_type(member) {
+                if let Some(undefined) = undefined_like {
+                    if index >= self.tuple_fixed_length(member).unwrap_or(0) {
+                        mapped.push(self.get_union_type(&[rest, undefined]));
+                    } else {
+                        mapped.push(rest);
+                    }
+                } else {
+                    mapped.push(rest);
+                }
+            } else {
+                mapped.push(self.undefined_type);
+            }
+        }
+        self.get_union_type(&mapped)
+    }
+
+    // Reports whether every constituent of `t` is a tuple type (Go's
+    // `everyType(t, isTupleType)`).
+    fn every_type_is_tuple(&self, t: TypeId) -> bool {
+        self.distributed_types(t)
+            .iter()
+            .all(|&member| self.is_tuple_type(member))
+    }
+
+    // Returns the number of type arguments on a fixed-arity tuple (Go's
+    // `getTypeReferenceArity` for tuple references).
+    fn tuple_reference_arity(&self, t: TypeId) -> Option<usize> {
+        if !self.is_tuple_type(t) {
+            return None;
+        }
+        self.get_type(t)
+            .as_object()
+            .map(|obj| obj.resolved_type_arguments.len())
+    }
+
+    // Returns the fixed (non-rest) length of a tuple (Go's
+    // `TargetTupleType().fixedLength`). For the fixed-arity subset this equals
+    // the full arity.
+    //
+    // DEFER(phase-4-checker-4af+): variadic/rest tuples where `fixedLength` <
+    // arity. blocked-by: tuple element flags.
+    fn tuple_fixed_length(&self, t: TypeId) -> Option<usize> {
+        self.tuple_reference_arity(t)
     }
 
     /// Performs assignability checking with optional elaboration (Go's

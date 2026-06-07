@@ -11191,6 +11191,131 @@ fn create_array_type_ex_readonly_interns_separately() {
     assert_ne!(mutable_obj.target, readonly_obj.target);
 }
 
+// ---- T1-E batch 14: tuple + array type operations ----
+
+// Go: internal/checker/checker.go:Checker.getElementTypeOfArrayType(23374)
+#[test]
+fn get_element_type_of_array_type_returns_first_type_argument() {
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let arr = c.create_array_type(s);
+    assert_eq!(c.get_element_type_of_array_type(arr), Some(s));
+    assert_eq!(c.get_element_type_of_array_type(s), None);
+    let tuple = c.create_tuple_type(vec![s]);
+    assert_eq!(c.get_element_type_of_array_type(tuple), None);
+}
+
+// Go: internal/checker/checker.go:Checker.getTupleElementType(23425)
+#[test]
+fn get_tuple_element_type_reads_positional_elements() {
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let n = c.number_type();
+    let b = c.boolean_type();
+    let tuple = c.create_tuple_type(vec![s, n, b]);
+    assert_eq!(c.get_tuple_element_type(tuple, 0), Some(s));
+    assert_eq!(c.get_tuple_element_type(tuple, 1), Some(n));
+    assert_eq!(c.get_tuple_element_type(tuple, 2), Some(b));
+    assert_eq!(c.get_tuple_element_type(n, 0), None);
+}
+
+// Go: internal/checker/checker.go:Checker.getTupleElementTypeOutOfStartCount(24716)
+#[test]
+fn get_tuple_element_type_out_of_range_yields_undefined() {
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let n = c.number_type();
+    let tuple = c.create_tuple_type(vec![s, n]);
+    assert_eq!(
+        c.get_tuple_element_type(tuple, 2),
+        Some(c.undefined_type()),
+        "out-of-range index on a fixed tuple yields undefined"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getRestTypeOfTupleType(24712)
+#[test]
+fn get_rest_type_of_tuple_type_none_for_fixed_arity() {
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let n = c.number_type();
+    let tuple = c.create_tuple_type(vec![s, n]);
+    assert_eq!(
+        c.get_rest_type_of_tuple_type(tuple),
+        None,
+        "fixed-arity tuples have no rest element"
+    );
+}
+
+// Go: internal/checker/relater.go:Checker.sliceTupleType(1879)
+#[test]
+fn slice_tuple_type_extracts_subrange() {
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let n = c.number_type();
+    let b = c.boolean_type();
+    let tuple = c.create_tuple_type(vec![s, n, b]);
+    let tail = c.slice_tuple_type(tuple, 1, 0);
+    assert!(c.is_tuple_type(tail));
+    assert_eq!(c.get_tuple_element_type(tail, 0), Some(n));
+    assert_eq!(c.get_tuple_element_type(tail, 1), Some(b));
+    assert_eq!(c.get_tuple_element_type(tail, 2), Some(c.undefined_type()));
+}
+
+// Go: internal/checker/relater.go:Checker.sliceTupleType(1879)
+#[test]
+fn slice_tuple_type_empty_when_index_at_or_past_end() {
+    let mut c = Checker::new();
+    let s = c.string_type();
+    let n = c.number_type();
+    let tuple = c.create_tuple_type(vec![s, n]);
+    let empty = c.slice_tuple_type(tuple, 2, 0);
+    assert!(c.is_tuple_type(empty));
+    let obj = c.get_type(empty).as_object().expect("tuple object");
+    assert!(obj.resolved_type_arguments.is_empty());
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromArrayOrTupleTypeNode (tuple branch)
+#[test]
+fn get_type_from_tuple_type_node_produces_fixed_arity_tuple() {
+    let p = StubProgram::parse_and_bind("/a.ts", "type T = [string, number];");
+    let mut c = Checker::new();
+    let type_alias = match p.arena().data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes[0],
+        _ => panic!("source file"),
+    };
+    let tuple_node = match p.arena().data(type_alias) {
+        NodeData::TypeAliasDeclaration(d) => d.type_node,
+        _ => panic!("type alias"),
+    };
+    let ty = crate::core::declared_types::get_type_from_type_node(&mut c, &p, tuple_node, None);
+    assert!(c.is_tuple_type(ty));
+    assert_eq!(c.get_tuple_element_type(ty, 0), Some(c.string_type()));
+    assert_eq!(c.get_tuple_element_type(ty, 1), Some(c.number_type()));
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromArrayOrTupleTypeNode (`T[]`)
+#[test]
+fn get_type_from_array_type_node_produces_array_reference() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\ntype T = number[];",
+    );
+    let mut c = Checker::new();
+    let type_alias = match p.arena().data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes[1],
+        _ => panic!("source file"),
+    };
+    let array_node = match p.arena().data(type_alias) {
+        NodeData::TypeAliasDeclaration(d) => d.type_node,
+        _ => panic!("type alias"),
+    };
+    let ty = crate::core::declared_types::get_type_from_type_node(&mut c, &p, array_node, None);
+    let obj = c.get_type(ty).as_object().expect("array type reference");
+    assert!(obj.target.is_some());
+    assert_eq!(obj.resolved_type_arguments, vec![c.number_type()]);
+}
+
 // Go: internal/checker/checker.go:Checker.getRegularTypeOfLiteralType(25132)
 #[test]
 fn regular_type_of_literal_type_returns_regular_form() {
@@ -11786,4 +11911,19 @@ fn check_return_statement_void_annotation_rejects_value_reports_2322() {
         codes.contains(&2322),
         "expected TS2322 returning number to void; got {codes:?}"
     );
+}
+
+#[test]
+fn repro_class_expression_computed_property_in_loop_no_panic() {
+    let src = r#"const array: any[] = [];
+const key = "myKey";
+for (let i = 0; i < 3; i++) {
+    array.push(class C {
+        [key] = i;
+        #field = i;
+    });
+}"#;
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let mut c = Checker::new_checker(p);
+    c.check_source_file(c.program().unwrap().root());
 }
