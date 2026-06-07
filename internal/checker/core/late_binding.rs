@@ -10,7 +10,6 @@ use super::types::{LiteralValue, TypeFlags, TypeId};
 use super::Checker;
 
 // Go: internal/checker/utilities.go:getPropertyNameFromType
-#[allow(dead_code)]
 pub(crate) fn get_property_name_from_type(checker: &Checker, t: TypeId) -> String {
     let ty = checker.get_type(t);
     let flags = ty.flags();

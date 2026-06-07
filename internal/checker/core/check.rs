@@ -44,6 +44,7 @@ use super::declared_types::{
 use super::inference::{InferenceContext, InferencePriority};
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
+use super::late_binding::get_property_name_from_type;
 use super::reachability::module_is_value_module;
 use super::relations::RelationKind;
 use super::signatures::{IndexInfo, IndexInfoId, Signature, SignatureFlags, SignatureId};
@@ -638,8 +639,7 @@ impl Checker {
     //
     // DEFER(phase-4-checker-4bi+): spread members (`{...o}`), get/set/method
     // members, contextual typing (the type flowing INTO the literal), the
-    // late-bound *named* member for a string/number-literal or unique-symbol
-    // computed name (`isTypeUsableAsPropertyName` -> `getPropertyNameFromType`),
+    // unique-symbol computed names (`getPropertyNameFromType` for unique ESSymbol),
     // and the destructuring-pattern member optionality. blocked-by: full
     // `getSpreadType` (union/index/private), accessor/method signature collection,
     // contextual type propagation, late binding, and destructuring-assignment typing.
@@ -780,9 +780,6 @@ impl Checker {
             // A non-literal computed name assignable to `string | number |
             // symbol` contributes to an index signature of the matching key
             // kind, not a named property (Go's `hasComputed*Property` block).
-            // DEFER(phase-4-checker-4bh+): a string/number-literal or
-            // unique-symbol computed name becomes a late-bound NAMED member
-            // (`isTypeUsableAsPropertyName`); the reachable subset skips it.
             if let Some(name_type) = computed_name_type {
                 if !self
                     .get_type(name_type)
@@ -818,7 +815,21 @@ impl Checker {
                     }
                     continue;
                 }
-                // Literal/unique computed name -> late-bound named member: DEFER.
+                // A string/number-literal or unique-symbol computed name becomes a
+                // late-bound named member (`isTypeUsableAsPropertyName`).
+                let name = get_property_name_from_type(self, name_type);
+                let prop = self.new_object_literal_property(
+                    &name,
+                    SymbolFlags::PROPERTY,
+                    member_check_flags | CheckFlags::LATE,
+                    member_type,
+                );
+                members.insert(name.clone(), prop);
+                properties.push(prop);
+                all_members.push(ObjectLiteralMember {
+                    symbol: prop,
+                    computed_name_type: Some(name_type),
+                });
                 continue;
             }
             let Some(name) = property_name_text(program, name_node) else {

@@ -13170,3 +13170,74 @@ fn object_spread_result_carries_object_literal_flags() {
         "spread result must carry ObjectFlagsContainsObjectOrArrayLiteral"
     );
 }
+
+// ---- T1-E batch 29: unknown spread, late-bound literal computed names ----
+
+// Go: internal/checker/checker.go:Checker.isValidSpreadType(13418) / checkObjectLiteral
+#[test]
+fn object_spread_unknown_operand_reports_2698() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const u: unknown;\nconst o = { ...u };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2698),
+        "spreading `unknown` is invalid; expected 2698, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13165) / getPropertyNameFromType
+#[test]
+fn object_literal_string_literal_computed_name_creates_named_property() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o = { ['foo']: 1 };\no.foo;",
+    );
+    let access = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, access);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "number"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13165) / getPropertyNameFromType
+#[test]
+fn object_literal_number_literal_computed_name_creates_named_property() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { [0]: 1 };\no;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ 0: number; }"
+    );
+    let prop = crate::core::declared_types::get_property_of_type(&c, t, "0")
+        .expect("literal computed name `0` is a named property");
+    let prop_type =
+        crate::core::declared_types::get_type_of_symbol(&mut c, &p, prop, p.globals());
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, prop_type),
+        "number"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectLiteral(13165) (CheckFlagsLate)
+#[test]
+fn object_literal_literal_computed_name_carries_late_check_flag() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { ['foo']: 1 };\no;");
+    let usage = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    let prop = crate::core::declared_types::get_property_of_type(&c, t, "foo")
+        .expect("literal computed name `foo` is a named property");
+    assert!(
+        c.synthesized_symbol_check_flags(prop)
+            .contains(tsgo_ast::CheckFlags::LATE),
+        "a literal computed-name property must carry the Late check flag"
+    );
+}
