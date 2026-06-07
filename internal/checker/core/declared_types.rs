@@ -1847,12 +1847,26 @@ fn get_type_of_func_class_enum_module(
     // (Go's `getTypeOfFuncClassEnumModuleWorker` -> anonymous object type whose
     // members are the symbol's exports). Exposing them as properties is what lets
     // `f.x` resolve instead of reporting a spurious TS2339.
-    let members = program.symbol(symbol).exports.clone();
+    let sym = program.symbol(symbol);
+    let members = sym.exports.clone();
     let properties: Vec<SymbolId> = members.values().copied().collect();
+    let mut index_infos = Vec::new();
+    if sym.flags.intersects(SymbolFlags::CLASS) {
+        let type_param_map =
+            build_type_parameter_name_map(checker, program, &sym.declarations);
+        index_infos = collect_index_infos_of_members(
+            checker,
+            program,
+            &members,
+            &type_param_map,
+            program.globals(),
+        );
+    }
     let object = ObjectType {
         call_signatures,
         members,
         properties,
+        index_infos,
         ..Default::default()
     };
     let t = checker.new_object_type(ObjectFlags::ANONYMOUS, Some(symbol), object);

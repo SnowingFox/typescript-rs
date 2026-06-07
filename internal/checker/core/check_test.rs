@@ -14840,3 +14840,56 @@ fn class_compatible_index_signatures_reports_no_diagnostic() {
         "compatible index signatures must not report cross-index errors"
     );
 }
+
+// ---- T1-E batch 55: static-side index constraints ----
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4361)
+#[test]
+fn class_static_property_not_assignable_to_string_index_reports_2411() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  static [x: string]: string;\n  static a: number;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2411);
+    assert_eq!(
+        diags[0].message,
+        "Property 'a' of type 'number' is not assignable to 'string' index type 'string'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4361)
+#[test]
+fn class_static_property_assignable_to_string_index_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  static [x: string]: string;\n  static a: string;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "compatible static property and index signature must not report"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4361)
+#[test]
+fn class_static_incompatible_index_signatures_reports_2413() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  static [n: number]: string;\n  static [s: string]: number;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2413);
+    assert_eq!(
+        diags[0].message,
+        "'number' index type 'string' is not assignable to 'string' index type 'number'."
+    );
+}

@@ -8423,21 +8423,23 @@ impl Checker {
         }
 
         // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4360)
-        self.check_index_constraints(program, class_type, symbol);
+        self.check_index_constraints(program, class_type, symbol, false);
+        let static_type = get_type_of_symbol(self, program, symbol, globals);
+        self.check_index_constraints(program, static_type, symbol, true);
     }
 
     // Verifies that declared properties are assignable to applicable index
-    // signatures on a class instance type (TS2411).
+    // signatures on a class or static type (TS2411).
     //
-    // DEFER(phase-4-checker-4bm+): static-side index constraints, computed
-    // property names without bindable names, and inherited interface error-node
-    // selection.
+    // DEFER(phase-4-checker-4bm+): computed property names without bindable
+    // names, and inherited interface error-node selection.
     // Go: internal/checker/checker.go:Checker.checkIndexConstraints(4760)
     fn check_index_constraints(
         &mut self,
         program: &dyn BoundProgram,
         t: TypeId,
         type_symbol: SymbolId,
+        is_static_index: bool,
     ) {
         let index_infos = get_index_infos_of_type(self, t);
         if index_infos.is_empty() {
@@ -8445,6 +8447,14 @@ impl Checker {
         }
         let globals = program.globals();
         for (name, prop_sym) in get_properties_of_type(self, t) {
+            if is_static_index
+                && program
+                    .symbol(prop_sym)
+                    .flags
+                    .intersects(SymbolFlags::PROTOTYPE)
+            {
+                continue;
+            }
             let prop_name_type = self.get_string_literal_type(&name);
             let prop_type = get_type_of_symbol(self, program, prop_sym, globals);
             self.check_index_constraint_for_property(
