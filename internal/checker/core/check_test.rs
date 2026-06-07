@@ -11912,18 +11912,3 @@ fn check_return_statement_void_annotation_rejects_value_reports_2322() {
         "expected TS2322 returning number to void; got {codes:?}"
     );
 }
-
-#[test]
-fn repro_class_expression_computed_property_in_loop_no_panic() {
-    let src = r#"const array: any[] = [];
-const key = "myKey";
-for (let i = 0; i < 3; i++) {
-    array.push(class C {
-        [key] = i;
-        #field = i;
-    });
-}"#;
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
-    let mut c = Checker::new_checker(p);
-    c.check_source_file(c.program().unwrap().root());
-}

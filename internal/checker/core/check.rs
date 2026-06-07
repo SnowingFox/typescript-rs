@@ -10674,29 +10674,33 @@ fn declaration_modifier_flags_from_symbol(
         };
         return access | static_mod;
     }
-    let sym = program.symbol(symbol);
+    // Declaration nodes may live in another file's arena (lib globals, merged
+    // cross-file symbols). Read them through the view that owns `symbol`.
+    let owner = program.view_for_symbol(symbol);
+    let prog: &dyn BoundProgram = owner.as_deref().unwrap_or(program);
+    let sym = prog.symbol(symbol);
     if let Some(mut decl) = sym.value_declaration {
         if is_write {
             decl = sym
                 .declarations
                 .iter()
                 .copied()
-                .find(|&d| program.arena().kind(d) == Kind::SetAccessor)
+                .find(|&d| prog.arena().kind(d) == Kind::SetAccessor)
                 .unwrap_or(decl);
         } else if sym.flags.intersects(SymbolFlags::GET_ACCESSOR) {
             if let Some(getter) = sym
                 .declarations
                 .iter()
                 .copied()
-                .find(|&d| program.arena().kind(d) == Kind::GetAccessor)
+                .find(|&d| prog.arena().kind(d) == Kind::GetAccessor)
             {
                 decl = getter;
             }
         }
-        let flags = combined_modifier_flags(program, decl);
+        let flags = combined_modifier_flags(prog, decl);
         if sym
             .parent
-            .is_some_and(|p| program.symbol(p).flags.intersects(SymbolFlags::CLASS))
+            .is_some_and(|p| prog.symbol(p).flags.intersects(SymbolFlags::CLASS))
         {
             return flags;
         }
@@ -10738,7 +10742,9 @@ fn get_class_like_declaration_of_symbol(
     program: &dyn BoundProgram,
     symbol: SymbolId,
 ) -> Option<NodeId> {
-    let sym = program.symbol(symbol);
+    let owner = program.view_for_symbol(symbol);
+    let prog: &dyn BoundProgram = owner.as_deref().unwrap_or(program);
+    let sym = prog.symbol(symbol);
     sym.value_declaration
         .or_else(|| sym.declarations.first().copied())
 }

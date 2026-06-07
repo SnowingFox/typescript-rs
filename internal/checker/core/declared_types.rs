@@ -1837,8 +1837,7 @@ fn get_type_of_func_class_enum_module(
     {
         return cached;
     }
-    let declarations = program.symbol(symbol).declarations.clone();
-    let call_signatures = get_signatures_of_symbol(checker, program, &declarations);
+    let call_signatures = get_signatures_of_symbol(checker, program, symbol);
     // Expando members (`function f(){}; f.x = v`) live in the function symbol's
     // `exports` table (the binder's `bindDeferredExpandoAssignment`), and a
     // function/class/enum/module value type resolves its members from that table
@@ -1869,8 +1868,13 @@ fn get_type_of_func_class_enum_module(
 fn get_signatures_of_symbol(
     checker: &mut Checker,
     program: &dyn BoundProgram,
-    declarations: &[NodeId],
+    symbol: SymbolId,
 ) -> Vec<SignatureId> {
+    // Declaration nodes may live in another file's arena (lib globals, merged
+    // cross-file symbols). Read them through the view that owns `symbol`.
+    let owner = program.view_for_symbol(symbol);
+    let prog: &dyn BoundProgram = owner.as_deref().unwrap_or(program);
+    let declarations = prog.symbol(symbol).declarations.clone();
     let mut result = Vec::new();
     for (i, &decl) in declarations.iter().enumerate() {
         // A method member contributes its `MethodSignature`/`MethodDeclaration`
@@ -1879,7 +1883,7 @@ fn get_signatures_of_symbol(
         // its call signature too (4bj), so a contextual function type yields the
         // signature that types an assigned arrow/function expression.
         if !matches!(
-            program.arena().kind(decl),
+            prog.arena().kind(decl),
             Kind::FunctionDeclaration
                 | Kind::MethodSignature
                 | Kind::MethodDeclaration
@@ -1897,16 +1901,16 @@ fn get_signatures_of_symbol(
         // expose exactly the two overloads, so an unmatched call elaborates
         // against them rather than silently resolving against the `any`
         // implementation.
-        if i > 0 && function_like_has_body(program, decl) {
+        if i > 0 && function_like_has_body(prog, decl) {
             let previous = declarations[i - 1];
-            if program.arena().parent(decl) == program.arena().parent(previous)
-                && program.arena().kind(decl) == program.arena().kind(previous)
-                && program.arena().loc(decl).pos() == program.arena().loc(previous).end()
+            if prog.arena().parent(decl) == prog.arena().parent(previous)
+                && prog.arena().kind(decl) == prog.arena().kind(previous)
+                && prog.arena().loc(decl).pos() == prog.arena().loc(previous).end()
             {
                 continue;
             }
         }
-        result.push(get_signature_from_declaration(checker, program, decl));
+        result.push(get_signature_from_declaration(checker, prog, decl));
     }
     result
 }
@@ -3268,10 +3272,7 @@ fn signatures_of_member(
     member_name: &str,
 ) -> Vec<SignatureId> {
     match program.symbol(symbol).members.get(member_name) {
-        Some(&member) => {
-            let declarations = program.symbol(member).declarations.clone();
-            get_signatures_of_symbol(checker, program, &declarations)
-        }
+        Some(&member) => get_signatures_of_symbol(checker, program, member),
         None => Vec::new(),
     }
 }

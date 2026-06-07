@@ -39,8 +39,13 @@ impl Checker {
                     get_type_only_alias_declaration_ex(self, program, result, SymbolFlags::VALUE)
                 {
                     let name = program.arena().text(error_location).to_string();
+                    let owner = program.view_for_symbol(result);
+                    let decl_arena = owner
+                        .as_deref()
+                        .map(|v| v.arena())
+                        .unwrap_or_else(|| program.arena());
                     let is_export = matches!(
-                        program.arena().kind(type_only_decl),
+                        decl_arena.kind(type_only_decl),
                         Kind::ExportSpecifier | Kind::ExportDeclaration | Kind::NamespaceExport
                     );
                     let message = if is_export {
