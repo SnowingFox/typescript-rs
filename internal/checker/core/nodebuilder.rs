@@ -23,6 +23,7 @@ use tsgo_ast::{Kind, SymbolFlags, SymbolId};
 
 use super::declared_types::{get_declared_type_of_symbol, get_type_of_symbol};
 use super::program::BoundProgram;
+use super::type_facts::TypeFacts;
 use super::types::{LiteralValue, ObjectFlags, TypeData, TypeFlags, TypeId};
 use super::Checker;
 
@@ -599,23 +600,15 @@ fn synthesize_members(
         // transient arena, and an `as const` member carries the `Readonly` check
         // flag; a program (interface/class) member reads its name from the
         // program. Mirrors [`serialize_members`].
-        let (name, readonly) = if super::is_synthesized_symbol(property) {
-            (
-                checker.synthesized_symbol_name(property),
-                checker
-                    .synthesized_symbol_check_flags(property)
-                    .contains(tsgo_ast::CheckFlags::READONLY),
-            )
-        } else {
-            (program.symbol(property).name.clone(), false)
-        };
-        let property_type = get_type_of_symbol(checker, program, property, None);
+        let (name, readonly, optional) = property_name_readonly_optional(checker, program, property);
+        let property_type =
+            printable_property_type(checker, program, property, optional);
         let type_node = type_to_type_node(checker, program, property_type)?;
         members.push(SynthesizedProperty {
             name,
             type_node,
             readonly,
-            optional: false,
+            optional,
         });
     }
     Some(SynthesizedTypeNode::TypeLiteral(members))
@@ -686,6 +679,45 @@ fn serialize_signature(
     format!("{prefix}({}) => {return_str}", parts.join(", "))
 }
 
+fn property_name_readonly_optional(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    property: SymbolId,
+) -> (String, bool, bool) {
+    if super::is_synthesized_symbol(property) {
+        (
+            checker.synthesized_symbol_name(property).to_string(),
+            checker
+                .synthesized_symbol_check_flags(property)
+                .contains(tsgo_ast::CheckFlags::READONLY),
+            checker
+                .synthesized_symbol_flags(property)
+                .contains(SymbolFlags::OPTIONAL),
+        )
+    } else {
+        let sym = program.symbol(property);
+        (
+            sym.name.clone(),
+            false,
+            sym.flags.contains(SymbolFlags::OPTIONAL),
+        )
+    }
+}
+
+fn printable_property_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    property: SymbolId,
+    optional: bool,
+) -> TypeId {
+    let property_type = get_type_of_symbol(checker, program, property, None);
+    if optional {
+        checker.get_type_with_facts(property_type, TypeFacts::NE_UNDEFINED)
+    } else {
+        property_type
+    }
+}
+
 // Prints an anonymous object type's members as `{ a: A; b: B; }` (or `{}`).
 // Go: internal/checker/nodebuilderimpl.go (type-literal member serialization)
 fn serialize_members(checker: &mut Checker, program: &dyn BoundProgram, ty: TypeId) -> String {
@@ -707,20 +739,13 @@ fn serialize_members(checker: &mut Checker, program: &dyn BoundProgram, ty: Type
         // DEFER(phase-4-checker-4bi+): the readonly modifier on a program (non
         // synthesized) member symbol (interface/class `readonly` field).
         // blocked-by: declaration-modifier readonly on bound symbols.
-        let (name, readonly) = if super::is_synthesized_symbol(property) {
-            (
-                checker.synthesized_symbol_name(property),
-                checker
-                    .synthesized_symbol_check_flags(property)
-                    .contains(tsgo_ast::CheckFlags::READONLY),
-            )
-        } else {
-            (program.symbol(property).name.clone(), false)
-        };
-        let property_type = get_type_of_symbol(checker, program, property, None);
+        let (name, readonly, optional) = property_name_readonly_optional(checker, program, property);
+        let property_type =
+            printable_property_type(checker, program, property, optional);
         let printed = type_to_string(checker, program, property_type);
         let prefix = if readonly { "readonly " } else { "" };
-        parts.push(format!("{prefix}{name}: {printed}"));
+        let separator = if optional { "?: " } else { ": " };
+        parts.push(format!("{prefix}{name}{separator}{printed}"));
     }
     format!("{{ {}; }}", parts.join("; "))
 }

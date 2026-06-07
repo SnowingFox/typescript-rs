@@ -698,10 +698,15 @@ impl Checker {
                     .union_types()
                     .map(|m| m.to_vec())
                 {
-                    // A spread-only object literal whose operand is a union of object
-                    // types yields that union (Go's `getSpreadType(empty, A | B)`).
+                    // A spread-only object literal defers to `getSpreadType` so
+                    // union-with-empty-object rewriting and distribution both
+                    // match Go (`getSpreadType(empty, A | B)` / `tryMerge…`).
                     if members.is_empty() && all_members.is_empty() && spread_only {
-                        return self.get_union_type(&union_members);
+                        return self.get_spread_type(
+                            program,
+                            self.empty_object_type(),
+                            spread_type,
+                        );
                     }
                     // Spreading a union after named members distributes
                     // `getSpreadType(left, eachMember)` (Go's right-union arm).
@@ -1069,13 +1074,7 @@ impl Checker {
         if right_flags.intersects(TypeFlags::NEVER) {
             return left;
         }
-        if let Some(members) = self.get_type(right).union_types().map(|m| m.to_vec()) {
-            let mapped: Vec<TypeId> = members
-                .iter()
-                .map(|&member| self.get_spread_type(program, left, member))
-                .collect();
-            return self.get_union_type(&mapped);
-        }
+        let left = self.try_merge_union_of_object_type_and_empty_object(program, left, false);
         if let Some(members) = self.get_type(left).union_types().map(|m| m.to_vec()) {
             let mapped: Vec<TypeId> = members
                 .iter()
@@ -1083,7 +1082,137 @@ impl Checker {
                 .collect();
             return self.get_union_type(&mapped);
         }
+        let right = self.try_merge_union_of_object_type_and_empty_object(program, right, false);
+        let right_flags = self.get_type(right).flags();
+        if let Some(members) = self.get_type(right).union_types().map(|m| m.to_vec()) {
+            let mapped: Vec<TypeId> = members
+                .iter()
+                .map(|&member| self.get_spread_type(program, left, member))
+                .collect();
+            return self.get_union_type(&mapped);
+        }
+        if right_flags.intersects(
+            TypeFlags::BOOLEAN_LIKE
+                | TypeFlags::NUMBER_LIKE
+                | TypeFlags::BIG_INT_LIKE
+                | TypeFlags::STRING_LIKE
+                | TypeFlags::ENUM_LIKE
+                | TypeFlags::NON_PRIMITIVE
+                | TypeFlags::INDEX,
+        ) {
+            return left;
+        }
         self.merge_object_types_for_spread(program, left, right)
+    }
+
+    // When a union is exactly one object type plus members that spread into an
+    // empty object (`{}`, `null`, primitives, etc.), rewrites the object arm so
+    // every property is optional (Go's `tryMergeUnionOfObjectTypeAndEmptyObject`).
+    // Go: internal/checker/checker.go:Checker.tryMergeUnionOfObjectTypeAndEmptyObject(13444)
+    fn try_merge_union_of_object_type_and_empty_object(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        readonly: bool,
+    ) -> TypeId {
+        if !self.get_type(t).flags().intersects(TypeFlags::UNION) {
+            return t;
+        }
+        let members = self.get_type(t).union_types().unwrap().to_vec();
+        if members
+            .iter()
+            .all(|&m| self.is_empty_object_type_or_spreads_into_empty_object(m))
+        {
+            if let Some(&empty) = members
+                .iter()
+                .find(|&&m| self.is_empty_object_type(m))
+            {
+                return empty;
+            }
+            return self.empty_object_type();
+        }
+        let first_type = members.iter().find(|&&m| {
+            !self.is_empty_object_type_or_spreads_into_empty_object(m)
+        });
+        let Some(&first_type) = first_type else {
+            return t;
+        };
+        if members.iter().any(|&m| {
+            m != first_type && !self.is_empty_object_type_or_spreads_into_empty_object(m)
+        }) {
+            return t;
+        }
+        self.make_all_properties_optional_for_spread(program, first_type, readonly)
+    }
+
+    // Reports whether `t` is an empty object or a primitive/nullish type that
+    // contributes no properties when spread (Go's
+    // `isEmptyObjectTypeOrSpreadsIntoEmptyObject`).
+    // Go: internal/checker/checker.go:Checker.isEmptyObjectTypeOrSpreadsIntoEmptyObject(13518)
+    fn is_empty_object_type_or_spreads_into_empty_object(&mut self, t: TypeId) -> bool {
+        if self.is_empty_object_type(t) {
+            return true;
+        }
+        self.get_type(t).flags().intersects(
+            TypeFlags::NULL
+                | TypeFlags::UNDEFINED
+                | TypeFlags::BOOLEAN_LIKE
+                | TypeFlags::NUMBER_LIKE
+                | TypeFlags::BIG_INT_LIKE
+                | TypeFlags::STRING_LIKE
+                | TypeFlags::ENUM_LIKE
+                | TypeFlags::NON_PRIMITIVE
+                | TypeFlags::INDEX,
+        )
+    }
+
+    // Materializes `t` with every spreadable property made optional, matching
+    // the union-with-empty-object rewrite in Go's `tryMergeUnionOfObjectTypeAndEmptyObject`.
+    fn make_all_properties_optional_for_spread(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        readonly: bool,
+    ) -> TypeId {
+        use super::declared_types::get_properties_of_type;
+        let globals = program.globals();
+        let member_check_flags = if readonly {
+            tsgo_ast::CheckFlags::READONLY
+        } else {
+            tsgo_ast::CheckFlags::empty()
+        };
+        let mut members = SymbolTable::default();
+        let mut properties: Vec<tsgo_ast::SymbolId> = Vec::new();
+        for (name, prop_sym) in get_properties_of_type(self, t) {
+            if is_private_or_protected_member(self, program, prop_sym) {
+                continue;
+            }
+            if !is_spreadable_property(program, prop_sym) {
+                continue;
+            }
+            let prop_type = self.get_spread_property_type(program, prop_sym, globals);
+            let optional_type = self.add_optionality_ex(prop_type, true, true);
+            let prop = self.new_object_literal_property(
+                &name,
+                SymbolFlags::PROPERTY | SymbolFlags::OPTIONAL,
+                member_check_flags,
+                optional_type,
+            );
+            members.insert(name, prop);
+            properties.push(prop);
+        }
+        let index_infos = get_index_infos_of_type(self, t);
+        let object = ObjectType {
+            members,
+            properties,
+            index_infos,
+            ..Default::default()
+        };
+        self.new_object_type(
+            ObjectFlags::ANONYMOUS | ObjectFlags::OBJECT_LITERAL | ObjectFlags::CONTAINS_OBJECT_OR_ARRAY_LITERAL,
+            self.get_type(t).symbol,
+            object,
+        )
     }
 
     // Merges the own properties of `right` into `left` for spread; right wins on
@@ -1191,10 +1320,25 @@ impl Checker {
         globals: Option<&SymbolTable>,
         check_flags: tsgo_ast::CheckFlags,
     ) -> SymbolId {
-        let prop_type = get_type_of_symbol(self, program, prop_sym, globals);
+        let prop_type = self.get_spread_property_type(program, prop_sym, globals);
         let flags = SymbolFlags::PROPERTY
             | (self.spread_source_symbol_flags(program, prop_sym) & SymbolFlags::OPTIONAL);
         self.new_object_literal_property(name, flags, check_flags, prop_type)
+    }
+
+    // Resolves the type carried by a spread property symbol (Go's
+    // `getSpreadSymbol` set-only accessor arm returns `undefined`).
+    // Go: internal/checker/checker.go:Checker.getSpreadSymbol(13499)
+    fn get_spread_property_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        prop_sym: SymbolId,
+        globals: Option<&SymbolTable>,
+    ) -> TypeId {
+        if is_setonly_accessor_symbol(self, program, prop_sym) {
+            return self.undefined_type();
+        }
+        get_type_of_symbol(self, program, prop_sym, globals)
     }
 
     fn spread_source_symbol_flags(
@@ -11140,6 +11284,21 @@ fn is_spreadable_property(program: &dyn BoundProgram, prop: SymbolId) -> bool {
             .is_some_and(|p| is_class_like(program.arena(), p))
     });
     (!is_private_id && !is_method_or_accessor) || !in_class
+}
+
+// Reports whether `prop` is a set-only accessor (Go's `getSpreadSymbol`
+// `isSetonlyAccessor` check).
+fn is_setonly_accessor_symbol(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    prop: SymbolId,
+) -> bool {
+    let flags = if super::is_synthesized_symbol(prop) {
+        checker.synthesized_symbol_flags(prop)
+    } else {
+        program.symbol(prop).flags
+    };
+    flags.contains(SymbolFlags::SET_ACCESSOR) && !flags.contains(SymbolFlags::GET_ACCESSOR)
 }
 
 // Reports whether `prop` is declared private or protected (Go's

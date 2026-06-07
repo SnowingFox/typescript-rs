@@ -12850,3 +12850,69 @@ fn object_spread_merges_optional_property_types() {
         "string | number"
     );
 }
+
+// ---- T1-E batch 25: getSpreadSymbol set-only, primitive skip, empty-object union merge ----
+
+// Go: internal/checker/checker.go:Checker.getSpreadSymbol(13499)
+#[test]
+fn object_spread_setonly_accessor_yields_undefined_property() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { set x(v: number): void; }\ndeclare const i: I;\nconst o = { ...i };\no.x;",
+    );
+    let access = expr_stmt_expression(&p, 3);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, access);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "undefined"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13332)
+#[test]
+fn object_spread_ignores_primitive_like_right_operand() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: { a: number };\ndeclare const s: string;\nconst o = { ...a, ...s };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 3);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ a: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.tryMergeUnionOfObjectTypeAndEmptyObject(13444)
+#[test]
+fn object_spread_union_with_empty_object_makes_properties_optional() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | {};\nconst o = { ...x };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ a?: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13301)
+#[test]
+fn object_spread_intersection_type_merges_all_properties() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: string } & { b: number };\nconst o = { ...x };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ a: string; b: number; }"
+    );
+}
