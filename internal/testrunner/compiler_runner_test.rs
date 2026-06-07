@@ -1220,7 +1220,10 @@ fn expanded_compiler_subset_parity_smoke() {
     // T5-6: measured `no_baseline_but_errors` is 10 on this branch (pin 7 was ahead).
     // Heritage re-measure (50655a72): 10 -> 11.
     // Re-measure (ada21a39, a7311041): 11 -> 8 (three no_baseline cases errored).
-    assert_eq!(hist.no_baseline_but_errors, 8);
+    //
+    // Re-measure (257710f4 OOB fix): 8 -> 11 (three errored cases now emit
+    // errors without a committed baseline).
+    assert_eq!(hist.no_baseline_but_errors, 11);
     // Round 22: `reachabilityChecks10.ts` flips out of missing_all_errors (44 ->
     // 43) as its `throw`-run TS7027 now matches the committed baseline.
     // Round 29: `assertsPredicateParameterMismatch.ts` flips out of
@@ -1378,10 +1381,12 @@ fn expanded_compiler_subset_parity_smoke() {
     );
     // Re-measure (ada21a39, a7311041): `objectSubtypeReduction.ts` now errored
     // (index-out-of-bounds) instead of reporting `extra TS2769 ×1`.
+    //
+    // Re-measure (257710f4 OOB fix): case runs again; `extra TS2769 ×1` restored.
     assert_eq!(
         hist.extra.get(&2769),
-        None,
-        "objectSubtypeReduction now panics before emitting TS2769; histogram:\n{}",
+        Some(&1),
+        "objectSubtypeReduction emits TS2769 again after OOB fix; histogram:\n{}",
         hist.report()
     );
     // Round 9 parser-recovery false-positive guards: the cleared syntax-error
