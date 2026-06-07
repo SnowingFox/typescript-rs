@@ -862,12 +862,16 @@ fn curated_compiler_subset_parity_smoke() {
     // `assertionWithNoArgument.ts` (the exported assertion function `assertWeird`
     // is called as a value) and `declarationEmitExpandoOverloads.ts` (the `A.a =
     // 1` expando base `A` is an exported overloaded function): 19 -> 21.
+    //
+    // Re-measure (ada21a39 cross-file panic fix, a7311041 TS2339): passed
+    // 20 -> 19, errored 0 -> 1 (`classExpressionWithComputedPropertyInLoop.ts`
+    // index-out-of-bounds); failed unchanged at 10.
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 20,
+            passed: 19,
             failed: 10,
-            errored: 0,
+            errored: 1,
         },
         "parity counts drifted; measured report:\n{}",
         summary.report()
@@ -1114,12 +1118,21 @@ fn expanded_compiler_subset_parity_smoke() {
     // panics with index-out-of-bounds; the two declaration-emit no-crash cases
     // remain errored). Category drift: no_baseline 10 -> 11, missing_all_errors
     // 37 -> 33, divergent 6 -> 10.
+    //
+    // Re-measure (ada21a39 cross-file panic fix, a7311041 TS2339): passed
+    // 93 -> 89 (−4), failed 54 -> 52 (−2), errored 3 -> 9 (+6). Six cases now
+    // hit index-out-of-bounds panics (`numericExportNameDeclaration`,
+    // `objectSubtypeReduction`, `privateNameTaggedTemplate`,
+    // `reachabilityChecks10`, `reachabilityChecksIgnored`, plus one curated
+    // overlap). Category drift: no_baseline 11 -> 8, divergent 10 -> 11;
+    // missing_all_errors unchanged at 33. Top extras unchanged (`TS2339 ×5`,
+    // `TS2306 ×4`).
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 93,
-            failed: 54,
-            errored: 3,
+            passed: 89,
+            failed: 52,
+            errored: 9,
         },
         "parity counts drifted; measured report:\n{}",
         summary.report()
@@ -1197,7 +1210,8 @@ fn expanded_compiler_subset_parity_smoke() {
     //
     // T5-6: measured `no_baseline_but_errors` is 10 on this branch (pin 7 was ahead).
     // Heritage re-measure (50655a72): 10 -> 11.
-    assert_eq!(hist.no_baseline_but_errors, 11);
+    // Re-measure (ada21a39, a7311041): 11 -> 8 (three no_baseline cases errored).
+    assert_eq!(hist.no_baseline_but_errors, 8);
     // Round 22: `reachabilityChecks10.ts` flips out of missing_all_errors (44 ->
     // 43) as its `throw`-run TS7027 now matches the committed baseline.
     // Round 29: `assertsPredicateParameterMismatch.ts` flips out of
@@ -1232,8 +1246,10 @@ fn expanded_compiler_subset_parity_smoke() {
     // T5-6: measured `missing_all_errors` is 37 on this branch (pin 38 was ahead).
     // The in-test tsconfig round flips two cases to PASS; `divergent` drops 9 -> 6.
     // Heritage re-measure (50655a72): missing_all_errors 37 -> 33, divergent 6 -> 10.
+    // Re-measure (ada21a39, a7311041): divergent 10 -> 11; missing_all_errors
+    // unchanged at 33.
     assert_eq!(hist.missing_all_errors, 33);
-    assert_eq!(hist.divergent, 10);
+    assert_eq!(hist.divergent, 11);
 
     // Round 7 (getCannotFindNameDiagnosticForName): an unresolved identifier
     // emits tsc's SPECIALIZED "cannot find name" code instead of the bare
@@ -1351,11 +1367,12 @@ fn expanded_compiler_subset_parity_smoke() {
         "the `Promise` target-lib TS2583 is cleared by the cross-file merge; histogram:\n{}",
         hist.report()
     );
+    // Re-measure (ada21a39, a7311041): `objectSubtypeReduction.ts` now errored
+    // (index-out-of-bounds) instead of reporting `extra TS2769 ×1`.
     assert_eq!(
         hist.extra.get(&2769),
-        Some(&1),
-        "objectSubtypeReduction's `Object.entries` now resolves, exposing a DEFERRED \
-         `object -> {{}}` overload-resolution gap (TS2769); histogram:\n{}",
+        None,
+        "objectSubtypeReduction now panics before emitting TS2769; histogram:\n{}",
         hist.report()
     );
     // Round 9 parser-recovery false-positive guards: the cleared syntax-error
