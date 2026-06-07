@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "a9804ec70361",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "internal/checker/core/check.rs",
+    "internal/checker/core/check_test.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a9/804ec70361/0/metadata.json",
+      "transcript": "/a9/804ec70361/0/full.jsonl",
+      "content_hash": "/a9/804ec70361/0/content_hash.txt",
+      "prompt": "/a9/804ec70361/0/prompt.txt"
+    }
+  ]
+}
