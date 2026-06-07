@@ -14805,3 +14805,38 @@ fn class_without_index_signature_skips_index_constraint_check() {
         "class without index signature must not report index constraint errors"
     );
 }
+
+// ---- T1-E batch 54: cross-index-signature compatibility (2413) ----
+
+// Go: internal/checker/checker.go:Checker.checkIndexConstraintForIndexSignature(4833)
+#[test]
+fn class_incompatible_index_signatures_reports_2413() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  [n: number]: string;\n  [s: string]: number;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2413);
+    assert_eq!(
+        diags[0].message,
+        "'number' index type 'string' is not assignable to 'string' index type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIndexConstraintForIndexSignature(4833)
+#[test]
+fn class_compatible_index_signatures_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  [n: number]: number;\n  [s: string]: number;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "compatible index signatures must not report cross-index errors"
+    );
+}

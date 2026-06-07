@@ -34,7 +34,8 @@ use tsgo_diagnostics::{Category, Message};
 use super::contextual::ContextFlags;
 use super::declared_types::{
     fill_missing_type_arguments, get_apparent_type, get_applicable_index_info,
-    get_applicable_index_info_for_name, get_constraint_of_type_parameter, get_declaration_of_alias_symbol, get_declared_type_of_symbol,
+    get_applicable_index_info_for_name, get_applicable_index_infos,
+    get_constraint_of_type_parameter, get_declaration_of_alias_symbol, get_declared_type_of_symbol,
     get_default_from_type_parameter, get_index_info_of_type, get_index_infos_of_type,
     get_index_type_of_type, get_indexed_access_type, get_min_type_argument_count,
     get_property_of_type,     get_property_of_union_or_intersection_type, get_properties_of_type,
@@ -8429,8 +8430,8 @@ impl Checker {
     // signatures on a class instance type (TS2411).
     //
     // DEFER(phase-4-checker-4bm+): static-side index constraints, computed
-    // property names without bindable names, inherited interface error-node
-    // selection, and cross-index-signature compatibility (2413).
+    // property names without bindable names, and inherited interface error-node
+    // selection.
     // Go: internal/checker/checker.go:Checker.checkIndexConstraints(4760)
     fn check_index_constraints(
         &mut self,
@@ -8454,6 +8455,16 @@ impl Checker {
                 prop_name_type,
                 prop_type,
             );
+        }
+        if index_infos.len() > 1 {
+            for &check_info_id in &index_infos {
+                self.check_index_constraint_for_index_signature(
+                    program,
+                    t,
+                    type_symbol,
+                    check_info_id,
+                );
+            }
         }
     }
 
@@ -8518,6 +8529,66 @@ impl Checker {
                 value_type_str.as_str(),
             ],
         );
+    }
+
+    // Go: internal/checker/checker.go:Checker.checkIndexConstraintForIndexSignature(4833)
+    fn check_index_constraint_for_index_signature(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        type_symbol: SymbolId,
+        check_info_id: IndexInfoId,
+    ) {
+        let (check_key_type, check_value_type, check_declaration) = {
+            let info = self.index_info(check_info_id);
+            (info.key_type, info.value_type, info.declaration)
+        };
+        let applicable = get_applicable_index_infos(self, program, t, check_key_type);
+        if applicable.is_empty() {
+            return;
+        }
+        let local_check_declaration = check_declaration.filter(|&decl| {
+            program
+                .symbol_of_node(decl)
+                .is_some_and(|sym| program.symbol(sym).parent == Some(type_symbol))
+        });
+        for info_id in applicable {
+            if info_id == check_info_id {
+                continue;
+            }
+            let (key_type, value_type, index_declaration) = {
+                let info = self.index_info(info_id);
+                (info.key_type, info.value_type, info.declaration)
+            };
+            let local_index_declaration = index_declaration.filter(|&decl| {
+                program
+                    .symbol_of_node(decl)
+                    .is_some_and(|index_sym| program.symbol(index_sym).parent == Some(type_symbol))
+            });
+            let Some(error_node) = local_check_declaration.or(local_index_declaration) else {
+                continue;
+            };
+            if self.is_type_assignable_to(program, check_value_type, value_type) {
+                continue;
+            }
+            let check_key_type_str =
+                super::nodebuilder::type_to_string(self, program, check_key_type);
+            let check_value_type_str =
+                super::nodebuilder::type_to_string(self, program, check_value_type);
+            let key_type_str = super::nodebuilder::type_to_string(self, program, key_type);
+            let value_type_str = super::nodebuilder::type_to_string(self, program, value_type);
+            self.error(
+                program,
+                error_node,
+                &tsgo_diagnostics::X_0_INDEX_TYPE_1_IS_NOT_ASSIGNABLE_TO_2_INDEX_TYPE_3,
+                &[
+                    check_key_type_str.as_str(),
+                    check_value_type_str.as_str(),
+                    key_type_str.as_str(),
+                    value_type_str.as_str(),
+                ],
+            );
+        }
     }
 
     // Checks that an object-type declaration (interface / class) does not declare

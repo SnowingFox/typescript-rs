@@ -4095,6 +4095,25 @@ pub(crate) fn get_applicable_index_info(
     }
 }
 
+/// Returns every index signature on `t` applicable to `key_type`.
+///
+/// Side effects: may instantiate index infos for generic references.
+// Go: internal/checker/checker.go:Checker.getApplicableIndexInfos(31751)
+pub(crate) fn get_applicable_index_infos(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    t: TypeId,
+    key_type: TypeId,
+) -> Vec<IndexInfoId> {
+    get_index_infos_of_type(checker, t)
+        .into_iter()
+        .filter(|&id| {
+            let info = checker.index_info(id);
+            is_applicable_index_type(checker, program, key_type, info.key_type)
+        })
+        .collect()
+}
+
 // Returns the index signature of `t` applicable to a property named `name`,
 // mapping the name to its string-literal key type and deferring to
 // `get_applicable_index_info`. Used by the excess-property check to treat a
