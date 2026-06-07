@@ -33,11 +33,11 @@ use tsgo_diagnostics::{Category, Message};
 
 use super::contextual::ContextFlags;
 use super::declared_types::{
-    fill_missing_type_arguments, get_apparent_type, get_applicable_index_info_for_name,
-    get_constraint_of_type_parameter, get_declaration_of_alias_symbol, get_declared_type_of_symbol,
+    fill_missing_type_arguments, get_apparent_type, get_applicable_index_info,
+    get_applicable_index_info_for_name, get_constraint_of_type_parameter, get_declaration_of_alias_symbol, get_declared_type_of_symbol,
     get_default_from_type_parameter, get_index_info_of_type, get_index_infos_of_type,
     get_index_type_of_type, get_indexed_access_type, get_min_type_argument_count,
-    get_property_of_type, get_property_of_union_or_intersection_type,
+    get_property_of_type,     get_property_of_union_or_intersection_type, get_properties_of_type,
     get_explicit_accessor_return_type, get_property_type_for_index_type, get_type_from_type_node,
     get_type_of_property_of_type, get_type_of_symbol, is_generic_object_type, resolve_alias,
 };
@@ -8420,6 +8420,104 @@ impl Checker {
                 }
             }
         }
+
+        // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4360)
+        self.check_index_constraints(program, class_type, symbol);
+    }
+
+    // Verifies that declared properties are assignable to applicable index
+    // signatures on a class instance type (TS2411).
+    //
+    // DEFER(phase-4-checker-4bm+): static-side index constraints, computed
+    // property names without bindable names, inherited interface error-node
+    // selection, and cross-index-signature compatibility (2413).
+    // Go: internal/checker/checker.go:Checker.checkIndexConstraints(4760)
+    fn check_index_constraints(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        type_symbol: SymbolId,
+    ) {
+        let index_infos = get_index_infos_of_type(self, t);
+        if index_infos.is_empty() {
+            return;
+        }
+        let globals = program.globals();
+        for (name, prop_sym) in get_properties_of_type(self, t) {
+            let prop_name_type = self.get_string_literal_type(&name);
+            let prop_type = get_type_of_symbol(self, program, prop_sym, globals);
+            self.check_index_constraint_for_property(
+                program,
+                t,
+                type_symbol,
+                prop_sym,
+                prop_name_type,
+                prop_type,
+            );
+        }
+    }
+
+    // Go: internal/checker/checker.go:Checker.checkIndexConstraintForProperty(4787)
+    fn check_index_constraint_for_property(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        type_symbol: SymbolId,
+        prop_sym: SymbolId,
+        prop_name_type: TypeId,
+        prop_type: TypeId,
+    ) {
+        let declaration = program.symbol(prop_sym).value_declaration;
+        if let Some(decl) = declaration {
+            let name = match program.arena().data(decl) {
+                NodeData::PropertyDeclaration(p) | NodeData::PropertySignature(p) => Some(p.name),
+                _ => None,
+            };
+            if let Some(name) = name {
+                if program.arena().kind(name) == Kind::PrivateIdentifier {
+                    return;
+                }
+            }
+        }
+        let Some(info_id) = get_applicable_index_info(self, program, t, prop_name_type) else {
+            return;
+        };
+        let (key_type, value_type, index_declaration) = {
+            let info = self.index_info(info_id);
+            (info.key_type, info.value_type, info.declaration)
+        };
+        let local_prop_declaration =
+            if program.symbol(prop_sym).parent == Some(type_symbol) {
+                declaration
+            } else {
+                None
+            };
+        let local_index_declaration = index_declaration.filter(|&decl| {
+            program
+                .symbol_of_node(decl)
+                .is_some_and(|index_sym| program.symbol(index_sym).parent == Some(type_symbol))
+        });
+        let Some(error_node) = local_prop_declaration.or(local_index_declaration) else {
+            return;
+        };
+        if self.is_type_assignable_to(program, prop_type, value_type) {
+            return;
+        }
+        let prop_str = super::nodebuilder::symbol_to_string(program, prop_sym);
+        let prop_type_str = super::nodebuilder::type_to_string(self, program, prop_type);
+        let key_type_str = super::nodebuilder::type_to_string(self, program, key_type);
+        let value_type_str = super::nodebuilder::type_to_string(self, program, value_type);
+        self.error(
+            program,
+            error_node,
+            &tsgo_diagnostics::PROPERTY_0_OF_TYPE_1_IS_NOT_ASSIGNABLE_TO_2_INDEX_TYPE_3,
+            &[
+                prop_str.as_str(),
+                prop_type_str.as_str(),
+                key_type_str.as_str(),
+                value_type_str.as_str(),
+            ],
+        );
     }
 
     // Checks that an object-type declaration (interface / class) does not declare

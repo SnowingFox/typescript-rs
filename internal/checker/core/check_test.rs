@@ -14755,3 +14755,53 @@ fn class_expression_incorrectly_implements_class_reports_2720() {
     assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
     assert_eq!(diags[0].code, 2720, "got {diags:?}");
 }
+
+// ---- T1-E batch 53: class index constraint checks ----
+
+// Go: internal/checker/checker.go:Checker.checkIndexConstraints(4360)
+#[test]
+fn class_property_not_assignable_to_string_index_reports_2411() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  [x: string]: string;\n  a: number;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2411);
+    assert_eq!(
+        diags[0].message,
+        "Property 'a' of type 'number' is not assignable to 'string' index type 'string'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIndexConstraints(4360)
+#[test]
+fn class_property_assignable_to_string_index_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  [x: string]: string;\n  a: string;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "compatible property and index signature must not report"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIndexConstraintForProperty(4787)
+#[test]
+fn class_without_index_signature_skips_index_constraint_check() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  a: number;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "class without index signature must not report index constraint errors"
+    );
+}
