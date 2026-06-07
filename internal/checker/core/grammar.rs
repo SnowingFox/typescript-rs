@@ -152,12 +152,40 @@ impl Checker {
                             &tsgo_diagnostics::ACCESSIBILITY_MODIFIER_ALREADY_SEEN,
                             &[],
                         );
+                    } else if flags.contains(ModifierFlags::OVERRIDE) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &[text, "override"],
+                        );
                     } else if flags.contains(ModifierFlags::STATIC) {
                         return self.grammar_error_on_node(
                             program,
                             modifier,
                             &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
                             &[text, "static"],
+                        );
+                    } else if flags.contains(ModifierFlags::ACCESSOR) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &[text, "accessor"],
+                        );
+                    } else if flags.contains(ModifierFlags::READONLY) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &[text, "readonly"],
+                        );
+                    } else if flags.contains(ModifierFlags::ASYNC) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &[text, "async"],
                         );
                     } else if matches!(
                         parent_kind,
@@ -167,14 +195,29 @@ impl Checker {
                             program, modifier,
                             &tsgo_diagnostics::X_0_MODIFIER_CANNOT_APPEAR_ON_A_MODULE_OR_NAMESPACE_ELEMENT, &[text],
                         );
-                    } else if flags.contains(ModifierFlags::ABSTRACT)
-                        && kind == Kind::PrivateKeyword
+                    } else if flags.contains(ModifierFlags::ABSTRACT) {
+                        if kind == Kind::PrivateKeyword {
+                            return self.grammar_error_on_node(
+                                program,
+                                modifier,
+                                &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
+                                &[text, "abstract"],
+                            );
+                        }
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &[text, "abstract"],
+                        );
+                    } else if declaration_name_node(arena, node)
+                        .is_some_and(|name| arena.kind(name) == Kind::PrivateIdentifier)
                     {
                         return self.grammar_error_on_node(
                             program,
                             modifier,
-                            &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
-                            &[text, "abstract"],
+                            &tsgo_diagnostics::AN_ACCESSIBILITY_MODIFIER_CANNOT_BE_USED_WITH_A_PRIVATE_IDENTIFIER,
+                            &[],
                         );
                     }
                     flags |= modifier_to_flag(kind);
@@ -215,6 +258,13 @@ impl Checker {
                             modifier,
                             &tsgo_diagnostics::X_0_MODIFIER_CANNOT_BE_USED_WITH_1_MODIFIER,
                             &["static", "abstract"],
+                        );
+                    } else if flags.contains(ModifierFlags::OVERRIDE) {
+                        return self.grammar_error_on_node(
+                            program,
+                            modifier,
+                            &tsgo_diagnostics::X_0_MODIFIER_MUST_PRECEDE_1_MODIFIER,
+                            &["static", "override"],
                         );
                     }
                     flags |= ModifierFlags::STATIC;

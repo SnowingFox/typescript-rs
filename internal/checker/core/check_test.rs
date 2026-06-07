@@ -14215,3 +14215,65 @@ fn compatible_auto_accessor_override_reports_no_extends_error() {
         "compatible auto-accessor override must not report extends errors; got {diags:?}"
     );
 }
+
+// ---- T1-E batch 44: auto-accessor accessibility ordering and duplicate members ----
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(344)
+#[test]
+fn public_must_precede_accessor_modifier_reports_1029() {
+    let codes = diag_codes("class C { accessor public x: number = 1; }");
+    assert!(
+        codes.contains(&1029),
+        "expected TS1029 when accessor precedes public; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(344)
+#[test]
+fn private_must_precede_accessor_modifier_reports_1029() {
+    let codes = diag_codes("class C { accessor private x: number = 1; }");
+    assert!(
+        codes.contains(&1029),
+        "expected TS1029 when accessor precedes private; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(344)
+#[test]
+fn protected_must_precede_accessor_modifier_reports_1029() {
+    let codes = diag_codes("class C { accessor protected x: number = 1; }");
+    assert!(
+        codes.contains(&1029),
+        "expected TS1029 when accessor precedes protected; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(358)
+#[test]
+fn public_auto_accessor_private_identifier_reports_18010() {
+    let codes = diag_codes("class C { public accessor #x: number = 1; }");
+    assert!(
+        codes.contains(&18010),
+        "expected TS18010 when a public accessibility modifier combines with a private identifier; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3122)
+#[test]
+fn class_property_and_auto_accessor_duplicate_reports_2300() {
+    let count = duplicate_identifier_count("class C { x: number; accessor x: string = \"a\"; }");
+    assert_eq!(
+        count, 2,
+        "property plus auto-accessor with the same name must report TS2300 twice"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModifiers(465)
+#[test]
+fn declare_accessor_conflict_reports_1243() {
+    let codes = diag_codes("class C { declare accessor x: number; }");
+    assert!(
+        codes.contains(&1243),
+        "expected TS1243 when declare combines with accessor; got {codes:?}"
+    );
+}
