@@ -1,0 +1,41 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "71ac7c2b6e8a",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-07T16:08:22.699498Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [],
+  "agent": "Cursor",
+  "model": "composer-2.5",
+  "turn_id": "9a8bd7085fe3",
+  "session_metrics": {
+    "turn_count": 9,
+    "context_tokens": 224084,
+    "context_window_size": 200000
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 820,
+      "user_lines_removed": 84,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "internal/checker/core/check.rs": 508,
+        "internal/checker/core/check_test.rs": 279,
+        "internal/checker/core/declared_types.rs": 14,
+        "internal/checker/core/name_resolution.rs": 6,
+        "internal/compiler/lib_dom_noemit_parity_test.rs": 13
+      },
+      "user_removed_per_file": {
+        "internal/checker/core/check.rs": 62,
+        "internal/checker/core/check_test.rs": 1,
+        "internal/checker/core/declared_types.rs": 13,
+        "internal/checker/core/name_resolution.rs": 1,
+        "internal/compiler/lib_dom_noemit_parity_test.rs": 7
+      }
+    }
+  ]
+}
