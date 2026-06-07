@@ -889,9 +889,21 @@ impl Checker {
                     &[],
                 );
             }
-            // DEFER(phase-4-checker-later): checkGrammarForInvalidDynamicName,
-            // auto-accessor optional check (blocked-by: isNonBindableDynamicName/
-            // isLateBindableName).
+            if kind == Kind::PropertyDeclaration
+                && is_auto_accessor_property_declaration(arena, node)
+            {
+                if let NodeData::PropertyDeclaration(d) = arena.data(node) {
+                    if self.check_grammar_for_invalid_question_mark(
+                        program,
+                        d.postfix_token,
+                        &tsgo_diagnostics::AN_ACCESSOR_PROPERTY_CANNOT_BE_DECLARED_OPTIONAL,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+            // DEFER(phase-4-checker-later): checkGrammarForInvalidDynamicName
+            // (blocked-by: isNonBindableDynamicName/isLateBindableName).
         } else if parent_kind == Some(Kind::InterfaceDeclaration) {
             // DEFER(phase-4-checker-later): checkGrammarForInvalidDynamicName
             if kind == Kind::PropertySignature {
@@ -1516,6 +1528,21 @@ impl Checker {
     ///
     /// Side effects: records a diagnostic, returns `true`.
     // Go: internal/checker/checker.go:Checker.grammarErrorOnNode(14179)
+    // Go: internal/checker/grammarchecks.go:Checker.checkGrammarForInvalidQuestionMark(1018)
+    fn check_grammar_for_invalid_question_mark(
+        &mut self,
+        program: &dyn BoundProgram,
+        postfix_token: Option<NodeId>,
+        message: &'static tsgo_diagnostics::Message,
+    ) -> bool {
+        if let Some(postfix) = postfix_token {
+            if program.arena().kind(postfix) == Kind::QuestionToken {
+                return self.grammar_error_on_node(program, postfix, message, &[]);
+            }
+        }
+        false
+    }
+
     pub(crate) fn grammar_error_on_node(
         &mut self,
         program: &dyn BoundProgram,
@@ -2460,6 +2487,12 @@ fn is_accessor(arena: &NodeArena, node: NodeId) -> bool {
 /// Returns whether `node` has a given syntactic modifier (Go's
 /// `HasSyntacticModifier`).
 // Go: internal/ast/utilities.go:HasSyntacticModifier
+// Go: internal/ast/utilities.go:IsAutoAccessorPropertyDeclaration
+fn is_auto_accessor_property_declaration(arena: &NodeArena, node: NodeId) -> bool {
+    arena.kind(node) == Kind::PropertyDeclaration
+        && has_syntactic_modifier(arena, node, ModifierFlags::ACCESSOR)
+}
+
 fn has_syntactic_modifier(arena: &NodeArena, node: NodeId, flag: ModifierFlags) -> bool {
     let modifiers = modifier_nodes(arena, node);
     for m in modifiers {

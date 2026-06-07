@@ -13943,3 +13943,25 @@ fn auto_accessor_circular_type_annotation_reports_2502() {
         "expected TS2502 when an auto-accessor type annotation is circular; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 40: auto-accessor grammar and initializer checks ----
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarProperty(1904)
+#[test]
+fn auto_accessor_optional_postfix_reports_1276() {
+    let codes = diag_codes("class C { accessor x?: number; }");
+    assert!(
+        codes.contains(&1276),
+        "expected TS1276 when an auto-accessor is declared optional; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarProperty(1904)
+#[test]
+fn auto_accessor_non_optional_postfix_has_no_1276() {
+    let codes = diag_codes("class C { accessor x: number; }");
+    assert!(
+        !codes.contains(&1276),
+        "annotated auto-accessor without ? must not report TS1276; got {codes:?}"
+    );
+}
