@@ -2688,6 +2688,51 @@ impl Checker {
         let name = program.arena().text(name_node).to_string();
         let is_super = program.arena().kind(expr) == Kind::SuperKeyword;
         let apparent = get_apparent_type(self, object_type);
+        if is_property_access_write_only(program, node) {
+            if let Some(prop) = get_property_of_type(self, apparent, &name)
+                .or_else(|| get_property_of_union_or_intersection_type(self, apparent, &name))
+            {
+                if program
+                    .symbol(prop)
+                    .flags
+                    .intersects(SymbolFlags::ACCESSOR)
+                {
+                    if !self.check_property_accessibility(
+                        program,
+                        node,
+                        is_super,
+                        apparent,
+                        prop,
+                        Some(name_node),
+                    ) {
+                        return self.error_type;
+                    }
+                    let mut prop_type = super::declared_types::get_write_type_of_accessors(
+                        self, program, prop, None,
+                    );
+                    if let Some((target, args)) =
+                        self.get_type(apparent).as_object().and_then(|o| {
+                            o.target
+                                .map(|target| (target, o.resolved_type_arguments.clone()))
+                        })
+                    {
+                        let params = self
+                            .get_type(target)
+                            .as_object()
+                            .map(|o| o.type_parameters.clone())
+                            .unwrap_or_default();
+                        if !params.is_empty() && params.len() == args.len() {
+                            let mapper = super::mapper::TypeMapper::Array {
+                                sources: params,
+                                targets: args,
+                            };
+                            prop_type = self.instantiate_type(prop_type, &mapper);
+                        }
+                    }
+                    return prop_type;
+                }
+            }
+        }
         if let Some(t) = self.get_type_of_property_of_type(program, apparent, &name) {
             if let Some(prop) = get_property_of_type(self, apparent, &name)
                 .or_else(|| get_property_of_union_or_intersection_type(self, apparent, &name))
@@ -7966,6 +8011,21 @@ impl Checker {
         self.check_grammar_function_like_declaration(program, node);
         self.check_grammar_accessor(program, node);
         self.check_accessor_pair_consistency(program, node);
+        if program.arena().kind(node) == Kind::GetAccessor {
+            let flags = program.arena().flags(node);
+            if !flags.contains(NodeFlags::AMBIENT)
+                && body.is_some()
+                && flags.contains(NodeFlags::HAS_IMPLICIT_RETURN)
+                && !flags.contains(NodeFlags::HAS_EXPLICIT_RETURN)
+            {
+                self.error(
+                    program,
+                    name,
+                    &tsgo_diagnostics::A_GET_ACCESSOR_MUST_RETURN_A_VALUE,
+                    &[],
+                );
+            }
+        }
         if program.arena().kind(name) == Kind::Identifier
             && program.arena().text(name) == "constructor"
             && get_containing_class(program, node).is_some()
@@ -8717,6 +8777,22 @@ impl Checker {
             NodeData::SetAccessorDeclaration(d) => d.name,
             _ => return,
         };
+        if getter_flags.contains(tsgo_ast::ModifierFlags::ABSTRACT)
+            != setter_flags.contains(tsgo_ast::ModifierFlags::ABSTRACT)
+        {
+            self.error(
+                program,
+                getter_name,
+                &tsgo_diagnostics::ACCESSORS_MUST_BOTH_BE_ABSTRACT_OR_NON_ABSTRACT,
+                &[],
+            );
+            self.error(
+                program,
+                setter_name,
+                &tsgo_diagnostics::ACCESSORS_MUST_BOTH_BE_ABSTRACT_OR_NON_ABSTRACT,
+                &[],
+            );
+        }
         if (getter_flags.contains(tsgo_ast::ModifierFlags::PROTECTED)
             && !setter_flags
                 .intersects(tsgo_ast::ModifierFlags::PROTECTED | tsgo_ast::ModifierFlags::PRIVATE))
@@ -12205,6 +12281,22 @@ fn type_parameter_nodes(arena: &tsgo_ast::NodeArena, node: NodeId) -> Vec<NodeId
         _ => None,
     };
     list.map(|l| l.nodes.clone()).unwrap_or_default()
+}
+
+/// Reports whether `node` is a property access used as an assignment write
+/// target (`=` or compound assignment LHS).
+// Go: internal/ast/ast.go:IsWriteOnlyAccess (assignment-target subset)
+fn is_property_access_write_only(program: &dyn BoundProgram, node: NodeId) -> bool {
+    let arena = program.arena();
+    let Some(parent) = arena.parent(node) else {
+        return false;
+    };
+    match arena.data(parent) {
+        NodeData::BinaryExpression(d) if d.left == node => {
+            is_assignment_operator(arena.kind(d.operator_token))
+        }
+        _ => false,
+    }
 }
 
 /// Returns `true` if `kind` is an access expression (`PropertyAccessExpression`

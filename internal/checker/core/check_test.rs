@@ -13499,3 +13499,51 @@ fn object_literal_set_accessor_contextual_parameter_type() {
         "a contextually typed object-literal setter parameter must be checked against the contextual type"
     );
 }
+
+// ---- T1-E batch 34: getWriteTypeOfAccessors, getter return checks ----
+
+// Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors(18429)
+#[test]
+fn class_accessor_assignment_uses_setter_write_type() {
+    let codes = diag_codes(
+        "class C {\n  get x(): number { return 1; }\n  set x(v: string) { }\n}\nconst c = new C();\nc.x = 1;",
+    );
+    assert!(
+        codes.contains(&2322),
+        "assignment to an accessor must use the setter parameter type, not the getter return type; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors(18429)
+#[test]
+fn object_literal_accessor_assignment_uses_setter_write_type() {
+    let codes = diag_codes(
+        "const o = { get x(): number { return 1; }, set x(v: string) { } };\no.x = 1;",
+    );
+    assert!(
+        codes.contains(&2322),
+        "object-literal accessor assignment must use the setter parameter type; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2923)
+#[test]
+fn getter_without_return_reports_2378() {
+    let codes = diag_codes("class C { get x() { } }");
+    assert!(
+        codes.contains(&2378),
+        "expected TS2378 a get accessor must return a value; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2946)
+#[test]
+fn accessor_abstract_mismatch_reports_2676() {
+    let codes = diag_codes(
+        "abstract class C {\n  abstract get x(): number;\n  set x(v: number) { }\n}",
+    );
+    assert!(
+        codes.iter().filter(|&&c| c == 2676).count() >= 2,
+        "expected TS2676 on getter and setter when abstractness mismatches; got {codes:?}"
+    );
+}

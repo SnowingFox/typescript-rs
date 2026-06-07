@@ -2227,6 +2227,30 @@ fn get_type_of_accessors(
     t
 }
 
+// Resolves the write type of an accessor symbol (setter annotation, else read
+// type). Go's `getWriteTypeOfAccessors`.
+// Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors(18429)
+pub fn get_write_type_of_accessors(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+    globals: Option<&SymbolTable>,
+) -> TypeId {
+    if let Some(cached) = checker
+        .value_symbol_links
+        .try_get(&symbol)
+        .and_then(|l| l.write_type)
+    {
+        return cached;
+    }
+    let setter = declaration_of_kind(program, symbol, Kind::SetAccessor);
+    let write_type = setter
+        .and_then(|s| get_annotated_accessor_type(checker, program, s, globals))
+        .unwrap_or_else(|| get_type_of_accessors(checker, program, symbol, globals));
+    checker.value_symbol_links.get(symbol).write_type = Some(write_type);
+    write_type
+}
+
 // Go: internal/checker/checker.go:Checker.getTypeOfVariableOrParameterOrProperty
 fn get_type_of_variable_or_property(
     checker: &mut Checker,
