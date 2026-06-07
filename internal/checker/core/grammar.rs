@@ -755,11 +755,7 @@ impl Checker {
     // `&&` expression. `node` is the `??` binary expression; `left`/`right` are
     // its operands.
     //
-    // DEFER(phase-4-checker-later): `checkNullishCoalesceOperandLeft` (the
-    // always-/never-nullish operand diagnostics). blocked-by: the syntactic
-    // nullishness-semantics analysis.
-    //
-    // Side effects: may record a `5076` diagnostic.
+    // Side effects: may record `5076`/`2871`/`2869` diagnostics.
     // Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperands(12859)
     pub(crate) fn check_nullish_coalesce_operands(
         &mut self,
@@ -820,9 +816,7 @@ impl Checker {
                 );
             }
         }
-        // DEFER(phase-4-checker-later): `checkNullishCoalesceOperandLeft` (the
-        // always-nullish `This_expression_is_always_nullish` / never-nullish
-        // `Right_operand_..._never_nullish` diagnostics).
+        self.check_nullish_coalesce_operand_left(program, left);
     }
 
     /// Checks that a constructor declaration `node` has no type parameters

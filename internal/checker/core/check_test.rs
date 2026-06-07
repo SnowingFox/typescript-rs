@@ -12091,3 +12091,116 @@ fn comma_operator_allow_unreachable_code_suppresses_2695() {
         "allowUnreachableCode should suppress TS2695; got {diags:?}"
     );
 }
+
+// ---- T1-E batch 17: nullish coalesce operand diagnostics ----
+
+// Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperandLeft(12880)
+#[test]
+fn nullish_coalesce_null_left_reports_2871() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "null ?? \"x\";"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2871);
+    assert_eq!(
+        diags[0].message,
+        "This expression is always nullish."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperandLeft(12880)
+#[test]
+fn nullish_coalesce_undefined_left_reports_2871() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "undefined ?? \"x\";"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2871);
+    assert_eq!(
+        diags[0].message,
+        "This expression is always nullish."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperandLeft(12880)
+#[test]
+fn nullish_coalesce_never_nullish_string_literal_reports_2869() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "\"hello\" ?? \"x\";"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2869);
+    assert_eq!(
+        diags[0].message,
+        "Right operand of ?? is unreachable because the left operand is never nullish."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperandLeft(12880)
+#[test]
+fn nullish_coalesce_never_nullish_numeric_literal_reports_2869() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "1 ?? \"x\";"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2869);
+}
+
+// Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperandLeft(12880)
+#[test]
+fn nullish_coalesce_variable_left_reports_nothing() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: number;\na ?? \"x\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperandLeft(12880)
+#[test]
+fn nullish_coalesce_parenthesized_null_left_reports_2871() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "(null) ?? \"x\";"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2871);
+}
+
+// Go: internal/checker/checker.go:Checker.getSyntacticNullishnessSemantics(12892)
+#[test]
+fn nullish_coalesce_conditional_both_nullish_branches_reports_2871() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "(true ? null : undefined) ?? \"x\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2871);
+}
+
+// Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperands(12859) — `??=`
+// does not run operand diagnostics (only the binary `??` form does).
+#[test]
+fn nullish_coalesce_assign_skips_operand_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | undefined;\nnull ??= \"x\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2871 || d.code == 2869),
+        "??= should not run nullish operand diagnostics; got {diags:?}"
+    );
+}

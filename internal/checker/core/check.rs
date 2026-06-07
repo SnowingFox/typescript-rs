@@ -2505,11 +2505,6 @@ impl Checker {
             // subsumed by `string`) is dropped, so `("a" | undefined) ?? string`
             // is `string`, not `"a" | string`.
             //
-            // DEFER(phase-4-checker-later): the `checkNullishCoalesceOperands`
-            // always-/never-nullish operand diagnostics (`This_expression_is_
-            // always_nullish` / `Right_operand_..._never_nullish`). blocked-by:
-            // the syntactic nullishness-semantics analysis. (The mixed-operator
-            // `5076` grammar check is wired separately below.)
             Kind::QuestionQuestionToken | Kind::QuestionQuestionEqualsToken => {
                 // Go runs the mixed-operator grammar check (`5076`) only for the
                 // binary `??` form, not the `??=` compound assignment.
@@ -5319,6 +5314,86 @@ impl Checker {
                     | self.get_syntactic_truthy_semantics(program, d.when_false)
             }
             _ => PredicateSemantics::Sometimes,
+        }
+    }
+
+    /// Returns syntactic nullishness semantics for `node` (port of Go's
+    /// `getSyntacticNullishnessSemantics`).
+    ///
+    /// Side effects: none (pure read of the AST).
+    // Go: internal/checker/checker.go:Checker.getSyntacticNullishnessSemantics(12892)
+    pub(crate) fn get_syntactic_nullishness_semantics(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> PredicateSemantics {
+        let node = skip_outer_expressions(program, node);
+        match program.arena().kind(node) {
+            Kind::AwaitExpression
+            | Kind::CallExpression
+            | Kind::TaggedTemplateExpression
+            | Kind::ElementAccessExpression
+            | Kind::MetaProperty
+            | Kind::NewExpression
+            | Kind::PropertyAccessExpression
+            | Kind::YieldExpression
+            | Kind::ThisKeyword => PredicateSemantics::Sometimes,
+            Kind::BinaryExpression => {
+                let NodeData::BinaryExpression(d) = program.arena().data(node) else {
+                    return PredicateSemantics::Sometimes;
+                };
+                match program.arena().kind(d.operator_token) {
+                    Kind::BarBarToken
+                    | Kind::BarBarEqualsToken
+                    | Kind::AmpersandAmpersandToken
+                    | Kind::AmpersandAmpersandEqualsToken => PredicateSemantics::Sometimes,
+                    Kind::CommaToken
+                    | Kind::EqualsToken
+                    | Kind::QuestionQuestionToken
+                    | Kind::QuestionQuestionEqualsToken => {
+                        self.get_syntactic_nullishness_semantics(program, d.right)
+                    }
+                    _ => PredicateSemantics::Never,
+                }
+            }
+            Kind::ConditionalExpression => {
+                let NodeData::ConditionalExpression(d) = program.arena().data(node) else {
+                    return PredicateSemantics::Sometimes;
+                };
+                self.get_syntactic_nullishness_semantics(program, d.when_true)
+                    | self.get_syntactic_nullishness_semantics(program, d.when_false)
+            }
+            Kind::NullKeyword => PredicateSemantics::Always,
+            Kind::Identifier => {
+                if program.arena().text(node) == "undefined" {
+                    PredicateSemantics::Always
+                } else {
+                    PredicateSemantics::Sometimes
+                }
+            }
+            _ => PredicateSemantics::Never,
+        }
+    }
+
+    /// Reports `2871`/`2869` when syntactic nullishness semantics prove the `??`
+    /// left operand is always or never nullish (Go's `checkNullishCoalesceOperandLeft`).
+    ///
+    /// Side effects: may record a diagnostic.
+    // Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperandLeft(12880)
+    pub(crate) fn check_nullish_coalesce_operand_left(
+        &mut self,
+        program: &dyn BoundProgram,
+        left: NodeId,
+    ) {
+        let left_target = skip_outer_expressions(program, left);
+        let semantics = self.get_syntactic_nullishness_semantics(program, left_target);
+        if semantics != PredicateSemantics::Sometimes {
+            let message = if semantics == PredicateSemantics::Always {
+                &tsgo_diagnostics::THIS_EXPRESSION_IS_ALWAYS_NULLISH
+            } else {
+                &tsgo_diagnostics::RIGHT_OPERAND_OF_IS_UNREACHABLE_BECAUSE_THE_LEFT_OPERAND_IS_NEVER_NULLISH
+            };
+            self.error(program, left_target, message, &[]);
         }
     }
 
