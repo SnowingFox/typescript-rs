@@ -13547,3 +13547,57 @@ fn accessor_abstract_mismatch_reports_2676() {
         "expected TS2676 on getter and setter when abstractness mismatches; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 35: accessor computed names, implicit-any resolution ----
+
+// Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2918)
+#[test]
+fn class_accessor_constructor_name_reports_1341() {
+    let codes = diag_codes("class C { get constructor() { return 1; } }");
+    assert!(
+        codes.contains(&1341),
+        "expected TS1341 class constructor may not be an accessor; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18401)
+#[test]
+fn set_only_accessor_without_param_type_reports_7032() {
+    let codes = diag_codes("class C { set x(v) { } }");
+    assert!(
+        codes.contains(&7032),
+        "expected TS7032 set accessor lacks parameter type annotation; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18403)
+#[test]
+fn abstract_getter_without_return_type_reports_7033() {
+    let codes = diag_codes("abstract class C { abstract get x(); }");
+    assert!(
+        codes.contains(&7033),
+        "expected TS7033 get accessor lacks return type annotation; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2933)
+#[test]
+fn class_accessor_computed_name_checks_expression() {
+    let codes = diag_codes("class C { get [x](): number { return 1; } }");
+    assert!(
+        codes.contains(&2304),
+        "expected TS2304 on unresolved computed accessor name expression; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2933) / checkComputedPropertyName
+#[test]
+fn class_accessor_computed_name_non_indexable_reports_2464() {
+    let codes = diag_codes(
+        "const k: boolean = true;\nclass C { get [k](): number { return 1; } }",
+    );
+    assert!(
+        codes.contains(&2464),
+        "expected TS2464 computed accessor name must be string/number/symbol; got {codes:?}"
+    );
+}

@@ -2192,7 +2192,7 @@ fn get_annotated_accessor_type(
 // Resolves the read type of an accessor symbol: getter annotation, else setter
 // annotation, else getter body return-type inference (Go's `getTypeOfAccessors`).
 // Go: internal/checker/checker.go:Checker.getTypeOfAccessors(18370)
-fn get_type_of_accessors(
+pub fn get_type_of_accessors(
     checker: &mut Checker,
     program: &dyn BoundProgram,
     symbol: SymbolId,
@@ -2222,7 +2222,30 @@ fn get_type_of_accessors(
             }
         }
     }
-    let t = t.unwrap_or_else(|| checker.any_type());
+    let t = match t {
+        Some(t) => t,
+        None => {
+            let sym_name = super::nodebuilder::symbol_to_string(program, symbol);
+            if let Some(setter) = setter {
+                checker.add_error_or_suggestion(
+                    program,
+                    checker.no_implicit_any(),
+                    setter,
+                    &tsgo_diagnostics::PROPERTY_0_IMPLICITLY_HAS_TYPE_ANY_BECAUSE_ITS_SET_ACCESSOR_LACKS_A_PARAMETER_TYPE_ANNOTATION,
+                    &[sym_name.as_str()],
+                );
+            } else if let Some(getter) = getter {
+                checker.add_error_or_suggestion(
+                    program,
+                    checker.no_implicit_any(),
+                    getter,
+                    &tsgo_diagnostics::PROPERTY_0_IMPLICITLY_HAS_TYPE_ANY_BECAUSE_ITS_GET_ACCESSOR_LACKS_A_RETURN_TYPE_ANNOTATION,
+                    &[sym_name.as_str()],
+                );
+            }
+            checker.any_type()
+        }
+    };
     checker.value_symbol_links.get(symbol).resolved_type = Some(t);
     t
 }

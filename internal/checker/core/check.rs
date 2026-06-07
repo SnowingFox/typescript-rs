@@ -8026,6 +8026,9 @@ impl Checker {
                 );
             }
         }
+        if program.arena().kind(name) == Kind::ComputedPropertyName {
+            self.check_computed_property_name(program, name);
+        }
         if program.arena().kind(name) == Kind::Identifier
             && program.arena().text(name) == "constructor"
             && get_containing_class(program, node).is_some()
@@ -8039,6 +8042,10 @@ impl Checker {
         }
         for param in &params {
             self.check_parameter(program, *param);
+        }
+        if let Some(symbol) = program.symbol_of_node(node) {
+            let globals = program.globals();
+            super::declared_types::get_type_of_accessors(self, program, symbol, globals);
         }
         if let Some(body) = body {
             self.check_statement(program, body);
