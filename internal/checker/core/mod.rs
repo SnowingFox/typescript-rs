@@ -402,6 +402,9 @@ pub struct Checker {
     non_primitive_type: TypeId,
     string_or_number_type: TypeId,
     number_or_bigint_type: TypeId,
+    /// Empty anonymous object type used as the left operand when folding spreads
+    /// (Go's `emptyObjectType`).
+    empty_object_type: TypeId,
 }
 
 impl Default for Checker {
@@ -530,6 +533,12 @@ impl Checker {
         let number_or_bigint_type =
             intern_union(&mut types, &mut union_types, vec![number_type, bigint_type])
                 .expect("number|bigint union has two members");
+        let empty_object_type = types.alloc(
+            TypeFlags::OBJECT,
+            ObjectFlags::ANONYMOUS,
+            None,
+            TypeData::Object(ObjectType::default()),
+        );
 
         Checker {
             types,
@@ -612,7 +621,13 @@ impl Checker {
             non_primitive_type,
             string_or_number_type,
             number_or_bigint_type,
+            empty_object_type,
         }
+    }
+
+    /// Returns the checker-wide empty object type (Go's `emptyObjectType`).
+    pub(crate) fn empty_object_type(&self) -> TypeId {
+        self.empty_object_type
     }
 
     /// Constructs a checker over a bound `program`, retaining it (Go's

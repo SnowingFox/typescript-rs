@@ -722,7 +722,7 @@ impl Checker {
                 }
                 if members.is_empty() && all_members.is_empty() {
                     spread_acc = Some(match spread_acc {
-                        None => spread_type,
+                        None => self.get_spread_type(program, self.empty_object_type(), spread_type),
                         Some(left) => self.get_spread_type(program, left, spread_type),
                     });
                 } else {
@@ -948,20 +948,71 @@ impl Checker {
         use super::declared_types::{get_apparent_type, get_properties_of_type, get_type_of_symbol};
         let apparent = get_apparent_type(self, spread_type);
         let globals = program.globals();
+        let mut skipped_private_members = FxHashSet::default();
         for (name, prop_sym) in get_properties_of_type(self, apparent) {
-            let prop_type = get_type_of_symbol(self, program, prop_sym, globals);
-            let prop = self.new_object_literal_property(
+            if is_private_or_protected_member(self, program, prop_sym) {
+                skipped_private_members.insert(name.clone());
+                continue;
+            }
+            if !is_spreadable_property(program, prop_sym) {
+                continue;
+            }
+            let prop = self.get_spread_property_symbol(
+                program,
                 &name,
-                SymbolFlags::PROPERTY,
+                prop_sym,
+                globals,
                 member_check_flags,
-                prop_type,
             );
-            members.insert(name, prop);
-            properties.push(prop);
-            all_members.push(ObjectLiteralMember {
-                symbol: prop,
-                computed_name_type: None,
-            });
+            if let Some(existing) = members.get(&name).copied() {
+                if self.is_optional_spread_symbol(program, prop_sym) {
+                    let left_type = get_type_of_symbol(self, program, existing, globals);
+                    let right_type = get_type_of_symbol(self, program, prop, globals);
+                    let merged = self.merge_optional_spread_property_types(left_type, right_type);
+                    let flags = SymbolFlags::PROPERTY
+                        | (self.spread_source_symbol_flags(program, existing)
+                            & SymbolFlags::OPTIONAL);
+                    let merged_prop = self.new_object_literal_property(
+                        &name,
+                        flags,
+                        member_check_flags,
+                        merged,
+                    );
+                    if let Some(pos) = properties.iter().position(|&s| {
+                        self.spread_property_name(program, s) == name
+                    }) {
+                        properties[pos] = merged_prop;
+                    }
+                    if let Some(pos) = all_members.iter().position(|m| {
+                        self.spread_property_name(program, m.symbol) == name
+                    }) {
+                        all_members[pos].symbol = merged_prop;
+                    }
+                    members.insert(name, merged_prop);
+                    continue;
+                }
+            }
+            if let Some(pos) = properties.iter().position(|&s| {
+                self.spread_property_name(program, s) == name
+            }) {
+                properties[pos] = prop;
+            } else {
+                properties.push(prop);
+            }
+            members.insert(name.clone(), prop);
+            if !all_members.iter().any(|m| self.spread_property_name(program, m.symbol) == name)
+            {
+                all_members.push(ObjectLiteralMember {
+                    symbol: prop,
+                    computed_name_type: None,
+                });
+            }
+        }
+        for skipped in skipped_private_members {
+            members.remove(&skipped);
+            properties.retain(|&s| self.spread_property_name(program, s) != skipped);
+            all_members
+                .retain(|m| self.spread_property_name(program, m.symbol) != skipped);
         }
     }
 
@@ -1036,7 +1087,8 @@ impl Checker {
     }
 
     // Merges the own properties of `right` into `left` for spread; right wins on
-    // name clashes (Go's `getSpreadType` non-generic object arm).
+    // name clashes unless the right property is optional (union merge) or
+    // private/protected (skip). Go's `getSpreadType` non-generic object arm.
     fn merge_object_types_for_spread(
         &mut self,
         program: &dyn BoundProgram,
@@ -1047,39 +1099,81 @@ impl Checker {
         let globals = program.globals();
         let mut members = SymbolTable::default();
         let mut properties: Vec<tsgo_ast::SymbolId> = Vec::new();
-        for (name, prop_sym) in get_properties_of_type(self, left) {
-            let prop_type = get_type_of_symbol(self, program, prop_sym, globals);
-            let prop = self.new_object_literal_property(
+        let mut skipped_private_members = FxHashSet::default();
+        let index_infos = if left == self.empty_object_type() {
+            get_index_infos_of_type(self, right)
+        } else {
+            self.get_union_index_infos(&[left, right])
+        };
+        for (name, prop_sym) in get_properties_of_type(self, right) {
+            if is_private_or_protected_member(self, program, prop_sym) {
+                skipped_private_members.insert(name);
+                continue;
+            }
+            if !is_spreadable_property(program, prop_sym) {
+                continue;
+            }
+            let prop = self.get_spread_property_symbol(
+                program,
                 &name,
-                SymbolFlags::PROPERTY,
+                prop_sym,
+                globals,
                 tsgo_ast::CheckFlags::empty(),
-                prop_type,
             );
-            members.insert(name, prop);
-            properties.push(prop);
+            members.insert(name.clone(), prop);
+        }
+        for (name, prop_sym) in get_properties_of_type(self, left) {
+            if skipped_private_members.contains(&name) || !is_spreadable_property(program, prop_sym)
+            {
+                continue;
+            }
+            if let Some(&right_prop) = members.get(&name) {
+                if self.is_optional_spread_symbol(program, right_prop) {
+                    let left_type = get_type_of_symbol(self, program, prop_sym, globals);
+                    let right_type = get_type_of_symbol(self, program, right_prop, globals);
+                    let merged = self.merge_optional_spread_property_types(left_type, right_type);
+                    let flags = SymbolFlags::PROPERTY
+                        | (self.spread_source_symbol_flags(program, prop_sym) & SymbolFlags::OPTIONAL);
+                    let prop = self.new_object_literal_property(
+                        &name,
+                        flags,
+                        tsgo_ast::CheckFlags::empty(),
+                        merged,
+                    );
+                    members.insert(name, prop);
+                }
+                continue;
+            }
+            let prop = self.get_spread_property_symbol(
+                program,
+                &name,
+                prop_sym,
+                globals,
+                tsgo_ast::CheckFlags::empty(),
+            );
+            members.insert(name.clone(), prop);
+        }
+        let mut seen = FxHashSet::default();
+        for (name, prop_sym) in get_properties_of_type(self, left) {
+            if skipped_private_members.contains(&name) || !is_spreadable_property(program, prop_sym) {
+                continue;
+            }
+            if let Some(&prop) = members.get(&name) {
+                properties.push(prop);
+                seen.insert(name);
+            }
         }
         for (name, prop_sym) in get_properties_of_type(self, right) {
-            let prop_type = get_type_of_symbol(self, program, prop_sym, globals);
-            let prop = self.new_object_literal_property(
-                &name,
-                SymbolFlags::PROPERTY,
-                tsgo_ast::CheckFlags::empty(),
-                prop_type,
-            );
-            if let Some(pos) = properties.iter().position(|&s| {
-                if super::is_synthesized_symbol(s) {
-                    self.synthesized_symbol_name(s) == name
-                } else {
-                    program.symbol(s).name == name
-                }
-            }) {
-                properties[pos] = prop;
-            } else {
+            if skipped_private_members.contains(&name) || !is_spreadable_property(program, prop_sym) {
+                continue;
+            }
+            if seen.contains(&name) {
+                continue;
+            }
+            if let Some(&prop) = members.get(&name) {
                 properties.push(prop);
             }
-            members.insert(name, prop);
         }
-        let index_infos = self.get_union_index_infos(&[left, right]);
         let object = ObjectType {
             members,
             properties,
@@ -1087,6 +1181,61 @@ impl Checker {
             ..Default::default()
         };
         self.new_object_type(ObjectFlags::ANONYMOUS, None, object)
+    }
+
+    fn get_spread_property_symbol(
+        &mut self,
+        program: &dyn BoundProgram,
+        name: &str,
+        prop_sym: SymbolId,
+        globals: Option<&SymbolTable>,
+        check_flags: tsgo_ast::CheckFlags,
+    ) -> SymbolId {
+        let prop_type = get_type_of_symbol(self, program, prop_sym, globals);
+        let flags = SymbolFlags::PROPERTY
+            | (self.spread_source_symbol_flags(program, prop_sym) & SymbolFlags::OPTIONAL);
+        self.new_object_literal_property(name, flags, check_flags, prop_type)
+    }
+
+    fn spread_source_symbol_flags(
+        &self,
+        program: &dyn BoundProgram,
+        symbol: SymbolId,
+    ) -> SymbolFlags {
+        if super::is_synthesized_symbol(symbol) {
+            self.synthesized_symbol_flags(symbol)
+        } else {
+            program.symbol(symbol).flags
+        }
+    }
+
+    fn spread_property_name(&self, program: &dyn BoundProgram, symbol: SymbolId) -> String {
+        if super::is_synthesized_symbol(symbol) {
+            self.synthesized_symbol_name(symbol).to_string()
+        } else {
+            program.symbol(symbol).name.clone()
+        }
+    }
+
+    fn is_optional_spread_symbol(&self, program: &dyn BoundProgram, symbol: SymbolId) -> bool {
+        self.spread_source_symbol_flags(program, symbol)
+            .contains(SymbolFlags::OPTIONAL)
+    }
+
+    fn merge_optional_spread_property_types(
+        &mut self,
+        left_type: TypeId,
+        right_type: TypeId,
+    ) -> TypeId {
+        let left_without_undefined =
+            self.get_type_with_facts(left_type, TypeFacts::NE_UNDEFINED);
+        let right_without_undefined =
+            self.get_type_with_facts(right_type, TypeFacts::NE_UNDEFINED);
+        if left_without_undefined == right_without_undefined {
+            left_type
+        } else {
+            self.get_union_type(&[left_type, right_without_undefined])
+        }
     }
 
     // Unions the index signatures shared by every type in `types` (Go's
@@ -10951,6 +11100,57 @@ fn is_class_like(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
         arena.kind(node),
         Kind::ClassDeclaration | Kind::ClassExpression
     )
+}
+
+// Reports whether `decl` is a class element whose name is a private identifier
+// (Go's `ast.IsPrivateIdentifierClassElementDeclaration`).
+fn is_private_identifier_class_element_declaration(
+    program: &dyn BoundProgram,
+    decl: NodeId,
+) -> bool {
+    let name = match program.arena().data(decl) {
+        NodeData::PropertyDeclaration(d) => d.name,
+        NodeData::MethodDeclaration(d) => d.name,
+        NodeData::GetAccessorDeclaration(d) => d.name,
+        NodeData::SetAccessorDeclaration(d) => d.name,
+        _ => return false,
+    };
+    program.arena().kind(name) == Kind::PrivateIdentifier
+}
+
+// Reports whether `prop` may be copied by object spread (Go's
+// `isSpreadableProperty`).
+fn is_spreadable_property(program: &dyn BoundProgram, prop: SymbolId) -> bool {
+    if super::is_synthesized_symbol(prop) {
+        return true;
+    }
+    let sym = program.symbol(prop);
+    let is_private_id = sym
+        .declarations
+        .iter()
+        .copied()
+        .any(|d| is_private_identifier_class_element_declaration(program, d));
+    let is_method_or_accessor = sym.flags.intersects(
+        SymbolFlags::METHOD | SymbolFlags::GET_ACCESSOR | SymbolFlags::SET_ACCESSOR,
+    );
+    let in_class = sym.declarations.iter().copied().any(|d| {
+        program
+            .arena()
+            .parent(d)
+            .is_some_and(|p| is_class_like(program.arena(), p))
+    });
+    (!is_private_id && !is_method_or_accessor) || !in_class
+}
+
+// Reports whether `prop` is declared private or protected (Go's
+// `getDeclarationModifierFlagsFromSymbol` check in `getSpreadType`).
+fn is_private_or_protected_member(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    prop: SymbolId,
+) -> bool {
+    declaration_modifier_flags_from_symbol(checker, program, prop, false)
+        .intersects(ModifierFlags::PRIVATE | ModifierFlags::PROTECTED)
 }
 
 // Reports whether `node` was parsed in a JavaScript file (the parser sets

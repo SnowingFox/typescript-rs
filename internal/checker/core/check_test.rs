@@ -12752,3 +12752,101 @@ fn object_spread_after_falsy_removal_yields_object_type() {
     let mut c = Checker::new();
     assert_eq!(c.check_expression(&p, access), c.number_type());
 }
+
+// ---- T1-E batch 24: private/protected skip, optional merge, isSpreadableProperty ----
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13362)
+#[test]
+fn object_spread_skips_private_class_member() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { private x: number; public y: number; }\ndeclare const c: C;\nconst o = { ...c };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 3);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ y: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13362)
+#[test]
+fn object_spread_skips_protected_class_member() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { protected x: number; public y: number; }\ndeclare const c: C;\nconst o = { ...c };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 3);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ y: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13370)
+#[test]
+fn object_spread_protected_right_skips_left_same_name() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { protected foo: number; }\ndeclare const left: { foo: string };\ndeclare const c: C;\nconst o = { ...left, ...c };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 4);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isSpreadableProperty(13494)
+#[test]
+fn object_spread_skips_class_method_member() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { m(): void {} x: number; }\ndeclare const c: C;\nconst o = { ...c };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 3);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ x: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isSpreadableProperty(13494)
+#[test]
+fn object_spread_includes_interface_method_member() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { m(): void; x: number; }\ndeclare const i: I;\nconst o = { ...i };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 3);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ m: m; x: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getSpreadType(13376)
+#[test]
+fn object_spread_merges_optional_property_types() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: { sn: string };\ndeclare const b: { sn?: number };\nconst o = { ...a, ...b };\no.sn;",
+    );
+    let access = expr_stmt_expression(&p, 3);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, access);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "string | number"
+    );
+}
