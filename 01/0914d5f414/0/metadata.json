@@ -1,0 +1,18 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "010914d5f414",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-07T16:10:11.42441Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [],
+  "agent": "Cursor",
+  "model": "composer-2.5",
+  "turn_id": "9a8bd7085fe3",
+  "session_metrics": {
+    "turn_count": 9,
+    "context_tokens": 224084,
+    "context_window_size": 200000
+  }
+}
