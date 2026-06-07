@@ -1390,6 +1390,9 @@ pub fn get_type_of_symbol(
     if flags.intersects(SymbolFlags::FUNCTION | SymbolFlags::METHOD) {
         return get_type_of_func_class_enum_module(checker, program, symbol);
     }
+    if flags.intersects(SymbolFlags::GET_ACCESSOR | SymbolFlags::SET_ACCESSOR) {
+        return get_type_of_variable_or_property(checker, program, symbol, globals);
+    }
     // A namespace/module symbol's value type is an anonymous object whose
     // members are the namespace's exports, so `N.x` reads an exported member's
     // type (Go's `getTypeOfFuncClassEnumModuleWorker`, module case). A merged
@@ -2181,6 +2184,7 @@ fn get_type_of_variable_or_property(
     let type_node = declaration.and_then(|decl| match program.arena().data(decl) {
         NodeData::VariableDeclaration(d) => d.type_node,
         NodeData::PropertySignature(d) | NodeData::PropertyDeclaration(d) => d.type_node,
+        NodeData::GetAccessorDeclaration(d) => d.type_node,
         // A parameter symbol's type comes from its annotation (Go's
         // `getTypeOfParameter` -> `getTypeOfSymbol` -> annotation), so a
         // signature's parameter types resolve for call checking (4q).

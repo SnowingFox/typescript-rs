@@ -2277,6 +2277,34 @@ impl Checker {
         t
     }
 
+    // Widens a `unique symbol` type to the `symbol` primitive, distributing over
+    // unions. Non-unique-symbol types are returned unchanged.
+    // Go: internal/checker/checker.go:Checker.getWidenedUniqueESSymbolType(25364)
+    pub(crate) fn get_widened_unique_es_symbol_type(&mut self, t: TypeId) -> TypeId {
+        let flags = self.get_type(t).flags();
+        if flags.intersects(TypeFlags::UNIQUE_ES_SYMBOL) {
+            return self.es_symbol_type;
+        }
+        if flags.intersects(TypeFlags::UNION) {
+            let members = self.get_type(t).union_types().unwrap_or(&[]).to_vec();
+            let mapped: Vec<TypeId> = members
+                .iter()
+                .map(|&m| self.get_widened_unique_es_symbol_type(m))
+                .collect();
+            let mut changed = false;
+            for (i, &m) in members.iter().enumerate() {
+                if mapped[i] != m {
+                    changed = true;
+                    break;
+                }
+            }
+            if changed {
+                return self.get_union_type(&mapped);
+            }
+        }
+        t
+    }
+
     /// Sets the `JSX.IntrinsicElements` type used to resolve intrinsic JSX tags.
     ///
     /// This is the injection point standing in for lib-global resolution until

@@ -675,6 +675,70 @@ fn unresolved_callee_with_callback_reports_2304_once() {
     assert_eq!(diags[0].message, "Cannot find name 'g'.");
 }
 
+// ---- T1-E batch 31: object-literal accessors/methods, computed-name contextual typing, getWidenedUniqueESSymbolType ----
+
+// Returns the `idx`-th member of an object-literal initializer of the first
+// variable declaration.
+fn object_literal_member(p: &StubProgram, member_idx: usize) -> NodeId {
+    let literal = var_decl_initializer(p, 0);
+    match p.arena().data(literal) {
+        NodeData::ObjectLiteralExpression(d) => d.list.nodes[member_idx],
+        _ => panic!("object literal"),
+    }
+}
+
+// Go: internal/checker/checker.go:Checker.getContextualTypeForObjectLiteralMethod(29640)
+#[test]
+fn get_contextual_type_of_object_literal_method_is_property_type() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const o: { m(): number } = { m() { return 1 } };");
+    let method = object_literal_member(&p, 0);
+    let mut c = Checker::new();
+    let ctx = c
+        .get_contextual_type(&p, method, ContextFlags::NONE)
+        .expect("object-literal method has a contextual type");
+    let sigs = c.get_signatures_of_type(ctx);
+    assert_eq!(sigs.len(), 1, "the contextual type is a method signature");
+    assert_eq!(c.get_return_type_of_signature(sigs[0]), c.number_type());
+}
+
+// Go: internal/checker/checker.go:Checker.getContextualTypeForObjectLiteralElement(29596)
+#[test]
+fn get_contextual_type_of_object_literal_get_accessor_is_property_type() {
+    let p =
+        StubProgram::parse_and_bind("/a.ts", "const o: { get x(): number } = { get x() { return 1 } };");
+    let getter = object_literal_member(&p, 0);
+    let mut c = Checker::new();
+    assert_eq!(
+        c.get_contextual_type(&p, getter, ContextFlags::NONE),
+        Some(c.number_type())
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isLiteralOfContextualType(25381)
+#[test]
+fn is_literal_of_contextual_type_matches_unique_es_symbol() {
+    let mut c = Checker::new();
+    let unique = c.new_unique_es_symbol_type(tsgo_ast::SymbolId(1), "\u{fe}@sym@1");
+    assert!(c.is_literal_of_contextual_type(unique, Some(unique)));
+    assert!(!c.is_literal_of_contextual_type(unique, Some(c.string_type())));
+}
+
+// Go: internal/checker/checker.go:Checker.getWidenedUniqueESSymbolType(25364)
+#[test]
+fn get_widened_literal_like_type_for_contextual_type_widens_unique_es_symbol() {
+    let mut c = Checker::new();
+    let unique = c.new_unique_es_symbol_type(tsgo_ast::SymbolId(1), "\u{fe}@sym@1");
+    let es_symbol = c.es_symbol_type();
+    assert_eq!(
+        c.get_widened_literal_like_type_for_contextual_type(unique, None),
+        es_symbol
+    );
+    assert_eq!(
+        c.get_widened_literal_like_type_for_contextual_type(unique, Some(unique)),
+        unique
+    );
+}
+
 // 4bk unit: `get_widened_literal_like_type_for_contextual_type` preserves a
 // literal in a matching literal context (returning the regular literal), but
 // widens a fresh literal when there is no contextual type or the context's kind

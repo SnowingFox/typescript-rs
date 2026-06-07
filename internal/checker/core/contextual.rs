@@ -15,10 +15,12 @@
 
 use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags};
 
+use super::check::is_type_usable_as_property_name;
 use super::declared_types::{
     get_applicable_index_info_for_name, get_indexed_access_type, get_property_of_type,
     get_type_from_type_node, get_type_of_symbol,
 };
+use super::late_binding::get_property_name_from_type;
 use super::program::BoundProgram;
 use super::signatures::SignatureId;
 use super::symbols::resolve_name;
@@ -126,6 +128,9 @@ impl Checker {
             }
             Kind::PropertyAssignment | Kind::ShorthandPropertyAssignment => {
                 self.get_contextual_type_for_object_literal_element(program, parent, context_flags)
+            }
+            Kind::ObjectLiteralExpression => {
+                self.get_contextual_type_for_object_literal_element(program, node, context_flags)
             }
             Kind::ArrayLiteralExpression => self.get_contextual_type_for_array_literal_element(
                 program,
@@ -417,11 +422,16 @@ impl Checker {
         let object_literal = program.arena().parent(element)?;
         let t =
             self.get_apparent_type_of_contextual_type(program, object_literal, context_flags)?;
-        // `hasBindableName` reachable subset: a static (non-computed) property
-        // name. A computed/dynamic name has no statically-known property name to
-        // look up here (DEFER).
-        let name = object_literal_element_static_name(program, element)?;
-        self.get_type_of_property_of_contextual_type(program, t, &name)
+        if let Some(name) = object_literal_element_static_name(program, element) {
+            return self.get_type_of_property_of_contextual_type(program, t, &name);
+        }
+        if let Some(name_type) = object_literal_element_computed_name_type(self, program, element) {
+            if is_type_usable_as_property_name(self.get_type(name_type).flags()) {
+                let name = get_property_name_from_type(self, name_type);
+                return self.get_type_of_property_of_contextual_type(program, t, &name);
+            }
+        }
+        None
     }
 
     /// The contextual type of an array-literal element: derived from the
@@ -572,6 +582,9 @@ impl Checker {
         node: NodeId,
         context_flags: ContextFlags,
     ) -> Option<TypeId> {
+        if is_object_literal_method(program, node) {
+            return self.get_contextual_type_for_object_literal_element(program, node, context_flags);
+        }
         self.get_contextual_type(program, node, context_flags)
     }
 
@@ -756,8 +769,6 @@ impl Checker {
     /// contextual typing into object/array literals: a `"x"` value in a `"x"`
     /// property position stays `"x"` instead of widening to `string`.
     ///
-    /// DEFER(phase-4-checker-4bl+): the `getWidenedUniqueESSymbolType` step (no
-    /// unique-symbol literal is typed yet). blocked-by: unique-ES-symbol typing.
     // Go: internal/checker/checker.go:Checker.getWidenedLiteralLikeTypeForContextualType
     pub(crate) fn get_widened_literal_like_type_for_contextual_type(
         &mut self,
@@ -767,7 +778,8 @@ impl Checker {
         let t = if self.is_literal_of_contextual_type(t, contextual_type) {
             t
         } else {
-            self.get_widened_literal_type(t)
+            let widened = self.get_widened_literal_type(t);
+            self.get_widened_unique_es_symbol_type(widened)
         };
         self.regular_type_of_literal_type(t)
     }
@@ -819,6 +831,8 @@ impl Checker {
                 && candidate.intersects(TypeFlags::NUMBER_LITERAL)
             || context.intersects(TypeFlags::BOOLEAN_LITERAL)
                 && candidate.intersects(TypeFlags::BOOLEAN_LITERAL)
+            || context.intersects(TypeFlags::UNIQUE_ES_SYMBOL)
+                && candidate.intersects(TypeFlags::UNIQUE_ES_SYMBOL)
     }
 
     /// Assigns contextual parameter types to a contextually-typed function/arrow
@@ -953,15 +967,41 @@ fn parameter_is_optional_for_arity(program: &dyn BoundProgram, parameter: NodeId
 /// Returns the static (non-computed) property name of an object-literal
 /// property/shorthand element, or `None` for a computed/dynamic name (which has
 /// no statically-known name to look up in a contextual type).
+fn is_object_literal_method(program: &dyn BoundProgram, node: NodeId) -> bool {
+    program.arena().kind(node) == Kind::MethodDeclaration
+        && program
+            .arena()
+            .parent(node)
+            .is_some_and(|p| program.arena().kind(p) == Kind::ObjectLiteralExpression)
+}
+
+fn object_literal_element_computed_name_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    element: NodeId,
+) -> Option<TypeId> {
+    let name_node = object_literal_element_name_node(program, element)?;
+    if program.arena().kind(name_node) != Kind::ComputedPropertyName {
+        return None;
+    }
+    Some(checker.check_computed_property_name(program, name_node))
+}
+
+fn object_literal_element_name_node(program: &dyn BoundProgram, element: NodeId) -> Option<NodeId> {
+    match program.arena().data(element) {
+        NodeData::PropertyAssignment(d) => Some(d.name),
+        NodeData::ShorthandPropertyAssignment(d) => Some(d.name),
+        NodeData::MethodDeclaration(d) => Some(d.name),
+        NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => Some(d.name),
+        _ => None,
+    }
+}
+
 fn object_literal_element_static_name(
     program: &dyn BoundProgram,
     element: NodeId,
 ) -> Option<String> {
-    let name_node = match program.arena().data(element) {
-        NodeData::PropertyAssignment(d) => d.name,
-        NodeData::ShorthandPropertyAssignment(d) => d.name,
-        _ => return None,
-    };
+    let name_node = object_literal_element_name_node(program, element)?;
     match program.arena().kind(name_node) {
         Kind::Identifier | Kind::StringLiteral | Kind::NumericLiteral => {
             Some(program.arena().text(name_node).to_string())

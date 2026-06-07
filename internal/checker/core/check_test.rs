@@ -13309,6 +13309,59 @@ fn object_literal_unique_symbol_computed_name_carries_late_check_flag() {
     );
 }
 
+// ---- T1-E batch 31: object-literal accessors/methods, computed-name contextual typing, getWidenedUniqueESSymbolType ----
+
+// Go: internal/checker/checker.go:Checker.getWidenedLiteralLikeTypeForContextualType(25374)
+#[test]
+fn object_literal_unique_symbol_value_preserved_by_contextual_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const sym: unique symbol;\nconst o: { [sym]: typeof sym } = { [sym]: sym };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "a unique-symbol value in a matching contextual position must not widen to symbol; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getContextualTypeForObjectLiteralElement(29596)
+#[test]
+fn object_literal_computed_name_property_value_gets_contextual_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { [\"k\"]: number } = { [\"k\"]: 1 };",
+    );
+    let literal = match p.arena().data(source_statements(&p)[0]) {
+        NodeData::VariableStatement(d) => {
+            let list = match p.arena().data(d.declaration_list) {
+                NodeData::VariableDeclarationList(dl) => dl.declarations.nodes[0],
+                _ => panic!("declaration list"),
+            };
+            match p.arena().data(list) {
+                NodeData::VariableDeclaration(vd) => vd.initializer.expect("initializer"),
+                _ => panic!("variable declaration"),
+            }
+        }
+        _ => panic!("variable statement"),
+    };
+    let member = match p.arena().data(literal) {
+        NodeData::ObjectLiteralExpression(d) => d.list.nodes[0],
+        _ => panic!("object literal"),
+    };
+    let value = match p.arena().data(member) {
+        NodeData::PropertyAssignment(d) => d.initializer.expect("property value"),
+        _ => panic!("property assignment"),
+    };
+    let mut c = Checker::new();
+    assert_eq!(
+        c.get_contextual_type(&p, value, crate::core::contextual::ContextFlags::NONE),
+        Some(c.number_type())
+    );
+}
+
 fn source_statements(p: &StubProgram) -> Vec<tsgo_ast::NodeId> {
     match p.arena().data(p.root()) {
         NodeData::SourceFile(d) => d.statements.nodes.clone(),
