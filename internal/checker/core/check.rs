@@ -2403,11 +2403,10 @@ impl Checker {
             // number-ish operands and yield `number` (Go's arithmetic arm).
             //
             // DEFER(phase-4-checker-4o+): the `bigint` result + mixed-operand
-            // (`reportOperatorError`) path, the boolean-bitwise suggestion
-            // (`The_0_operator_is_not_allowed_for_boolean_types`), the shift
-            // simplification suggestion, and compound assignments (`*=` etc.,
-            // which also run `checkAssignmentOperator`). blocked-by: `maybeTypeOfKind`
-            // bigint handling + `evaluate`-based shift constants + compound-assign
+            // (`reportOperatorError`) path, the shift simplification suggestion,
+            // and compound assignments (`*=` etc., which also run
+            // `checkAssignmentOperator`). blocked-by: `maybeTypeOfKind` bigint
+            // handling + `evaluate`-based shift constants + compound-assign
             // reference/write-type resolution.
             Kind::MinusToken
             | Kind::AsteriskToken
@@ -2431,6 +2430,26 @@ impl Checker {
             | Kind::AmpersandEqualsToken
             | Kind::BarEqualsToken
             | Kind::CaretEqualsToken => {
+                if left_type == self.silent_never_type || right_type == self.silent_never_type {
+                    return self.silent_never_type;
+                }
+                let left_type = self.check_non_null_type(program, left_type, left);
+                let right_type = self.check_non_null_type(program, right_type, right);
+                let left_boolean = self.maybe_type_of_kind(left_type, TypeFlags::BOOLEAN_LIKE);
+                let right_boolean = self.maybe_type_of_kind(right_type, TypeFlags::BOOLEAN_LIKE);
+                if left_boolean && right_boolean {
+                    if let Some(suggested) = get_suggested_boolean_operator(operator) {
+                        let op = tsgo_scanner::token_to_string(operator);
+                        let suggested_op = tsgo_scanner::token_to_string(suggested);
+                        self.error(
+                            program,
+                            operator_token,
+                            &tsgo_diagnostics::THE_0_OPERATOR_IS_NOT_ALLOWED_FOR_BOOLEAN_TYPES_CONSIDER_USING_1_INSTEAD,
+                            &[op, suggested_op],
+                        );
+                        return self.number_type;
+                    }
+                }
                 let left_ok = self.check_arithmetic_operand_type(
                     program,
                     left,
@@ -2898,6 +2917,27 @@ impl Checker {
             }
             self.report_type_not_assignable(program, left, right_type, left_type);
         }
+    }
+
+    // Reports whether `t` is, or contains, a type with flag bits in `kind` (Go's
+    // `maybeTypeOfKind`).
+    // Go: internal/checker/checker.go:Checker.maybeTypeOfKind(27418)
+    fn maybe_type_of_kind(&self, t: TypeId, kind: TypeFlags) -> bool {
+        let f = self.get_type(t).flags();
+        if f.intersects(kind) {
+            return true;
+        }
+        if f.intersects(TypeFlags::UNION_OR_INTERSECTION) {
+            let members = self
+                .get_type(t)
+                .union_types()
+                .or_else(|| self.get_type(t).intersection_types())
+                .unwrap_or(&[]);
+            return members
+                .iter()
+                .any(|&m| self.maybe_type_of_kind(m, kind));
+        }
+        false
     }
 
     // Checks that an arithmetic `operand` of type `t` is number-ish (assignable
@@ -10682,6 +10722,18 @@ fn is_compound_assignment(operator: Kind) -> bool {
             | Kind::BarBarEqualsToken
             | Kind::QuestionQuestionEqualsToken
     )
+}
+
+// Maps a bitwise operator applied to boolean operands to the logical operator
+// Go suggests in diagnostic `2447`.
+// Go: internal/checker/checker.go:Checker.getSuggestedBooleanOperator(12731)
+fn get_suggested_boolean_operator(operator: Kind) -> Option<Kind> {
+    match operator {
+        Kind::BarToken | Kind::BarEqualsToken => Some(Kind::BarBarToken),
+        Kind::CaretToken | Kind::CaretEqualsToken => Some(Kind::ExclamationEqualsEqualsToken),
+        Kind::AmpersandToken | Kind::AmpersandEqualsToken => Some(Kind::AmpersandAmpersandToken),
+        _ => None,
+    }
 }
 
 /// Returns the enclosing function-like container where `new.target` is valid

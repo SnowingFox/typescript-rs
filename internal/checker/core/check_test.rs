@@ -12204,3 +12204,89 @@ fn nullish_coalesce_assign_skips_operand_diagnostics() {
         "??= should not run nullish operand diagnostics; got {diags:?}"
     );
 }
+
+// ---- T1-E batch 18: boolean-bitwise operator suggestion (2447) ----
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12316)
+#[test]
+fn bitwise_or_on_boolean_literals_reports_2447() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "true | false;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2447);
+    assert_eq!(
+        diags[0].message,
+        "The '|' operator is not allowed for boolean types. Consider using '||' instead."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12316)
+#[test]
+fn bitwise_and_on_boolean_literals_reports_2447() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "true & false;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2447);
+    assert_eq!(
+        diags[0].message,
+        "The '&' operator is not allowed for boolean types. Consider using '&&' instead."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12316)
+#[test]
+fn bitwise_xor_on_boolean_literals_reports_2447() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "true ^ false;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2447);
+    assert_eq!(
+        diags[0].message,
+        "The '^' operator is not allowed for boolean types. Consider using '!==' instead."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12316)
+#[test]
+fn bitwise_or_compound_on_boolean_literals_reports_2447() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "var a = true;\na |= false;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2447);
+    assert_eq!(
+        diags[0].message,
+        "The '|=' operator is not allowed for boolean types. Consider using '||' instead."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12316)
+#[test]
+fn bitwise_and_mixed_boolean_number_reports_arithmetic_not_2447() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "true & 1;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2447),
+        "mixed boolean/number operands should not report 2447; got {diags:?}"
+    );
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, 2362);
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12319)
+#[test]
+fn bitwise_or_on_boolean_literals_yields_number() {
+    let p = StubProgram::parse_and_bind("/a.ts", "true | false;");
+    let sub = expr_stmt_expression(&p, 0);
+    let mut c = Checker::new();
+    assert_eq!(c.check_expression(&p, sub), c.number_type());
+}
