@@ -672,6 +672,7 @@ impl Checker {
         let mut has_computed_string_property = false;
         let mut has_computed_number_property = false;
         let mut has_computed_symbol_property = false;
+        let mut index_infos: Vec<IndexInfoId> = Vec::new();
         let spread_only = members_nodes.len() == 1;
         for member_decl in members_nodes {
             // DEFER(phase-4-checker-4bh+): accessor (`get`/`set`) and method
@@ -688,15 +689,31 @@ impl Checker {
                     );
                     continue;
                 }
-                // A spread-only object literal whose operand is a union of object
-                // types yields that union (Go's `getSpreadType(empty, A | B)`).
-                if members.is_empty() && all_members.is_empty() && spread_only {
-                    if let Some(union_members) = self
-                        .get_type(spread_type)
-                        .union_types()
-                        .map(|m| m.to_vec())
-                    {
+                if let Some(union_members) = self
+                    .get_type(spread_type)
+                    .union_types()
+                    .map(|m| m.to_vec())
+                {
+                    // A spread-only object literal whose operand is a union of object
+                    // types yields that union (Go's `getSpreadType(empty, A | B)`).
+                    if members.is_empty() && all_members.is_empty() && spread_only {
                         return self.get_union_type(&union_members);
+                    }
+                    // Spreading a union after named members distributes
+                    // `getSpreadType(left, eachMember)` (Go's right-union arm).
+                    if !members.is_empty() || !all_members.is_empty() {
+                        let left = self.materialize_object_literal_type(
+                            program,
+                            node,
+                            &members,
+                            &properties,
+                            &index_infos,
+                        );
+                        let spread_results: Vec<TypeId> = union_members
+                            .iter()
+                            .map(|&right| self.get_spread_type(program, left, right))
+                            .collect();
+                        return self.get_union_type(&spread_results);
                     }
                 }
                 self.merge_spread_into_object_literal(
@@ -802,7 +819,6 @@ impl Checker {
         // whose names match that key kind (`getObjectLiteralIndexInfo`). The
         // index signatures are readonly in a const context (Go's `isReadonly :=
         // c.isConstContext(node)`).
-        let mut index_infos: Vec<IndexInfoId> = Vec::new();
         if has_computed_string_property {
             let string = self.string_type;
             let info =
@@ -906,6 +922,128 @@ impl Checker {
                 computed_name_type: None,
             });
         }
+    }
+
+    // Materializes the object-literal type accumulated so far (Go's
+    // `createObjectLiteralType` on a partial member table).
+    // Go: internal/checker/checker.go:Checker.createObjectLiteralType
+    fn materialize_object_literal_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        members: &SymbolTable,
+        properties: &[tsgo_ast::SymbolId],
+        index_infos: &[IndexInfoId],
+    ) -> TypeId {
+        let object = ObjectType {
+            members: members.clone(),
+            properties: properties.to_vec(),
+            index_infos: index_infos.to_vec(),
+            ..Default::default()
+        };
+        let symbol = program.symbol_of_node(node);
+        self.types.alloc(
+            TypeFlags::OBJECT,
+            ObjectFlags::ANONYMOUS
+                | ObjectFlags::OBJECT_LITERAL
+                | ObjectFlags::FRESH_LITERAL
+                | ObjectFlags::CONTAINS_OBJECT_OR_ARRAY_LITERAL,
+            symbol,
+            super::types::TypeData::Object(object),
+        )
+    }
+
+    // Folds two object types for spread (`{...right}` into `left`); spread
+    // properties override same-named properties on the left (Go's `getSpreadType`
+    // reachable subset: union distribution + non-generic object merge).
+    // Go: internal/checker/checker.go:Checker.getSpreadType(13301)
+    fn get_spread_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        left: TypeId,
+        right: TypeId,
+    ) -> TypeId {
+        let left_flags = self.get_type(left).flags();
+        let right_flags = self.get_type(right).flags();
+        if left_flags.intersects(TypeFlags::ANY) || right_flags.intersects(TypeFlags::ANY) {
+            return self.any_type;
+        }
+        if left_flags.intersects(TypeFlags::UNKNOWN) || right_flags.intersects(TypeFlags::UNKNOWN) {
+            return self.unknown_type;
+        }
+        if left_flags.intersects(TypeFlags::NEVER) {
+            return right;
+        }
+        if right_flags.intersects(TypeFlags::NEVER) {
+            return left;
+        }
+        if let Some(members) = self.get_type(right).union_types().map(|m| m.to_vec()) {
+            let mapped: Vec<TypeId> = members
+                .iter()
+                .map(|&member| self.get_spread_type(program, left, member))
+                .collect();
+            return self.get_union_type(&mapped);
+        }
+        if let Some(members) = self.get_type(left).union_types().map(|m| m.to_vec()) {
+            let mapped: Vec<TypeId> = members
+                .iter()
+                .map(|&member| self.get_spread_type(program, member, right))
+                .collect();
+            return self.get_union_type(&mapped);
+        }
+        self.merge_object_types_for_spread(program, left, right)
+    }
+
+    // Merges the own properties of `right` into `left` for spread; right wins on
+    // name clashes (Go's `getSpreadType` non-generic object arm).
+    fn merge_object_types_for_spread(
+        &mut self,
+        program: &dyn BoundProgram,
+        left: TypeId,
+        right: TypeId,
+    ) -> TypeId {
+        use super::declared_types::{get_properties_of_type, get_type_of_symbol};
+        let globals = program.globals();
+        let mut members = SymbolTable::default();
+        let mut properties: Vec<tsgo_ast::SymbolId> = Vec::new();
+        for (name, prop_sym) in get_properties_of_type(self, left) {
+            let prop_type = get_type_of_symbol(self, program, prop_sym, globals);
+            let prop = self.new_object_literal_property(
+                &name,
+                SymbolFlags::PROPERTY,
+                tsgo_ast::CheckFlags::empty(),
+                prop_type,
+            );
+            members.insert(name, prop);
+            properties.push(prop);
+        }
+        for (name, prop_sym) in get_properties_of_type(self, right) {
+            let prop_type = get_type_of_symbol(self, program, prop_sym, globals);
+            let prop = self.new_object_literal_property(
+                &name,
+                SymbolFlags::PROPERTY,
+                tsgo_ast::CheckFlags::empty(),
+                prop_type,
+            );
+            if let Some(pos) = properties.iter().position(|&s| {
+                if super::is_synthesized_symbol(s) {
+                    self.synthesized_symbol_name(s) == name
+                } else {
+                    program.symbol(s).name == name
+                }
+            }) {
+                properties[pos] = prop;
+            } else {
+                properties.push(prop);
+            }
+            members.insert(name, prop);
+        }
+        let object = ObjectType {
+            members,
+            properties,
+            ..Default::default()
+        };
+        self.new_object_type(ObjectFlags::ANONYMOUS, None, object)
     }
 
     // Builds the index signature of kind `key_type` (`string`/`number`/`symbol`)
@@ -2516,14 +2654,12 @@ impl Checker {
             | Kind::EqualsEqualsEqualsToken
             | Kind::ExclamationEqualsEqualsToken => {
                 if !self.equality_operands_comparable(program, left_type, right_type) {
-                    let left_base = self.get_base_type_of_literal_type(left_type);
-                    let right_base = self.get_base_type_of_literal_type(right_type);
-                    let (error_left, error_right) =
-                        if self.equality_operands_comparable(program, left_base, right_base) {
-                            (left_type, right_type)
-                        } else {
-                            (left_base, right_base)
-                        };
+                    let (error_left, error_right) = self.get_base_types_if_unrelated(
+                        program,
+                        left_type,
+                        right_type,
+                        |c, p, l, r| c.equality_operands_comparable(p, l, r),
+                    );
                     self.report_binary_operator_error(
                         program,
                         node,
@@ -2825,19 +2961,32 @@ impl Checker {
                             | TypeFlags::BIG_INT_LIKE
                             | TypeFlags::STRING_LIKE
                             | TypeFlags::ANY_OR_UNKNOWN;
-                        let awaited_left = self.get_awaited_type_no_alias(left_type);
-                        let awaited_right = self.get_awaited_type_no_alias(right_type);
+                        let awaited_left = self.get_awaited_type_no_alias(program, left_type);
+                        let awaited_right = self.get_awaited_type_no_alias(program, right_type);
                         let would_work_with_await = (awaited_left != left_type
                             || awaited_right != right_type)
                             && self.is_type_assignable_to_kind(program, awaited_left, close_enough)
                             && self
                                 .is_type_assignable_to_kind(program, awaited_right, close_enough);
+                        let (error_left, error_right) = if would_work_with_await {
+                            (left_type, right_type)
+                        } else {
+                            self.get_base_types_if_unrelated(
+                                program,
+                                left_type,
+                                right_type,
+                                |c, p, l, r| {
+                                    c.is_type_assignable_to_kind(p, l, close_enough)
+                                        && c.is_type_assignable_to_kind(p, r, close_enough)
+                                },
+                            )
+                        };
                         self.report_binary_operator_error(
                             program,
                             node,
                             operator_token,
-                            left_type,
-                            right_type,
+                            error_left,
+                            error_right,
                             would_work_with_await,
                         );
                         self.any_type
@@ -3192,28 +3341,116 @@ impl Checker {
             .is_some_and(|tgt| tgt == target)
     }
 
-    // Returns the type argument of a `Promise<T>` reference, if any (Go's
-    // `getPromisedTypeOfPromise` reachable subset: global `Promise` only).
-    // Go: internal/checker/checker.go:Checker.getPromisedTypeOfPromise(28595)
-    fn get_promised_type_of_promise(&mut self, t: TypeId) -> Option<TypeId> {
+    // Returns the "promised" type of a `Promise<T>` reference or thenable (Go's
+    // `getPromisedTypeOfPromiseEx` reachable subset: global `Promise` + `.then`
+    // callback value parameter).
+    // Go: internal/checker/checker.go:Checker.getPromisedTypeOfPromiseEx(28602)
+    fn get_promised_type_of_promise(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> Option<TypeId> {
         if self.get_type(t).flags().intersects(TypeFlags::ANY) {
             return None;
         }
-        let promise_type = self.get_global_promise_type()?;
-        if self.is_reference_to_type(t, promise_type) {
-            return self
-                .get_type(t)
-                .as_object()
-                .and_then(|o| o.resolved_type_arguments.first().copied());
+        if let Some(promise_type) = self.get_global_promise_type() {
+            if self.is_reference_to_type(t, promise_type) {
+                return self
+                    .get_type(t)
+                    .as_object()
+                    .and_then(|o| o.resolved_type_arguments.first().copied());
+            }
         }
-        None
+        let base = self.get_base_constraint_or_type(program, t);
+        if self.all_types_assignable_to_kind(base, TypeFlags::PRIMITIVE | TypeFlags::NEVER) {
+            return None;
+        }
+        let then_type = self.get_type_of_property_of_type(program, t, "then")?;
+        if self.get_type(then_type).flags().intersects(TypeFlags::ANY) {
+            return None;
+        }
+        let then_signatures = self.get_signatures_of_type(then_type);
+        if then_signatures.is_empty() {
+            return None;
+        }
+        let onfulfilled_params: Vec<TypeId> = then_signatures
+            .iter()
+            .map(|&sig| self.get_type_at_position(program, sig, 0))
+            .collect();
+        let onfulfilled_union = self.get_union_type(&onfulfilled_params);
+        let onfulfilled_param =
+            self.get_type_with_facts(onfulfilled_union, TypeFacts::NE_UNDEFINED_OR_NULL);
+        if self
+            .get_type(onfulfilled_param)
+            .flags()
+            .intersects(TypeFlags::ANY)
+        {
+            return None;
+        }
+        let callback_signatures = self.get_signatures_of_type(onfulfilled_param);
+        if callback_signatures.is_empty() {
+            return None;
+        }
+        let value_types: Vec<TypeId> = callback_signatures
+            .iter()
+            .map(|&sig| {
+                let value = self.get_type_at_position(program, sig, 0);
+                self.instantiate_through_type_reference(t, value)
+            })
+            .collect();
+        Some(self.get_union_type(&value_types))
+    }
+
+    // Instantiates `promised` through `source`'s type-argument mapper when
+    // `source` is a generic reference (so a callback `(value: T) => void` on
+    // `Thenable<number>` yields `number` for `T`).
+    fn instantiate_through_type_reference(&mut self, source: TypeId, promised: TypeId) -> TypeId {
+        let Some(obj) = self.get_type(source).as_object() else {
+            return promised;
+        };
+        let Some(target) = obj.target else {
+            return promised;
+        };
+        let params = self
+            .get_type(target)
+            .as_object()
+            .map(|o| o.type_parameters.clone())
+            .unwrap_or_default();
+        let args = obj.resolved_type_arguments.clone();
+        if params.is_empty() || params.len() != args.len() {
+            return promised;
+        }
+        let mapper = TypeMapper::Array {
+            sources: params,
+            targets: args,
+        };
+        self.instantiate_type(promised, &mapper)
     }
 
     // Returns the awaited type of `t` without alias expansion (Go's
     // `getAwaitedTypeNoAlias` reachable subset).
     // Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias
-    fn get_awaited_type_no_alias(&mut self, t: TypeId) -> TypeId {
-        self.get_promised_type_of_promise(t).unwrap_or(t)
+    fn get_awaited_type_no_alias(&mut self, program: &dyn BoundProgram, t: TypeId) -> TypeId {
+        self.get_promised_type_of_promise(program, t).unwrap_or(t)
+    }
+
+    // Generalizes literal operands for operator-error display when their base
+    // types are also unrelated (Go's `getBaseTypesIfUnrelated`).
+    // Go: internal/checker/checker.go:Checker.getBaseTypesIfUnrelated(12689)
+    fn get_base_types_if_unrelated(
+        &mut self,
+        program: &dyn BoundProgram,
+        left: TypeId,
+        right: TypeId,
+        is_related: impl FnOnce(&mut Self, &dyn BoundProgram, TypeId, TypeId) -> bool,
+    ) -> (TypeId, TypeId) {
+        let left_base = self.get_base_type_of_literal_type(left);
+        let right_base = self.get_base_type_of_literal_type(right);
+        if is_related(self, program, left_base, right_base) {
+            (left, right)
+        } else {
+            (left_base, right_base)
+        }
     }
 
     // Returns `true` when no ES-symbol operand error was reported (Go's
@@ -3272,7 +3509,7 @@ impl Checker {
         if !self.is_type_assignable_to(program, t, number_or_bigint) {
             let maybe_missing_await = is_await_valid
                 && self
-                    .get_promised_type_of_promise(t)
+                    .get_promised_type_of_promise(program, t)
                     .is_some_and(|awaited| {
                         self.is_type_assignable_to(program, awaited, number_or_bigint)
                     });
@@ -9099,8 +9336,30 @@ impl Checker {
         if f.intersects(TypeFlags::BIG_INT_LITERAL) {
             return self.bigint_type;
         }
-        if f.intersects(TypeFlags::BOOLEAN_LITERAL) {
+        if f.intersects(TypeFlags::BOOLEAN_LITERAL | TypeFlags::BOOLEAN) {
             return self.boolean_type;
+        }
+        if f.contains(TypeFlags::UNION) {
+            if let Some(members) = self.get_type(t).union_types() {
+                if members
+                    .iter()
+                    .all(|&m| self.get_type(m).flags().intersects(TypeFlags::BOOLEAN_LIKE))
+                {
+                    return self.boolean_type;
+                }
+                if members
+                    .iter()
+                    .all(|&m| self.get_type(m).flags().intersects(TypeFlags::STRING_LIKE))
+                {
+                    return self.string_type;
+                }
+                if members
+                    .iter()
+                    .all(|&m| self.get_type(m).flags().intersects(TypeFlags::NUMBER_LIKE))
+                {
+                    return self.number_type;
+                }
+            }
         }
         t
     }

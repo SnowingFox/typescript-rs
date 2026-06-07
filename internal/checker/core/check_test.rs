@@ -12594,3 +12594,77 @@ fn arithmetic_on_promise_operand_suggests_await() {
         "Did you forget to use 'await'?"
     );
 }
+
+// ---- T1-E batch 22: spread union distribution, base-type errors, thenable await ----
+
+// Go: internal/checker/checker.go:Checker.getSpreadType (union distribution)
+#[test]
+fn object_spread_union_with_prefix_distributes() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | { b: number };\nconst o = { a: 1, ...x };\no;",
+    );
+    let usage = expr_stmt_expression(&p, 2);
+    let mut c = Checker::new();
+    let t = c.check_expression(&p, usage);
+    assert_eq!(
+        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
+        "{ a: number; } | { a: number; b: number; }"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getBaseTypesIfUnrelated(12689)
+#[test]
+fn plus_incompatible_literals_reports_base_types_in_message() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "1 + true;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2365);
+    assert_eq!(
+        diags[0].message,
+        "Operator '+' cannot be applied to types 'number' and 'false | true'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getBaseTypesIfUnrelated(12689)
+#[test]
+fn equality_unrelated_literals_reports_base_types_in_message() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "\"a\" === 1;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2367);
+    assert_eq!(
+        diags[0].message,
+        "This comparison appears to be unintentional because the types 'string' and 'number' have no overlap."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getPromisedTypeOfPromiseEx(28602)
+#[test]
+fn arithmetic_on_thenable_operand_suggests_await() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Thenable<T> { then(onfulfilled: (value: T) => void): void; }\ndeclare const t: Thenable<number>;\nt - 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let left_side = diags
+        .iter()
+        .find(|d| d.code == 2362)
+        .expect("expected left-hand arithmetic operand error");
+    assert_eq!(
+        left_side.message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+    assert_eq!(left_side.related_information.len(), 1);
+    assert_eq!(left_side.related_information[0].code, 2773);
+    assert_eq!(
+        left_side.related_information[0].message,
+        "Did you forget to use 'await'?"
+    );
+}
