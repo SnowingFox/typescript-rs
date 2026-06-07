@@ -13965,3 +13965,111 @@ fn auto_accessor_non_optional_postfix_has_no_1276() {
         "annotated auto-accessor without ? must not report TS1276; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 41: auto-accessor definite assignment and initializer checks ----
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarProperty(1938)
+#[test]
+fn auto_accessor_definite_assignment_with_initializer_reports_1263() {
+    let codes = diag_codes("class C { accessor x!: string = \"a\"; }");
+    assert!(
+        codes.contains(&1263),
+        "expected TS1263 when an auto-accessor has both ! and an initializer; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarProperty(1942)
+#[test]
+fn auto_accessor_definite_assignment_without_type_reports_1264() {
+    let codes = diag_codes("class C { accessor x!; }");
+    assert!(
+        codes.contains(&1264),
+        "expected TS1264 when an auto-accessor has ! without a type annotation; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarProperty(1938)
+#[test]
+fn auto_accessor_definite_assignment_with_type_has_no_grammar_error() {
+    let codes = diag_codes("class C { accessor x!: number; }");
+    assert!(
+        !codes.contains(&1263) && !codes.contains(&1264),
+        "annotated auto-accessor with ! must not report definite-assignment grammar errors; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPropertyDeclaration / checkVariableLikeDeclaration(5760)
+#[test]
+fn auto_accessor_initializer_not_assignable_reports_2322() {
+    let codes = diag_codes("class C { accessor x: number = \"s\"; }");
+    assert!(
+        codes.contains(&2322),
+        "auto-accessor initializer must be checked against its type annotation; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPropertyDeclaration / checkVariableLikeDeclaration(5760)
+#[test]
+fn auto_accessor_initializer_assignable_reports_no_2322() {
+    let codes = diag_codes("class C { accessor x: number = 1; }");
+    assert!(
+        !codes.contains(&2322),
+        "assignable auto-accessor initializer must not report TS2322; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarProperty(1944)
+#[test]
+fn static_auto_accessor_definite_assignment_reports_1255() {
+    let codes = diag_codes("class C { static accessor x!: number; }");
+    assert!(
+        codes.contains(&1255),
+        "expected TS1255 when a static auto-accessor uses definite assignment assertion; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPropertyDeclaration (abstract initializer)
+#[test]
+fn abstract_auto_accessor_with_initializer_reports_1267() {
+    let codes = diag_codes("abstract class C { abstract accessor x: number = 1; }");
+    assert!(
+        codes.contains(&1267),
+        "expected TS1267 when an abstract auto-accessor has an initializer; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (assignment to inferred write type)
+#[test]
+fn auto_accessor_inferred_write_type_rejects_bad_assignment() {
+    let codes = diag_codes("class C { accessor x = 1; }\nconst c = new C();\nc.x = \"\";");
+    assert!(
+        codes.contains(&2322),
+        "assignment to inferred auto-accessor write type must reject incompatible values; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPropertyAccessExpressionOrQualifiedName (private identifier)
+#[test]
+fn private_auto_accessor_read_type_resolves() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { accessor #x: number = 1; m(): number { return this.#x; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "private auto-accessor read type must resolve from annotation inside the class; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPropertyAccessExpressionOrQualifiedName (private identifier write)
+#[test]
+fn private_auto_accessor_write_rejects_incompatible_assignment() {
+    let codes = diag_codes("class C { accessor #x: number = 1; m() { this.#x = \"\"; } }");
+    assert!(
+        codes.contains(&2322),
+        "private auto-accessor assignment must use write type; got {codes:?}"
+    );
+}

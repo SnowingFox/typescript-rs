@@ -2670,6 +2670,76 @@ impl Checker {
         }
     }
 
+    // Resolves a private-identifier property access (`obj.#name`) using lexical
+    // class scope and the binder's mangled member name (Go's
+    // `checkPropertyAccessExpressionOrQualifiedName` private-identifier arm).
+    // Go: internal/checker/checker.go:Checker.checkPropertyAccessExpressionOrQualifiedName(11225)
+    fn check_private_identifier_property_access(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        name_node: NodeId,
+        object_type: TypeId,
+        apparent: TypeId,
+        is_super: bool,
+    ) -> TypeId {
+        let prop_name = program.arena().text(name_node);
+        let lex_sym = lookup_symbol_for_private_identifier_declaration(program, prop_name, name_node);
+        let prop = lex_sym.and_then(|sym| {
+            let mangled = program.symbol(sym).name.clone();
+            get_property_of_type(self, apparent, &mangled)
+                .or_else(|| get_property_of_union_or_intersection_type(self, apparent, &mangled))
+        });
+        if let Some(prop) = prop {
+            if is_property_access_write_only(program, node)
+                && program
+                    .symbol(prop)
+                    .flags
+                    .intersects(SymbolFlags::ACCESSOR)
+            {
+                if !self.check_property_accessibility(
+                    program,
+                    node,
+                    is_super,
+                    apparent,
+                    prop,
+                    Some(name_node),
+                ) {
+                    return self.error_type;
+                }
+                return super::declared_types::get_write_type_of_accessors(
+                    self, program, prop, None,
+                );
+            }
+            if let Some(t) = get_type_of_property_of_type(
+                self,
+                program,
+                apparent,
+                &program.symbol(prop).name,
+            ) {
+                if !self.check_property_accessibility(
+                    program,
+                    node,
+                    is_super,
+                    apparent,
+                    prop,
+                    Some(name_node),
+                ) {
+                    return self.error_type;
+                }
+                return t;
+            }
+        }
+        let type_str = super::nodebuilder::type_to_string(self, program, object_type);
+        self.error(
+            program,
+            name_node,
+            &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
+            &[prop_name, type_str.as_str()],
+        );
+        self.error_type
+    }
+
     // Checks a property access `obj.name`, returning the property's type.
     // Go: internal/checker/checker.go:Checker.checkPropertyAccessExpression
     fn check_property_access(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
@@ -2694,9 +2764,19 @@ impl Checker {
         {
             return object_type;
         }
-        let name = program.arena().text(name_node).to_string();
         let is_super = program.arena().kind(expr) == Kind::SuperKeyword;
         let apparent = get_apparent_type(self, object_type);
+        if is_private_identifier_name_node(program.arena(), name_node) {
+            return self.check_private_identifier_property_access(
+                program,
+                node,
+                name_node,
+                object_type,
+                apparent,
+                is_super,
+            );
+        }
+        let name = program.arena().text(name_node).to_string();
         if is_property_access_write_only(program, node) {
             if let Some(prop) = get_property_of_type(self, apparent, &name)
                 .or_else(|| get_property_of_union_or_intersection_type(self, apparent, &name))
@@ -11596,6 +11676,19 @@ fn is_class_like(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
 
 // Reports whether `decl` is a class element whose name is a private identifier
 // (Go's `ast.IsPrivateIdentifierClassElementDeclaration`).
+// Reports whether `node` is a private identifier name in a property access
+// (Go's `ast.IsPrivateIdentifier`). The parser's `parseRightSideOfDot` subset
+// may represent `#x` as an `Identifier` with a `#` prefix rather than a
+// `PrivateIdentifier` node; accept both shapes.
+// Go: internal/ast/utilities.go:IsPrivateIdentifier
+fn is_private_identifier_name_node(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    match arena.kind(node) {
+        Kind::PrivateIdentifier => true,
+        Kind::Identifier => arena.text(node).starts_with('#'),
+        _ => false,
+    }
+}
+
 fn is_private_identifier_class_element_declaration(
     program: &dyn BoundProgram,
     decl: NodeId,
@@ -12576,6 +12669,42 @@ fn get_containing_class(program: &dyn BoundProgram, node: NodeId) -> Option<Node
             return Some(n);
         }
         current = arena.parent(n);
+    }
+    None
+}
+
+// Mangles a private identifier description into the class-scoped symbol name
+// (Go's `binder.GetSymbolNameForPrivateIdentifier`).
+// Go: internal/binder/binder.go:GetSymbolNameForPrivateIdentifier
+fn get_symbol_name_for_private_identifier(class_symbol: SymbolId, description: &str) -> String {
+    format!(
+        "{}#{}@{}",
+        tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_PREFIX,
+        class_symbol.0,
+        description
+    )
+}
+
+// Walks enclosing classes from `location` to resolve a private identifier
+// declaration symbol (Go's `lookupSymbolForPrivateIdentifierDeclaration`).
+// Go: internal/checker/checker.go:Checker.lookupSymbolForPrivateIdentifierDeclaration(11425)
+fn lookup_symbol_for_private_identifier_declaration(
+    program: &dyn BoundProgram,
+    prop_name: &str,
+    location: NodeId,
+) -> Option<SymbolId> {
+    let mut containing_class = get_containing_class(program, location);
+    while let Some(class_node) = containing_class {
+        let class_symbol = program.symbol_of_node(class_node)?;
+        let name = get_symbol_name_for_private_identifier(class_symbol, prop_name);
+        let class_sym = program.symbol(class_symbol);
+        if let Some(&prop) = class_sym.members.get(&name) {
+            return Some(prop);
+        }
+        if let Some(&prop) = class_sym.exports.get(&name) {
+            return Some(prop);
+        }
+        containing_class = get_containing_class(program, class_node);
     }
     None
 }
