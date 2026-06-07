@@ -866,12 +866,16 @@ fn curated_compiler_subset_parity_smoke() {
     // Re-measure (ada21a39 cross-file panic fix, a7311041 TS2339): passed
     // 20 -> 19, errored 0 -> 1 (`classExpressionWithComputedPropertyInLoop.ts`
     // index-out-of-bounds); failed unchanged at 10.
+    //
+    // Re-measure (257710f4 view_for_symbol in signatures/modifiers): passed
+    // 19 -> 20, errored 1 -> 0 (`classExpressionWithComputedPropertyInLoop.ts`
+    // no longer panics); failed unchanged at 10.
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 19,
+            passed: 20,
             failed: 10,
-            errored: 1,
+            errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
         summary.report()
@@ -1127,12 +1131,17 @@ fn expanded_compiler_subset_parity_smoke() {
     // overlap). Category drift: no_baseline 11 -> 8, divergent 10 -> 11;
     // missing_all_errors unchanged at 33. Top extras unchanged (`TS2339 ×5`,
     // `TS2306 ×4`).
+    //
+    // Re-measure (257710f4 view_for_symbol in signatures/modifiers): passed
+    // 89 -> 95 (+6), failed 52 -> 55 (+3), errored 9 -> 0 (−9). All six
+    // index-out-of-bounds panics cleared; three former errored cases now FAIL
+    // on diagnostic mismatch instead of crashing.
     assert_eq!(
         counts,
         ParityCounts {
-            passed: 89,
-            failed: 52,
-            errored: 9,
+            passed: 95,
+            failed: 55,
+            errored: 0,
         },
         "parity counts drifted; measured report:\n{}",
         summary.report()
