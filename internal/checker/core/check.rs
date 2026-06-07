@@ -10296,13 +10296,6 @@ fn get_class_like_declaration_of_symbol(
         .or_else(|| sym.declarations.first().copied())
 }
 
-fn property_symbol_name(checker: &Checker, program: &dyn BoundProgram, prop: SymbolId) -> String {
-    if super::is_synthesized_symbol(prop) {
-        return checker.synthesized_symbol_name(prop);
-    }
-    program.symbol(prop).name.clone()
-}
-
 fn declaring_class_name(program: &dyn BoundProgram, prop: SymbolId) -> String {
     if super::is_synthesized_symbol(prop) {
         return String::new();
