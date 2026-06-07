@@ -14644,3 +14644,67 @@ fn class_expression_method_instance_static_overload_mismatch_reports_2388() {
         "expected TS2388 instance/static overload mismatch in a class expression; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 51: effective property names for static builtin conflicts ----
+
+// Go: internal/checker/checker.go:Checker.checkClassForStaticPropertyNameConflicts(4366) +
+// getEffectivePropertyNameForPropertyNameNode(18566)
+#[test]
+fn class_static_computed_string_literal_name_reports_2699_when_use_define_for_class_fields_disabled(
+) {
+    let options = CompilerOptions {
+        use_define_for_class_fields: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let codes = diag_codes_with_options("class C { static [\"name\"] = 1; }", options);
+    assert!(
+        codes.contains(&2699),
+        "computed static `[\"name\"]` must report TS2699 when udfcf is off; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassForStaticPropertyNameConflicts(4366) +
+// getEffectivePropertyNameForPropertyNameNode(18566)
+#[test]
+fn class_expression_static_computed_string_literal_name_reports_2699_when_use_define_for_class_fields_disabled(
+) {
+    let options = CompilerOptions {
+        use_define_for_class_fields: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let codes = diag_codes_with_options("const C = class { static [\"length\"] = 1; };", options);
+    assert!(
+        codes.contains(&2699),
+        "computed static `[\"length\"]` in a class expression must report TS2699 when udfcf is off; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassForStaticPropertyNameConflicts(4366) +
+// getEffectivePropertyNameForPropertyNameNode(18566)
+#[test]
+fn class_static_computed_const_name_reports_2699_when_use_define_for_class_fields_disabled() {
+    let options = CompilerOptions {
+        use_define_for_class_fields: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let codes = diag_codes_with_options(
+        "const key = \"caller\" as const;\nclass C { static [key] = 1; }",
+        options,
+    );
+    assert!(
+        codes.contains(&2699),
+        "computed static `[key]` with a const string-literal type must report TS2699 when udfcf is off; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkFunctionOrConstructorSymbolWorker (reportImplementationExpectedError)
+#[test]
+fn method_instance_static_overload_mismatch_reports_2388() {
+    let codes = diag_codes(
+        "class C {\n  static foo(): void;\n  foo(): void;\n  foo() {}\n}",
+    );
+    assert!(
+        codes.contains(&2388),
+        "expected TS2388 instance/static overload mismatch; got {codes:?}"
+    );
+}

@@ -9193,8 +9193,12 @@ impl Checker {
             let Some(name_node) = member_name_node_for_duplicate(program, member) else {
                 continue;
             };
-            let name = program.arena().text(name_node);
-            if !matches!(name, "name" | "length" | "caller" | "arguments") {
+            let Some(name) =
+                effective_property_name_for_property_name_node(self, program, name_node)
+            else {
+                continue;
+            };
+            if !matches!(name.as_str(), "name" | "length" | "caller" | "arguments") {
                 continue;
             }
             let class_name = match program.arena().data(node) {
@@ -9208,7 +9212,7 @@ impl Checker {
                 program,
                 name_node,
                 &tsgo_diagnostics::STATIC_PROPERTY_0_CONFLICTS_WITH_BUILT_IN_PROPERTY_FUNCTION_0_OF_CONSTRUCTOR_FUNCTION_1,
-                &[name, name, class_name.as_str()],
+                &[name.as_str(), name.as_str(), class_name.as_str()],
             );
         }
     }
@@ -12532,6 +12536,85 @@ fn property_name_text(program: &dyn BoundProgram, name_node: NodeId) -> Option<S
             Some(program.arena().text(name_node).to_string())
         }
         _ => None,
+    }
+}
+
+// Resolves a property name node to its effective name text (Go's
+// `getEffectivePropertyNameForPropertyNameNode`).
+//
+// # Side effects
+//
+// May type-check computed name expressions.
+// Go: internal/ast/utilities.go:GetPropertyNameForPropertyNameNode(3126) +
+//     internal/checker/checker.go:getEffectivePropertyNameForPropertyNameNode(18566)
+fn effective_property_name_for_property_name_node(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    name_node: NodeId,
+) -> Option<String> {
+    if let Some(name) = property_name_for_property_name_node(program, name_node) {
+        return Some(name);
+    }
+    let NodeData::ComputedPropertyName(d) = program.arena().data(name_node) else {
+        return None;
+    };
+    let expr_type = checker.check_expression(program, d.expression);
+    try_get_name_from_type(checker, expr_type)
+}
+
+// Go: internal/ast/utilities.go:GetPropertyNameForPropertyNameNode(3126)
+fn property_name_for_property_name_node(
+    program: &dyn BoundProgram,
+    name_node: NodeId,
+) -> Option<String> {
+    if let Some(name) = property_name_text(program, name_node) {
+        return Some(name);
+    }
+    let NodeData::ComputedPropertyName(d) = program.arena().data(name_node) else {
+        return None;
+    };
+    let expr = d.expression;
+    // Go only reads literal text from computed names; identifier expressions are
+    // resolved later via `getTypeOfExpression` / `tryGetNameFromType`.
+    match program.arena().kind(expr) {
+        Kind::StringLiteral | Kind::NumericLiteral | Kind::NoSubstitutionTemplateLiteral
+        | Kind::BigIntLiteral => property_name_text(program, expr),
+        Kind::PrefixUnaryExpression => {
+            let NodeData::PrefixUnaryExpression(ud) = program.arena().data(expr) else {
+                return None;
+            };
+            if ud.operator == Kind::MinusToken {
+                property_name_text(program, ud.operand).map(|operand| format!("-{operand}"))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+// Go: internal/checker/checker.go:tryGetNameFromType(18577)
+fn try_get_name_from_type(checker: &Checker, t: TypeId) -> Option<String> {
+    let ty = checker.get_type(t);
+    let flags = ty.flags();
+    if let Some(val) = ty.literal_value() {
+        match val {
+            super::types::LiteralValue::String(s)
+                if flags.intersects(TypeFlags::STRING_LITERAL) =>
+            {
+                Some(s.clone())
+            }
+            super::types::LiteralValue::Number(n)
+                if flags.intersects(TypeFlags::NUMBER_LITERAL) =>
+            {
+                Some(n.to_string())
+            }
+            _ => None,
+        }
+    } else if flags.intersects(TypeFlags::UNIQUE_ES_SYMBOL) {
+        ty.unique_es_symbol_name().map(|s| s.to_string())
+    } else {
+        None
     }
 }
 
