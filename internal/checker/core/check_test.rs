@@ -16652,3 +16652,86 @@ fn new_function_no_7009_when_no_implicit_any_disabled() {
         "TS7009 must not report when noImplicitAny is off; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 76: union property chains + static member hints (2576) ----
+
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty (union chain)
+#[test]
+fn union_property_missing_on_constituent_reports_2339_with_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { a: number }\ninterface C { b: string }\n\
+         type U2 = A | C;\ndeclare const u2: U2;\nu2.a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+    assert_eq!(
+        diags[0].message,
+        "Property 'a' does not exist on type 'A | C'."
+    );
+    assert_eq!(diags[0].message_chain.len(), 1);
+    assert_eq!(diags[0].message_chain[0].code, 2339);
+    assert_eq!(
+        diags[0].message_chain[0].message,
+        "Property 'a' does not exist on type 'C'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty (2576)
+#[test]
+fn instance_property_access_static_member_reports_2576() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class A {\n  static y = 1;\n}\ndeclare const a: A;\na.y;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2576, got {diags:?}");
+    assert_eq!(diags[0].code, 2576);
+    assert_eq!(
+        diags[0].message,
+        "Property 'y' does not exist on type 'A'. Did you mean to access the static member 'A.y' instead?"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty (2576, `this` receiver)
+#[test]
+fn instance_method_accesses_static_member_on_this_reports_2576() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class List {\n  m() {\n    this.Foo();\n  }\n  static Foo() {}\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| {
+            d.code == 2576
+                && d.message
+                    == "Property 'Foo' does not exist on type 'List'. Did you mean to access the static member 'List.Foo' instead?"
+        }),
+        "expected TS2576 for `this.Foo` on instance, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getPropertyTypeForIndexType (2576 bracket form)
+#[test]
+fn element_access_static_member_reports_2576_with_bracket_suggestion() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class A {\n  static y = 1;\n}\ndeclare const a: A;\na[\"y\"];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2576, got {diags:?}");
+    assert_eq!(diags[0].code, 2576);
+    assert_eq!(
+        diags[0].message,
+        "Property 'y' does not exist on type 'A'. Did you mean to access the static member 'A[\"y\"]' instead?"
+    );
+}

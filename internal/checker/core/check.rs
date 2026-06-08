@@ -3048,7 +3048,26 @@ impl Checker {
     ) {
         let name = program.arena().text(name_node).to_string();
         let type_str = super::nodebuilder::type_to_string(self, program, containing_type);
-        if let Some(suggestion_sym) = self.get_suggested_symbol_for_nonexistent_property(
+        let message_chain = self.union_missing_property_chain(
+            program,
+            name_node,
+            containing_type,
+            &name,
+        );
+        let mut diagnostic = if self.type_has_static_property(program, &name, containing_type) {
+            let static_access = self.static_member_access_suggestion(
+                program,
+                access_node,
+                &type_str,
+                &name,
+            );
+            self.diagnostic_for_node(
+                program,
+                name_node,
+                &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1_DID_YOU_MEAN_TO_ACCESS_THE_STATIC_MEMBER_2_INSTEAD,
+                &[name.as_str(), type_str.as_str(), static_access.as_str()],
+            )
+        } else if let Some(suggestion_sym) = self.get_suggested_symbol_for_nonexistent_property(
             program,
             &name,
             containing_type,
@@ -3071,14 +3090,111 @@ impl Checker {
                 );
                 diagnostic.add_related_info(related);
             }
-            self.add_diagnostic(program, diagnostic);
+            diagnostic
         } else {
-            self.error(
+            self.diagnostic_for_node(
                 program,
                 name_node,
                 &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
                 &[name.as_str(), type_str.as_str()],
-            );
+            )
+        };
+        if !message_chain.is_empty() {
+            diagnostic.message_chain = message_chain;
+        }
+        self.add_diagnostic(program, diagnostic);
+    }
+
+    // When `containing_type` is a non-primitive union, returns a chain node for
+    // the first constituent missing `prop_name` (Go's `reportNonexistentProperty`
+    // union preamble).
+    // Go: internal/checker/checker.go:Checker.reportNonexistentProperty(11496)
+    fn union_missing_property_chain(
+        &mut self,
+        program: &dyn BoundProgram,
+        name_node: NodeId,
+        containing_type: TypeId,
+        prop_name: &str,
+    ) -> Vec<DiagnosticMessageChain> {
+        if is_private_identifier_name_node(program.arena(), name_node) {
+            return Vec::new();
+        }
+        let containing_flags = self.get_type(containing_type).flags();
+        if !containing_flags.intersects(TypeFlags::UNION)
+            || containing_flags.intersects(TypeFlags::PRIMITIVE)
+        {
+            return Vec::new();
+        }
+        let members = self
+            .get_type(containing_type)
+            .union_types()
+            .map(|m| m.to_vec())
+            .unwrap_or_default();
+        for subtype in members {
+            let sub_apparent = get_apparent_type(self, subtype);
+            let missing = get_property_of_type(self, sub_apparent, prop_name).is_none()
+                && get_applicable_index_info_for_name(self, program, sub_apparent, prop_name)
+                    .is_none();
+            if missing {
+                let subtype_str = super::nodebuilder::type_to_string(self, program, subtype);
+                let message = &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1;
+                return vec![DiagnosticMessageChain {
+                    code: message.code(),
+                    category: message.category(),
+                    message: tsgo_diagnostics::format(
+                        &message.to_string(),
+                        &[prop_name, subtype_str.as_str()],
+                    ),
+                    next: Vec::new(),
+                }];
+            }
+        }
+        Vec::new()
+    }
+
+    // Reports whether `prop_name` exists as a static member on the class value
+    // type associated with `containing_type` (Go's `typeHasStaticProperty`).
+    // Go: internal/checker/checker.go:Checker.typeHasStaticProperty(27033)
+    fn type_has_static_property(
+        &mut self,
+        program: &dyn BoundProgram,
+        prop_name: &str,
+        containing_type: TypeId,
+    ) -> bool {
+        let Some(class_sym) = self.get_type(containing_type).symbol else {
+            return false;
+        };
+        let static_type =
+            get_type_of_symbol(self, program, class_sym, program.globals());
+        let apparent = get_apparent_type(self, static_type);
+        let Some(prop) = get_property_of_type(self, apparent, prop_name) else {
+            return false;
+        };
+        program
+            .symbol(prop)
+            .value_declaration
+            .is_some_and(|decl| has_static_modifier(program.arena(), decl))
+    }
+
+    // Formats the static-member access suggestion for TS2576 (`Type.prop` or
+    // `Type["prop"]` for element access).
+    // Go: internal/checker/checker.go:Checker.reportNonexistentProperty(11507)
+    fn static_member_access_suggestion(
+        &self,
+        program: &dyn BoundProgram,
+        access_node: NodeId,
+        type_name: &str,
+        prop_name: &str,
+    ) -> String {
+        if program.arena().kind(access_node) == Kind::ElementAccessExpression {
+            let arg = match program.arena().data(access_node) {
+                NodeData::ElementAccessExpression(d) => d.argument_expression,
+                _ => return format!("{type_name}.{prop_name}"),
+            };
+            let key = node_source_text(program, arg);
+            format!("{type_name}[{key}]")
+        } else {
+            format!("{type_name}.{prop_name}")
         }
     }
 
@@ -3297,29 +3413,8 @@ impl Checker {
         // property-does-not-exist suggestions. blocked-by: ES-symbol globals (P6).
         let index_flags = self.get_type(index_type).flags();
         if index_flags.intersects(TypeFlags::STRING_LITERAL | TypeFlags::NUMBER_LITERAL) {
-            let prop_name =
-                super::late_binding::get_property_name_from_type(self, index_type);
             let is_super = program.arena().kind(expr) == Kind::SuperKeyword;
-            if self
-                .get_suggested_symbol_for_nonexistent_property(
-                    program,
-                    &prop_name,
-                    object_type,
-                    node,
-                    is_super,
-                )
-                .is_some()
-            {
-                self.report_nonexistent_property(program, arg, object_type, node, is_super);
-            } else {
-                let type_str = super::nodebuilder::type_to_string(self, program, object_type);
-                self.error(
-                    program,
-                    arg,
-                    &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
-                    &[prop_name.as_str(), type_str.as_str()],
-                );
-            }
+            self.report_nonexistent_property(program, arg, object_type, node, is_super);
             return self.error_type;
         }
         if !index_flags.intersects(
@@ -14703,6 +14798,26 @@ fn is_require_call(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
                 && d.arguments.nodes.len() == 1
         }
         _ => false,
+    }
+}
+
+// Returns the source text of `node` (including quotes on string literals), or
+// falls back to `NodeArena::text` when no file text is available.
+fn node_source_text(program: &dyn BoundProgram, node: NodeId) -> String {
+    if let Some(source) = program.source_text() {
+        let loc = program.arena().loc(node);
+        let start = loc.pos() as usize;
+        let end = loc.end() as usize;
+        if end <= source.len() {
+            return source[start..end].to_string();
+        }
+    }
+    let arena = program.arena();
+    let text = arena.text(node);
+    if arena.kind(node) == Kind::StringLiteral {
+        format!("\"{text}\"")
+    } else {
+        text.to_string()
     }
 }
 
