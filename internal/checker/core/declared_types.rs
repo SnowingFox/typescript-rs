@@ -380,8 +380,14 @@ fn get_declared_type_of_class_or_interface(
     let t = checker.new_object_type(kind, Some(symbol), object);
     checker.declared_type_links.get(symbol).declared_type = Some(t);
 
-    // Resolve and merge base (extends) members.
-    let base_types = resolve_base_types(checker, program, t, &declarations, globals);
+    // Resolve and merge base (extends) members. Classes use constructor-based
+    // resolution (Go's `resolveBaseTypesOfClass`); interfaces keep the heritage
+    // identifier lookup path.
+    let base_types = if kind.contains(ObjectFlags::CLASS) {
+        resolve_base_types_of_class(checker, program, t, &declarations, globals)
+    } else {
+        resolve_base_types(checker, program, t, &declarations, globals)
+    };
     if !base_types.is_empty() {
         let mut merged = SymbolTable::default();
         for &base in &base_types {
@@ -777,6 +783,145 @@ fn collect_local_type_parameters(
 
 // Resolves the `extends` heritage of an interface/class to base type ids.
 // Go: internal/checker/checker.go:Checker.getBaseTypes (extends portion)
+// Resolves a class's `extends` clause to the base instance type via the base
+// constructor expression (Go's `resolveBaseTypesOfClass`).
+// Go: internal/checker/checker.go:Checker.resolveBaseTypesOfClass(19075)
+fn resolve_base_types_of_class(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    class_type: TypeId,
+    declarations: &[tsgo_ast::NodeId],
+    globals: Option<&SymbolTable>,
+) -> Vec<TypeId> {
+    let base_type_node = declarations
+        .iter()
+        .find_map(|&decl| extends_heritage_clause_element(program, decl));
+    let Some(base_type_node) = base_type_node else {
+        return Vec::new();
+    };
+    let base_constructor_type =
+        checker.get_base_constructor_type_of_class(program, class_type);
+    if base_constructor_type == checker.undefined_type()
+        || base_constructor_type == checker.error_type()
+    {
+        return Vec::new();
+    }
+    let static_base = get_apparent_type(checker, base_constructor_type);
+    let flags = checker.get_type(static_base).flags();
+    if !flags.intersects(TypeFlags::OBJECT | TypeFlags::INTERSECTION | TypeFlags::ANY) {
+        return Vec::new();
+    }
+    let base_type = if let Some(sym) = checker.get_type(static_base).symbol {
+        if program.symbol(sym).flags.contains(SymbolFlags::CLASS) {
+            resolve_class_extends_instance_type(
+                checker,
+                program,
+                base_type_node,
+                sym,
+                globals,
+            )
+        } else {
+            let constructors = checker.get_instantiated_constructors_for_type_arguments(
+                program,
+                static_base,
+                base_type_node,
+            );
+            if constructors.is_empty() {
+                return Vec::new();
+            }
+            checker.get_return_type_of_signature(constructors[0])
+        }
+    } else {
+        let constructors = checker.get_instantiated_constructors_for_type_arguments(
+            program,
+            static_base,
+            base_type_node,
+        );
+        if constructors.is_empty() {
+            return Vec::new();
+        }
+        checker.get_return_type_of_signature(constructors[0])
+    };
+    if base_type == checker.error_type() || !is_valid_base_type_for_extends(checker, base_type) {
+        return Vec::new();
+    }
+    if class_type == base_type {
+        return Vec::new();
+    }
+    vec![base_type]
+}
+
+// Resolves the instance type of a class `extends` heritage element (Go's
+// `getTypeFromClassOrInterfaceReference` on the heritage node).
+fn resolve_class_extends_instance_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    base_type_node: NodeId,
+    base_class_sym: SymbolId,
+    globals: Option<&SymbolTable>,
+) -> TypeId {
+    let target = get_declared_type_of_symbol(checker, program, base_class_sym, globals);
+    let type_parameters = checker
+        .get_type(target)
+        .as_object()
+        .map(|o| o.type_parameters.clone())
+        .unwrap_or_default();
+    let provided_args: Vec<TypeId> = type_arguments_from_heritage_node(program, base_type_node)
+        .iter()
+        .map(|&n| get_type_from_type_node(checker, program, n, globals))
+        .collect();
+    if type_parameters.is_empty() {
+        return target;
+    }
+    let filled = fill_missing_type_arguments(checker, program, &provided_args, &type_parameters);
+    checker.create_type_reference(target, filled)
+}
+
+fn type_arguments_from_heritage_node(program: &dyn BoundProgram, node: NodeId) -> Vec<NodeId> {
+    match program.arena().data(node) {
+        NodeData::ExpressionWithTypeArguments(e) => e
+            .type_arguments
+            .as_ref()
+            .map(|list| list.nodes.clone())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn is_valid_base_type_for_extends(checker: &Checker, type_id: TypeId) -> bool {
+    let ty = checker.get_type(type_id);
+    let flags = ty.flags();
+    if flags.intersects(TypeFlags::OBJECT | TypeFlags::ANY | TypeFlags::NON_PRIMITIVE) {
+        return true;
+    }
+    if flags.intersects(TypeFlags::INTERSECTION) {
+        return ty
+            .intersection_types()
+            .map(|types| {
+                types
+                    .iter()
+                    .all(|&t| is_valid_base_type_for_extends(checker, t))
+            })
+            .unwrap_or(false);
+    }
+    false
+}
+
+fn extends_heritage_clause_element(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    let heritage = match program.arena().data(node) {
+        NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d.heritage_clauses.clone(),
+        _ => None,
+    }?;
+    for clause in heritage.nodes {
+        if let NodeData::HeritageClause(h) = program.arena().data(clause) {
+            if h.token == Kind::ExtendsKeyword {
+                return h.types.nodes.first().copied();
+            }
+        }
+    }
+    None
+}
+
 fn resolve_base_types(
     checker: &mut Checker,
     program: &dyn BoundProgram,

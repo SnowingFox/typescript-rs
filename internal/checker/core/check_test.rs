@@ -15233,6 +15233,85 @@ fn parameter_property_missing_override_reports_4115() {
     );
 }
 
+// ---- T1-E batch 59: base constructor type, extends constraints, 2510 ----
+
+// Go: internal/checker/checker.go:Checker.getBaseConstructorTypeOfClass(16843)
+#[test]
+fn class_extends_non_constructor_expression_reports_2507() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "class D extends 42 {}"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2507);
+    assert_eq!(
+        diags[0].message,
+        "Type '42' is not a constructor function type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4300)
+#[test]
+fn class_extends_generic_with_invalid_type_argument_reports_2344() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class Base<T extends string> {}\nclass D extends Base<number> {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2344)
+        .unwrap_or_else(|| panic!("expected 2344; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Type 'number' does not satisfy the constraint 'string'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4331)
+#[test]
+fn class_extends_intersection_constructors_with_mismatched_returns_reports_2510() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { a: number }\n\
+         interface B { b: string }\n\
+         type CTor = (new () => A) & (new (x: number) => B);\n\
+         declare const Base: CTor;\n\
+         class D extends Base {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2510)
+        .unwrap_or_else(|| panic!("expected 2510; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Base constructors must all have the same return type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4328)
+#[test]
+fn class_extends_constructor_with_uniform_returns_reports_no_2510() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { a: number }\n\
+         declare const Base: new () => A;\n\
+         class D extends Base {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2510),
+        "uniform constructor return types must not report 2510; got {diags:?}"
+    );
+}
+
 // Go: internal/checker/checker.go:Checker.checkMemberForOverrideModifier(4751)
 #[test]
 fn abstract_member_missing_override_reports_4116() {

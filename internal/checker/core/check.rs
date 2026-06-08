@@ -8293,6 +8293,165 @@ impl Checker {
         )
     }
 
+    // Go: internal/checker/checker.go:Checker.getBaseConstructorTypeOfClass(16816)
+    pub(crate) fn get_base_constructor_type_of_class(
+        &mut self,
+        program: &dyn BoundProgram,
+        class_type: TypeId,
+    ) -> TypeId {
+        let Some(obj) = self.get_type(class_type).as_object() else {
+            return self.error_type();
+        };
+        if let Some(cached) = obj.resolved_base_constructor_type {
+            return cached;
+        }
+        let Some(sym) = self.get_type(class_type).symbol else {
+            return self.error_type();
+        };
+        let base_type_node = program
+            .symbol(sym)
+            .declarations
+            .iter()
+            .find_map(|&decl| get_extends_heritage_clause_element(program, decl));
+        let Some(base_type_node) = base_type_node else {
+            self.set_resolved_base_constructor_type(class_type, self.undefined_type());
+            return self.undefined_type();
+        };
+        let expression = match program.arena().data(base_type_node) {
+            NodeData::ExpressionWithTypeArguments(e) => e.expression,
+            _ => {
+                self.set_resolved_base_constructor_type(class_type, self.error_type());
+                return self.error_type();
+            }
+        };
+        let base_constructor_type = self.check_expression(program, expression);
+        if !self.get_type(base_constructor_type).flags().contains(TypeFlags::ANY)
+            && base_constructor_type != self.null_type()
+            && !self.is_constructor_type(program, base_constructor_type)
+        {
+            let type_str =
+                super::nodebuilder::type_to_string(self, program, base_constructor_type);
+            self.error(
+                program,
+                expression,
+                &tsgo_diagnostics::TYPE_0_IS_NOT_A_CONSTRUCTOR_FUNCTION_TYPE,
+                &[type_str.as_str()],
+            );
+            self.set_resolved_base_constructor_type(class_type, self.error_type());
+            return self.error_type();
+        }
+        self.set_resolved_base_constructor_type(class_type, base_constructor_type);
+        base_constructor_type
+    }
+
+    fn set_resolved_base_constructor_type(&mut self, class_type: TypeId, resolved: TypeId) {
+        if let Some(obj) = self.types.get_mut(class_type).as_object_mut() {
+            obj.resolved_base_constructor_type = Some(resolved);
+        }
+    }
+
+    // Go: internal/checker/checker.go:Checker.isConstructorType(16872)
+    fn is_constructor_type(&mut self, program: &dyn BoundProgram, t: TypeId) -> bool {
+        if !self
+            .collect_construct_signatures_of_type(program, t)
+            .is_empty()
+        {
+            return true;
+        }
+        self.get_type(t).symbol.is_some_and(|sym| {
+            program.symbol(sym).flags.contains(SymbolFlags::CLASS)
+        })
+    }
+
+    // Go: internal/checker/checker.go:Checker.getSignaturesOfType (construct, intersection)
+    fn collect_construct_signatures_of_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> Vec<SignatureId> {
+        let apparent = get_apparent_type(self, t);
+        if let Some(members) = self
+            .get_type(apparent)
+            .intersection_types()
+            .map(|types| types.to_vec())
+        {
+            let mut sigs = Vec::new();
+            for member in members {
+                sigs.extend(self.collect_construct_signatures_of_type(program, member));
+            }
+            return sigs;
+        }
+        let mut sigs = self.get_construct_signatures_of_type(apparent);
+        if sigs.is_empty() {
+            if let Some(sym) = self.get_type(apparent).symbol {
+                if program.symbol(sym).flags.contains(SymbolFlags::CLASS) {
+                    sigs = self.construct_signatures_of_class_symbol(program, sym);
+                }
+            }
+        }
+        sigs
+    }
+
+    fn construct_signatures_of_class_symbol(
+        &mut self,
+        program: &dyn BoundProgram,
+        class_sym: SymbolId,
+    ) -> Vec<SignatureId> {
+        let declared = get_declared_type_of_symbol(self, program, class_sym, program.globals());
+        let type_parameters = self
+            .get_type(declared)
+            .as_object()
+            .map(|o| o.type_parameters.clone())
+            .unwrap_or_default();
+        let mut sig = Signature::new(SignatureFlags::CONSTRUCT);
+        sig.type_parameters = type_parameters;
+        vec![self.signatures.alloc(sig)]
+    }
+
+    // Go: internal/checker/checker.go:Checker.getConstructorsForTypeArguments(19141)
+    fn get_constructors_for_type_arguments(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        type_arg_nodes: &[NodeId],
+    ) -> Vec<SignatureId> {
+        let type_arg_count = type_arg_nodes.len();
+        self.collect_construct_signatures_of_type(program, t)
+            .into_iter()
+            .filter(|&sig| {
+                let tps = self.signature(sig).type_parameters.clone();
+                type_arg_count >= get_min_type_argument_count(self, program, &tps)
+                    && type_arg_count <= tps.len()
+            })
+            .collect()
+    }
+
+    // Go: internal/checker/checker.go:Checker.getInstantiatedConstructorsForTypeArguments(19130)
+    pub(crate) fn get_instantiated_constructors_for_type_arguments(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        base_type_node: NodeId,
+    ) -> Vec<SignatureId> {
+        let type_arg_nodes = type_arguments_of_heritage_node(program, base_type_node);
+        let constructors =
+            self.get_constructors_for_type_arguments(program, t, &type_arg_nodes);
+        let type_arguments: Vec<TypeId> = type_arg_nodes
+            .iter()
+            .map(|&n| get_type_from_type_node(self, program, n, None))
+            .collect();
+        constructors
+            .into_iter()
+            .map(|sig| {
+                if self.signature(sig).type_parameters.is_empty() {
+                    sig
+                } else {
+                    self.get_signature_instantiation(program, sig, &type_arguments)
+                }
+            })
+            .collect()
+    }
+
     // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4266)
     fn check_class_like_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
         self.check_class_heritage(program, node);
@@ -8370,6 +8529,26 @@ impl Checker {
             .as_object()
             .map(|o| o.base_types.clone())
             .unwrap_or_default();
+        let base_constructor_type = self.get_base_constructor_type_of_class(program, class_type);
+        let static_base_type = get_apparent_type(self, base_constructor_type);
+        if let Some(base_type_node) = get_extends_heritage_clause_element(program, node) {
+            let type_arg_nodes = type_arguments_of_heritage_node(program, base_type_node);
+            // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4299)
+            if !type_arg_nodes.is_empty() {
+                for constructor in self.get_constructors_for_type_arguments(
+                    program,
+                    static_base_type,
+                    &type_arg_nodes,
+                ) {
+                    self.check_type_argument_constraints_for_reference(
+                        program,
+                        &self.signature(constructor).type_parameters.clone(),
+                        &type_arg_nodes,
+                    );
+                    break;
+                }
+            }
+        }
         if let Some(&base_type) = base_types.first() {
             // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4295)
             if let Some(base_type_node) = get_extends_heritage_clause_element(program, node) {
@@ -8416,6 +8595,44 @@ impl Checker {
             }
             // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4334)
             self.check_kinds_of_property_member_overrides(program, node, class_type, base_type);
+            // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4324)
+            let static_is_class = self.get_type(static_base_type).symbol.is_some_and(|sym| {
+                program.symbol(sym).flags.contains(SymbolFlags::CLASS)
+            });
+            let base_is_type_variable = self
+                .get_type(base_constructor_type)
+                .flags()
+                .intersects(TypeFlags::TYPE_PARAMETER);
+            if !static_is_class && !base_is_type_variable {
+                if let Some(base_type_node) = get_extends_heritage_clause_element(program, node)
+                {
+                    let constructors = self.get_instantiated_constructors_for_type_arguments(
+                        program,
+                        static_base_type,
+                        base_type_node,
+                    );
+                    let all_same = !constructors.is_empty()
+                        && constructors.iter().all(|&sig| {
+                            self.is_type_identical_to(
+                                program,
+                                self.get_return_type_of_signature(sig),
+                                base_type,
+                            )
+                        });
+                    if !all_same {
+                        let expression = match program.arena().data(base_type_node) {
+                            NodeData::ExpressionWithTypeArguments(e) => e.expression,
+                            _ => error_node,
+                        };
+                        self.error(
+                            program,
+                            expression,
+                            &tsgo_diagnostics::BASE_CONSTRUCTORS_MUST_ALL_HAVE_THE_SAME_RETURN_TYPE,
+                            &[],
+                        );
+                    }
+                }
+            }
         }
 
         // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4337)
@@ -14020,6 +14237,17 @@ fn find_constructor_declaration(program: &dyn BoundProgram, node: NodeId) -> Opt
     object_type_member_nodes(program, node)
         .into_iter()
         .find(|&m| program.arena().kind(m) == Kind::Constructor)
+}
+
+fn type_arguments_of_heritage_node(program: &dyn BoundProgram, node: NodeId) -> Vec<NodeId> {
+    match program.arena().data(node) {
+        NodeData::ExpressionWithTypeArguments(e) => e
+            .type_arguments
+            .as_ref()
+            .map(|list| list.nodes.clone())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 /// Returns the `extends` heritage element of a class-like node, if any.

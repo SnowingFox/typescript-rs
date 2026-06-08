@@ -731,6 +731,8 @@ pub struct ObjectType {
     pub resolved_type_arguments: Vec<TypeId>,
     /// Base (extends) types whose members are inherited, by type id.
     pub base_types: Vec<TypeId>,
+    /// Cached `extends` expression type for a class (`getBaseConstructorTypeOfClass`).
+    pub resolved_base_constructor_type: Option<TypeId>,
     /// For a `TUPLE`-flagged type, whether the tuple is `readonly` (Go's tuple
     /// target `readonly` flag, set for an `[...] as const` readonly tuple).
     /// Has no meaning for non-tuple object types.
