@@ -47,7 +47,7 @@ use super::inference::{InferenceContext, InferencePriority};
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
 use super::late_binding::get_property_name_from_type;
-use super::reachability::module_is_value_module;
+use super::reachability::{is_instantiated_module, module_is_value_module};
 use super::relations::RelationKind;
 use super::signatures::{IndexInfo, IndexInfoId, Signature, SignatureFlags, SignatureId};
 use super::symbols::resolve_name;
@@ -8020,7 +8020,19 @@ impl Checker {
             return;
         };
         let members = d.members.nodes.clone();
+        let in_ambient = program
+            .arena()
+            .flags(node)
+            .contains(NodeFlags::AMBIENT);
         self.check_grammar_modifiers(program, node);
+        if should_check_erasable_syntax(program, node) && !in_ambient {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::THIS_SYNTAX_IS_NOT_ALLOWED_WHEN_ERASABLESYNTAXONLY_IS_ENABLED,
+                &[],
+            );
+        }
         self.compute_enum_member_values(program, node);
         for member in &members {
             self.check_enum_member(program, *member);
@@ -8126,6 +8138,15 @@ impl Checker {
             .arena()
             .flags(node)
             .contains(tsgo_ast::NodeFlags::AMBIENT);
+        let is_ambient_external = is_ambient_module(program, node);
+        let context_error = if is_ambient_external {
+            &tsgo_diagnostics::AN_AMBIENT_MODULE_DECLARATION_IS_ONLY_ALLOWED_AT_THE_TOP_LEVEL_IN_A_FILE
+        } else {
+            &tsgo_diagnostics::A_NAMESPACE_DECLARATION_IS_ONLY_ALLOWED_AT_THE_TOP_LEVEL_OF_A_NAMESPACE_OR_MODULE
+        };
+        if self.check_grammar_module_element_context(program, node, context_error) {
+            return;
+        }
         self.check_grammar_modifiers(program, node);
         if program.arena().kind(name) == Kind::Identifier && keyword == Kind::ModuleKeyword {
             self.error(program, name, &tsgo_diagnostics::A_NAMESPACE_DECLARATION_SHOULD_NOT_BE_DECLARED_USING_THE_MODULE_KEYWORD_PLEASE_USE_THE_NAMESPACE_KEYWORD_INSTEAD, &[]);
@@ -8137,6 +8158,61 @@ impl Checker {
                 &tsgo_diagnostics::ONLY_AMBIENT_MODULES_CAN_USE_QUOTED_NAMES,
                 &[],
             );
+        }
+        let Some(module_symbol) = program.symbol_of_node(node) else {
+            return;
+        };
+        if program.symbol(module_symbol)
+            .flags
+            .intersects(SymbolFlags::VALUE_MODULE)
+            && !in_ambient
+            && is_instantiated_module(
+                program.arena(),
+                node,
+                program.compiler_options().should_preserve_const_enums(),
+            )
+        {
+            if should_check_erasable_syntax(program, node) {
+                self.error(
+                    program,
+                    node,
+                    &tsgo_diagnostics::THIS_SYNTAX_IS_NOT_ALLOWED_WHEN_ERASABLESYNTAXONLY_IS_ENABLED,
+                    &[],
+                );
+            }
+            if program.compiler_options().get_isolated_modules()
+                && source_file_of(program, node).is_some_and(|sf| {
+                    matches!(
+                        program.arena().data(sf),
+                        NodeData::SourceFile(d) if d.external_module_indicator.is_none()
+                    )
+                })
+            {
+                let flag_name = get_isolated_modules_like_flag_name(program);
+                self.error(
+                    program,
+                    name,
+                    &tsgo_diagnostics::NAMESPACES_ARE_NOT_ALLOWED_IN_GLOBAL_SCRIPT_FILES_WHEN_0_IS_ENABLED_IF_THIS_FILE_IS_NOT_INTENDED_TO_BE_A_GLOBAL_SCRIPT_SET_MODULEDETECTION_TO_FORCE_OR_ADD_AN_EMPTY_EXPORT_STATEMENT,
+                    &[flag_name.as_str()],
+                );
+            }
+            if program.symbol(module_symbol).declarations.len() > 1 {
+                if let Some(first_class_or_func) =
+                    get_first_non_ambient_class_or_function_declaration(program, module_symbol)
+                {
+                    if source_file_of(program, node) == source_file_of(program, first_class_or_func)
+                        && program.arena().loc(node).pos()
+                            < program.arena().loc(first_class_or_func).pos()
+                    {
+                        self.error(
+                            program,
+                            name,
+                            &tsgo_diagnostics::A_NAMESPACE_DECLARATION_CANNOT_BE_LOCATED_PRIOR_TO_A_CLASS_OR_FUNCTION_WITH_WHICH_IT_IS_MERGED,
+                            &[],
+                        );
+                    }
+                }
+            }
         }
     }
     fn check_function_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
@@ -13289,6 +13365,65 @@ fn is_ambient_module(program: &dyn BoundProgram, node: NodeId) -> bool {
 // the Rust AST. blocked-by: NodeFlags porting. Always returns false for now.
 fn is_global_scope_augmentation(_program: &dyn BoundProgram, _node: NodeId) -> bool {
     false
+}
+
+// Go: internal/checker/checker.go:Checker.shouldCheckErasableSyntax(2632)
+fn should_check_erasable_syntax(program: &dyn BoundProgram, node: NodeId) -> bool {
+    use tsgo_core::tristate::Tristate;
+    program.compiler_options().erasable_syntax_only == Tristate::True
+        && !is_in_js_file(program.arena(), node)
+}
+
+// Go: internal/checker/checker.go:Checker.getIsolatedModulesLikeFlagName(5208)
+fn get_isolated_modules_like_flag_name(program: &dyn BoundProgram) -> String {
+    use tsgo_core::tristate::Tristate;
+    if program.compiler_options().verbatim_module_syntax == Tristate::True {
+        "verbatimModuleSyntax".to_string()
+    } else {
+        "isolatedModules".to_string()
+    }
+}
+
+// Go: internal/checker/checker.go:getFirstNonAmbientClassOrFunctionDeclaration(5199)
+fn get_first_non_ambient_class_or_function_declaration(
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> Option<NodeId> {
+    for &decl in &program.symbol(symbol).declarations {
+        if program
+            .arena()
+            .flags(decl)
+            .contains(NodeFlags::AMBIENT)
+        {
+            continue;
+        }
+        match program.arena().kind(decl) {
+            Kind::ClassDeclaration => return Some(decl),
+            Kind::FunctionDeclaration => {
+                if matches!(
+                    program.arena().data(decl),
+                    NodeData::FunctionDeclaration(d) if d.body.is_some()
+                ) {
+                    return Some(decl);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+// Go: internal/ast/utilities.go:GetSourceFileOfNode
+fn source_file_of(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    let arena = program.arena();
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if arena.kind(n) == Kind::SourceFile {
+            return Some(n);
+        }
+        cur = arena.parent(n);
+    }
+    None
 }
 
 // Reports whether an identifier node starts with `_` (used to suppress unused

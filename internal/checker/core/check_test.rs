@@ -15674,3 +15674,137 @@ fn isolated_modules_non_syntactic_string_enum_initializer_reports_18055() {
         "'E.B' has a string type, but must have syntactically recognizable string syntax when 'isolatedModules' is enabled."
     );
 }
+
+// ---- T1-E batch 64: namespace/module declaration checks ----
+
+// Go: internal/checker/checker.go:Checker.checkEnumDeclaration(5050)
+#[test]
+fn erasable_syntax_only_non_ambient_enum_reports_1294() {
+    let options = CompilerOptions {
+        erasable_syntax_only: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "enum E { A }",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 1294)
+        .unwrap_or_else(|| panic!("expected 1294; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "This syntax is not allowed when 'erasableSyntaxOnly' is enabled."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkEnumDeclaration(5050)
+#[test]
+fn erasable_syntax_only_declare_enum_no_1294() {
+    let options = CompilerOptions {
+        erasable_syntax_only: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "declare enum E { A }",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 1294),
+        "ambient enum must not report 1294 under erasableSyntaxOnly; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModuleElementContext
+#[test]
+fn namespace_inside_function_reports_1235() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() { namespace N { } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 1235)
+        .unwrap_or_else(|| panic!("expected 1235; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "A namespace declaration is only allowed at the top level of a namespace or module."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkModuleDeclaration(5142)
+#[test]
+fn isolated_modules_instantiated_namespace_in_script_reports_1280() {
+    let options = CompilerOptions {
+        isolated_modules: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "namespace N { export const x = 1; }",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 1280)
+        .unwrap_or_else(|| panic!("expected 1280; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Namespaces are not allowed in global script files when 'isolatedModules' is enabled. If this file is not intended to be a global script, set 'moduleDetection' to 'force' or add an empty 'export {}' statement."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkModuleDeclaration(5142)
+#[test]
+fn isolated_modules_namespace_in_external_module_no_1280() {
+    let options = CompilerOptions {
+        isolated_modules: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "export {};\nnamespace N { export const x = 1; }",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 1280),
+        "namespace in external module must not report 1280; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkModuleDeclaration(5153)
+#[test]
+fn namespace_before_merged_class_reports_2434() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace N { export const x = 1; }\nclass N {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2434)
+        .unwrap_or_else(|| panic!("expected 2434; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "A namespace declaration cannot be located prior to a class or function with which it is merged."
+    );
+}

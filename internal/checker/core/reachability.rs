@@ -261,7 +261,11 @@ pub(crate) fn module_is_value_module(arena: &NodeArena, node: NodeId) -> bool {
 ///
 /// Side effects: none (reads the arena).
 // Go: internal/ast/utilities.go:IsInstantiatedModule(2409)
-fn is_instantiated_module(arena: &NodeArena, node: NodeId, preserve_const_enums: bool) -> bool {
+pub(crate) fn is_instantiated_module(
+    arena: &NodeArena,
+    node: NodeId,
+    preserve_const_enums: bool,
+) -> bool {
     let state = module_instance_state(arena, node);
     state == ModuleInstanceState::Instantiated
         || (preserve_const_enums && state == ModuleInstanceState::ConstEnumOnly)
