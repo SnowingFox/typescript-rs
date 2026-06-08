@@ -17653,3 +17653,86 @@ fn namespace_import_named_exports_only_resolves_module_symbol() {
         "ns.x on a named-export module must type-check without diagnostics, got {diags:?}"
     );
 }
+
+// ---- T1-E batch 85: tuple arity mismatch, single-element tuple assignability ----
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm, 2619)
+#[test]
+fn assignability_chain_tuple_source_too_long_reports_2619() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: [number, number];\nconst o: [number] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2619);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Source has 2 element(s) but target allows only 1."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm, 2618)
+#[test]
+fn assignability_chain_tuple_source_too_short_reports_2618() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: [number];\nconst o: [number, number] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2618);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Source has 1 element(s) but target requires 2."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm, no 2626 for arity 1)
+#[test]
+fn assignability_chain_single_element_tuple_mismatch_skips_2626() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: [string];\nconst o: [number] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2322);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void left, 2362)
+#[test]
+fn exponent_void_left_operand_reports_2362() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() ** 2;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2362, got {diags:?}");
+    assert_eq!(diags[0].code, 2362);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}

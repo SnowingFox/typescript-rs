@@ -1138,8 +1138,9 @@ impl Checker {
     // Pairwise-relates fixed-arity tuple element types by position (Go's
     // `propertiesRelatedTo` tuple arm, fixed-arity subset).
     //
-    // DEFER(phase-4-checker-4ae+): variadic/optional/rest tuples, arity
-    // mismatch diagnostics, and tuple-to-array assignability.
+    // DEFER(phase-4-checker-4ae+): variadic/optional/rest tuples and
+    // tuple-to-array assignability (fixed-arity length mismatch is in
+    // `report_tuple_types_related_to`).
     // Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm)
     fn tuple_types_related_to(
         &mut self,
@@ -1175,6 +1176,25 @@ impl Checker {
         let source_elements = self.tuple_element_types(source);
         let target_elements = self.tuple_element_types(target);
         if source_elements.len() != target_elements.len() {
+            // Fixed-arity subset: no rest/variadic tuples yet, so min length
+            // equals arity (Go's `propertiesRelatedTo` tuple arm).
+            if source_elements.len() < target_elements.len() {
+                reporter.report(
+                    &tsgo_diagnostics::SOURCE_HAS_0_ELEMENT_S_BUT_TARGET_REQUIRES_1,
+                    vec![
+                        source_elements.len().to_string(),
+                        target_elements.len().to_string(),
+                    ],
+                );
+            } else {
+                reporter.report(
+                    &tsgo_diagnostics::SOURCE_HAS_0_ELEMENT_S_BUT_TARGET_ALLOWS_ONLY_1,
+                    vec![
+                        source_elements.len().to_string(),
+                        target_elements.len().to_string(),
+                    ],
+                );
+            }
             return false;
         }
         for (source_position, (&source_type, &target_type)) in source_elements
