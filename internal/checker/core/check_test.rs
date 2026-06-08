@@ -1,4 +1,4 @@
-use crate::core::check::get_effective_return_type_node;
+use crate::core::check::{get_effective_return_type_node, DiagnosticMessageChain};
 use crate::core::program::BoundProgram;
 use crate::core::signatures::{Signature, SignatureFlags};
 use crate::core::test_support::{MultiFileProgram, StubProgram};
@@ -17376,5 +17376,153 @@ fn object_literal_excess_property_targets_property_name_span() {
         diags[0].start, prop_pos,
         "excess-property diagnostic must start at the property name, not leading trivia; got start={} src={src:?}",
         diags[0].start
+    );
+}
+
+// ---- T1-E batch 83: void relational, arithmetic operands, ES-module namespace import ----
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (void relational, 2365)
+#[test]
+fn void_relational_with_number_reports_2365() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() < 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2365, got {diags:?}");
+    assert_eq!(diags[0].code, 2365);
+    assert_eq!(
+        diags[0].message,
+        "Operator '<' cannot be applied to types 'void' and 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void right, 2363)
+#[test]
+fn divide_void_right_operand_reports_2363() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\n2 / f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2363, got {diags:?}");
+    assert_eq!(diags[0].code, 2363);
+    assert_eq!(
+        diags[0].message,
+        "The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void left, 2362)
+#[test]
+fn modulo_void_left_operand_reports_2362() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() % 2;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2362, got {diags:?}");
+    assert_eq!(diags[0].code, 2362);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveESModuleSymbol (default export wrap)
+#[test]
+fn namespace_import_default_export_wraps_and_call_reports_2349() {
+    use crate::core::is_es_module_symbol;
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/foo.ts", "export default function foo(): void {}\n"),
+        ("/index.ts", "import * as ns from \"./foo\";\nns();"),
+    ]));
+    let index = p.source_files()[1];
+    let view = p.file_view(index).unwrap();
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p) as std::rc::Rc<dyn BoundProgram>);
+    let stmts = match view.arena().data(view.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let call_expr = match view.arena().data(stmts[1]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expression statement"),
+    };
+    let callee = match view.arena().data(call_expr) {
+        NodeData::CallExpression(d) => d.expression,
+        _ => panic!("call expression"),
+    };
+    let ty = c.check_expression(view.as_ref(), callee);
+    let sym = c.get_type(ty).symbol.expect("wrapped type symbol");
+    assert!(is_es_module_symbol(sym));
+    assert!(
+        c.export_type_originating_import(sym).is_some(),
+        "default-export namespace import must record originating import"
+    );
+    let diags = c.get_diagnostics(index);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].message, "This expression is not callable.");
+}
+
+// Go: internal/checker/relater.go:Relater.reportError (array element assignability chain)
+#[test]
+fn assignability_chain_nested_array_element_collapses_to_dotted_message() {
+    let src = format!(
+        "{ARRAY_LIB}declare const src: {{ items: {{ value: string }}[] }};\n\
+         const o: {{ items: {{ value: number }}[] }} = src;"
+    );
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", &src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    let items = &d.message_chain[0];
+    assert_eq!(items.code, 2326);
+    assert_eq!(
+        items.message,
+        "Types of property 'items' are incompatible."
+    );
+    fn chain_contains_leaf(chain: &DiagnosticMessageChain, code: i32, text: &str) -> bool {
+        if chain.code == code && chain.message == text {
+            return true;
+        }
+        chain.next.iter().any(|n| chain_contains_leaf(n, code, text))
+    }
+    assert!(
+        chain_contains_leaf(
+            items,
+            2322,
+            "Type 'string' is not assignable to type 'number'."
+        ),
+        "expected nested element mismatch chain, got {items:?}"
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.hasExcessProperties (intersection target, 2561)
+#[test]
+fn object_literal_excess_on_intersection_misspelling_reports_2561() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { prop1: number; }\ninterface B { prop2: number; }\n\
+         const o: A & B = { prop: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2561);
+    assert_eq!(
+        diags[0].message,
+        "Object literal may only specify known properties, but 'prop' does not exist in type 'A & B'. Did you mean to write 'prop1'?"
     );
 }

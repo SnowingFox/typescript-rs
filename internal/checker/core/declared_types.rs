@@ -1937,9 +1937,14 @@ fn resolve_es_module_symbol(
 ) -> SymbolId {
     let symbol = resolve_external_module_symbol(checker, program, module_symbol);
     let typ = get_type_of_symbol(checker, program, symbol, program.globals());
-    // Namespace imports of a callable export (or an `export=` indirection) are
-    // wrapped so the import is not directly callable (Go's `resolveESModuleSymbol`).
+    // Namespace imports of a callable export, a `default` export, or an `export=`
+    // indirection are wrapped so the import is not directly callable (Go's
+    // `resolveESModuleSymbol` reachable subset: `hasSignatures` and
+    // `getPropertyOfTypeEx(..., default)`).
+    let has_default_export =
+        get_export_of_module(checker, program, symbol, "default").is_some();
     let should_wrap = symbol != module_symbol
+        || has_default_export
         || !get_signatures_of_symbol(checker, program, symbol).is_empty()
         || !checker.get_signatures_of_type(typ).is_empty();
     if !should_wrap {
