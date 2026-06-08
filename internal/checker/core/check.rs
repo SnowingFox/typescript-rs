@@ -2642,6 +2642,37 @@ impl Checker {
         }
         let construct_sigs = self.collect_construct_signatures_of_type(program, callee_type);
         if construct_sigs.is_empty() {
+            let call_sigs = self.get_signatures_of_type(callee_type);
+            if !call_sigs.is_empty() {
+                let resolved = if call_sigs.len() > 1 {
+                    self.resolve_overloaded_call(program, node, &call_sigs, &args)
+                } else {
+                    let signature = call_sigs[0];
+                    if self.has_correct_arity(signature, args.len()) {
+                        self.check_applicable_signature_for_call(program, signature, &args);
+                    } else {
+                        for &arg in &args {
+                            self.check_expression(program, arg);
+                        }
+                        self.report_argument_arity_error(program, node, signature, &args);
+                    }
+                    self.get_return_type_of_call(program, signature, &[], &[])
+                };
+                if !self.no_implicit_any() {
+                    let signature = call_sigs[0];
+                    if self.signature(signature).declaration.is_some()
+                        && self.get_return_type_of_signature(signature) != self.void_type
+                    {
+                        self.error(
+                            program,
+                            node,
+                            &tsgo_diagnostics::ONLY_A_VOID_FUNCTION_CAN_BE_CALLED_WITH_THE_NEW_KEYWORD,
+                            &[],
+                        );
+                    }
+                }
+                return resolved;
+            }
             for &arg in &args {
                 self.check_expression(program, arg);
             }
@@ -2969,14 +3000,83 @@ impl Checker {
         if let Some(info) = get_applicable_index_info_for_name(self, program, apparent, &name) {
             return self.index_info(info).value_type;
         }
-        let type_str = super::nodebuilder::type_to_string(self, program, object_type);
-        self.error(
-            program,
-            name_node,
-            &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
-            &[name.as_str(), type_str.as_str()],
-        );
+        self.report_nonexistent_property(program, name_node, object_type, node, is_super);
         self.error_type
+    }
+
+    // Reports a missing property on `containing_type`, suggesting a close
+    // spelling when one exists (Go's `reportNonexistentProperty`).
+    // Go: internal/checker/checker.go:Checker.reportNonexistentProperty(11481)
+    fn report_nonexistent_property(
+        &mut self,
+        program: &dyn BoundProgram,
+        name_node: NodeId,
+        containing_type: TypeId,
+        access_node: NodeId,
+        is_super: bool,
+    ) {
+        let name = program.arena().text(name_node).to_string();
+        let type_str = super::nodebuilder::type_to_string(self, program, containing_type);
+        if let Some(suggestion_sym) = self.get_suggested_symbol_for_nonexistent_property(
+            program,
+            &name,
+            containing_type,
+            access_node,
+            is_super,
+        ) {
+            let suggested_name = program.symbol(suggestion_sym).name.clone();
+            let mut diagnostic = self.diagnostic_for_node(
+                program,
+                name_node,
+                &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1_DID_YOU_MEAN_2,
+                &[name.as_str(), type_str.as_str(), suggested_name.as_str()],
+            );
+            if let Some(decl) = program.symbol(suggestion_sym).value_declaration {
+                let related = self.diagnostic_for_node(
+                    program,
+                    decl,
+                    &tsgo_diagnostics::X_0_IS_DECLARED_HERE,
+                    &[suggested_name.as_str()],
+                );
+                diagnostic.add_related_info(related);
+            }
+            self.add_diagnostic(program, diagnostic);
+        } else {
+            self.error(
+                program,
+                name_node,
+                &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
+                &[name.as_str(), type_str.as_str()],
+            );
+        }
+    }
+
+    // Returns a close-spelling property symbol on `containing_type`, or `None`
+    // when no candidate is near enough (Go's
+    // `getSuggestedSymbolForNonexistentProperty`).
+    // Go: internal/checker/checker.go:Checker.getSuggestedSymbolForNonexistentProperty(11559)
+    fn get_suggested_symbol_for_nonexistent_property(
+        &mut self,
+        program: &dyn BoundProgram,
+        prop_name: &str,
+        containing_type: TypeId,
+        access_node: NodeId,
+        is_super: bool,
+    ) -> Option<SymbolId> {
+        let apparent = get_apparent_type(self, containing_type);
+        let candidates: Vec<SymbolId> = get_properties_of_type(self, apparent)
+            .into_iter()
+            .filter(|(_, sym)| {
+                self.is_property_accessible(program, access_node, is_super, false, apparent, *sym)
+            })
+            .map(|(_, sym)| sym)
+            .collect();
+        super::name_resolution::get_spelling_suggestion_for_name(
+            program,
+            prop_name,
+            &candidates,
+            SymbolFlags::VALUE,
+        )
     }
 
     /// Reports whether `node` is a valid property access of `property_name`.
@@ -3168,13 +3268,27 @@ impl Checker {
         if index_flags.intersects(TypeFlags::STRING_LITERAL | TypeFlags::NUMBER_LITERAL) {
             let prop_name =
                 super::late_binding::get_property_name_from_type(self, index_type);
-            let type_str = super::nodebuilder::type_to_string(self, program, object_type);
-            self.error(
-                program,
-                arg,
-                &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
-                &[prop_name.as_str(), type_str.as_str()],
-            );
+            let is_super = program.arena().kind(expr) == Kind::SuperKeyword;
+            if self
+                .get_suggested_symbol_for_nonexistent_property(
+                    program,
+                    &prop_name,
+                    object_type,
+                    node,
+                    is_super,
+                )
+                .is_some()
+            {
+                self.report_nonexistent_property(program, arg, object_type, node, is_super);
+            } else {
+                let type_str = super::nodebuilder::type_to_string(self, program, object_type);
+                self.error(
+                    program,
+                    arg,
+                    &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
+                    &[prop_name.as_str(), type_str.as_str()],
+                );
+            }
             return self.error_type;
         }
         if !index_flags.intersects(

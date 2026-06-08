@@ -16443,3 +16443,124 @@ fn call_union_incompatible_signatures_reports_2349_with_2758_chain() {
         "Each member of the union type '(x: number) => void | (x: string) => void' has signatures, but none of those signatures are compatible with each other."
     );
 }
+
+// ---- T1-E batch 74: property suggestions (2551) + construct 2350 ----
+
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty (2551)
+#[test]
+fn property_access_misspelling_reports_2551_with_suggestion() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O {\n  prop1: number;\n}\ndeclare const o: O;\no.prop;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2551, got {diags:?}");
+    assert_eq!(diags[0].code, 2551);
+    assert_eq!(
+        diags[0].message,
+        "Property 'prop' does not exist on type 'O'. Did you mean 'prop1'?"
+    );
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 2728);
+    assert_eq!(
+        diags[0].related_information[0].message,
+        "'prop1' is declared here."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getPropertyTypeForIndexType (2551 literal)
+#[test]
+fn element_access_string_literal_misspelling_reports_2551() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O {\n  prop1: number;\n}\ndeclare const o: O;\no[\"prop\"];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2551, got {diags:?}");
+    assert_eq!(diags[0].code, 2551);
+    assert_eq!(
+        diags[0].message,
+        "Property 'prop' does not exist on type 'O'. Did you mean 'prop1'?"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty (2339 when no suggestion)
+#[test]
+fn property_access_no_close_suggestion_still_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O {\n  prop1: number;\n}\ndeclare const o: O;\no.zzzzz;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+    assert_eq!(
+        diags[0].message,
+        "Property 'zzzzz' does not exist on type 'O'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression (2350, !noImplicitAny)
+#[test]
+fn new_non_void_function_reports_2350_when_no_implicit_any_disabled() {
+    let options = CompilerOptions {
+        no_implicit_any: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let codes = diag_codes_with_options(
+        "function fnNumber(): number { return 32; }\nnew fnNumber();",
+        options,
+    );
+    assert!(
+        codes.contains(&2350),
+        "expected TS2350 for `new` on a non-void function when noImplicitAny is off; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression (2350)
+#[test]
+fn new_non_void_function_reports_2350_message() {
+    let options = CompilerOptions {
+        no_implicit_any: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "function fnNumber(): number { return 32; }\nnew fnNumber();",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| {
+            d.code == 2350
+                && d.message
+                    == "Only a void function can be called with the 'new' keyword."
+        }),
+        "expected TS2350 with canonical message; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression (no 2350 for void return)
+#[test]
+fn new_void_function_no_2350_when_no_implicit_any_disabled() {
+    let options = CompilerOptions {
+        no_implicit_any: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let codes = diag_codes_with_options(
+        "function fnVoid(): void {}\nnew fnVoid();",
+        options,
+    );
+    assert!(
+        !codes.contains(&2350),
+        "void-returning function must not report TS2350; got {codes:?}"
+    );
+}
