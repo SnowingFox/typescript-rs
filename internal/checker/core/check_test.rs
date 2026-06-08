@@ -15442,3 +15442,72 @@ fn enum_member_private_identifier_reports_18024() {
         "An enum member cannot be named with a private identifier."
     );
 }
+
+// ---- T1-E batch 61: enum member names, initializers, string-valued members ----
+
+// Go: internal/checker/checker.go:Checker.computeEnumMemberValue(23842)
+#[test]
+fn enum_member_must_have_initializer_reports_1061() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A = \"a\", B }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 1061);
+    assert_eq!(diags[0].message, "Enum member must have initializer.");
+}
+
+// Go: internal/checker/checker.go:Checker.computeEnumMemberValue(23822)
+#[test]
+fn enum_bigint_literal_name_reports_2452() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "enum E { 1n = 0 }"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2452);
+    assert_eq!(
+        diags[0].message,
+        "An enum member cannot have a numeric name."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.computeEnumMemberValues (string-valued members)
+#[test]
+fn enum_computed_value_with_string_member_reports_2553() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A = \"a\", B = 1 + 1 }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2553)
+        .unwrap_or_else(|| panic!("expected 2553; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Computed values are not permitted in an enum with string valued members."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.computeConstantEnumMemberValue(23880)
+#[test]
+fn enum_non_numeric_initializer_reports_18033() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "enum E { A = true }"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 18033)
+        .unwrap_or_else(|| panic!("expected 18033; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Type 'boolean' is not assignable to type 'number' as required for computed enum member values."
+    );
+}
