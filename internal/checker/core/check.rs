@@ -4671,9 +4671,39 @@ impl Checker {
         let Some(&signature) = signatures.first() else {
             // No call signatures (e.g. an `any`/error callee or a non-callable
             // value). Still check the argument expressions so nested diagnostics
-            // surface; the invocation error itself is deferred.
+            // surface, then report the invocation error (Go's
+            // `resolveCallExpression` -> `invocationError` / the construct-only
+            // `2348` hint).
             for &arg in &args {
                 self.check_expression(program, arg);
+            }
+            if self.is_constructor_type(program, func_type) {
+                let type_str = self
+                    .get_type(func_type)
+                    .symbol
+                    .filter(|&sym| program.symbol(sym).flags.contains(SymbolFlags::CLASS))
+                    .map(|sym| {
+                        format!(
+                            "typeof {}",
+                            super::nodebuilder::symbol_to_string(program, sym)
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        super::nodebuilder::type_to_string(self, program, func_type)
+                    });
+                self.error(
+                    program,
+                    node,
+                    &tsgo_diagnostics::VALUE_OF_TYPE_0_IS_NOT_CALLABLE_DID_YOU_MEAN_TO_INCLUDE_NEW,
+                    &[type_str.as_str()],
+                );
+            } else if func_type != self.error_type {
+                self.error(
+                    program,
+                    callee,
+                    &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE,
+                    &[],
+                );
             }
             return self.error_type;
         };

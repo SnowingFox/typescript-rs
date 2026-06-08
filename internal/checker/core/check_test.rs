@@ -16265,3 +16265,48 @@ fn tagged_template_overloaded_no_match_reports_2769() {
     assert_eq!(diags[0].code, 2769);
     assert_eq!(diags[0].message, "No overload matches this call.");
 }
+
+// ---- T1-E batch 71: call-expression invocation errors (2349/2348) ----
+
+// Go: internal/checker/checker.go:Checker.resolveCallExpression -> invocationError (2349)
+#[test]
+fn call_non_callable_value_reports_2349() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = 1;\nx();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].message, "This expression is not callable.");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveCallExpression (2348)
+#[test]
+fn call_class_value_without_new_reports_2348() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\nC();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2348, got {diags:?}");
+    assert_eq!(diags[0].code, 2348);
+    assert_eq!(
+        diags[0].message,
+        "Value of type 'typeof C' is not callable. Did you mean to include 'new'?"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveCallExpression -> invocationError (well-typed call)
+#[test]
+fn call_on_function_value_no_invocation_error() {
+    let codes = diag_codes("function f(): void {}\nf();");
+    assert!(
+        !codes.contains(&2349) && !codes.contains(&2348),
+        "a callable function must not report invocation errors; got {codes:?}"
+    );
+}
