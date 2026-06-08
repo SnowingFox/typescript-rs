@@ -160,3 +160,18 @@ fn type_only_import_default_and_named_reports_1363() {
         "expected TS1363 for type-only import with both default and named; got: {diags:?}"
     );
 }
+
+// Go: internal/checker/checker.go:Checker.computeConstantEnumMemberValue(23876)
+#[test]
+fn const_enum_forward_ref_initializer_reports_2474() {
+    let p = StubProgram::parse_and_bind("/a.ts", "const enum E { A = E.B, B = 1 }");
+    let enum_decl =
+        first_node_of_kind(p.arena(), p.root(), Kind::EnumDeclaration).expect("enum declaration");
+    let mut c = Checker::new();
+    c.compute_enum_member_values(&p, enum_decl);
+    let diags = c.get_diagnostics(p.root());
+    assert!(
+        diags.iter().any(|d| d.code == 2474),
+        "expected TS2474 for non-constant const enum initializer; got: {diags:?}"
+    );
+}

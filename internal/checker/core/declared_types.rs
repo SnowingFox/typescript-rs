@@ -1228,6 +1228,44 @@ fn get_declared_type_of_enum(
 // DEFER(phase-4-checker-C-D2): `evaluateEnumMember` use-before-assigned (2474),
 // the computed-member checks, and cross-file resolution.
 // blocked-by: full `resolveEntityName` + enum diagnostics.
+// Resolves a bare identifier to a file-local `const` variable's foldable value,
+// when the variable has a constant-foldable initializer (Go `evaluateEntity` /
+// `isConstantVariable` subset).
+fn try_evaluate_const_variable_reference(
+    program: &dyn BoundProgram,
+    location: NodeId,
+    name: &str,
+) -> Option<tsgo_evaluator::EvalValue> {
+    use tsgo_evaluator::{new_evaluator, new_result, EvalValue, OuterExpressionKinds};
+    let globals = program.globals();
+    let sym = resolve_name(
+        program,
+        location,
+        name,
+        SymbolFlags::VALUE,
+        true,
+        globals,
+    )?;
+    let decl = program.symbol(sym).value_declaration?;
+    let init = match program.arena().data(decl) {
+        NodeData::VariableDeclaration(d) => d.initializer?,
+        _ => return None,
+    };
+    let flags = program.symbol(sym).flags;
+    if !flags.intersects(SymbolFlags::BLOCK_SCOPED_VARIABLE) {
+        return None;
+    }
+    let eval = new_evaluator(
+        |_, _, _| new_result(EvalValue::None, false, false, false),
+        OuterExpressionKinds::NONE,
+    );
+    let result = eval.evaluate(program.arena(), init, Some(location));
+    match result.value {
+        EvalValue::None => None,
+        v => Some(v),
+    }
+}
+
 // Go: internal/checker/checker.go:Checker.computeEnumMemberValues
 pub(crate) fn compute_enum_member_values(
     program: &dyn BoundProgram,
@@ -1250,7 +1288,7 @@ pub(crate) fn compute_enum_member_values(
             // Evaluate the initializer, resolving identifier/property-access
             // entity names against the enum's prior members by name.
             let evaluator = new_evaluator(
-                |arena: &NodeArena, expr: NodeId, _loc: Option<NodeId>| {
+                |arena: &NodeArena, expr: NodeId, loc: Option<NodeId>| {
                     let name = match arena.data(expr) {
                         NodeData::Identifier(_) => Some(arena.text(expr).to_string()),
                         NodeData::PropertyAccessExpression(d) => {
@@ -1258,10 +1296,21 @@ pub(crate) fn compute_enum_member_values(
                         }
                         _ => None,
                     };
-                    match name.and_then(|n| by_name.get(&n)) {
-                        Some(v) => new_result(v.clone(), false, false, false),
-                        None => new_result(EvalValue::None, false, false, false),
+                    if let Some(n) = name {
+                        if let Some(v) = by_name.get(&n) {
+                            return new_result(v.clone(), false, false, false);
+                        }
+                        if matches!(arena.data(expr), NodeData::Identifier(_)) {
+                            if let Some(loc) = loc {
+                                if let Some(v) =
+                                    try_evaluate_const_variable_reference(program, loc, &n)
+                                {
+                                    return new_result(v, false, false, false);
+                                }
+                            }
+                        }
                     }
+                    new_result(EvalValue::None, false, false, false)
                 },
                 OuterExpressionKinds::NONE,
             );

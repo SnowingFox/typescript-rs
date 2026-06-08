@@ -13599,6 +13599,8 @@ fn modifier_flags_of(arena: &tsgo_ast::NodeArena, node: NodeId) -> tsgo_ast::Mod
         NodeData::ConstructorType(d) => d.modifiers.as_ref(),
         NodeData::ParameterDeclaration(d) => d.modifiers.as_ref(),
         NodeData::IndexSignatureDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::EnumDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ModuleDeclaration(d) => d.modifiers.as_ref(),
         _ => None,
     };
     modifiers

@@ -12,7 +12,7 @@ use tsgo_tspath;
 
 use super::check::{is_enum_const, is_in_js_file, is_numeric_literal_name};
 use super::declared_types::{
-    compute_enum_member_values as compute_enum_member_values_impl, get_enum_member_value,
+    compute_enum_member_values as compute_enum_member_values_impl,
     resolve_alias, resolve_external_module_name, resolve_external_module_symbol,
 };
 use super::program::BoundProgram;
@@ -174,19 +174,18 @@ impl Checker {
                     );
                 } else if program.compiler_options().get_isolated_modules() {
                     if let Some(prev) = previous {
-                        let prev_has_init = matches!(
-                            program.arena().data(prev),
-                            NodeData::EnumMember(d) if d.initializer.is_some()
-                        );
-                        if prev_has_init {
-                            let prev_val = get_enum_member_value(program, prev);
-                            if !matches!(prev_val, tsgo_evaluator::EvalValue::Num(_)) {
-                                self.error(
-                                    program,
-                                    name_node,
-                                    &tsgo_diagnostics::ENUM_MEMBER_FOLLOWING_A_NON_LITERAL_NUMERIC_MEMBER_MUST_HAVE_AN_INITIALIZER_WHEN_ISOLATEDMODULES_IS_ENABLED,
-                                    &[],
-                                );
+                        if let NodeData::EnumMember(pd) = program.arena().data(prev) {
+                            if let Some(prev_init) = pd.initializer {
+                                if !is_isolated_modules_literal_numeric_enum_initializer(
+                                    program, prev_init,
+                                ) {
+                                    self.error(
+                                        program,
+                                        name_node,
+                                        &tsgo_diagnostics::ENUM_MEMBER_FOLLOWING_A_NON_LITERAL_NUMERIC_MEMBER_MUST_HAVE_AN_INITIALIZER_WHEN_ISOLATEDMODULES_IS_ENABLED,
+                                        &[],
+                                    );
+                                }
                             }
                         }
                     }
@@ -578,6 +577,48 @@ fn is_string_or_numeric_literal_like(program: &dyn BoundProgram, node: NodeId) -
         program.arena().kind(node),
         Kind::StringLiteral | Kind::NumericLiteral | Kind::NoSubstitutionTemplateLiteral
     )
+}
+
+/// Reports whether `expr` is a syntactically literal numeric enum initializer
+/// that `isolatedModules` allows to be followed by an auto-incremented member
+/// (Go `computeEnumMemberValue` / `enumNoInitializerFollowsNonLiteralInitializer`).
+fn is_isolated_modules_literal_numeric_enum_initializer(
+    program: &dyn BoundProgram,
+    expr: NodeId,
+) -> bool {
+    let mut node = expr;
+    loop {
+        node = match program.arena().data(node) {
+            NodeData::ParenthesizedExpression(d) => d.expression,
+            _ => break,
+        };
+    }
+    match program.arena().data(node) {
+        NodeData::NumericLiteral(_) => true,
+        NodeData::PrefixUnaryExpression(d) => {
+            (d.operator == Kind::PlusToken || d.operator == Kind::MinusToken)
+                && is_isolated_modules_literal_numeric_enum_initializer(program, d.operand)
+        }
+        NodeData::BinaryExpression(d) => {
+            let op = program.arena().kind(d.operator_token);
+            matches!(
+                op,
+                Kind::PlusToken
+                    | Kind::MinusToken
+                    | Kind::AsteriskToken
+                    | Kind::SlashToken
+                    | Kind::PercentToken
+                    | Kind::BarToken
+                    | Kind::AmpersandToken
+                    | Kind::CaretToken
+                    | Kind::LessThanLessThanToken
+                    | Kind::GreaterThanGreaterThanToken
+                    | Kind::GreaterThanGreaterThanGreaterThanToken
+            ) && is_isolated_modules_literal_numeric_enum_initializer(program, d.left)
+                && is_isolated_modules_literal_numeric_enum_initializer(program, d.right)
+        }
+        _ => false,
+    }
 }
 
 fn external_module_name_node(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {

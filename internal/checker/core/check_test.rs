@@ -15511,3 +15511,79 @@ fn enum_non_numeric_initializer_reports_18033() {
         "Type 'boolean' is not assignable to type 'number' as required for computed enum member values."
     );
 }
+
+// ---- T1-E batch 62: enum expressions, const enum, isolatedModules ----
+
+// Go: internal/checker/checker.go:Checker.checkEnumMember(5100)
+#[test]
+fn enum_member_initializer_expression_is_checked_reports_2304() {
+    let codes = diag_codes("enum E { A = foo }");
+    assert!(
+        codes.contains(&2304),
+        "enum member initializer must be expression-checked; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.computeConstantEnumMemberValue(23876)
+#[test]
+fn const_enum_non_constant_initializer_reports_2474() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const enum E { A = E.B, B = 1 }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2474)
+        .unwrap_or_else(|| panic!("expected 2474; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "const enum member initializers must be constant expressions."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.computeConstantEnumMemberValue(23878)
+#[test]
+fn ambient_enum_non_constant_initializer_reports_1066() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare enum E { A = E.B, B = 1 }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 1066)
+        .unwrap_or_else(|| panic!("expected 1066; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "In ambient enum declarations member initializer must be constant expression."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.computeEnumMemberValue(23850)
+#[test]
+fn isolated_modules_enum_following_entity_initializer_reports_18056() {
+    let options = CompilerOptions {
+        isolated_modules: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let codes = diag_codes_with_options("const n = 1;\nenum E { A = n, B }", options);
+    assert!(
+        codes.contains(&18056),
+        "expected TS18056 when isolatedModules and a member auto-increments after a non-literal numeric initializer; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkEnumDeclaration(5086)
+#[test]
+fn merged_enum_duplicate_omit_initializer_reports_2432_via_get_diagnostics() {
+    let codes = diag_codes("enum E { A }\nenum E { B }");
+    assert!(
+        codes.contains(&2432),
+        "expected TS2432 for merged enum with two omit-first-initializer declarations; got {codes:?}"
+    );
+}
