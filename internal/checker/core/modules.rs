@@ -5,15 +5,18 @@
 //! `checkImportDeclaration` / `checkImportClause`, `checkExportDeclaration`, and
 //! `getExportsOfModule`.
 
+use rustc_hash::FxHashMap;
 use tsgo_ast::utilities::node_is_missing;
 use tsgo_ast::{Kind, NodeArena, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId, SymbolTable};
 use tsgo_diagnostics::Message;
+use tsgo_evaluator::EvalValue;
 use tsgo_tspath;
 
 use super::check::{is_enum_const, is_in_js_file, is_numeric_literal_name};
 use super::declared_types::{
     compute_enum_member_values as compute_enum_member_values_impl,
-    resolve_alias, resolve_external_module_name, resolve_external_module_symbol,
+    evaluate_enum_member_initializer, resolve_alias, resolve_external_module_name,
+    resolve_external_module_symbol,
 };
 use super::program::BoundProgram;
 use super::symbols::resolve_name;
@@ -67,6 +70,7 @@ impl Checker {
 
         let mut previous: Option<NodeId> = None;
         let mut has_string_valued_member = false;
+        let mut by_name: FxHashMap<String, EvalValue> = FxHashMap::default();
         let computed = compute_enum_member_values_impl(program, enum_declaration);
 
         for member in &members {
@@ -114,10 +118,16 @@ impl Checker {
                 .iter()
                 .find(|(m, _)| *m == *member)
                 .map(|(_, v)| v.clone());
+            let eval_result = initializer.map(|_| {
+                evaluate_enum_member_initializer(program, *member, &by_name)
+            });
 
             if let Some(init) = initializer {
                 if has_string_valued_member
                     && !is_string_or_numeric_literal_like(program, init)
+                    && !eval_result.as_ref().is_some_and(|r| {
+                        matches!(r.value, EvalValue::Str(_))
+                    })
                 {
                     self.error(
                         program,
@@ -125,38 +135,82 @@ impl Checker {
                         &tsgo_diagnostics::COMPUTED_VALUES_ARE_NOT_PERMITTED_IN_AN_ENUM_WITH_STRING_VALUED_MEMBERS,
                         &[],
                     );
-                } else if matches!(member_value, Some(tsgo_evaluator::EvalValue::None)) {
-                    if is_const {
-                        self.error(
-                            program,
-                            init,
-                            &tsgo_diagnostics::X_CONST_ENUM_MEMBER_INITIALIZERS_MUST_BE_CONSTANT_EXPRESSIONS,
-                            &[],
-                        );
-                    } else if in_ambient {
-                        self.error(
-                            program,
-                            init,
-                            &tsgo_diagnostics::IN_AMBIENT_ENUM_DECLARATIONS_MEMBER_INITIALIZER_MUST_BE_CONSTANT_EXPRESSION,
-                            &[],
-                        );
-                    } else {
-                        let expr_type = self.check_expression(program, init);
-                        if !self.is_type_assignable_to(program, expr_type, self.number_type) {
-                            let source_for_msg = self.get_base_type_of_literal_type(expr_type);
-                            let source_str = if source_for_msg == self.boolean_type {
-                                "boolean".to_string()
-                            } else {
-                                super::nodebuilder::type_to_string(self, program, source_for_msg)
-                            };
-                            let target_str =
-                                super::nodebuilder::type_to_string(self, program, self.number_type);
+                } else if let Some(result) = eval_result {
+                    if !matches!(result.value, EvalValue::None) {
+                        if is_const {
+                            if let EvalValue::Num(n) = result.value {
+                                if n.is_nan() {
+                                    self.error(
+                                        program,
+                                        init,
+                                        &tsgo_diagnostics::X_CONST_ENUM_MEMBER_INITIALIZER_WAS_EVALUATED_TO_DISALLOWED_VALUE_NAN,
+                                        &[],
+                                    );
+                                } else if n.is_inf() {
+                                    self.error(
+                                        program,
+                                        init,
+                                        &tsgo_diagnostics::X_CONST_ENUM_MEMBER_INITIALIZER_WAS_EVALUATED_TO_A_NON_FINITE_VALUE,
+                                        &[],
+                                    );
+                                }
+                            }
+                        }
+                        if program.compiler_options().get_isolated_modules()
+                            && matches!(result.value, EvalValue::Str(_))
+                            && !result.is_syntactically_string
+                        {
+                            let qualified = enum_member_qualified_name(
+                                program,
+                                enum_declaration,
+                                name_node,
+                            );
                             self.error(
                                 program,
                                 init,
-                                &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1_AS_REQUIRED_FOR_COMPUTED_ENUM_MEMBER_VALUES,
-                                &[source_str.as_str(), target_str.as_str()],
+                                &tsgo_diagnostics::X_0_HAS_A_STRING_TYPE_BUT_MUST_HAVE_SYNTACTICALLY_RECOGNIZABLE_STRING_SYNTAX_WHEN_ISOLATEDMODULES_IS_ENABLED,
+                                &[qualified.as_str()],
                             );
+                        }
+                    } else if matches!(member_value, Some(EvalValue::None)) {
+                        if is_const {
+                            self.error(
+                                program,
+                                init,
+                                &tsgo_diagnostics::X_CONST_ENUM_MEMBER_INITIALIZERS_MUST_BE_CONSTANT_EXPRESSIONS,
+                                &[],
+                            );
+                        } else if in_ambient {
+                            self.error(
+                                program,
+                                init,
+                                &tsgo_diagnostics::IN_AMBIENT_ENUM_DECLARATIONS_MEMBER_INITIALIZER_MUST_BE_CONSTANT_EXPRESSION,
+                                &[],
+                            );
+                        } else {
+                            let expr_type = self.check_expression(program, init);
+                            if !self.is_type_assignable_to(program, expr_type, self.number_type) {
+                                let source_for_msg =
+                                    self.get_base_type_of_literal_type(expr_type);
+                                let source_str = if source_for_msg == self.boolean_type {
+                                    "boolean".to_string()
+                                } else {
+                                    super::nodebuilder::type_to_string(
+                                        self, program, source_for_msg,
+                                    )
+                                };
+                                let target_str = super::nodebuilder::type_to_string(
+                                    self,
+                                    program,
+                                    self.number_type,
+                                );
+                                self.error(
+                                    program,
+                                    init,
+                                    &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1_AS_REQUIRED_FOR_COMPUTED_ENUM_MEMBER_VALUES,
+                                    &[source_str.as_str(), target_str.as_str()],
+                                );
+                            }
                         }
                     }
                 }
@@ -192,8 +246,20 @@ impl Checker {
                 }
             }
 
-            if matches!(member_value, Some(tsgo_evaluator::EvalValue::Str(_))) {
+            if matches!(member_value, Some(EvalValue::Str(_))) {
                 has_string_valued_member = true;
+            }
+
+            if let Some(v) = member_value {
+                let text = match program.arena().kind(name_node) {
+                    Kind::Identifier | Kind::StringLiteral | Kind::NumericLiteral => {
+                        program.arena().text(name_node).to_string()
+                    }
+                    _ => String::new(),
+                };
+                if !text.is_empty() {
+                    by_name.insert(text, v);
+                }
             }
 
             previous = Some(*member);
@@ -558,6 +624,19 @@ impl Checker {
             }
         }
     }
+}
+
+fn enum_member_qualified_name(
+    program: &dyn BoundProgram,
+    enum_declaration: NodeId,
+    member_name: NodeId,
+) -> String {
+    let enum_name = match program.arena().data(enum_declaration) {
+        NodeData::EnumDeclaration(d) => program.arena().text(d.name).to_string(),
+        _ => "?".to_string(),
+    };
+    let member = program.arena().text(member_name).to_string();
+    format!("{enum_name}.{member}")
 }
 
 /// Reports whether `name` is a computed property name that is not a string/number literal.

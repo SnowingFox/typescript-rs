@@ -1235,7 +1235,7 @@ fn try_evaluate_const_variable_reference(
     program: &dyn BoundProgram,
     location: NodeId,
     name: &str,
-) -> Option<tsgo_evaluator::EvalValue> {
+) -> Option<tsgo_evaluator::Result> {
     use tsgo_evaluator::{new_evaluator, new_result, EvalValue, OuterExpressionKinds};
     let globals = program.globals();
     let sym = resolve_name(
@@ -1260,10 +1260,72 @@ fn try_evaluate_const_variable_reference(
         OuterExpressionKinds::NONE,
     );
     let result = eval.evaluate(program.arena(), init, Some(location));
-    match result.value {
-        EvalValue::None => None,
-        v => Some(v),
+    if matches!(result.value, EvalValue::None) {
+        None
+    } else {
+        Some(result)
     }
+}
+
+// Entity resolver for enum-member initializer evaluation (Go `evaluateEntity` subset).
+fn evaluate_enum_entity(
+    program: &dyn BoundProgram,
+    arena: &NodeArena,
+    expr: NodeId,
+    loc: Option<NodeId>,
+    by_name: &FxHashMap<String, tsgo_evaluator::EvalValue>,
+) -> tsgo_evaluator::Result {
+    use tsgo_evaluator::{new_result, EvalValue};
+    let name = match arena.data(expr) {
+        NodeData::Identifier(_) => Some(arena.text(expr).to_string()),
+        NodeData::PropertyAccessExpression(d) => Some(arena.text(d.name).to_string()),
+        _ => None,
+    };
+    if let Some(n) = name {
+        if let Some(v) = by_name.get(&n) {
+            return new_result(v.clone(), false, false, false);
+        }
+        if matches!(arena.data(expr), NodeData::Identifier(_)) {
+            if n == "Infinity" || n == "NaN" {
+                return new_result(
+                    EvalValue::Num(tsgo_jsnum::from_string(&n)),
+                    false,
+                    false,
+                    false,
+                );
+            }
+            if let Some(loc) = loc {
+                if let Some(result) = try_evaluate_const_variable_reference(program, loc, &n) {
+                    return result;
+                }
+            }
+        }
+    }
+    new_result(EvalValue::None, false, false, false)
+}
+
+// Evaluates one enum member initializer with prior-member name resolution.
+// Go: internal/checker/checker.go:Checker.evaluate (enum member context)
+pub(crate) fn evaluate_enum_member_initializer(
+    program: &dyn BoundProgram,
+    member: NodeId,
+    by_name: &FxHashMap<String, tsgo_evaluator::EvalValue>,
+) -> tsgo_evaluator::Result {
+    use tsgo_evaluator::{new_evaluator, OuterExpressionKinds};
+    let init = match program.arena().data(member) {
+        NodeData::EnumMember(d) => d.initializer,
+        _ => return tsgo_evaluator::new_result(tsgo_evaluator::EvalValue::None, false, false, false),
+    };
+    let Some(init) = init else {
+        return tsgo_evaluator::new_result(tsgo_evaluator::EvalValue::None, false, false, false);
+    };
+    let evaluator = new_evaluator(
+        |arena: &NodeArena, expr: NodeId, loc: Option<NodeId>| {
+            evaluate_enum_entity(program, arena, expr, loc, by_name)
+        },
+        OuterExpressionKinds::NONE,
+    );
+    evaluator.evaluate(program.arena(), init, Some(member))
 }
 
 // Go: internal/checker/checker.go:Checker.computeEnumMemberValues
@@ -1271,7 +1333,7 @@ pub(crate) fn compute_enum_member_values(
     program: &dyn BoundProgram,
     enum_declaration: NodeId,
 ) -> Vec<(NodeId, tsgo_evaluator::EvalValue)> {
-    use tsgo_evaluator::{new_evaluator, new_result, EvalValue, OuterExpressionKinds};
+    use tsgo_evaluator::EvalValue;
     let members = match program.arena().data(enum_declaration) {
         NodeData::EnumDeclaration(d) => d.members.nodes.clone(),
         _ => return Vec::new(),
@@ -1284,39 +1346,8 @@ pub(crate) fn compute_enum_member_values(
             NodeData::EnumMember(d) => d.initializer,
             _ => None,
         };
-        let value = if let Some(init) = initializer {
-            // Evaluate the initializer, resolving identifier/property-access
-            // entity names against the enum's prior members by name.
-            let evaluator = new_evaluator(
-                |arena: &NodeArena, expr: NodeId, loc: Option<NodeId>| {
-                    let name = match arena.data(expr) {
-                        NodeData::Identifier(_) => Some(arena.text(expr).to_string()),
-                        NodeData::PropertyAccessExpression(d) => {
-                            Some(arena.text(d.name).to_string())
-                        }
-                        _ => None,
-                    };
-                    if let Some(n) = name {
-                        if let Some(v) = by_name.get(&n) {
-                            return new_result(v.clone(), false, false, false);
-                        }
-                        if matches!(arena.data(expr), NodeData::Identifier(_)) {
-                            if let Some(loc) = loc {
-                                if let Some(v) =
-                                    try_evaluate_const_variable_reference(program, loc, &n)
-                                {
-                                    return new_result(v, false, false, false);
-                                }
-                            }
-                        }
-                    }
-                    new_result(EvalValue::None, false, false, false)
-                },
-                OuterExpressionKinds::NONE,
-            );
-            evaluator
-                .evaluate(program.arena(), init, Some(member))
-                .value
+        let value = if initializer.is_some() {
+            evaluate_enum_member_initializer(program, member, &by_name).value
         } else if let Some(v) = auto_value {
             // No initializer: the auto-incremented numeric value.
             EvalValue::Num(tsgo_jsnum::Number::from(v))

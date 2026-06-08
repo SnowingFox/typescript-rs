@@ -15587,3 +15587,90 @@ fn merged_enum_duplicate_omit_initializer_reports_2432_via_get_diagnostics() {
         "expected TS2432 for merged enum with two omit-first-initializer declarations; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 63: merged const enum, non-finite const values, isolatedModules strings ----
+
+// Go: internal/checker/checker.go:Checker.checkEnumDeclaration(5069)
+#[test]
+fn merged_enum_const_and_non_const_reports_2473() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const enum E { A }\nenum E { B }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2473)
+        .unwrap_or_else(|| panic!("expected 2473; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Enum declarations must all be const or non-const."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.computeConstantEnumMemberValue(23863)
+#[test]
+fn const_enum_infinity_initializer_reports_2477() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const enum E { A = Infinity }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2477)
+        .unwrap_or_else(|| panic!("expected 2477; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "'const' enum member initializer was evaluated to a non-finite value."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.computeConstantEnumMemberValue(23864)
+#[test]
+fn const_enum_nan_initializer_reports_2478() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const enum E { A = NaN }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2478)
+        .unwrap_or_else(|| panic!("expected 2478; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "'const' enum member initializer was evaluated to disallowed value 'NaN'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.computeConstantEnumMemberValue(23869)
+#[test]
+fn isolated_modules_non_syntactic_string_enum_initializer_reports_18055() {
+    let options = CompilerOptions {
+        isolated_modules: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "enum E { A = \"a\", B = 2 + A }",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 18055)
+        .unwrap_or_else(|| panic!("expected 18055; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "'E.B' has a string type, but must have syntactically recognizable string syntax when 'isolatedModules' is enabled."
+    );
+}
