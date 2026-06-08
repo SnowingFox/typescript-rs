@@ -16099,3 +16099,78 @@ fn new_protected_constructor_in_unrelated_function_reports_2674() {
         "expected TS2674 for protected constructor outside class hierarchy; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 69: new-expression construct signature resolution ----
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression -> resolveCall (2345)
+#[test]
+fn new_wrong_constructor_argument_reports_2345() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { constructor(x: number) {} }\nnew C(\"s\");",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+    assert_eq!(
+        diags[0].message,
+        "Argument of type 'string' is not assignable to parameter of type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression -> resolveCall (well-typed)
+#[test]
+fn new_matching_constructor_argument_no_diagnostic() {
+    let codes = diag_codes("class C { constructor(x: number) {} }\nnew C(1);");
+    assert!(
+        !codes.contains(&2345),
+        "matching constructor argument must not report TS2345; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression -> resolveCall (2554)
+#[test]
+fn new_wrong_constructor_arity_reports_2554() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { constructor(x: number) {} }\nnew C();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2554, got {diags:?}");
+    assert_eq!(diags[0].code, 2554);
+    assert_eq!(
+        diags[0].message,
+        "Expected 1 arguments, but got 0."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression -> chooseOverload (2769)
+#[test]
+fn new_overloaded_constructor_no_match_reports_2769() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  constructor(x: number);\n  constructor(x: string);\n  constructor(x: any) {}\n}\nnew C(true);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2769, got {diags:?}");
+    assert_eq!(diags[0].code, 2769);
+    assert_eq!(diags[0].message, "No overload matches this call.");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression -> chooseOverload (ok)
+#[test]
+fn new_overloaded_constructor_matching_overload_no_diagnostic() {
+    let codes = diag_codes(
+        "class C {\n  constructor(x: number);\n  constructor(x: string);\n  constructor(x: any) {}\n}\nnew C(\"s\");",
+    );
+    assert!(
+        codes.is_empty(),
+        "matching overloaded constructor must not report diagnostics; got {codes:?}"
+    );
+}

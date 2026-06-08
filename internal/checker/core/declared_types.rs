@@ -13,8 +13,8 @@
 use rustc_hash::FxHashMap;
 
 use tsgo_ast::symbol::{
-    INTERNAL_SYMBOL_NAME_CALL, INTERNAL_SYMBOL_NAME_INDEX, INTERNAL_SYMBOL_NAME_NEW,
-    INTERNAL_SYMBOL_NAME_PREFIX,
+    INTERNAL_SYMBOL_NAME_CALL, INTERNAL_SYMBOL_NAME_CONSTRUCTOR, INTERNAL_SYMBOL_NAME_INDEX,
+    INTERNAL_SYMBOL_NAME_NEW, INTERNAL_SYMBOL_NAME_PREFIX,
 };
 use tsgo_ast::{
     CheckFlags, Kind, ModifierFlags, NodeArena, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId,
@@ -2131,6 +2131,7 @@ fn get_signatures_of_symbol(
                 | Kind::MethodDeclaration
                 | Kind::FunctionType
                 | Kind::ConstructorType
+                | Kind::Constructor
         ) {
             continue;
         }
@@ -2155,6 +2156,48 @@ fn get_signatures_of_symbol(
         result.push(get_signature_from_declaration(checker, prog, decl));
     }
     result
+}
+
+// Returns the construct signatures of a class symbol: the `__constructor` member's
+// overloads, or a default zero-argument signature whose return type is the class
+// instance type (Go's `getDefaultConstructSignatures` subset).
+// Go: internal/checker/checker.go:Checker.resolveDeclaredMembers (class construct)
+pub(crate) fn get_class_construct_signatures(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    class_sym: SymbolId,
+) -> Vec<SignatureId> {
+    let sym = program.symbol(class_sym);
+    if let Some(&ctor_member) = sym.members.get(INTERNAL_SYMBOL_NAME_CONSTRUCTOR) {
+        let sigs = get_signatures_of_symbol(checker, program, ctor_member);
+        if !sigs.is_empty() {
+            return sigs;
+        }
+    }
+    default_construct_signatures(checker, program, class_sym)
+}
+
+fn default_construct_signatures(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    class_sym: SymbolId,
+) -> Vec<SignatureId> {
+    let class_type = get_declared_type_of_symbol(checker, program, class_sym, program.globals());
+    let type_parameters = checker
+        .get_type(class_type)
+        .as_object()
+        .map(|o| o.type_parameters.clone())
+        .unwrap_or_default();
+    let mut flags = SignatureFlags::CONSTRUCT;
+    if let Some(decl) = program.symbol(class_sym).value_declaration {
+        if class_like_declaration_is_abstract(program, decl) {
+            flags |= SignatureFlags::ABSTRACT;
+        }
+    }
+    let mut signature = Signature::new(flags);
+    signature.type_parameters = type_parameters;
+    signature.resolved_return_type = Some(class_type);
+    vec![checker.new_signature(signature)]
 }
 
 // Reports whether a function-like declaration has a body (Go's `decl.Body() !=
@@ -2200,6 +2243,7 @@ fn get_signature_from_declaration(
         NodeData::FunctionType(d) | NodeData::ConstructorType(d) => {
             (d.parameters.nodes.clone(), d.type_node)
         }
+        NodeData::ConstructorDeclaration(d) => (d.parameters.nodes.clone(), None),
         // DEFER(phase-4-checker-4q+): accessor/function-expression/arrow
         // declarations. blocked-by: those declaration kinds.
         _ => (Vec::new(), None),
@@ -2218,10 +2262,21 @@ fn get_signature_from_declaration(
         }
     }
     // The return type comes from the annotation; an un-annotated function defers
-    // body-based inference and yields `any`.
-    let resolved_return_type = match return_type_node {
-        Some(node) => get_type_from_type_node(checker, program, node, None),
-        None => checker.any_type(),
+    // body-based inference and yields `any`. A class constructor's return type
+    // is the instance type of the declaring class (Go's
+    // `getReturnTypeFromAnnotation` for `ConstructorDeclaration`).
+    let resolved_return_type = if program.arena().kind(declaration) == Kind::Constructor {
+        program
+            .arena()
+            .parent(declaration)
+            .and_then(|parent| program.symbol_of_node(parent))
+            .map(|class_sym| get_declared_type_of_symbol(checker, program, class_sym, None))
+            .unwrap_or(checker.error_type())
+    } else {
+        match return_type_node {
+            Some(node) => get_type_from_type_node(checker, program, node, None),
+            None => checker.any_type(),
+        }
     };
     // A constructor-type / construct-signature declaration produces a construct
     // signature (Go's `getSignatureFromDeclaration` sets `SignatureFlagsConstruct`
@@ -2229,7 +2284,7 @@ fn get_signature_from_declaration(
     // relation and the `new (...)` printed form.
     let mut flags = if matches!(
         program.arena().kind(declaration),
-        Kind::ConstructorType | Kind::ConstructSignature
+        Kind::ConstructorType | Kind::ConstructSignature | Kind::Constructor
     ) {
         SignatureFlags::CONSTRUCT
     } else {
@@ -2244,7 +2299,9 @@ fn get_signature_from_declaration(
     if has_rest_parameter(program, &param_nodes) {
         flags |= SignatureFlags::HAS_REST_PARAMETER;
     }
-    if signature_declaration_has_abstract_modifier(program, declaration) {
+    if signature_declaration_has_abstract_modifier(program, declaration)
+        || constructor_parent_is_abstract(program, declaration)
+    {
         flags |= SignatureFlags::ABSTRACT;
     }
     let mut signature = Signature::new(flags);
@@ -2278,6 +2335,22 @@ fn get_signature_type_parameters(
         NodeData::MethodSignature(d) => d.type_parameters.clone(),
         NodeData::MethodDeclaration(d) => d.type_parameters.clone(),
         NodeData::FunctionType(d) | NodeData::ConstructorType(d) => d.type_parameters.clone(),
+        NodeData::ConstructorDeclaration(_) => {
+            return program
+                .arena()
+                .parent(declaration)
+                .and_then(|parent| program.symbol_of_node(parent))
+                .map(|class_sym| {
+                    let class_type =
+                        get_declared_type_of_symbol(checker, program, class_sym, None);
+                    checker
+                        .get_type(class_type)
+                        .as_object()
+                        .map(|o| o.type_parameters.clone())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+        }
         _ => None,
     };
     let mut result = Vec::new();
@@ -2321,6 +2394,26 @@ fn signature_declaration_has_abstract_modifier(
     modifiers
         .map(|m| m.modifier_flags.contains(ModifierFlags::ABSTRACT))
         .unwrap_or(false)
+}
+
+fn constructor_parent_is_abstract(program: &dyn BoundProgram, declaration: NodeId) -> bool {
+    if program.arena().kind(declaration) != Kind::Constructor {
+        return false;
+    }
+    program
+        .arena()
+        .parent(declaration)
+        .is_some_and(|parent| class_like_declaration_is_abstract(program, parent))
+}
+
+fn class_like_declaration_is_abstract(program: &dyn BoundProgram, node: NodeId) -> bool {
+    match program.arena().data(node) {
+        NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d
+            .modifiers
+            .as_ref()
+            .is_some_and(|m| m.modifier_flags.contains(ModifierFlags::ABSTRACT)),
+        _ => false,
+    }
 }
 
 // Reports whether a signature declaration's LAST parameter is a rest parameter

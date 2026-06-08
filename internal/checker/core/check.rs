@@ -35,8 +35,9 @@ use super::contextual::ContextFlags;
 use super::declared_types::{
     fill_missing_type_arguments, get_apparent_type, get_applicable_index_info,
     get_applicable_index_info_for_name, get_applicable_index_infos,
-    get_constraint_of_type_parameter, get_declaration_of_alias_symbol, get_declared_type_of_symbol,
-    get_default_from_type_parameter, has_base_type, get_index_info_of_type, get_index_infos_of_type,
+    get_class_construct_signatures, get_constraint_of_type_parameter,
+    get_declaration_of_alias_symbol, get_declared_type_of_symbol, get_default_from_type_parameter,
+    has_base_type, get_index_info_of_type, get_index_infos_of_type,
     get_index_type_of_type, get_indexed_access_type, get_min_type_argument_count,
     get_property_of_type,     get_property_of_union_or_intersection_type, get_properties_of_type,
     get_explicit_accessor_return_type, get_property_type_for_index_type, get_type_from_type_node,
@@ -2625,39 +2626,21 @@ impl Checker {
             ),
             _ => return self.error_type,
         };
-        // Type the callee and arguments so nested diagnostics surface.
         let callee_type = self.check_expression(program, callee);
-        for &arg in &args {
-            self.check_expression(program, arg);
-        }
-        let Some(class_symbol) = self.new_expression_class_symbol(program, callee) else {
-            if self
-                .get_type(callee_type)
-                .flags()
-                .intersects(TypeFlags::ANY)
-            {
-                return self.any_type;
+        if self
+            .get_type(callee_type)
+            .flags()
+            .intersects(TypeFlags::ANY)
+        {
+            for &arg in &args {
+                self.check_expression(program, arg);
             }
-            let construct_sigs = self.collect_construct_signatures_of_type(program, callee_type);
-            if !construct_sigs.is_empty() {
-                if let Some(&sig) = construct_sigs.first() {
-                    if let Some(decl) = self.signature(sig).declaration {
-                        if program.arena().kind(decl) == Kind::Constructor {
-                            if let Some(class_sym) = program.symbol_of_node(decl).and_then(|ctor_sym| {
-                                program.symbol(ctor_sym).parent
-                            }) {
-                                if !self.is_constructor_accessible(
-                                    program, node, class_sym, decl,
-                                ) {
-                                    return self.error_type;
-                                }
-                            }
-                        }
-                    }
-                }
-                // DEFER(phase-4-checker-C-D2+): construct-signature overload
-                // resolution and argument applicability.
-                return self.error_type;
+            return self.any_type;
+        }
+        let construct_sigs = self.collect_construct_signatures_of_type(program, callee_type);
+        if construct_sigs.is_empty() {
+            for &arg in &args {
+                self.check_expression(program, arg);
             }
             self.error(
                 program,
@@ -2666,29 +2649,71 @@ impl Checker {
                 &[],
             );
             return self.error_type;
-        };
-        if let Some(class_decl) = get_class_like_declaration_of_symbol(program, class_symbol) {
-            if let Some(constructor) = find_constructor_declaration(program, class_decl) {
-                if !self.is_constructor_accessible(program, node, class_symbol, constructor) {
-                    return self.error_type;
+        }
+        if let Some(&sig) = construct_sigs.first() {
+            if let Some(decl) = self.signature(sig).declaration {
+                if program.arena().kind(decl) == Kind::Constructor {
+                    if let Some(class_sym) = program.symbol_of_node(decl).and_then(|ctor_sym| {
+                        program.symbol(ctor_sym).parent
+                    }) {
+                        if !self.is_constructor_accessible(program, node, class_sym, decl) {
+                            for &arg in &args {
+                                self.check_expression(program, arg);
+                            }
+                            return self.error_type;
+                        }
+                    }
                 }
             }
         }
-        // Constructing an abstract class is an error (2511). Go checks the
-        // chosen construct signature's `abstract` flag; the reachable subset
-        // reads the `abstract` modifier off the class declaration directly.
-        if let Some(decl) = program.symbol(class_symbol).value_declaration {
-            if has_abstract_modifier(program.arena(), decl) {
-                self.error(
-                    program,
-                    node,
-                    &tsgo_diagnostics::CANNOT_CREATE_AN_INSTANCE_OF_AN_ABSTRACT_CLASS,
-                    &[],
-                );
+        if construct_sigs
+            .iter()
+            .any(|&sig| self.signature(sig).flags.contains(SignatureFlags::ABSTRACT))
+        {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::CANNOT_CREATE_AN_INSTANCE_OF_AN_ABSTRACT_CLASS,
+                &[],
+            );
+        } else if let Some(class_symbol) = self.new_expression_class_symbol(program, callee) {
+            if let Some(decl) = program.symbol(class_symbol).value_declaration {
+                if has_abstract_modifier(program.arena(), decl) {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::CANNOT_CREATE_AN_INSTANCE_OF_AN_ABSTRACT_CLASS,
+                        &[],
+                    );
+                }
             }
         }
-        let globals = program.globals();
-        get_declared_type_of_symbol(self, program, class_symbol, globals)
+        self.resolve_construct_signatures(program, node, &construct_sigs, &args)
+    }
+
+    // Resolves a `new` expression against its construct-signature candidates
+    // (Go's `resolveNewExpression` -> `resolveCall`).
+    // Go: internal/checker/checker.go:Checker.resolveNewExpression(8592)
+    fn resolve_construct_signatures(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        signatures: &[SignatureId],
+        args: &[NodeId],
+    ) -> TypeId {
+        if signatures.len() > 1 {
+            return self.resolve_overloaded_call(program, node, signatures, args);
+        }
+        let signature = signatures[0];
+        if self.has_correct_arity(signature, args.len()) {
+            self.check_applicable_signature_for_call(program, signature, args);
+        } else {
+            for &arg in args {
+                self.check_expression(program, arg);
+            }
+            self.report_argument_arity_error(program, node, signature, args);
+        }
+        self.get_return_type_of_call(program, signature, &[], &[])
     }
 
     // Resolves the class symbol a `new C(...)` callee refers to (reachable
@@ -8739,15 +8764,7 @@ impl Checker {
         program: &dyn BoundProgram,
         class_sym: SymbolId,
     ) -> Vec<SignatureId> {
-        let declared = get_declared_type_of_symbol(self, program, class_sym, program.globals());
-        let type_parameters = self
-            .get_type(declared)
-            .as_object()
-            .map(|o| o.type_parameters.clone())
-            .unwrap_or_default();
-        let mut sig = Signature::new(SignatureFlags::CONSTRUCT);
-        sig.type_parameters = type_parameters;
-        vec![self.signatures.alloc(sig)]
+        get_class_construct_signatures(self, program, class_sym)
     }
 
     // Go: internal/checker/checker.go:Checker.getConstructorsForTypeArguments(19141)
