@@ -15971,3 +15971,73 @@ fn derived_extends_null_without_super_no_2377() {
         "extends null without super must not report TS2377; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 67: constructor SPI private identifiers + new 2351 ----
+
+// Go: internal/checker/checker.go:Checker.checkConstructorDeclaration(2843)
+#[test]
+fn super_call_in_block_with_private_field_reports_2401() {
+    let codes = diag_codes_with_options(
+        "class B {}\nclass D extends B {\n  #x = 1;\n  constructor() {\n    if (true) { super(); }\n  }\n}",
+        legacy_class_field_options(),
+    );
+    assert!(
+        codes.contains(&2401),
+        "expected TS2401 for nested super() with private field; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkConstructorDeclaration(2861)
+#[test]
+fn super_after_this_with_private_field_reports_2376() {
+    let codes = diag_codes_with_options(
+        "class B {}\nclass D extends B {\n  #x = 1;\n  constructor() {\n    this;\n    super();\n  }\n}",
+        legacy_class_field_options(),
+    );
+    assert!(
+        codes.contains(&2376),
+        "expected TS2376 when this precedes super with private field; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkConstructorDeclaration(2838)
+#[test]
+fn nested_super_allowed_with_emit_standard_class_fields() {
+    let codes = diag_codes(
+        "class B {}\nclass D extends B {\n  constructor(public y: string) {\n    if (true) { super(); }\n  }\n}",
+    );
+    assert!(
+        !codes.contains(&2401),
+        "emit-standard class fields must not require root-level super(); got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression(8611)
+#[test]
+fn new_numeric_literal_reports_2351() {
+    let codes = diag_codes("new 1();");
+    assert!(
+        codes.contains(&2351),
+        "expected TS2351 for `new` on a number literal; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression(8611)
+#[test]
+fn new_non_class_identifier_reports_2351() {
+    let codes = diag_codes("const n = 1;\nnew n();");
+    assert!(
+        codes.contains(&2351),
+        "expected TS2351 for `new` on a non-class value; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression(8571)
+#[test]
+fn new_valid_class_no_2351() {
+    let codes = diag_codes("class C {}\nnew C();");
+    assert!(
+        !codes.contains(&2351),
+        "constructing a concrete class must not report TS2351; got {codes:?}"
+    );
+}

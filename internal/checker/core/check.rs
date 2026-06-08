@@ -2627,12 +2627,29 @@ impl Checker {
             _ => return self.error_type,
         };
         // Type the callee and arguments so nested diagnostics surface.
-        let _ = self.check_expression(program, callee);
+        let callee_type = self.check_expression(program, callee);
         for &arg in &args {
             self.check_expression(program, arg);
         }
         let Some(class_symbol) = self.new_expression_class_symbol(program, callee) else {
-            // DEFER: `new` on a non-class value (construct signatures / 2351).
+            if self
+                .get_type(callee_type)
+                .flags()
+                .intersects(TypeFlags::ANY)
+            {
+                return self.any_type;
+            }
+            if !self.get_construct_signatures_of_type(callee_type).is_empty() {
+                // DEFER(phase-4-checker-C-D2+): construct-signature overload
+                // resolution and accessibility (2673/2674).
+                return self.error_type;
+            }
+            self.error(
+                program,
+                callee,
+                &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CONSTRUCTABLE,
+                &[],
+            );
             return self.error_type;
         };
         // Constructing an abstract class is an error (2511). Go checks the
