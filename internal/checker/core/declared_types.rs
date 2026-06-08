@@ -3388,6 +3388,10 @@ fn get_type_from_array_type_node(
         None => return checker.error_type(),
     };
     let array_target = get_declared_type_of_symbol(checker, program, array_symbol, globals);
+    checker
+        .global_types
+        .entry(global_name.to_string())
+        .or_insert(array_target);
     checker.create_type_reference(array_target, vec![element_type])
 }
 

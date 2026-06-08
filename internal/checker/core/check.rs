@@ -14253,6 +14253,24 @@ impl Checker {
         self.get_type(t).object_flags().contains(ObjectFlags::TUPLE)
     }
 
+    // Whether a type-reference target is the global `Array` or `ReadonlyArray`
+    // interface (intrinsic stub or a synthetic `interface Array<T>` in scope).
+    fn array_reference_target_name(&self, target: TypeId) -> Option<&'static str> {
+        match self.get_type(target).intrinsic_name() {
+            Some("Array") => Some("Array"),
+            Some("ReadonlyArray") => Some("ReadonlyArray"),
+            _ => {
+                if self.global_types.get("Array") == Some(&target) {
+                    Some("Array")
+                } else if self.global_types.get("ReadonlyArray") == Some(&target) {
+                    Some("ReadonlyArray")
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     /// Reports whether `t` is an array type (Go's `isArrayType`).
     // Go: internal/checker/checker.go:Checker.isArrayType(23342)
     pub fn is_array_type(&self, t: TypeId) -> bool {
@@ -14262,8 +14280,7 @@ impl Checker {
         }
         if let Some(obj) = ty.as_object() {
             if let Some(target) = obj.target {
-                let target_name = self.get_type(target).intrinsic_name();
-                return matches!(target_name, Some("Array") | Some("ReadonlyArray"));
+                return self.array_reference_target_name(target).is_some();
             }
         }
         false
@@ -14278,7 +14295,7 @@ impl Checker {
         }
         if let Some(obj) = ty.as_object() {
             if let Some(target) = obj.target {
-                return self.get_type(target).intrinsic_name() == Some("ReadonlyArray");
+                return self.array_reference_target_name(target) == Some("ReadonlyArray");
             }
         }
         false

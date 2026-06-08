@@ -1221,6 +1221,16 @@ impl Checker {
         target: TypeId,
         relation: RelationKind,
     ) -> bool {
+        // Go's tuple `propertiesRelatedTo` arm: a readonly array source cannot
+        // satisfy a mutable tuple target before arity/element checks. When both
+        // sides are tuples, `tuple_types_related_to` checks elements first so
+        // an element mismatch (`2626`) wins over readonly (`4104`).
+        if self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
+            && self.is_array_type(source)
+            && self.readonly_blocks_mutable_assignability(source, target, relation)
+        {
+            return false;
+        }
         if self.get_type(source).object_flags().contains(ObjectFlags::TUPLE)
             && self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
         {
@@ -1253,7 +1263,7 @@ impl Checker {
                 return false;
             }
         }
-        true
+        !self.readonly_blocks_mutable_assignability(source, target, relation)
     }
 
     // Returns a property symbol's type as seen on `containing`, instantiating it
@@ -1859,6 +1869,12 @@ impl Checker {
         relation: RelationKind,
         reporter: &mut ChainReporter,
     ) -> bool {
+        if self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
+            && self.is_array_type(source)
+            && self.readonly_blocks_mutable_assignability(source, target, relation)
+        {
+            return false;
+        }
         if self.get_type(source).object_flags().contains(ObjectFlags::TUPLE)
             && self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
         {
@@ -1900,7 +1916,7 @@ impl Checker {
                 return false;
             }
         }
-        true
+        !self.readonly_blocks_mutable_assignability(source, target, relation)
     }
 
     // The reporting twin of [`properties_related_to`]'s per-property step (Go's
