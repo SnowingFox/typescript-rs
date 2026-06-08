@@ -36,7 +36,7 @@ use super::declared_types::{
     fill_missing_type_arguments, get_apparent_type, get_applicable_index_info,
     get_applicable_index_info_for_name, get_applicable_index_infos,
     get_constraint_of_type_parameter, get_declaration_of_alias_symbol, get_declared_type_of_symbol,
-    get_default_from_type_parameter, get_index_info_of_type, get_index_infos_of_type,
+    get_default_from_type_parameter, has_base_type, get_index_info_of_type, get_index_infos_of_type,
     get_index_type_of_type, get_indexed_access_type, get_min_type_argument_count,
     get_property_of_type,     get_property_of_union_or_intersection_type, get_properties_of_type,
     get_explicit_accessor_return_type, get_property_type_for_index_type, get_type_from_type_node,
@@ -2609,9 +2609,8 @@ impl Checker {
     // 2511 "Cannot create an instance of an abstract class.".
     //
     // DEFER(phase-4-checker-C-D2+): construct-signature resolution + overloads +
-    // argument applicability, constructor accessibility (private/protected,
-    // 2673/2674), `new` on a non-constructable value (2351), type-argument
-    // instantiation, and the construct-signature-level `abstract` flag path.
+    // argument applicability, type-argument instantiation, and the
+    // construct-signature-level `abstract` flag path.
     // blocked-by: construct signatures on the class value type + `new`-signature
     // applicability.
     // Go: internal/checker/checker.go:Checker.checkNewExpression / resolveNewExpression
@@ -2639,9 +2638,25 @@ impl Checker {
             {
                 return self.any_type;
             }
-            if !self.get_construct_signatures_of_type(callee_type).is_empty() {
+            let construct_sigs = self.collect_construct_signatures_of_type(program, callee_type);
+            if !construct_sigs.is_empty() {
+                if let Some(&sig) = construct_sigs.first() {
+                    if let Some(decl) = self.signature(sig).declaration {
+                        if program.arena().kind(decl) == Kind::Constructor {
+                            if let Some(class_sym) = program.symbol_of_node(decl).and_then(|ctor_sym| {
+                                program.symbol(ctor_sym).parent
+                            }) {
+                                if !self.is_constructor_accessible(
+                                    program, node, class_sym, decl,
+                                ) {
+                                    return self.error_type;
+                                }
+                            }
+                        }
+                    }
+                }
                 // DEFER(phase-4-checker-C-D2+): construct-signature overload
-                // resolution and accessibility (2673/2674).
+                // resolution and argument applicability.
                 return self.error_type;
             }
             self.error(
@@ -2652,6 +2667,13 @@ impl Checker {
             );
             return self.error_type;
         };
+        if let Some(class_decl) = get_class_like_declaration_of_symbol(program, class_symbol) {
+            if let Some(constructor) = find_constructor_declaration(program, class_decl) {
+                if !self.is_constructor_accessible(program, node, class_symbol, constructor) {
+                    return self.error_type;
+                }
+            }
+        }
         // Constructing an abstract class is an error (2511). Go checks the
         // chosen construct signature's `abstract` flag; the reachable subset
         // reads the `abstract` modifier off the class declaration directly.
@@ -2688,6 +2710,63 @@ impl Checker {
         } else {
             None
         }
+    }
+
+    // Reports whether a `new` expression may invoke `constructor` of
+    // `declaring_class_sym`, emitting 2673/2674 when it may not.
+    // Go: internal/checker/checker.go:Checker.isConstructorAccessible(8615)
+    fn is_constructor_accessible(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        declaring_class_sym: SymbolId,
+        constructor: NodeId,
+    ) -> bool {
+        let modifiers = modifier_flags_of(program.arena(), constructor);
+        if !modifiers.intersects(ModifierFlags::NON_PUBLIC_ACCESSIBILITY_MODIFIER) {
+            return true;
+        }
+        if program.arena().kind(constructor) != Kind::Constructor {
+            return true;
+        }
+        let Some(class_decl) = get_class_like_declaration_of_symbol(program, declaring_class_sym)
+        else {
+            return true;
+        };
+        if is_node_within_class(program, node, class_decl) {
+            return true;
+        }
+        if modifiers.contains(ModifierFlags::PROTECTED) {
+            if let Some(containing_class) = get_containing_class(program, node) {
+                if let Some(containing_sym) = program.symbol_of_node(containing_class) {
+                    let globals = program.globals();
+                    let containing_type =
+                        get_declared_type_of_symbol(self, program, containing_sym, globals);
+                    let target_type =
+                        get_declared_type_of_symbol(self, program, declaring_class_sym, globals);
+                    if has_base_type(self, containing_type, target_type) {
+                        return true;
+                    }
+                }
+            }
+        }
+        let class_name = super::nodebuilder::symbol_to_string(program, declaring_class_sym);
+        if modifiers.contains(ModifierFlags::PRIVATE) {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::CONSTRUCTOR_OF_CLASS_0_IS_PRIVATE_AND_ONLY_ACCESSIBLE_WITHIN_THE_CLASS_DECLARATION,
+                &[class_name.as_str()],
+            );
+        } else if modifiers.contains(ModifierFlags::PROTECTED) {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::CONSTRUCTOR_OF_CLASS_0_IS_PROTECTED_AND_ONLY_ACCESSIBLE_WITHIN_THE_CLASS_DECLARATION,
+                &[class_name.as_str()],
+            );
+        }
+        false
     }
 
     // Resolves a private-identifier property access (`obj.#name`) using lexical

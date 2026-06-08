@@ -16041,3 +16041,61 @@ fn new_valid_class_no_2351() {
         "constructing a concrete class must not report TS2351; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 68: new-expression constructor accessibility (2673/2674) ----
+
+// Go: internal/checker/checker.go:Checker.isConstructorAccessible(8615)
+#[test]
+fn new_private_constructor_outside_class_reports_2673() {
+    let codes = diag_codes("class C { private constructor() {} }\nnew C();");
+    assert!(
+        codes.contains(&2673),
+        "expected TS2673 for `new` on a private constructor outside the class; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isConstructorAccessible(8615)
+#[test]
+fn new_protected_constructor_outside_class_reports_2674() {
+    let codes = diag_codes("class C { protected constructor() {} }\nnew C();");
+    assert!(
+        codes.contains(&2674),
+        "expected TS2674 for `new` on a protected constructor outside the class; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isConstructorAccessible(8615)
+#[test]
+fn new_private_constructor_inside_class_no_2673() {
+    let codes = diag_codes(
+        "class C {\n  private constructor() {}\n  static create() { return new C(); }\n}",
+    );
+    assert!(
+        !codes.contains(&2673),
+        "private constructor must be constructible inside the declaring class; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isConstructorAccessible(8628)
+#[test]
+fn new_protected_base_constructor_in_subclass_no_2674() {
+    let codes = diag_codes(
+        "class B { protected constructor() {} }\nclass D extends B {\n  m() { new B(); }\n}",
+    );
+    assert!(
+        !codes.contains(&2674),
+        "protected base constructor must be accessible from a subclass; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isConstructorAccessible(8639)
+#[test]
+fn new_protected_constructor_in_unrelated_function_reports_2674() {
+    let codes = diag_codes(
+        "class C { protected constructor() {} }\nfunction f() { new C(); }",
+    );
+    assert!(
+        codes.contains(&2674),
+        "expected TS2674 for protected constructor outside class hierarchy; got {codes:?}"
+    );
+}

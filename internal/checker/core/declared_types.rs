@@ -992,7 +992,7 @@ fn get_target_type(checker: &Checker, t: TypeId) -> TypeId {
 
 // Returns whether `t` has `check_base` in its extends chain.
 // Go: internal/checker/checker.go:Checker.hasBaseType
-fn has_base_type(checker: &Checker, t: TypeId, check_base: TypeId) -> bool {
+pub(crate) fn has_base_type(checker: &Checker, t: TypeId, check_base: TypeId) -> bool {
     fn check(checker: &Checker, t: TypeId, check_base: TypeId) -> bool {
         let ty = checker.get_type(t);
         if let Some(members) = ty.intersection_types() {
