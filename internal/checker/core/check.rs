@@ -3136,6 +3136,13 @@ impl Checker {
         // Go's `checkIndexedAccess` types the object via `checkNonNullExpression`
         // (reports possibly-`null`/`undefined`, narrows to the non-null type).
         let object_type = self.check_non_null_expression(program, expr);
+        if self
+            .get_type(object_type)
+            .flags()
+            .intersects(TypeFlags::ANY)
+        {
+            return object_type;
+        }
         if program.arena().kind(arg) == Kind::StringLiteral {
             let name = program.arena().text(arg).to_string();
             if let Some(t) = self.get_type_of_property_of_type(program, object_type, &name) {
@@ -3156,9 +3163,20 @@ impl Checker {
         // resolved no element type; `any`/`never` indices are excluded (Go returns
         // the index/object type for them).
         // DEFER(phase-4-checker-4af+): the symbol-keyed string-index fallback and
-        // the string/number-literal `2339` property-missing path. blocked-by:
-        // ES-symbol globals (P6) + property-does-not-exist suggestions.
+        // property-does-not-exist suggestions. blocked-by: ES-symbol globals (P6).
         let index_flags = self.get_type(index_type).flags();
+        if index_flags.intersects(TypeFlags::STRING_LITERAL | TypeFlags::NUMBER_LITERAL) {
+            let prop_name =
+                super::late_binding::get_property_name_from_type(self, index_type);
+            let type_str = super::nodebuilder::type_to_string(self, program, object_type);
+            self.error(
+                program,
+                arg,
+                &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
+                &[prop_name.as_str(), type_str.as_str()],
+            );
+            return self.error_type;
+        }
         if !index_flags.intersects(
             TypeFlags::STRING_LIKE
                 | TypeFlags::NUMBER_LIKE
@@ -6265,10 +6283,9 @@ impl Checker {
     // elaboration chain (`2755`/`2756`/`2757` under `2349`).
     //
     // DEFER(phase-4-checker-4r+): construct-signature (`2350`) variants, the
-    // getter-called-as-function hint, the `await` suggestion, namespace-import
-    // related info, and the incompatible-signatures (`2758`) union branch.
-    // blocked-by: construct signatures, getter symbols, awaited types, import
-    // recovery, and overload compatibility selection.
+    // getter-called-as-function hint, the `await` suggestion, and namespace-import
+    // related info. blocked-by: construct signatures, getter symbols, awaited
+    // types, and import recovery.
     // Go: internal/checker/checker.go:Checker.invocationError(9956)
     fn invocation_error(
         &mut self,

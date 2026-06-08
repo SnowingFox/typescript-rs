@@ -16384,3 +16384,62 @@ fn call_union_mixed_callable_constituent_reports_2349_with_2756_chain() {
         "Type 'number' has no call signatures."
     );
 }
+
+// ---- T1-E batch 73: literal element-access 2339 + union 2758 ----
+
+// Go: internal/checker/checker.go:Checker.getPropertyTypeForIndexType (2339 literal)
+#[test]
+fn element_access_string_literal_missing_property_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O {\n  a: number;\n}\ndeclare const o: O;\no[\"missing\"];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+    assert_eq!(
+        diags[0].message,
+        "Property 'missing' does not exist on type 'O'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getPropertyTypeForIndexType (2339 literal)
+#[test]
+fn element_access_number_literal_missing_property_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O {\n  a: number;\n}\ndeclare const o: O;\no[0];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+    assert_eq!(
+        diags[0].message,
+        "Property '0' does not exist on type 'O'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (2758 + 2349)
+#[test]
+fn call_union_incompatible_signatures_reports_2349_with_2758_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const f: ((x: number) => void) | ((x: string) => void);\nf();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].message, "This expression is not callable.");
+    assert_eq!(diags[0].message_chain.len(), 1);
+    assert_eq!(diags[0].message_chain[0].code, 2758);
+    assert_eq!(
+        diags[0].message_chain[0].message,
+        "Each member of the union type '(x: number) => void | (x: string) => void' has signatures, but none of those signatures are compatible with each other."
+    );
+}
