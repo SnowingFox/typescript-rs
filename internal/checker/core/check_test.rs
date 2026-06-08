@@ -17180,3 +17180,143 @@ fn namespace_import_callable_export_new_skips_7038_without_construct_sigs() {
         "function export= has no construct signatures, so 7038 must not attach: {diags:?}"
     );
 }
+
+// ---- T1-E batch 81: union construct chains, void equality, invocation spans, + literals ----
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (construct union, 2759)
+#[test]
+fn new_union_no_constructable_constituent_reports_2351_with_2759_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: number | string;\nnew x();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2351, got {diags:?}");
+    assert_eq!(diags[0].code, 2351);
+    assert_eq!(diags[0].message, "This expression is not constructable.");
+    assert_eq!(diags[0].message_chain.len(), 1);
+    assert_eq!(diags[0].message_chain[0].code, 2759);
+    assert_eq!(
+        diags[0].message_chain[0].message,
+        "No constituent of type 'string | number' is constructable."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (construct union, 2760)
+#[test]
+fn new_union_mixed_constructable_constituent_reports_2351_with_2760_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const f: (new () => void) | number;\nnew f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2351, got {diags:?}");
+    assert_eq!(diags[0].code, 2351);
+    assert_eq!(diags[0].message_chain.len(), 1);
+    assert_eq!(diags[0].message_chain[0].code, 2760);
+    assert_eq!(
+        diags[0].message_chain[0].message,
+        "Not all constituents of type 'number | new () => void' are constructable."
+    );
+    assert_eq!(diags[0].message_chain[0].next.len(), 1);
+    assert_eq!(diags[0].message_chain[0].next[0].code, 2761);
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (void equality, 2367)
+#[test]
+fn void_equality_with_number_reports_2367() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() === 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2367, got {diags:?}");
+    assert_eq!(diags[0].code, 2367);
+    assert_eq!(
+        diags[0].message,
+        "This comparison appears to be unintentional because the types 'void' and 'number' have no overlap."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (property-access target)
+#[test]
+fn invocation_error_on_property_access_targets_name_node() {
+    let src = "declare const o: { m: number };\no.m();";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    let m_pos = src.find("m()").expect("m() in source") as i32;
+    assert_eq!(
+        diags[0].start, m_pos,
+        "diagnostic must target the property name, not the whole access; got start={} src={src:?}",
+        diags[0].start
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (construct union, 2762)
+#[test]
+fn new_union_incompatible_construct_signatures_reports_2351_with_2762_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const f: (new (x: number) => void) | (new (x: string) => void);\nnew f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2351, got {diags:?}");
+    assert_eq!(diags[0].code, 2351);
+    assert_eq!(diags[0].message_chain.len(), 1);
+    assert_eq!(diags[0].message_chain[0].code, 2762);
+    assert!(
+        diags[0].message_chain[0]
+            .message
+            .contains("has construct signatures, but none of those signatures are compatible"),
+        "got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void left, 2362)
+#[test]
+fn multiply_void_operand_reports_2362_on_left() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() * 2;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2362, got {diags:?}");
+    assert_eq!(diags[0].code, 2362);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.hasExcessProperties (2561 on union discriminant)
+#[test]
+fn object_literal_excess_on_union_discriminant_misspelling_reports_2561() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = { kind: \"a\"; prop1: number } | { kind: \"b\" };\n\
+         const t: T = { kind: \"a\", prop: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2561);
+    assert_eq!(
+        diags[0].message,
+        "Object literal may only specify known properties, but 'prop' does not exist in type '{ prop1: number; kind: \"a\"; }'. Did you mean to write 'prop1'?"
+    );
+}

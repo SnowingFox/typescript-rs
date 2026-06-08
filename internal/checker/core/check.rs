@@ -6748,6 +6748,24 @@ impl Checker {
         diagnostic.add_related_info(related);
     }
 
+    // When a property-access expression is the callee of a call, Go reports the
+    // invocation error on the member name, not the whole `obj.prop` span.
+    // Go: internal/checker/checker.go:Checker.invocationErrorDetails(9905)
+    fn invocation_error_diagnostic_target(
+        program: &dyn BoundProgram,
+        error_target: NodeId,
+    ) -> NodeId {
+        if let Some(parent) = program.arena().parent(error_target) {
+            if program.arena().kind(parent) == Kind::CallExpression {
+                if let NodeData::PropertyAccessExpression(d) = program.arena().data(error_target)
+                {
+                    return d.name;
+                }
+            }
+        }
+        error_target
+    }
+
     // Builds the not-callable / not-constructable diagnostic chain for
     // `error_target` (Go's `invocationErrorDetails`).
     // Go: internal/checker/checker.go:Checker.invocationErrorDetails(9900)
@@ -6758,6 +6776,7 @@ impl Checker {
         apparent_type: TypeId,
         kind: InvocationKind,
     ) -> Diagnostic {
+        let diagnostic_target = Self::invocation_error_diagnostic_target(program, error_target);
         let apparent = get_apparent_type(self, apparent_type);
         let awaited = self.get_awaited_type_no_alias(program, apparent);
         let maybe_missing_await = matches!(kind, InvocationKind::Call)
@@ -6894,7 +6913,7 @@ impl Checker {
                 next: Vec::new(),
             });
         }
-        let loc = program.arena().loc(error_target);
+        let loc = program.arena().loc(diagnostic_target);
         let mut diagnostic = Diagnostic {
             code: head_message.code(),
             category: head_message.category(),
