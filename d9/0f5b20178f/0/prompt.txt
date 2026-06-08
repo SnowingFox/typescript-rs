@@ -1,0 +1,3 @@
+/session-handoff  ./target/release/tsgo --noEmit /tmp/lib.dom.copy.d.ts
+
+这玩意为什么卡主不动了？
