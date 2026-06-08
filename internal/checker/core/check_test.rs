@@ -15916,3 +15916,58 @@ fn ambient_module_nested_in_namespace_reports_2435() {
         "Ambient modules cannot be nested in other modules or namespaces."
     );
 }
+
+// ---- T1-E batch 66: constructor super() SPI flow (2376/2401/17005) ----
+
+fn legacy_class_field_options() -> CompilerOptions {
+    CompilerOptions {
+        use_define_for_class_fields: Tristate::False,
+        ..CompilerOptions::default()
+    }
+}
+
+// Go: internal/checker/checker.go:Checker.checkConstructorDeclaration(2843)
+#[test]
+fn super_call_in_block_with_parameter_property_reports_2401() {
+    let codes = diag_codes_with_options(
+        "class B {}\nclass D extends B {\n  constructor(public y: string) {\n    if (true) { super(); }\n  }\n}",
+        legacy_class_field_options(),
+    );
+    assert!(
+        codes.contains(&2401),
+        "expected TS2401 for nested super() with parameter property; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkConstructorDeclaration(2861)
+#[test]
+fn super_after_this_with_initialized_property_reports_2376() {
+    let codes = diag_codes_with_options(
+        "class B {}\nclass D extends B {\n  a = 1;\n  constructor() {\n    this.a = 3;\n    super();\n  }\n}",
+        legacy_class_field_options(),
+    );
+    assert!(
+        codes.contains(&2376),
+        "expected TS2376 when this precedes super with initialized property; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkConstructorDeclaration(2831)
+#[test]
+fn super_call_when_extends_null_reports_17005() {
+    let codes = diag_codes("class C extends null { constructor() { super(); } }");
+    assert!(
+        codes.contains(&17005),
+        "expected TS17005 for super() when class extends null; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkConstructorDeclaration(2866)
+#[test]
+fn derived_extends_null_without_super_no_2377() {
+    let codes = diag_codes("class C extends null { constructor() {} }");
+    assert!(
+        !codes.contains(&2377),
+        "extends null without super must not report TS2377; got {codes:?}"
+    );
+}

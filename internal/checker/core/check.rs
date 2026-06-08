@@ -8352,7 +8352,42 @@ impl Checker {
         if get_extends_heritage_clause_element(program, class_decl).is_none() {
             return;
         }
-        if find_first_super_call(program, body).is_none() {
+        let class_extends_null = self.class_declaration_extends_null(program, class_decl);
+        let super_call = find_first_super_call(program, body);
+        if let Some(super_call) = super_call {
+            if class_extends_null {
+                self.error(
+                    program,
+                    super_call,
+                    &tsgo_diagnostics::A_CONSTRUCTOR_CANNOT_CONTAIN_A_SUPER_CALL_WHEN_ITS_CLASS_EXTENDS_NULL,
+                    &[],
+                );
+            }
+            let super_call_should_be_root_level = !self.compiler_options().get_emit_standard_class_fields()
+                && (class_has_initialized_property_or_private_identifier(program, class_decl)
+                    || constructor_has_parameter_property(program, node));
+            if super_call_should_be_root_level {
+                if !super_call_is_root_level_in_constructor(program, super_call, body) {
+                    self.error(
+                        program,
+                        super_call,
+                        &tsgo_diagnostics::A_SUPER_CALL_MUST_BE_A_ROOT_LEVEL_STATEMENT_WITHIN_A_CONSTRUCTOR_OF_A_DERIVED_CLASS_THAT_CONTAINS_INITIALIZED_PROPERTIES_PARAMETER_PROPERTIES_OR_PRIVATE_IDENTIFIERS,
+                        &[],
+                    );
+                } else if find_super_call_statement_after_super_or_this_reference(
+                    program, node, body,
+                )
+                .is_none()
+                {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::A_SUPER_CALL_MUST_BE_THE_FIRST_STATEMENT_IN_THE_CONSTRUCTOR_TO_REFER_TO_SUPER_OR_THIS_WHEN_A_DERIVED_CLASS_CONTAINS_INITIALIZED_PROPERTIES_PARAMETER_PROPERTIES_OR_PRIVATE_IDENTIFIERS,
+                        &[],
+                    );
+                }
+            }
+        } else if !class_extends_null {
             self.error(
                 program,
                 node,
@@ -8537,6 +8572,22 @@ impl Checker {
         }
         self.set_resolved_base_constructor_type(class_type, base_constructor_type);
         base_constructor_type
+    }
+
+    /// Reports whether `class_decl` extends `null` (base constructor type is null).
+    // Go: internal/checker/checker.go:Checker.classDeclarationExtendsNull(12231)
+    fn class_declaration_extends_null(
+        &mut self,
+        program: &dyn BoundProgram,
+        class_decl: NodeId,
+    ) -> bool {
+        let Some(sym) = program.symbol_of_node(class_decl) else {
+            return false;
+        };
+        let class_type = get_declared_type_of_symbol(self, program, sym, program.globals());
+        let base_constructor_type =
+            self.get_base_constructor_type_of_class(program, class_type);
+        base_constructor_type == self.null_type()
     }
 
     fn set_resolved_base_constructor_type(&mut self, class_type: TypeId, resolved: TypeId) {
@@ -14810,6 +14861,118 @@ fn get_extends_heritage_clause_element(program: &dyn BoundProgram, node: NodeId)
         }
     }
     None
+}
+
+/// Reports whether `member` is a non-static instance property with an initializer
+/// or a private-identifier class element.
+// Go: internal/checker/checker.go:isInstancePropertyWithInitializerOrPrivateIdentifierProperty(2888)
+fn is_instance_property_with_initializer_or_private_identifier(
+    program: &dyn BoundProgram,
+    member: NodeId,
+) -> bool {
+    if is_private_identifier_class_element_declaration(program, member) {
+        return true;
+    }
+    let NodeData::PropertyDeclaration(d) = program.arena().data(member) else {
+        return false;
+    };
+    !has_static_modifier(program.arena(), member) && d.initializer.is_some()
+}
+
+/// Reports whether `class_decl` has an initialized instance property or private identifier.
+fn class_has_initialized_property_or_private_identifier(
+    program: &dyn BoundProgram,
+    class_decl: NodeId,
+) -> bool {
+    object_type_member_nodes(program, class_decl)
+        .into_iter()
+        .any(|member| is_instance_property_with_initializer_or_private_identifier(program, member))
+}
+
+/// Reports whether `constructor` declares a parameter property.
+fn constructor_has_parameter_property(program: &dyn BoundProgram, constructor: NodeId) -> bool {
+    let NodeData::ConstructorDeclaration(d) = program.arena().data(constructor) else {
+        return false;
+    };
+    d.parameters.nodes.iter().any(|&param| {
+        is_parameter_property_declaration(program, param)
+    })
+}
+
+/// Reports whether `super_call` is a direct child expression statement of `body`.
+// Go: internal/checker/checker.go:superCallIsRootLevelInConstructor(2892)
+fn super_call_is_root_level_in_constructor(
+    program: &dyn BoundProgram,
+    super_call: NodeId,
+    body: NodeId,
+) -> bool {
+    let Some(mut current) = program.arena().parent(super_call) else {
+        return false;
+    };
+    while program.arena().kind(current) == Kind::ParenthesizedExpression {
+        current = match program.arena().parent(current) {
+            Some(parent) => parent,
+            None => return false,
+        };
+    }
+    program.arena().kind(current) == Kind::ExpressionStatement
+        && program.arena().parent(current) == Some(body)
+}
+
+/// Returns the first expression-statement `super()` in `body`, unless a prior
+/// statement immediately references `super` or `this`.
+// Go: internal/checker/checker.go:Checker.checkConstructorDeclaration(2849)
+fn find_super_call_statement_after_super_or_this_reference(
+    program: &dyn BoundProgram,
+    constructor: NodeId,
+    body: NodeId,
+) -> Option<NodeId> {
+    let NodeData::Block(d) = program.arena().data(body) else {
+        return None;
+    };
+    for &statement in &d.list.nodes {
+        if let NodeData::ExpressionStatement(expr_stmt) = program.arena().data(statement) {
+            let expr = skip_outer_expressions(program, expr_stmt.expression);
+            if is_super_call(program, expr) {
+                return Some(statement);
+            }
+        }
+        if node_immediately_references_super_or_this(program, statement) {
+            break;
+        }
+    }
+    let _ = constructor;
+    None
+}
+
+/// Reports whether `node` or a direct child references `super` or `this`.
+// Go: internal/checker/checker.go:nodeImmediatelyReferencesSuperOrThis(2897)
+fn node_immediately_references_super_or_this(program: &dyn BoundProgram, node: NodeId) -> bool {
+    match program.arena().kind(node) {
+        Kind::SuperKeyword | Kind::ThisKeyword => true,
+        Kind::ArrowFunction
+        | Kind::FunctionDeclaration
+        | Kind::FunctionExpression
+        | Kind::PropertyDeclaration => false,
+        Kind::Block => {
+            if let Some(parent) = program.arena().parent(node) {
+                matches!(
+                    program.arena().kind(parent),
+                    Kind::Constructor
+                        | Kind::MethodDeclaration
+                        | Kind::GetAccessor
+                        | Kind::SetAccessor
+                )
+            } else {
+                false
+            }
+        }
+        _ => program
+            .arena()
+            .for_each_child(node, &mut |child| {
+                node_immediately_references_super_or_this(program, child)
+            }),
+    }
 }
 
 /// Locates the first `super()` call in `node`'s subtree (skipping nested functions).
