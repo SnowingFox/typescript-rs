@@ -3155,9 +3155,9 @@ impl Checker {
         // 4af subset reports 2538 for a non-string/number/symbol-like index that
         // resolved no element type; `any`/`never` indices are excluded (Go returns
         // the index/object type for them).
-        // DEFER(phase-4-checker-4af+): the `7053` implicit-any element access
-        // (`noImplicitAny` wiring) and the symbol-keyed string-index fallback.
-        // blocked-by: `noImplicitAny` option plumbing + ES-symbol globals (P6).
+        // DEFER(phase-4-checker-4af+): the symbol-keyed string-index fallback and
+        // the string/number-literal `2339` property-missing path. blocked-by:
+        // ES-symbol globals (P6) + property-does-not-exist suggestions.
         let index_flags = self.get_type(index_type).flags();
         if !index_flags.intersects(
             TypeFlags::STRING_LIKE
@@ -3172,6 +3172,20 @@ impl Checker {
                 arg,
                 &tsgo_diagnostics::TYPE_0_CANNOT_BE_USED_AS_AN_INDEX_TYPE,
                 &[type_str.as_str()],
+            );
+            return self.error_type;
+        }
+        if self.no_implicit_any()
+            && index_flags.intersects(TypeFlags::STRING_LIKE | TypeFlags::NUMBER_LIKE)
+            && !index_flags.intersects(TypeFlags::ANY | TypeFlags::NEVER)
+            && index_flags.intersects(TypeFlags::STRING | TypeFlags::NUMBER)
+        {
+            self.report_element_access_implicit_any_index_error(
+                program,
+                node,
+                arg,
+                object_type,
+                index_type,
             );
         }
         self.error_type
@@ -4698,12 +4712,7 @@ impl Checker {
                     &[type_str.as_str()],
                 );
             } else if func_type != self.error_type {
-                self.error(
-                    program,
-                    callee,
-                    &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE,
-                    &[],
-                );
+                self.invocation_error(program, callee, func_type);
             }
             return self.error_type;
         };
@@ -4801,12 +4810,7 @@ impl Checker {
         let substitutions = self.tagged_template_substitution_expressions(program, template);
         let signatures = self.get_signatures_of_type(tag_type);
         if signatures.is_empty() {
-            self.error(
-                program,
-                tag,
-                &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE,
-                &[],
-            );
+            self.invocation_error(program, tag, tag_type);
             return self.error_type;
         }
         if signatures.len() > 1 {
@@ -6252,6 +6256,163 @@ impl Checker {
             length: loc.end() - loc.pos(),
             related_information: Vec::new(),
             message_chain: vec![mid],
+        };
+        self.add_diagnostic(program, diagnostic);
+    }
+
+    // Records the not-callable diagnostic for a call/tag callee (Go's
+    // `invocationError` -> `invocationErrorDetails`), including the union-type
+    // elaboration chain (`2755`/`2756`/`2757` under `2349`).
+    //
+    // DEFER(phase-4-checker-4r+): construct-signature (`2350`) variants, the
+    // getter-called-as-function hint, the `await` suggestion, namespace-import
+    // related info, and the incompatible-signatures (`2758`) union branch.
+    // blocked-by: construct signatures, getter symbols, awaited types, import
+    // recovery, and overload compatibility selection.
+    // Go: internal/checker/checker.go:Checker.invocationError(9956)
+    fn invocation_error(
+        &mut self,
+        program: &dyn BoundProgram,
+        error_target: NodeId,
+        apparent_type: TypeId,
+    ) {
+        let diagnostic = self.invocation_error_details(program, error_target, apparent_type);
+        self.add_diagnostic(program, diagnostic);
+    }
+
+    // Builds the not-callable diagnostic chain for `error_target` (Go's
+    // `invocationErrorDetails`).
+    // Go: internal/checker/checker.go:Checker.invocationErrorDetails(9900)
+    fn invocation_error_details(
+        &mut self,
+        program: &dyn BoundProgram,
+        error_target: NodeId,
+        apparent_type: TypeId,
+    ) -> Diagnostic {
+        let apparent = get_apparent_type(self, apparent_type);
+        let head_message = &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE;
+        let mut chain: Option<DiagnosticMessageChain> = None;
+        if self.get_type(apparent).flags().contains(TypeFlags::UNION) {
+            let constituents = self
+                .get_type(apparent)
+                .union_types()
+                .unwrap_or(&[])
+                .to_vec();
+            let apparent_str = super::nodebuilder::type_to_string(self, program, apparent);
+            let mut has_signatures = false;
+            for constituent in constituents {
+                if !self.get_signatures_of_type(constituent).is_empty() {
+                    has_signatures = true;
+                    if chain.is_some() {
+                        break;
+                    }
+                } else if chain.is_none() {
+                    let constituent_str =
+                        super::nodebuilder::type_to_string(self, program, constituent);
+                    let leaf_message = &tsgo_diagnostics::TYPE_0_HAS_NO_CALL_SIGNATURES;
+                    let leaf = DiagnosticMessageChain {
+                        code: leaf_message.code(),
+                        category: leaf_message.category(),
+                        message: tsgo_diagnostics::format(
+                            &leaf_message.to_string(),
+                            &[constituent_str.as_str()],
+                        ),
+                        next: Vec::new(),
+                    };
+                    let mid_message = &tsgo_diagnostics::NOT_ALL_CONSTITUENTS_OF_TYPE_0_ARE_CALLABLE;
+                    chain = Some(DiagnosticMessageChain {
+                        code: mid_message.code(),
+                        category: mid_message.category(),
+                        message: tsgo_diagnostics::format(
+                            &mid_message.to_string(),
+                            &[apparent_str.as_str()],
+                        ),
+                        next: vec![leaf],
+                    });
+                    if has_signatures {
+                        break;
+                    }
+                }
+            }
+            if !has_signatures {
+                let message = &tsgo_diagnostics::NO_CONSTITUENT_OF_TYPE_0_IS_CALLABLE;
+                chain = Some(DiagnosticMessageChain {
+                    code: message.code(),
+                    category: message.category(),
+                    message: tsgo_diagnostics::format(&message.to_string(), &[apparent_str.as_str()]),
+                    next: Vec::new(),
+                });
+            } else if chain.is_none() {
+                let message = &tsgo_diagnostics::EACH_MEMBER_OF_THE_UNION_TYPE_0_HAS_SIGNATURES_BUT_NONE_OF_THOSE_SIGNATURES_ARE_COMPATIBLE_WITH_EACH_OTHER;
+                chain = Some(DiagnosticMessageChain {
+                    code: message.code(),
+                    category: message.category(),
+                    message: tsgo_diagnostics::format(&message.to_string(), &[apparent_str.as_str()]),
+                    next: Vec::new(),
+                });
+            }
+        } else {
+            let type_str = super::nodebuilder::type_to_string(self, program, apparent);
+            let message = &tsgo_diagnostics::TYPE_0_HAS_NO_CALL_SIGNATURES;
+            chain = Some(DiagnosticMessageChain {
+                code: message.code(),
+                category: message.category(),
+                message: tsgo_diagnostics::format(&message.to_string(), &[type_str.as_str()]),
+                next: Vec::new(),
+            });
+        }
+        let loc = program.arena().loc(error_target);
+        Diagnostic {
+            code: head_message.code(),
+            category: head_message.category(),
+            message: tsgo_diagnostics::format(&head_message.to_string(), &[]),
+            start: loc.pos(),
+            length: loc.end() - loc.pos(),
+            related_information: Vec::new(),
+            message_chain: chain.into_iter().collect(),
+        }
+    }
+
+    // Reports the `7053` implicit-any element-access error when a `string`/`number`
+    // index cannot be applied to `object_type` (Go's
+    // `getPropertyTypeForIndexType` `noImplicitAny` branch with the `7054`
+    // inner diagnostic for primitive `string`/`number` indices).
+    // Go: internal/checker/checker.go:Checker.getPropertyTypeForIndexType(26965)
+    fn report_element_access_implicit_any_index_error(
+        &mut self,
+        program: &dyn BoundProgram,
+        access_node: NodeId,
+        _index_node: NodeId,
+        object_type: TypeId,
+        index_type: TypeId,
+    ) {
+        let object_str = super::nodebuilder::type_to_string(self, program, object_type);
+        let index_str = super::nodebuilder::type_to_string(self, program, index_type);
+        let inner_message =
+            &tsgo_diagnostics::NO_INDEX_SIGNATURE_WITH_A_PARAMETER_OF_TYPE_0_WAS_FOUND_ON_TYPE_1;
+        let inner = DiagnosticMessageChain {
+            code: inner_message.code(),
+            category: inner_message.category(),
+            message: tsgo_diagnostics::format(
+                &inner_message.to_string(),
+                &[index_str.as_str(), object_str.as_str()],
+            ),
+            next: Vec::new(),
+        };
+        let head_message =
+            &tsgo_diagnostics::ELEMENT_IMPLICITLY_HAS_AN_ANY_TYPE_BECAUSE_EXPRESSION_OF_TYPE_0_CAN_T_BE_USED_TO_INDEX_TYPE_1;
+        let loc = program.arena().loc(access_node);
+        let diagnostic = Diagnostic {
+            code: head_message.code(),
+            category: head_message.category(),
+            message: tsgo_diagnostics::format(
+                &head_message.to_string(),
+                &[index_str.as_str(), object_str.as_str()],
+            ),
+            start: loc.pos(),
+            length: loc.end() - loc.pos(),
+            related_information: Vec::new(),
+            message_chain: vec![inner],
         };
         self.add_diagnostic(program, diagnostic);
     }

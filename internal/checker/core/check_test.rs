@@ -16310,3 +16310,77 @@ fn call_on_function_value_no_invocation_error() {
         "a callable function must not report invocation errors; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 72: element access 7053 + union invocation ----
+
+// Go: internal/checker/checker.go:Checker.getPropertyTypeForIndexType (7053/7054 chain)
+#[test]
+fn element_access_string_index_no_signature_reports_7053() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O {\n  a: number;\n}\ndeclare const o: O;\ndeclare const k: string;\no[k];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 7053, got {diags:?}");
+    assert_eq!(diags[0].code, 7053);
+    assert_eq!(
+        diags[0].message,
+        "Element implicitly has an 'any' type because expression of type 'string' can't be used to index type 'O'."
+    );
+    assert_eq!(diags[0].message_chain.len(), 1);
+    assert_eq!(diags[0].message_chain[0].code, 7054);
+    assert_eq!(
+        diags[0].message_chain[0].message,
+        "No index signature with a parameter of type 'string' was found on type 'O'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (2755 + 2349)
+#[test]
+fn call_union_no_callable_constituent_reports_2349_with_2755_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: number | string;\nx();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].message, "This expression is not callable.");
+    assert_eq!(diags[0].message_chain.len(), 1);
+    assert_eq!(diags[0].message_chain[0].code, 2755);
+    assert_eq!(
+        diags[0].message_chain[0].message,
+        "No constituent of type 'string | number' is callable."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (2756/2757 + 2349)
+#[test]
+fn call_union_mixed_callable_constituent_reports_2349_with_2756_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const f: (() => void) | number;\nf();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].message, "This expression is not callable.");
+    assert_eq!(diags[0].message_chain.len(), 1);
+    assert_eq!(diags[0].message_chain[0].code, 2756);
+    assert_eq!(
+        diags[0].message_chain[0].message,
+        "Not all constituents of type 'number | () => void' are callable."
+    );
+    assert_eq!(diags[0].message_chain[0].next.len(), 1);
+    assert_eq!(diags[0].message_chain[0].next[0].code, 2757);
+    assert_eq!(
+        diags[0].message_chain[0].next[0].message,
+        "Type 'number' has no call signatures."
+    );
+}
