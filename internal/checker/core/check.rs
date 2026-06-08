@@ -236,6 +236,14 @@ struct ObjectLiteralMember {
     computed_name_type: Option<TypeId>,
 }
 
+// Which signature list an invocation diagnostic consults (Go's `SignatureKind`).
+// Go: internal/checker/types.go:SignatureKind
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum InvocationKind {
+    Call,
+    Construct,
+}
+
 impl Checker {
     /// Computes the type of an expression `node` (Go's `checkExpression`).
     ///
@@ -1884,7 +1892,7 @@ impl Checker {
     // arm, the JSX-attribute message variant, and the `Did you mean to write`
     // suggestion variant (`2561`).
     // blocked-by: JS literals, lib globals, union discriminant reduction, JSX
-    // typing, and property suggestions.
+    // typing.
     // Go: internal/checker/relater.go:Relater.hasExcessProperties(2695)
     fn has_excess_properties(
         &mut self,
@@ -1935,12 +1943,25 @@ impl Checker {
                 // Go's `c.error(errorNode, …)` uses `GetErrorRangeForNode` =
                 // `skipTrivia(pos)..end`, so the span starts at the property name,
                 // not the leading whitespace before it.
-                self.error_skipping_leading_trivia(
+                if let Some(suggested) = self.get_suggestion_for_nonexistent_property_name(
                     program,
-                    error_node,
-                    &tsgo_diagnostics::OBJECT_LITERAL_MAY_ONLY_SPECIFY_KNOWN_PROPERTIES_AND_0_DOES_NOT_EXIST_IN_TYPE_1,
-                    &[name.as_str(), target_str.as_str()],
-                );
+                    &name,
+                    error_target,
+                ) {
+                    self.error_skipping_leading_trivia(
+                        program,
+                        error_node,
+                        &tsgo_diagnostics::OBJECT_LITERAL_MAY_ONLY_SPECIFY_KNOWN_PROPERTIES_BUT_0_DOES_NOT_EXIST_IN_TYPE_1_DID_YOU_MEAN_TO_WRITE_2,
+                        &[name.as_str(), target_str.as_str(), suggested.as_str()],
+                    );
+                } else {
+                    self.error_skipping_leading_trivia(
+                        program,
+                        error_node,
+                        &tsgo_diagnostics::OBJECT_LITERAL_MAY_ONLY_SPECIFY_KNOWN_PROPERTIES_AND_0_DOES_NOT_EXIST_IN_TYPE_1,
+                        &[name.as_str(), target_str.as_str()],
+                    );
+                }
                 return true;
             }
         }
@@ -1960,6 +1981,29 @@ impl Checker {
         } else {
             program.symbol(symbol).name.clone()
         }
+    }
+
+    // Returns a close-spelling property name on `containing_type`, or `None`
+    // when no candidate is near enough (Go's `getSuggestionForNonexistentProperty`).
+    // Go: internal/checker/checker.go:Checker.getSuggestionForNonexistentProperty(27041)
+    fn get_suggestion_for_nonexistent_property_name(
+        &mut self,
+        program: &dyn BoundProgram,
+        prop_name: &str,
+        containing_type: TypeId,
+    ) -> Option<String> {
+        let apparent = get_apparent_type(self, containing_type);
+        let candidates: Vec<SymbolId> = get_properties_of_type(self, apparent)
+            .into_iter()
+            .map(|(_, sym)| sym)
+            .collect();
+        super::name_resolution::get_spelling_suggestion_for_name(
+            program,
+            prop_name,
+            &candidates,
+            SymbolFlags::VALUE,
+        )
+        .map(|sym| program.symbol(sym).name.clone())
     }
 
     // Widens an inferred declaration type (the reachable subset of Go's
@@ -2709,11 +2753,11 @@ impl Checker {
             for &arg in &args {
                 self.check_expression(program, arg);
             }
-            self.error(
+            self.invocation_error(
                 program,
                 callee,
-                &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CONSTRUCTABLE,
-                &[],
+                callee_type,
+                InvocationKind::Construct,
             );
             return self.error_type;
         }
@@ -5031,7 +5075,7 @@ impl Checker {
                     &[type_str.as_str()],
                 );
             } else if func_type != self.error_type {
-                self.invocation_error(program, callee, func_type);
+                self.invocation_error(program, callee, func_type, InvocationKind::Call);
             }
             return self.error_type;
         };
@@ -5129,7 +5173,7 @@ impl Checker {
         let substitutions = self.tagged_template_substitution_expressions(program, template);
         let signatures = self.get_signatures_of_type(tag_type);
         if signatures.is_empty() {
-            self.invocation_error(program, tag, tag_type);
+            self.invocation_error(program, tag, tag_type, InvocationKind::Call);
             return self.error_type;
         }
         if signatures.len() > 1 {
@@ -6630,31 +6674,45 @@ impl Checker {
         self.add_diagnostic(program, diagnostic);
     }
 
-    // Records the not-callable diagnostic for a call/tag callee (Go's
-    // `invocationError` -> `invocationErrorDetails`), including the union-type
-    // elaboration chain (`2755`/`2756`/`2757` under `2349`).
-    //
-    // DEFER(phase-4-checker-4r+): construct-signature (`2350`) variants.
-    // blocked-by: construct signatures on invocation diagnostics.
+    // Records the not-callable / not-constructable diagnostic (Go's
+    // `invocationError` -> `invocationErrorDetails`), including union-type
+    // elaboration chains.
     // Go: internal/checker/checker.go:Checker.invocationError(9956)
     fn invocation_error(
         &mut self,
         program: &dyn BoundProgram,
         error_target: NodeId,
         apparent_type: TypeId,
+        kind: InvocationKind,
     ) {
-        let mut diagnostic = self.invocation_error_details(program, error_target, apparent_type);
-        self.invocation_error_recovery(program, apparent_type, &mut diagnostic);
+        let mut diagnostic =
+            self.invocation_error_details(program, error_target, apparent_type, kind);
+        self.invocation_error_recovery(program, apparent_type, kind, &mut diagnostic);
         self.add_diagnostic(program, diagnostic);
     }
 
+    fn signatures_for_invocation(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        kind: InvocationKind,
+    ) -> Vec<SignatureId> {
+        match kind {
+            InvocationKind::Call => self.get_signatures_of_type(t),
+            InvocationKind::Construct => {
+                self.collect_construct_signatures_of_type(program, t)
+            }
+        }
+    }
+
     // Attaches namespace-import recovery related information when a wrapped
-    // module export was called as a function (Go's `invocationErrorRecovery`).
+    // module export was called or constructed (Go's `invocationErrorRecovery`).
     // Go: internal/checker/checker.go:Checker.invocationErrorRecovery(9965)
     fn invocation_error_recovery(
         &mut self,
         program: &dyn BoundProgram,
         apparent_type: TypeId,
+        kind: InvocationKind,
         diagnostic: &mut Diagnostic,
     ) {
         let Some(symbol) = self.get_type(apparent_type).symbol else {
@@ -6666,11 +6724,21 @@ impl Checker {
         let Some(import_node) = links.originating_import else {
             return;
         };
-        // `exportTypeLinks` with an originating import is only recorded by
-        // namespace-import ES module wrapping of a callable export; the wrap
-        // decision already required callability (Go's `invocationErrorRecovery`
-        // re-checks target signatures — deferred until cross-file signature
-        // collection matches Go end-to-end).
+        let Some(target_sym) = links.target else {
+            return;
+        };
+        let target_type = super::declared_types::get_type_of_symbol(
+            self,
+            program,
+            target_sym,
+            program.globals(),
+        );
+        if self
+            .signatures_for_invocation(program, target_type, kind)
+            .is_empty()
+        {
+            return;
+        }
         let related = self.diagnostic_for_node(
             program,
             import_node,
@@ -6680,38 +6748,47 @@ impl Checker {
         diagnostic.add_related_info(related);
     }
 
-    // Builds the not-callable diagnostic chain for `error_target` (Go's
-    // `invocationErrorDetails`).
+    // Builds the not-callable / not-constructable diagnostic chain for
+    // `error_target` (Go's `invocationErrorDetails`).
     // Go: internal/checker/checker.go:Checker.invocationErrorDetails(9900)
     fn invocation_error_details(
         &mut self,
         program: &dyn BoundProgram,
         error_target: NodeId,
         apparent_type: TypeId,
+        kind: InvocationKind,
     ) -> Diagnostic {
         let apparent = get_apparent_type(self, apparent_type);
         let awaited = self.get_awaited_type_no_alias(program, apparent);
-        let maybe_missing_await =
-            awaited != apparent && !self.get_signatures_of_type(awaited).is_empty();
-        let mut head_message = &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE;
-        if let Some(parent) = program.arena().parent(error_target) {
-            if program.arena().kind(parent) == Kind::CallExpression {
-                let zero_arg_call = matches!(
-                    program.arena().data(parent),
-                    NodeData::CallExpression(d) if d.arguments.nodes.is_empty()
-                );
-                if zero_arg_call {
-                    if let Some(sym) = super::symbols_query::get_symbol_at_location(
-                        self,
-                        program,
-                        error_target,
-                        program.globals(),
-                    ) {
-                        if self
-                            .resolved_symbol_flags(program, sym)
-                            .contains(SymbolFlags::GET_ACCESSOR)
-                        {
-                            head_message = &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE_BECAUSE_IT_IS_A_GET_ACCESSOR_DID_YOU_MEAN_TO_USE_IT_WITHOUT;
+        let maybe_missing_await = matches!(kind, InvocationKind::Call)
+            && awaited != apparent
+            && !self
+                .signatures_for_invocation(program, awaited, kind)
+                .is_empty();
+        let mut head_message = match kind {
+            InvocationKind::Call => &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE,
+            InvocationKind::Construct => &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CONSTRUCTABLE,
+        };
+        if matches!(kind, InvocationKind::Call) {
+            if let Some(parent) = program.arena().parent(error_target) {
+                if program.arena().kind(parent) == Kind::CallExpression {
+                    let zero_arg_call = matches!(
+                        program.arena().data(parent),
+                        NodeData::CallExpression(d) if d.arguments.nodes.is_empty()
+                    );
+                    if zero_arg_call {
+                        if let Some(sym) = super::symbols_query::get_symbol_at_location(
+                            self,
+                            program,
+                            error_target,
+                            program.globals(),
+                        ) {
+                            if self
+                                .resolved_symbol_flags(program, sym)
+                                .contains(SymbolFlags::GET_ACCESSOR)
+                            {
+                                head_message = &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE_BECAUSE_IT_IS_A_GET_ACCESSOR_DID_YOU_MEAN_TO_USE_IT_WITHOUT;
+                            }
                         }
                     }
                 }
@@ -6727,7 +6804,10 @@ impl Checker {
             let apparent_str = super::nodebuilder::type_to_string(self, program, apparent);
             let mut has_signatures = false;
             for constituent in constituents {
-                if !self.get_signatures_of_type(constituent).is_empty() {
+                if !self
+                    .signatures_for_invocation(program, constituent, kind)
+                    .is_empty()
+                {
                     has_signatures = true;
                     if chain.is_some() {
                         break;
@@ -6735,7 +6815,12 @@ impl Checker {
                 } else if chain.is_none() {
                     let constituent_str =
                         super::nodebuilder::type_to_string(self, program, constituent);
-                    let leaf_message = &tsgo_diagnostics::TYPE_0_HAS_NO_CALL_SIGNATURES;
+                    let leaf_message = match kind {
+                        InvocationKind::Call => &tsgo_diagnostics::TYPE_0_HAS_NO_CALL_SIGNATURES,
+                        InvocationKind::Construct => {
+                            &tsgo_diagnostics::TYPE_0_HAS_NO_CONSTRUCT_SIGNATURES
+                        }
+                    };
                     let leaf = DiagnosticMessageChain {
                         code: leaf_message.code(),
                         category: leaf_message.category(),
@@ -6745,7 +6830,14 @@ impl Checker {
                         ),
                         next: Vec::new(),
                     };
-                    let mid_message = &tsgo_diagnostics::NOT_ALL_CONSTITUENTS_OF_TYPE_0_ARE_CALLABLE;
+                    let mid_message = match kind {
+                        InvocationKind::Call => {
+                            &tsgo_diagnostics::NOT_ALL_CONSTITUENTS_OF_TYPE_0_ARE_CALLABLE
+                        }
+                        InvocationKind::Construct => {
+                            &tsgo_diagnostics::NOT_ALL_CONSTITUENTS_OF_TYPE_0_ARE_CONSTRUCTABLE
+                        }
+                    };
                     chain = Some(DiagnosticMessageChain {
                         code: mid_message.code(),
                         category: mid_message.category(),
@@ -6761,7 +6853,12 @@ impl Checker {
                 }
             }
             if !has_signatures {
-                let message = &tsgo_diagnostics::NO_CONSTITUENT_OF_TYPE_0_IS_CALLABLE;
+                let message = match kind {
+                    InvocationKind::Call => &tsgo_diagnostics::NO_CONSTITUENT_OF_TYPE_0_IS_CALLABLE,
+                    InvocationKind::Construct => {
+                        &tsgo_diagnostics::NO_CONSTITUENT_OF_TYPE_0_IS_CONSTRUCTABLE
+                    }
+                };
                 chain = Some(DiagnosticMessageChain {
                     code: message.code(),
                     category: message.category(),
@@ -6769,7 +6866,14 @@ impl Checker {
                     next: Vec::new(),
                 });
             } else if chain.is_none() {
-                let message = &tsgo_diagnostics::EACH_MEMBER_OF_THE_UNION_TYPE_0_HAS_SIGNATURES_BUT_NONE_OF_THOSE_SIGNATURES_ARE_COMPATIBLE_WITH_EACH_OTHER;
+                let message = match kind {
+                    InvocationKind::Call => {
+                        &tsgo_diagnostics::EACH_MEMBER_OF_THE_UNION_TYPE_0_HAS_SIGNATURES_BUT_NONE_OF_THOSE_SIGNATURES_ARE_COMPATIBLE_WITH_EACH_OTHER
+                    }
+                    InvocationKind::Construct => {
+                        &tsgo_diagnostics::EACH_MEMBER_OF_THE_UNION_TYPE_0_HAS_CONSTRUCT_SIGNATURES_BUT_NONE_OF_THOSE_SIGNATURES_ARE_COMPATIBLE_WITH_EACH_OTHER
+                    }
+                };
                 chain = Some(DiagnosticMessageChain {
                     code: message.code(),
                     category: message.category(),
@@ -6779,7 +6883,10 @@ impl Checker {
             }
         } else {
             let type_str = super::nodebuilder::type_to_string(self, program, apparent);
-            let message = &tsgo_diagnostics::TYPE_0_HAS_NO_CALL_SIGNATURES;
+            let message = match kind {
+                InvocationKind::Call => &tsgo_diagnostics::TYPE_0_HAS_NO_CALL_SIGNATURES,
+                InvocationKind::Construct => &tsgo_diagnostics::TYPE_0_HAS_NO_CONSTRUCT_SIGNATURES,
+            };
             chain = Some(DiagnosticMessageChain {
                 code: message.code(),
                 category: message.category(),

@@ -17056,3 +17056,127 @@ fn namespace_import_callable_export_reports_7038_related_info() {
         "Type originates at this import. A namespace-style import cannot be called or constructed, and will cause a failure at runtime. Consider using a default import or import require here instead."
     );
 }
+
+// ---- T1-E batch 80: assignability chains, excess 2561, invocation recovery, operators ----
+
+// Go: internal/checker/relater.go:Relater.reportError (dotted-name collapse, depth 3)
+#[test]
+fn assignability_chain_triple_nested_property_collapses_to_dotted_abc() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: { a: { b: { c: string } } };\n\
+         const o: { a: { b: { c: number } } } = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    let dotted = &d.message_chain[0];
+    assert_eq!(dotted.code, 2200);
+    assert_eq!(
+        dotted.message,
+        "The types of 'a.b.c' are incompatible between these types."
+    );
+    assert_eq!(dotted.next.len(), 1);
+    assert_eq!(dotted.next[0].code, 2322);
+    assert_eq!(
+        dotted.next[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.hasExcessProperties (2561 suggestion)
+#[test]
+fn object_literal_excess_property_misspelling_reports_2561() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O { prop1: number; }\nconst o: O = { prop: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2561);
+    assert_eq!(
+        diags[0].message,
+        "Object literal may only specify known properties, but 'prop' does not exist in type 'O'. Did you mean to write 'prop1'?"
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.hasExcessProperties (2353 when no suggestion)
+#[test]
+fn object_literal_excess_property_no_suggestion_still_reports_2353() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O { prop1: number; }\nconst o: O = { zzzzz: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2353);
+    assert_eq!(
+        diags[0].message,
+        "Object literal may only specify known properties, and 'zzzzz' does not exist in type 'O'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (+ void, 2365)
+#[test]
+fn plus_void_operand_reports_2365() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() + 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2365, got {diags:?}");
+    assert_eq!(diags[0].code, 2365);
+    assert_eq!(
+        diags[0].message,
+        "Operator '+' cannot be applied to types 'void' and 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (construct, 2761 chain)
+#[test]
+fn new_non_constructable_reports_2351_with_2761_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: number;\nnew x();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2351, got {diags:?}");
+    assert_eq!(diags[0].code, 2351);
+    assert_eq!(diags[0].message, "This expression is not constructable.");
+    assert_eq!(diags[0].message_chain.len(), 1);
+    assert_eq!(diags[0].message_chain[0].code, 2761);
+    assert_eq!(
+        diags[0].message_chain[0].message,
+        "Type 'number' has no construct signatures."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorRecovery (construct + export=)
+#[test]
+fn namespace_import_callable_export_new_skips_7038_without_construct_sigs() {
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/foo.ts", "function foo(): void {}\nexport = foo;"),
+        ("/index.ts", "import * as ns from \"./foo\";\nnew ns();"),
+    ]));
+    let index = p.source_files()[1];
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(index);
+    assert_eq!(diags.len(), 1, "expected one 2351, got {diags:?}");
+    assert_eq!(diags[0].code, 2351);
+    assert!(
+        diags[0].related_information.is_empty(),
+        "function export= has no construct signatures, so 7038 must not attach: {diags:?}"
+    );
+}
