@@ -16174,3 +16174,94 @@ fn new_overloaded_constructor_matching_overload_no_diagnostic() {
         "matching overloaded constructor must not report diagnostics; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 70: tagged template expressions ----
+
+// Go: internal/checker/checker.go:Checker.checkTaggedTemplateExpression(9994)
+#[test]
+fn tagged_template_result_type_is_signature_return_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "function tag(l: any): string { return \"\"; }\ntag`hello`;",
+    );
+    let call = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let string = c.string_type();
+    assert_eq!(c.check_expression(&p, call), string);
+}
+
+// Go: internal/checker/checker.go:Checker.resolveTaggedTemplateExpression -> resolveCall (well-typed)
+#[test]
+fn tagged_template_matching_substitution_no_diagnostic() {
+    let codes = diag_codes("function tag(l: any, x: number): void {}\ntag`a${1}b`;");
+    assert!(
+        codes.is_empty(),
+        "matching tagged-template substitution must not report diagnostics; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveTaggedTemplateExpression -> resolveCall (2345)
+#[test]
+fn tagged_template_substitution_not_assignable_reports_2345() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function tag(l: any, x: number): void {}\ntag`a${\"s\"}b`;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+    assert_eq!(
+        diags[0].message,
+        "Argument of type 'string' is not assignable to parameter of type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveTaggedTemplateExpression -> resolveCall (2554)
+#[test]
+fn tagged_template_wrong_arity_reports_2554() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function tag(): void {}\ntag`hello`;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2554, got {diags:?}");
+    assert_eq!(diags[0].code, 2554);
+    assert_eq!(
+        diags[0].message,
+        "Expected 0 arguments, but got 1."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveTaggedTemplateExpression -> invocationError (2349)
+#[test]
+fn tagged_template_non_callable_tag_reports_2349() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = 1;\nx`hello`;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].message, "This expression is not callable.");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveTaggedTemplateExpression -> resolveCall (2769)
+#[test]
+fn tagged_template_overloaded_no_match_reports_2769() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function tag(l: any, x: number): void;\nfunction tag(l: any, x: string): void;\nfunction tag(l: any, x: any): void {}\ntag`a${true}b`;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2769, got {diags:?}");
+    assert_eq!(diags[0].code, 2769);
+    assert_eq!(diags[0].message, "No overload matches this call.");
+}

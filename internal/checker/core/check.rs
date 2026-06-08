@@ -460,6 +460,9 @@ impl Checker {
                 }
             }
             Kind::NewExpression => self.check_new_expression(program, node),
+            Kind::TaggedTemplateExpression => {
+                self.check_tagged_template_expression(program, node)
+            }
             Kind::PrefixUnaryExpression => self.check_prefix_unary_expression(program, node),
             Kind::PostfixUnaryExpression => self.check_postfix_unary_expression(program, node),
             Kind::BinaryExpression => self.check_binary_expression(program, node),
@@ -4730,6 +4733,351 @@ impl Checker {
         // this returns that type directly; for a bare (non-generic) signature it
         // is the declared return type.
         self.get_return_type_of_call(program, signature, &[], &[])
+    }
+
+    // Checks a tagged template expression `` tag`...` `` (Go's
+    // `checkTaggedTemplateExpression` -> `resolveTaggedTemplateExpression` ->
+    // `resolveCall`): resolves the tag's call signatures against the effective
+    // arguments (a synthetic `TemplateStringsArray` plus each template-span
+    // expression).
+    //
+    // DEFER(phase-4-checker-4r+): the real `TemplateStringsArray` global type,
+    // generic call-site inference, explicit type arguments, untyped-function-call
+    // handling, and the missing-comma array-literal hint. blocked-by: lib globals
+    // (P6) + inference contexts + untyped-call detection.
+    // Go: internal/checker/checker.go:Checker.checkTaggedTemplateExpression(9994)
+    fn check_tagged_template_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
+        let (tag, template, type_arguments_ref) = match program.arena().data(node) {
+            NodeData::TaggedTemplateExpression(d) => (
+                d.tag,
+                d.template,
+                d.type_arguments.as_ref(),
+            ),
+            _ => return self.error_type,
+        };
+        self.check_grammar_type_arguments(program, node, type_arguments_ref);
+        let tag_type = self.check_expression(program, tag);
+        let tag_type = self.check_non_null_type_with_reporter(
+            program,
+            tag_type,
+            tag,
+            NonNullReporter::Invocation,
+        );
+        self.check_tagged_template_literal(program, template);
+        let substitutions = self.tagged_template_substitution_expressions(program, template);
+        let signatures = self.get_signatures_of_type(tag_type);
+        if signatures.is_empty() {
+            self.error(
+                program,
+                tag,
+                &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE,
+                &[],
+            );
+            return self.error_type;
+        }
+        if signatures.len() > 1 {
+            return self.resolve_overloaded_tagged_template(
+                program,
+                node,
+                tag,
+                &signatures,
+                template,
+                &substitutions,
+            );
+        }
+        let signature = signatures[0];
+        let effective_arg_count = 1 + substitutions.len();
+        if self.has_correct_arity(signature, effective_arg_count) {
+            self.check_applicable_signature_for_tagged_template(
+                program,
+                signature,
+                template,
+                &substitutions,
+            );
+        } else {
+            let effective_args = self.tagged_template_effective_argument_nodes(
+                template,
+                &substitutions,
+            );
+            self.report_argument_arity_error(program, node, signature, &effective_args);
+        }
+        self.get_return_type_of_call(program, signature, &[], &[])
+    }
+
+    // Type-checks the template literal of a tagged template (the span expressions
+    // and any nested template parts).
+    fn check_tagged_template_literal(&mut self, program: &dyn BoundProgram, template: NodeId) {
+        match program.arena().data(template) {
+            NodeData::TemplateExpression(d) => {
+                for &span in &d.template_spans.nodes {
+                    let NodeData::TemplateSpan(span_data) = program.arena().data(span) else {
+                        continue;
+                    };
+                    self.check_expression(program, span_data.expression);
+                }
+            }
+            NodeData::NoSubstitutionTemplateLiteral(_) => {}
+            _ => {
+                self.check_expression(program, template);
+            }
+        }
+    }
+
+    // Returns the template-span expression nodes of a tagged template's
+    // template literal (Go's `getEffectiveCallArguments` tail).
+    fn tagged_template_substitution_expressions(
+        &self,
+        program: &dyn BoundProgram,
+        template: NodeId,
+    ) -> Vec<NodeId> {
+        let NodeData::TemplateExpression(d) = program.arena().data(template) else {
+            return Vec::new();
+        };
+        d.template_spans
+            .nodes
+            .iter()
+            .filter_map(|&span| {
+                let NodeData::TemplateSpan(span_data) = program.arena().data(span) else {
+                    return None;
+                };
+                Some(span_data.expression)
+            })
+            .collect()
+    }
+
+    // Builds the effective argument node list for arity-error reporting: the
+    // template literal stands in for the synthetic `TemplateStringsArray`
+    // argument, followed by each substitution expression.
+    fn tagged_template_effective_argument_nodes(
+        &self,
+        template: NodeId,
+        substitutions: &[NodeId],
+    ) -> Vec<NodeId> {
+        let mut nodes = Vec::with_capacity(1 + substitutions.len());
+        nodes.push(template);
+        nodes.extend_from_slice(substitutions);
+        nodes
+    }
+
+    // Checks that each substitution expression is assignable to its parameter,
+    // after the synthetic `TemplateStringsArray` first argument (Go's
+    // `isSignatureApplicable` for tagged templates). The first parameter, when
+    // present, is checked against `any` as a stand-in for
+    // `TemplateStringsArray` until lib globals are wired (P6).
+    fn check_applicable_signature_for_tagged_template(
+        &mut self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+        template: NodeId,
+        substitutions: &[NodeId],
+    ) {
+        if self.get_parameter_count(signature) > 0 {
+            let param_type = self.get_type_at_position(program, signature, 0);
+            if !self.is_type_assignable_to(program, self.any_type, param_type) {
+                let target_str = super::nodebuilder::type_to_string(self, program, param_type);
+                self.error(
+                    program,
+                    template,
+                    &tsgo_diagnostics::ARGUMENT_OF_TYPE_0_IS_NOT_ASSIGNABLE_TO_PARAMETER_OF_TYPE_1,
+                    &["any", target_str.as_str()],
+                );
+                return;
+            }
+        }
+        for (i, &expr) in substitutions.iter().enumerate() {
+            let param_idx = i + 1;
+            if param_idx >= self.get_parameter_count(signature) {
+                break;
+            }
+            let arg_type = self.check_expression(program, expr);
+            let param_type = self.get_type_at_position(program, signature, param_idx);
+            if !self.is_type_assignable_to(program, arg_type, param_type) {
+                let generalized = self.generalized_source_for_error(arg_type, param_type);
+                let source_str = super::nodebuilder::type_to_string(self, program, generalized);
+                let target_str = super::nodebuilder::type_to_string(self, program, param_type);
+                self.error(
+                    program,
+                    expr,
+                    &tsgo_diagnostics::ARGUMENT_OF_TYPE_0_IS_NOT_ASSIGNABLE_TO_PARAMETER_OF_TYPE_1,
+                    &[source_str.as_str(), target_str.as_str()],
+                );
+                return;
+            }
+        }
+    }
+
+    // Resolves an overloaded tagged template (Go's `resolveCall` overload path
+    // with `getEffectiveCallArguments`).
+    // Go: internal/checker/checker.go:Checker.resolveTaggedTemplateExpression(8686)
+    fn resolve_overloaded_tagged_template(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        tag: NodeId,
+        signatures: &[SignatureId],
+        template: NodeId,
+        substitutions: &[NodeId],
+    ) -> TypeId {
+        let effective_arg_count = 1 + substitutions.len();
+        let arg_types: Vec<TypeId> = substitutions
+            .iter()
+            .map(|&arg| self.check_expression(program, arg))
+            .collect();
+        let mut arity_matched: Vec<SignatureId> = Vec::new();
+        for &signature in signatures {
+            if !self.has_correct_arity(signature, effective_arg_count) {
+                continue;
+            }
+            if self.signature_applicable_for_tagged_template(
+                program,
+                signature,
+                &arg_types,
+            ) {
+                return self.get_return_type_of_call(program, signature, &[], &[]);
+            }
+            arity_matched.push(signature);
+        }
+        let effective_args =
+            self.tagged_template_effective_argument_nodes(template, substitutions);
+        match arity_matched.len() {
+            0 => self.report_overload_arity_error(program, node, signatures, &effective_args),
+            1 => self.report_inapplicable_tagged_template_argument(
+                program,
+                arity_matched[0],
+                template,
+                substitutions,
+                &arg_types,
+            ),
+            _ => {
+                let last = *arity_matched.last().unwrap();
+                if let Some((arg_node, source_str, target_str)) =
+                    self.first_failing_tagged_template_argument(
+                        program,
+                        last,
+                        template,
+                        substitutions,
+                        &arg_types,
+                    )
+                {
+                    self.report_no_overload_matches(program, arg_node, &source_str, &target_str);
+                } else {
+                    let error_node = tagged_template_error_node(program, node, tag);
+                    self.error(
+                        program,
+                        error_node,
+                        &tsgo_diagnostics::NO_OVERLOAD_MATCHES_THIS_CALL,
+                        &[],
+                    );
+                }
+            }
+        }
+        match signatures.last() {
+            Some(&last) => self.get_return_type_of_call(program, last, &[], &[]),
+            None => self.error_type,
+        }
+    }
+
+    // Silent applicability check for tagged-template overload resolution.
+    fn signature_applicable_for_tagged_template(
+        &mut self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+        substitution_types: &[TypeId],
+    ) -> bool {
+        if self.get_parameter_count(signature) > 0 {
+            let param_type = self.get_type_at_position(program, signature, 0);
+            if !self.is_type_assignable_to(program, self.any_type, param_type) {
+                return false;
+            }
+        }
+        for (i, &arg_type) in substitution_types.iter().enumerate() {
+            let param_idx = i + 1;
+            if param_idx >= self.get_parameter_count(signature) {
+                break;
+            }
+            let param_type = self.get_type_at_position(program, signature, param_idx);
+            if !self.is_type_assignable_to(program, arg_type, param_type) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn report_inapplicable_tagged_template_argument(
+        &mut self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+        template: NodeId,
+        substitutions: &[NodeId],
+        substitution_types: &[TypeId],
+    ) {
+        if self.get_parameter_count(signature) > 0 {
+            let param_type = self.get_type_at_position(program, signature, 0);
+            if !self.is_type_assignable_to(program, self.any_type, param_type) {
+                let target_str = super::nodebuilder::type_to_string(self, program, param_type);
+                self.error(
+                    program,
+                    template,
+                    &tsgo_diagnostics::ARGUMENT_OF_TYPE_0_IS_NOT_ASSIGNABLE_TO_PARAMETER_OF_TYPE_1,
+                    &["any", target_str.as_str()],
+                );
+                return;
+            }
+        }
+        for (i, &arg_type) in substitution_types.iter().enumerate() {
+            let param_idx = i + 1;
+            if param_idx >= self.get_parameter_count(signature) {
+                break;
+            }
+            let param_type = self.get_type_at_position(program, signature, param_idx);
+            if !self.is_type_assignable_to(program, arg_type, param_type) {
+                let generalized = self.generalized_source_for_error(arg_type, param_type);
+                let source_str = super::nodebuilder::type_to_string(self, program, generalized);
+                let target_str = super::nodebuilder::type_to_string(self, program, param_type);
+                self.error(
+                    program,
+                    substitutions[i],
+                    &tsgo_diagnostics::ARGUMENT_OF_TYPE_0_IS_NOT_ASSIGNABLE_TO_PARAMETER_OF_TYPE_1,
+                    &[source_str.as_str(), target_str.as_str()],
+                );
+                return;
+            }
+        }
+    }
+
+    fn first_failing_tagged_template_argument(
+        &mut self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+        template: NodeId,
+        substitutions: &[NodeId],
+        substitution_types: &[TypeId],
+    ) -> Option<(NodeId, String, String)> {
+        if self.get_parameter_count(signature) > 0 {
+            let param_type = self.get_type_at_position(program, signature, 0);
+            if !self.is_type_assignable_to(program, self.any_type, param_type) {
+                let target_str = super::nodebuilder::type_to_string(self, program, param_type);
+                return Some((template, "any".to_string(), target_str));
+            }
+        }
+        for (i, &arg_type) in substitution_types.iter().enumerate() {
+            let param_idx = i + 1;
+            if param_idx >= self.get_parameter_count(signature) {
+                break;
+            }
+            let param_type = self.get_type_at_position(program, signature, param_idx);
+            if !self.is_type_assignable_to(program, arg_type, param_type) {
+                let generalized = self.generalized_source_for_error(arg_type, param_type);
+                let source_str = super::nodebuilder::type_to_string(self, program, generalized);
+                let target_str = super::nodebuilder::type_to_string(self, program, param_type);
+                return Some((substitutions[i], source_str, target_str));
+            }
+        }
+        None
     }
 
     // Instantiates a generic signature with the call's explicit type arguments
@@ -13770,11 +14118,19 @@ fn name_of_node(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
 fn call_error_node(program: &dyn BoundProgram, node: NodeId) -> NodeId {
     let callee = match program.arena().data(node) {
         NodeData::CallExpression(d) => d.expression,
+        NodeData::TaggedTemplateExpression(d) => d.tag,
         _ => return node,
     };
     match program.arena().data(callee) {
         NodeData::PropertyAccessExpression(d) => d.name,
         _ => callee,
+    }
+}
+
+fn tagged_template_error_node(program: &dyn BoundProgram, _node: NodeId, tag: NodeId) -> NodeId {
+    match program.arena().data(tag) {
+        NodeData::PropertyAccessExpression(d) => d.name,
+        _ => tag,
     }
 }
 
