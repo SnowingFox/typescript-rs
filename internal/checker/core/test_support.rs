@@ -7,6 +7,7 @@
 //! `cfg(test)`, so `tsgo_parser`/`tsgo_binder` are dev-dependencies only.
 
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use rustc_hash::FxHashMap;
 use tsgo_ast::flow::{FlowList, FlowListId, FlowNode, FlowNodeId, FlowSwitchClauseData};
@@ -199,6 +200,8 @@ pub(crate) struct FileView {
     flow_nodes: Rc<Vec<FlowNode>>,
     flow_lists: Rc<Vec<FlowList>>,
     flow_switch: Rc<FxHashMap<FlowNodeId, FlowSwitchClauseData>>,
+    /// Every file view in a multi-file program (filled after all views are built).
+    all_views: Rc<OnceLock<Rc<Vec<Rc<FileView>>>>>,
 }
 
 impl BoundProgram for FileView {
@@ -244,6 +247,20 @@ impl BoundProgram for FileView {
 
     fn flow_switch_clause_data(&self, id: FlowNodeId) -> Option<FlowSwitchClauseData> {
         self.flow_switch.get(&id).copied()
+    }
+
+    fn source_files(&self) -> Vec<NodeId> {
+        self.all_views
+            .get()
+            .map(|views| views.iter().map(|view| view.handle).collect())
+            .unwrap_or_else(|| vec![self.handle])
+    }
+
+    fn file_view(&self, file: NodeId) -> Option<Rc<dyn BoundProgram>> {
+        let index = (file.0 >> FILE_INDEX_SHIFT) as usize;
+        self.all_views
+            .get()
+            .and_then(|views| views.get(index).map(|view| Rc::clone(view) as Rc<dyn BoundProgram>))
     }
 }
 
@@ -304,27 +321,35 @@ impl MultiFileProgram {
                 merged_symbols.push(remap_symbol(symbol, off));
             }
         }
-        let merged_symbols = Rc::new(merged_symbols);
 
-        // The merged global table: the union of every file's top-level (root
-        // `locals`) declarations, with merged ids (Go's `Checker.globals`).
-        // DEFER(phase-4-checker-4ab): cross-file symbol MERGE for same-named
-        // declarations (declaration merging) — first file wins here.
-        // blocked-by: `mergeSymbol`/`mergeSymbolTable` (the binder's cross-file
-        // merge) + `globalThis`.
+        // The merged global table: union of every file's top-level locals, with
+        // same-named globals merged so declaration lists accumulate (enough for
+        // cross-file clodule / namespace-merge diagnostics like TS2433).
         let mut merged_globals = SymbolTable::default();
+        let mut symbol_redirect: FxHashMap<SymbolId, SymbolId> = FxHashMap::default();
         for (i, (_, root, bind)) in parsed.iter().enumerate() {
             let off = offsets[i];
             if let Some(locals) = bind.locals.get(root) {
                 for (name, &sid) in locals {
-                    merged_globals
-                        .entry(name.clone())
-                        .or_insert(SymbolId(sid.0 + off));
+                    let merged_sid = SymbolId(sid.0 + off);
+                    match merged_globals.entry(name.clone()) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(merged_sid);
+                        }
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            let canonical = *entry.get();
+                            let source = merged_symbols[merged_sid.0 as usize].clone();
+                            merge_symbols(&mut merged_symbols[canonical.0 as usize], &source);
+                            symbol_redirect.insert(merged_sid, canonical);
+                        }
+                    }
                 }
             }
         }
+        let merged_symbols = Rc::new(merged_symbols);
         let merged_globals = Rc::new(merged_globals);
 
+        let all_views_slot: Rc<OnceLock<Rc<Vec<Rc<FileView>>>>> = Rc::new(OnceLock::new());
         let mut views = Vec::with_capacity(parsed.len());
         let mut symbol_ranges = Vec::with_capacity(parsed.len());
         for (i, (arena, root, bind)) in parsed.into_iter().enumerate() {
@@ -332,7 +357,13 @@ impl MultiFileProgram {
             let node_symbol: FxHashMap<NodeId, SymbolId> = bind
                 .node_symbol
                 .iter()
-                .map(|(&node, &sid)| (node, SymbolId(sid.0 + off)))
+                .map(|(&node, &sid)| {
+                    let mut merged = SymbolId(sid.0 + off);
+                    if let Some(&canonical) = symbol_redirect.get(&merged) {
+                        merged = canonical;
+                    }
+                    (node, merged)
+                })
                 .collect();
             let locals: FxHashMap<NodeId, SymbolTable> = bind
                 .locals
@@ -352,8 +383,10 @@ impl MultiFileProgram {
                 flow_nodes: Rc::new(bind.flow_nodes),
                 flow_lists: Rc::new(bind.flow_lists),
                 flow_switch: Rc::new(bind.flow_switch_data),
+                all_views: Rc::clone(&all_views_slot),
             }));
         }
+        let _ = all_views_slot.set(Rc::new(views.clone()));
         MultiFileProgram {
             views,
             merged_globals,
@@ -425,6 +458,19 @@ impl BoundProgram for MultiFileProgram {
             .iter()
             .position(|&(start, end)| symbol.0 >= start && symbol.0 < end)?;
         Some(Rc::clone(&self.views[index]) as Rc<dyn BoundProgram>)
+    }
+}
+
+/// Merges `source` into `target` for cross-file global declaration merging.
+fn merge_symbols(target: &mut Symbol, source: &Symbol) {
+    target.flags |= source.flags;
+    for &decl in &source.declarations {
+        if !target.declarations.contains(&decl) {
+            target.declarations.push(decl);
+        }
+    }
+    if target.value_declaration.is_none() {
+        target.value_declaration = source.value_declaration;
     }
 }
 

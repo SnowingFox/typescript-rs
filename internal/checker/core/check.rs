@@ -8130,14 +8130,25 @@ impl Checker {
             return;
         };
         let (body, name, keyword) = (d.body, d.name, d.keyword);
+        let is_global_augmentation = is_global_scope_augmentation(program, node);
         if let Some(body) = body {
             self.check_statement(program, body);
-            self.register_for_unused_identifiers_check(node);
+            if !is_global_augmentation {
+                self.register_for_unused_identifiers_check(node);
+            }
         }
         let in_ambient = program
             .arena()
             .flags(node)
             .contains(tsgo_ast::NodeFlags::AMBIENT);
+        if is_global_augmentation && !in_ambient {
+            self.error(
+                program,
+                name,
+                &tsgo_diagnostics::AUGMENTATIONS_FOR_THE_GLOBAL_SCOPE_SHOULD_HAVE_DECLARE_MODIFIER_UNLESS_THEY_APPEAR_IN_ALREADY_AMBIENT_CONTEXT,
+                &[],
+            );
+        }
         let is_ambient_external = is_ambient_module(program, node);
         let context_error = if is_ambient_external {
             &tsgo_diagnostics::AN_AMBIENT_MODULE_DECLARATION_IS_ONLY_ALLOWED_AT_THE_TOP_LEVEL_IN_A_FILE
@@ -8162,15 +8173,16 @@ impl Checker {
         let Some(module_symbol) = program.symbol_of_node(node) else {
             return;
         };
+        let module_is_instantiated = is_instantiated_module(
+            program.arena(),
+            node,
+            program.compiler_options().should_preserve_const_enums(),
+        );
         if program.symbol(module_symbol)
             .flags
             .intersects(SymbolFlags::VALUE_MODULE)
             && !in_ambient
-            && is_instantiated_module(
-                program.arena(),
-                node,
-                program.compiler_options().should_preserve_const_enums(),
-            )
+            && module_is_instantiated
         {
             if should_check_erasable_syntax(program, node) {
                 self.error(
@@ -8200,7 +8212,16 @@ impl Checker {
                 if let Some(first_class_or_func) =
                     get_first_non_ambient_class_or_function_declaration(program, module_symbol)
                 {
-                    if source_file_of(program, node) == source_file_of(program, first_class_or_func)
+                    let node_file = source_file_handle_of_node(program, node);
+                    let class_file = source_file_handle_of_node(program, first_class_or_func);
+                    if node_file != class_file {
+                        self.error(
+                            program,
+                            name,
+                            &tsgo_diagnostics::A_NAMESPACE_DECLARATION_CANNOT_BE_IN_A_DIFFERENT_FILE_FROM_A_CLASS_OR_FUNCTION_WITH_WHICH_IT_IS_MERGED,
+                            &[],
+                        );
+                    } else if node_file == class_file
                         && program.arena().loc(node).pos()
                             < program.arena().loc(first_class_or_func).pos()
                     {
@@ -8212,6 +8233,42 @@ impl Checker {
                         );
                     }
                 }
+            }
+        }
+        if is_ambient_external && !is_external_module_augmentation(program, node) {
+            let parent = program.arena().parent(node);
+            if parent.is_some_and(|p| is_global_source_file(program, p)) {
+                if is_global_augmentation {
+                    self.error(
+                        program,
+                        name,
+                        &tsgo_diagnostics::AUGMENTATIONS_FOR_THE_GLOBAL_SCOPE_CAN_ONLY_BE_DIRECTLY_NESTED_IN_EXTERNAL_MODULES_OR_AMBIENT_MODULE_DECLARATIONS,
+                        &[],
+                    );
+                } else if program.arena().kind(name) == Kind::StringLiteral
+                    && tsgo_tspath::is_external_module_name_relative(program.arena().text(name))
+                {
+                    self.error(
+                        program,
+                        name,
+                        &tsgo_diagnostics::AMBIENT_MODULE_DECLARATION_CANNOT_SPECIFY_RELATIVE_MODULE_NAME,
+                        &[],
+                    );
+                }
+            } else if is_global_augmentation {
+                self.error(
+                    program,
+                    name,
+                    &tsgo_diagnostics::AUGMENTATIONS_FOR_THE_GLOBAL_SCOPE_CAN_ONLY_BE_DIRECTLY_NESTED_IN_EXTERNAL_MODULES_OR_AMBIENT_MODULE_DECLARATIONS,
+                    &[],
+                );
+            } else {
+                self.error(
+                    program,
+                    name,
+                    &tsgo_diagnostics::AMBIENT_MODULES_CANNOT_BE_NESTED_IN_OTHER_MODULES_OR_NAMESPACES,
+                    &[],
+                );
             }
         }
     }
@@ -13361,10 +13418,45 @@ fn is_ambient_module(program: &dyn BoundProgram, node: NodeId) -> bool {
 }
 
 // Go: internal/ast/utilities.go:IsGlobalScopeAugmentation
-// DEFER(phase-4-checker-C5+): the GLOBAL_AUGMENTATION NodeFlag is not yet in
-// the Rust AST. blocked-by: NodeFlags porting. Always returns false for now.
-fn is_global_scope_augmentation(_program: &dyn BoundProgram, _node: NodeId) -> bool {
-    false
+fn is_global_scope_augmentation(program: &dyn BoundProgram, node: NodeId) -> bool {
+    matches!(
+        program.arena().data(node),
+        NodeData::ModuleDeclaration(d) if d.keyword == Kind::GlobalKeyword
+    )
+}
+
+// Go: internal/ast/utilities.go:IsExternalModuleAugmentation(3533)
+fn is_external_module_augmentation(program: &dyn BoundProgram, node: NodeId) -> bool {
+    is_ambient_module(program, node) && is_module_augmentation_external(program, node)
+}
+
+// Go: internal/ast/utilities.go:IsModuleAugmentationExternal(1660)
+fn is_module_augmentation_external(program: &dyn BoundProgram, node: NodeId) -> bool {
+    let Some(parent) = program.arena().parent(node) else {
+        return false;
+    };
+    match program.arena().kind(parent) {
+        Kind::SourceFile => !is_global_source_file(program, parent),
+        Kind::ModuleBlock => {
+            let Some(grand_parent) = program.arena().parent(parent) else {
+                return false;
+            };
+            is_ambient_module(program, grand_parent)
+                && program
+                    .arena()
+                    .parent(grand_parent)
+                    .is_some_and(|sf| is_global_source_file(program, sf))
+        }
+        _ => false,
+    }
+}
+
+// Go: internal/ast/utilities.go:IsGlobalSourceFile(2443)
+fn is_global_source_file(program: &dyn BoundProgram, node: NodeId) -> bool {
+    matches!(
+        program.arena().data(node),
+        NodeData::SourceFile(d) if d.external_module_indicator.is_none()
+    )
 }
 
 // Go: internal/checker/checker.go:Checker.shouldCheckErasableSyntax(2632)
@@ -13390,24 +13482,21 @@ fn get_first_non_ambient_class_or_function_declaration(
     symbol: SymbolId,
 ) -> Option<NodeId> {
     for &decl in &program.symbol(symbol).declarations {
-        if program
-            .arena()
-            .flags(decl)
-            .contains(NodeFlags::AMBIENT)
-        {
-            continue;
-        }
-        match program.arena().kind(decl) {
-            Kind::ClassDeclaration => return Some(decl),
-            Kind::FunctionDeclaration => {
-                if matches!(
-                    program.arena().data(decl),
-                    NodeData::FunctionDeclaration(d) if d.body.is_some()
-                ) {
-                    return Some(decl);
-                }
+        let is_match = with_program_view_for_node(program, decl, |view| {
+            if view.arena().flags(decl).contains(NodeFlags::AMBIENT) {
+                return false;
             }
-            _ => {}
+            match view.arena().kind(decl) {
+                Kind::ClassDeclaration => true,
+                Kind::FunctionDeclaration => matches!(
+                    view.arena().data(decl),
+                    NodeData::FunctionDeclaration(d) if d.body.is_some()
+                ),
+                _ => false,
+            }
+        });
+        if is_match == Some(true) {
+            return Some(decl);
         }
     }
     None
@@ -13415,13 +13504,68 @@ fn get_first_non_ambient_class_or_function_declaration(
 
 // Go: internal/ast/utilities.go:GetSourceFileOfNode
 fn source_file_of(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
-    let arena = program.arena();
+    with_program_view_for_node(program, node, |view| {
+        source_file_in_arena(view.arena(), node)
+    })
+    .flatten()
+}
+
+fn source_file_in_arena(arena: &tsgo_ast::NodeArena, node: NodeId) -> Option<NodeId> {
     let mut cur = Some(node);
     while let Some(n) = cur {
         if arena.kind(n) == Kind::SourceFile {
             return Some(n);
         }
         cur = arena.parent(n);
+    }
+    None
+}
+
+/// Returns whether `node` is owned by `view`'s arena (reaches that file's root).
+fn node_belongs_to_view(view: &dyn BoundProgram, node: NodeId) -> bool {
+    let arena = view.arena();
+    if node.index() >= arena.node_count() {
+        return false;
+    }
+    let root = view.root();
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if n == root {
+            return true;
+        }
+        cur = arena.parent(n);
+    }
+    false
+}
+
+/// Returns the program file handle owning `node` (the diagnostics partition key).
+fn source_file_handle_of_node(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    for file in program.source_files() {
+        if let Some(view) = program.file_view(file) {
+            if node_belongs_to_view(view.as_ref(), node) {
+                return Some(file);
+            }
+        } else if file == program.file_handle() && node_belongs_to_view(program, node) {
+            return Some(file);
+        }
+    }
+    None
+}
+
+/// Invokes `f` with the [`BoundProgram`] view whose arena owns `node`.
+fn with_program_view_for_node<R>(
+    program: &dyn BoundProgram,
+    node: NodeId,
+    f: impl FnOnce(&dyn BoundProgram) -> R,
+) -> Option<R> {
+    for file in program.source_files() {
+        if let Some(view) = program.file_view(file) {
+            if node_belongs_to_view(view.as_ref(), node) {
+                return Some(f(view.as_ref()));
+            }
+        } else if file == program.file_handle() && node_belongs_to_view(program, node) {
+            return Some(f(program));
+        }
     }
     None
 }

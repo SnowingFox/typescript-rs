@@ -15808,3 +15808,111 @@ fn namespace_before_merged_class_reports_2434() {
         "A namespace declaration cannot be located prior to a class or function with which it is merged."
     );
 }
+
+// ---- T1-E batch 65: global augmentation + namespace merge (2433/2670) ----
+
+// Go: internal/checker/checker.go:Checker.checkModuleDeclaration(5113)
+#[test]
+fn global_augmentation_without_declare_in_module_reports_2670() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "export {};\nglobal {\n  interface X {}\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2670)
+        .unwrap_or_else(|| panic!("expected 2670; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Augmentations for the global scope should have 'declare' modifier unless they appear in already ambient context."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkModuleDeclaration(5113)
+#[test]
+fn declare_global_augmentation_in_module_no_2670() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "export {};\ndeclare global {\n  interface X {}\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| d.code == 2670),
+        "declare global must not report 2670; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkModuleDeclaration(5177)
+#[test]
+fn global_augmentation_in_script_reports_2669() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "global {\n  interface X {}\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2669)
+        .unwrap_or_else(|| panic!("expected 2669; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Augmentations for the global scope can only be directly nested in external modules or ambient module declarations."
+    );
+}
+
+#[test]
+fn multi_file_view_delegates_source_files() {
+    let p = MultiFileProgram::build(&[
+        ("/class.ts", "class D {}"),
+        ("/module.ts", "namespace D { export const y = 1; }"),
+    ]);
+    let view = p.file_view(p.source_files()[1]).unwrap();
+    assert_eq!(view.source_files().len(), 2);
+}
+
+// Go: internal/checker/checker.go:Checker.checkModuleDeclaration(5151)
+#[test]
+fn namespace_different_file_from_merged_class_reports_2433() {
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/class.ts", "class D {}"),
+        ("/module.ts", "namespace D { export const y = 1; }"),
+    ]));
+    let file_module = p.source_files()[1];
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(file_module);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2433)
+        .unwrap_or_else(|| panic!("expected 2433; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "A namespace declaration cannot be in a different file from a class or function with which it is merged."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkModuleDeclaration(5188)
+#[test]
+fn ambient_module_nested_in_namespace_reports_2435() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace N { declare module \"m\" {} }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2435)
+        .unwrap_or_else(|| panic!("expected 2435; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Ambient modules cannot be nested in other modules or namespaces."
+    );
+}
