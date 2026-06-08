@@ -422,6 +422,20 @@ impl Checker {
         self.signature_return_type(signature)
     }
 
+    // Returns the `this` type declared by a signature's leading `this` parameter,
+    // or `None` when the signature has no explicit `this` type.
+    // Go: internal/checker/relater.go:Checker.getThisTypeOfSignature(1911)
+    fn get_this_type_of_signature(
+        &mut self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+    ) -> Option<TypeId> {
+        let this_parameter = self.signature(signature).this_parameter?;
+        Some(super::declared_types::get_type_of_symbol(
+            self, program, this_parameter, None,
+        ))
+    }
+
     fn check_expression_worker(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         match program.arena().kind(node) {
             Kind::Identifier => self.check_identifier(program, node),
@@ -2644,8 +2658,8 @@ impl Checker {
         if construct_sigs.is_empty() {
             let call_sigs = self.get_signatures_of_type(callee_type);
             if !call_sigs.is_empty() {
-                let resolved = if call_sigs.len() > 1 {
-                    self.resolve_overloaded_call(program, node, &call_sigs, &args)
+                let resolved_signature = if call_sigs.len() > 1 {
+                    self.resolve_overloaded_call_signature(program, node, &call_sigs, &args)
                 } else {
                     let signature = call_sigs[0];
                     if self.has_correct_arity(signature, args.len()) {
@@ -2656,12 +2670,11 @@ impl Checker {
                         }
                         self.report_argument_arity_error(program, node, signature, &args);
                     }
-                    self.get_return_type_of_call(program, signature, &[], &[])
+                    signature
                 };
                 if !self.no_implicit_any() {
-                    let signature = call_sigs[0];
-                    if self.signature(signature).declaration.is_some()
-                        && self.get_return_type_of_signature(signature) != self.void_type
+                    if self.signature(resolved_signature).declaration.is_some()
+                        && self.get_return_type_of_signature(resolved_signature) != self.void_type
                     {
                         self.error(
                             program,
@@ -2670,8 +2683,26 @@ impl Checker {
                             &[],
                         );
                     }
+                    if self.get_this_type_of_signature(program, resolved_signature)
+                        == Some(self.void_type)
+                    {
+                        self.error(
+                            program,
+                            node,
+                            &tsgo_diagnostics::A_FUNCTION_THAT_IS_CALLED_WITH_THE_NEW_KEYWORD_CANNOT_HAVE_A_THIS_TYPE_THAT_IS_VOID,
+                            &[],
+                        );
+                    }
+                } else {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::X_NEW_EXPRESSION_WHOSE_TARGET_LACKS_A_CONSTRUCT_SIGNATURE_IMPLICITLY_HAS_AN_ANY_TYPE,
+                        &[],
+                    );
+                    return self.any_type;
                 }
-                return resolved;
+                return self.get_return_type_of_call(program, resolved_signature, &[], &[]);
             }
             for &arg in &args {
                 self.check_expression(program, arg);
@@ -6263,6 +6294,57 @@ impl Checker {
             Some(&last) => self.get_return_type_of_call(program, last, &[], &[]),
             None => self.error_type,
         }
+    }
+
+    // Chooses the overload signature a call/new resolves to (Go's `chooseOverload`
+    // / `resolveCall` selection), reporting resolution errors when no candidate
+    // applies.
+    // Go: internal/checker/checker.go:Checker.resolveCall(8806)/chooseOverload(8988)
+    fn resolve_overloaded_call_signature(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        signatures: &[SignatureId],
+        args: &[NodeId],
+    ) -> SignatureId {
+        let arg_types: Vec<TypeId> = args
+            .iter()
+            .map(|&arg| self.check_expression(program, arg))
+            .collect();
+        let mut arity_matched: Vec<SignatureId> = Vec::new();
+        for &signature in signatures {
+            if !self.has_correct_arity(signature, args.len()) {
+                continue;
+            }
+            if self.signature_applicable_with_types(program, signature, &arg_types) {
+                return signature;
+            }
+            arity_matched.push(signature);
+        }
+        match arity_matched.len() {
+            0 => self.report_overload_arity_error(program, node, signatures, args),
+            1 => self.report_inapplicable_argument(program, arity_matched[0], args, &arg_types),
+            _ => {
+                let last = *arity_matched.last().unwrap();
+                if let Some((arg_node, source_str, target_str)) =
+                    self.first_failing_argument(program, last, args, &arg_types)
+                {
+                    self.report_no_overload_matches(program, arg_node, &source_str, &target_str);
+                } else {
+                    let error_node = call_error_node(program, node);
+                    self.error(
+                        program,
+                        error_node,
+                        &tsgo_diagnostics::NO_OVERLOAD_MATCHES_THIS_CALL,
+                        &[],
+                    );
+                }
+            }
+        }
+        signatures
+            .last()
+            .copied()
+            .unwrap_or_else(|| signatures[0])
     }
 
     // Reports whether every overlapping argument of a call is assignable to its

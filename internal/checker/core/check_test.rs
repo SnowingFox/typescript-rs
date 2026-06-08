@@ -16564,3 +16564,91 @@ fn new_void_function_no_2350_when_no_implicit_any_disabled() {
         "void-returning function must not report TS2350; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 75: new void-this (2679) + missing construct signature (7009) ----
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression (2679, !noImplicitAny)
+#[test]
+fn new_void_this_function_reports_2679_when_no_implicit_any_disabled() {
+    let options = CompilerOptions {
+        no_implicit_any: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let codes = diag_codes_with_options(
+        "function VoidThis(this: void): void {}\nnew VoidThis();",
+        options,
+    );
+    assert!(
+        codes.contains(&2679),
+        "expected TS2679 for `new` on a void-`this` function when noImplicitAny is off; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression (2679)
+#[test]
+fn new_void_this_function_reports_2679_message() {
+    let options = CompilerOptions {
+        no_implicit_any: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "function VoidThis(this: void): void {}\nnew VoidThis();",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| {
+            d.code == 2679
+                && d.message
+                    == "A function that is called with the 'new' keyword cannot have a 'this' type that is 'void'."
+        }),
+        "expected TS2679 with canonical message; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkCallExpression (7009, noImplicitAny)
+#[test]
+fn new_function_without_construct_signature_reports_7009() {
+    let codes = diag_codes("function fn() {}\nnew fn();");
+    assert!(
+        codes.contains(&7009),
+        "expected TS7009 for `new` on a function without a construct signature; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkCallExpression (7009)
+#[test]
+fn new_function_without_construct_signature_reports_7009_message() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function fn() {}\nnew fn();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| {
+            d.code == 7009
+                && d.message
+                    == "'new' expression, whose target lacks a construct signature, implicitly has an 'any' type."
+        }),
+        "expected TS7009 with canonical message; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkCallExpression (no 7009 when !noImplicitAny)
+#[test]
+fn new_function_no_7009_when_no_implicit_any_disabled() {
+    let options = CompilerOptions {
+        no_implicit_any: Tristate::False,
+        ..CompilerOptions::default()
+    };
+    let codes = diag_codes_with_options("function fn() {}\nnew fn();", options);
+    assert!(
+        !codes.contains(&7009),
+        "TS7009 must not report when noImplicitAny is off; got {codes:?}"
+    );
+}

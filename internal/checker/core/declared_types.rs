@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 
 use tsgo_ast::symbol::{
     INTERNAL_SYMBOL_NAME_CALL, INTERNAL_SYMBOL_NAME_CONSTRUCTOR, INTERNAL_SYMBOL_NAME_INDEX,
-    INTERNAL_SYMBOL_NAME_NEW, INTERNAL_SYMBOL_NAME_PREFIX,
+    INTERNAL_SYMBOL_NAME_NEW, INTERNAL_SYMBOL_NAME_PREFIX, INTERNAL_SYMBOL_NAME_THIS,
 };
 use tsgo_ast::{
     CheckFlags, Kind, ModifierFlags, NodeArena, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId,
@@ -2250,7 +2250,16 @@ fn get_signature_from_declaration(
     };
     let mut parameters = Vec::with_capacity(param_nodes.len());
     let mut min_argument_count = 0i32;
-    for &param in &param_nodes {
+    let mut this_parameter = None;
+    for (i, &param) in param_nodes.iter().enumerate() {
+        // Go's `getSignatureFromDeclaration` peels a leading `this` parameter
+        // off into `signature.thisParameter` so it is not counted in arity.
+        if i == 0 && is_this_parameter(program, param) {
+            if let Some(sym) = program.symbol_of_node(param) {
+                this_parameter = Some(sym);
+            }
+            continue;
+        }
         if let Some(sym) = program.symbol_of_node(param) {
             parameters.push(sym);
         }
@@ -2308,6 +2317,7 @@ fn get_signature_from_declaration(
     signature.declaration = Some(declaration);
     signature.type_parameters = get_signature_type_parameters(checker, program, declaration);
     signature.parameters = parameters;
+    signature.this_parameter = this_parameter;
     signature.min_argument_count = min_argument_count;
     signature.resolved_return_type = Some(resolved_return_type);
     checker.new_signature(signature)
@@ -2376,6 +2386,21 @@ fn is_optional_parameter(program: &dyn BoundProgram, param: NodeId) -> bool {
     match program.arena().data(param) {
         NodeData::ParameterDeclaration(d) => {
             d.question_token.is_some() || d.initializer.is_some() || d.dot_dot_dot_token.is_some()
+        }
+        _ => false,
+    }
+}
+
+// Reports whether `node` is a `this: T` parameter.
+// Go: internal/ast/utilities.go:IsThisParameter
+fn is_this_parameter(program: &dyn BoundProgram, param: NodeId) -> bool {
+    if program.arena().kind(param) != Kind::Parameter {
+        return false;
+    }
+    match program.arena().data(param) {
+        NodeData::ParameterDeclaration(d) => {
+            program.arena().kind(d.name) == Kind::Identifier
+                && program.arena().text(d.name) == INTERNAL_SYMBOL_NAME_THIS
         }
         _ => false,
     }
