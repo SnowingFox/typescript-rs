@@ -1127,6 +1127,74 @@ impl Checker {
         true
     }
 
+    // Returns the positional element types of a fixed-arity `TUPLE`-flagged type.
+    fn tuple_element_types(&self, t: TypeId) -> Vec<TypeId> {
+        self.get_type(t)
+            .as_object()
+            .map(|o| o.resolved_type_arguments.clone())
+            .unwrap_or_default()
+    }
+
+    // Pairwise-relates fixed-arity tuple element types by position (Go's
+    // `propertiesRelatedTo` tuple arm, fixed-arity subset).
+    //
+    // DEFER(phase-4-checker-4ae+): variadic/optional/rest tuples, arity
+    // mismatch diagnostics, and tuple-to-array assignability.
+    // Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm)
+    fn tuple_types_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> bool {
+        let source_elements = self.tuple_element_types(source);
+        let target_elements = self.tuple_element_types(target);
+        if source_elements.len() != target_elements.len() {
+            return false;
+        }
+        source_elements.iter().zip(target_elements.iter()).all(
+            |(&source_type, &target_type)| {
+                self.is_type_related_to(program, source_type, target_type, relation)
+            },
+        )
+    }
+
+    // Reporting twin of [`tuple_types_related_to`]: on the first incompatible
+    // positional element, hang `2626` over the child's head when either tuple
+    // has arity greater than one (Go's tuple `reportErrors` arm).
+    // Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm)
+    fn report_tuple_types_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+        reporter: &mut ChainReporter,
+    ) -> bool {
+        let source_elements = self.tuple_element_types(source);
+        let target_elements = self.tuple_element_types(target);
+        if source_elements.len() != target_elements.len() {
+            return false;
+        }
+        for (source_position, (&source_type, &target_type)) in source_elements
+            .iter()
+            .zip(target_elements.iter())
+            .enumerate()
+        {
+            if !self.report_is_related_to(program, source_type, target_type, relation, reporter) {
+                if source_elements.len() > 1 || target_elements.len() > 1 {
+                    reporter.report(
+                        &tsgo_diagnostics::TYPE_AT_POSITION_0_IN_SOURCE_IS_NOT_COMPATIBLE_WITH_TYPE_AT_POSITION_1_IN_TARGET,
+                        vec![source_position.to_string(), source_position.to_string()],
+                    );
+                }
+                return false;
+            }
+        }
+        true
+    }
+
     // For each property of `target`, `source` must have a property whose type is
     // related. A missing source property is tolerated only when the target
     // property is optional and the relation does not require optional properties
@@ -1139,6 +1207,11 @@ impl Checker {
         target: TypeId,
         relation: RelationKind,
     ) -> bool {
+        if self.get_type(source).object_flags().contains(ObjectFlags::TUPLE)
+            && self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
+        {
+            return self.tuple_types_related_to(program, source, target, relation);
+        }
         // Go: subtype/strictSubtype relations still require optional members to
         // be matched; assignability/comparability/identity do not.
         let require_optional_properties =
@@ -1764,6 +1837,11 @@ impl Checker {
         relation: RelationKind,
         reporter: &mut ChainReporter,
     ) -> bool {
+        if self.get_type(source).object_flags().contains(ObjectFlags::TUPLE)
+            && self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
+        {
+            return self.report_tuple_types_related_to(program, source, target, relation, reporter);
+        }
         // Go: subtype/strictSubtype require matching optional members too.
         let require_optional_properties =
             relation == RelationKind::Subtype || relation == RelationKind::StrictSubtype;

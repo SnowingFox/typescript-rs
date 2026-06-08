@@ -17526,3 +17526,130 @@ fn object_literal_excess_on_intersection_misspelling_reports_2561() {
         "Object literal may only specify known properties, but 'prop' does not exist in type 'A & B'. Did you mean to write 'prop1'?"
     );
 }
+
+// ---- T1-E batch 84: bitwise/shift void operands, minus void, tuple assignability ----
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void left, 2362)
+#[test]
+fn bitwise_void_left_operand_reports_2362() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() | 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2362, got {diags:?}");
+    assert_eq!(diags[0].code, 2362);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void right, 2363)
+#[test]
+fn exponent_void_right_operand_reports_2363() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\n2 ** f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2363, got {diags:?}");
+    assert_eq!(diags[0].code, 2363);
+    assert_eq!(
+        diags[0].message,
+        "The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void right, 2363)
+#[test]
+fn minus_void_right_operand_reports_2363() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\n1 - f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2363, got {diags:?}");
+    assert_eq!(diags[0].code, 2363);
+    assert_eq!(
+        diags[0].message,
+        "The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void left, 2362)
+#[test]
+fn shift_void_left_operand_reports_2362() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() >> 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2362, got {diags:?}");
+    assert_eq!(diags[0].code, 2362);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.reportError (tuple element assignability chain)
+#[test]
+fn assignability_chain_tuple_element_mismatch_reports_2326() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: [string, number];\nconst o: [number, number] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2626);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Type at position 0 in source is not compatible with type at position 0 in target."
+    );
+    assert_eq!(d.message_chain[0].next.len(), 1);
+    assert_eq!(d.message_chain[0].next[0].code, 2322);
+    assert_eq!(
+        d.message_chain[0].next[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTargetOfNamespaceImport (named exports only)
+#[test]
+fn namespace_import_named_exports_only_resolves_module_symbol() {
+    use crate::core::declared_types::resolve_alias;
+    use crate::core::is_es_module_symbol;
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/foo.ts", "export const x = 1;\n"),
+        ("/index.ts", "import * as ns from \"./foo\";\nns.x;"),
+    ]));
+    let index = p.source_files()[1];
+    let view = p.file_view(index).unwrap();
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p) as std::rc::Rc<dyn BoundProgram>);
+    let locals = view.locals(view.root()).expect("module locals");
+    let alias = *locals.get("ns").expect("import binding ns");
+    let target = resolve_alias(&mut c, view.as_ref(), alias).expect("alias target");
+    assert!(
+        !is_es_module_symbol(target),
+        "namespace import of named-export-only module must resolve to the module symbol, not a wrapped clone"
+    );
+    let diags = c.get_diagnostics(index);
+    assert!(
+        diags.is_empty(),
+        "ns.x on a named-export module must type-check without diagnostics, got {diags:?}"
+    );
+}
