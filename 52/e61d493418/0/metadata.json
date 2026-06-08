@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "52e61d493418",
+  "session_id": "fc98ae35-feaa-48ad-b625-70c62354986a",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-08T07:42:09.151193Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "internal/checker/core/relations.rs"
+  ],
+  "agent": "Cursor",
+  "model": "composer-2.5",
+  "turn_id": "2d24dfa6d3c9",
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-08T07:42:09.120341Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 205,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 205,
+    "total_lines_changed": 205,
+    "agent_percentage": 0,
+    "metric_version": 2
+  }
+}
