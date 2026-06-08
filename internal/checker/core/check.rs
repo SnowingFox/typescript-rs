@@ -6633,9 +6633,8 @@ impl Checker {
     // elaboration chain (`2755`/`2756`/`2757` under `2349`).
     //
     // DEFER(phase-4-checker-4r+): construct-signature (`2350`) variants, the
-    // getter-called-as-function hint, the `await` suggestion, and namespace-import
-    // related info. blocked-by: construct signatures, getter symbols, awaited
-    // types, and import recovery.
+    // getter-called-as-function hint, and namespace-import related info.
+    // blocked-by: construct signatures, getter symbols, and import recovery.
     // Go: internal/checker/checker.go:Checker.invocationError(9956)
     fn invocation_error(
         &mut self,
@@ -6657,6 +6656,9 @@ impl Checker {
         apparent_type: TypeId,
     ) -> Diagnostic {
         let apparent = get_apparent_type(self, apparent_type);
+        let awaited = self.get_awaited_type_no_alias(program, apparent);
+        let maybe_missing_await =
+            awaited != apparent && !self.get_signatures_of_type(awaited).is_empty();
         let head_message = &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE;
         let mut chain: Option<DiagnosticMessageChain> = None;
         if self.get_type(apparent).flags().contains(TypeFlags::UNION) {
@@ -6729,7 +6731,7 @@ impl Checker {
             });
         }
         let loc = program.arena().loc(error_target);
-        Diagnostic {
+        let mut diagnostic = Diagnostic {
             code: head_message.code(),
             category: head_message.category(),
             message: tsgo_diagnostics::format(&head_message.to_string(), &[]),
@@ -6737,7 +6739,17 @@ impl Checker {
             length: loc.end() - loc.pos(),
             related_information: Vec::new(),
             message_chain: chain.into_iter().collect(),
+        };
+        if maybe_missing_await {
+            let related = self.diagnostic_for_node(
+                program,
+                error_target,
+                &tsgo_diagnostics::DID_YOU_FORGET_TO_USE_AWAIT,
+                &[],
+            );
+            diagnostic.add_related_info(related);
         }
+        diagnostic
     }
 
     // Reports the `7053` implicit-any element-access error when a `string`/`number`

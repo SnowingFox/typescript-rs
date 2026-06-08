@@ -16846,3 +16846,81 @@ fn plus_on_two_promise_operands_suggests_await() {
     assert_eq!(diags[0].related_information.len(), 1);
     assert_eq!(diags[0].related_information[0].code, 2773);
 }
+
+// ---- T1-E batch 78: invocation await suggestions (2349 + 2773) ----
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (await suggestion)
+#[test]
+fn call_on_promise_callable_operand_suggests_await() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         declare const p: Promise<() => void>;\np();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].message, "This expression is not callable.");
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 2773);
+    assert_eq!(
+        diags[0].related_information[0].message,
+        "Did you forget to use 'await'?"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (no await when awaited type is not callable)
+#[test]
+fn call_on_promise_non_callable_operand_no_await_suggestion() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         declare const p: Promise<number>;\np();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(
+        diags[0].related_information.len(),
+        0,
+        "non-callable awaited type must not suggest await, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveTaggedTemplateExpression -> invocationError (await)
+#[test]
+fn tagged_template_on_promise_callable_tag_suggests_await() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         declare const p: Promise<(strings: TemplateStringsArray) => void>;\np`x`;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 2773);
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (property-access callee)
+#[test]
+fn call_property_on_promise_callable_suggests_await() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         declare const o: { f: Promise<() => void> };\no.f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 2773);
+}
