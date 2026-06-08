@@ -15,8 +15,9 @@ use tsgo_diagnostics::{Category, Message};
 
 use super::check::DiagnosticMessageChain;
 use super::declared_types::{
-    get_apparent_type, get_applicable_index_info_for_name, get_properties_of_type,
-    get_property_of_type, get_type_of_property_of_type, get_type_of_symbol,
+    get_apparent_type, get_applicable_index_info_for_name, get_index_type_of_type,
+    get_properties_of_type, get_property_of_type, get_property_type_for_index_type,
+    get_type_of_property_of_type, get_type_of_symbol,
 };
 use super::nodebuilder::type_to_string;
 use super::program::BoundProgram;
@@ -707,6 +708,11 @@ impl Checker {
             {
                 return result;
             }
+            if let Some(related) =
+                self.array_target_index_types_related_to(program, source, target, relation)
+            {
+                return related;
+            }
             // An object type relates structurally on BOTH its properties and its
             // call/construct signatures (Go relates properties, then call sigs,
             // then construct sigs — all must hold). A bare function type has no
@@ -1127,6 +1133,99 @@ impl Checker {
         true
     }
 
+    // Whether every constituent of `t` satisfies `predicate` (Go's `everyType`).
+    fn every_type(&self, t: TypeId, predicate: impl Fn(&Checker, TypeId) -> bool) -> bool {
+        self.distributed_types(t)
+            .iter()
+            .all(|&member| predicate(self, member))
+    }
+
+    // Whether `t` is a mutable (non-readonly) tuple (Go's `isMutableTupleType`).
+    fn is_mutable_tuple_type(&self, t: TypeId) -> bool {
+        self.is_tuple_type(t) && !self.is_readonly_tuple_type(t)
+    }
+
+    // The `number`-index element type of an array or tuple, falling back to `any`
+    // when no index signature applies (Go's `getIndexTypeOfTypeEx(_, number, any)`).
+    fn number_index_element_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> TypeId {
+        let number = self.number_type();
+        if let Some(element) = get_index_type_of_type(self, t, number) {
+            return element;
+        }
+        if let Some(element) = get_property_type_for_index_type(self, program, t, number) {
+            return element;
+        }
+        self.any_type
+    }
+
+    // Whether the array-target index-type arm of `structuredTypeRelatedTo` applies
+    // (Go's `isArrayType(target) && (...)` guard).
+    fn array_target_index_types_arm_applies(
+        &self,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> bool {
+        if relation == RelationKind::Identity || !self.is_array_type(target) {
+            return false;
+        }
+        (self.is_readonly_array_type(target)
+            && self.every_type(source, |c, m| c.is_array_or_tuple_type(m)))
+            || self.every_type(source, |c, m| c.is_mutable_tuple_type(m))
+    }
+
+    // Relates a mutable tuple (or readonly array/tuple to readonly array) source to
+    // an array target by comparing `number` index types (Go's
+    // `structuredTypeRelatedToWorker` array-target arm).
+    // Go: internal/checker/relater.go:Relater.structuredTypeRelatedToWorker (array target)
+    fn array_target_index_types_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> Option<bool> {
+        if !self.array_target_index_types_arm_applies(source, target, relation) {
+            return None;
+        }
+        if self.readonly_blocks_mutable_assignability(source, target, relation) {
+            return Some(false);
+        }
+        let source_index = self.number_index_element_type(program, source);
+        let target_index = self.number_index_element_type(program, target);
+        Some(self.is_type_related_to(program, source_index, target_index, relation))
+    }
+
+    // Reporting twin of [`array_target_index_types_related_to`].
+    fn report_array_target_index_types_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+        reporter: &mut ChainReporter,
+    ) -> Option<bool> {
+        if !self.array_target_index_types_arm_applies(source, target, relation) {
+            return None;
+        }
+        if self.readonly_blocks_mutable_assignability(source, target, relation) {
+            return Some(false);
+        }
+        let source_index = self.number_index_element_type(program, source);
+        let target_index = self.number_index_element_type(program, target);
+        Some(self.report_is_related_to(
+            program,
+            source_index,
+            target_index,
+            relation,
+            reporter,
+        ))
+    }
+
     // Returns the positional element types of a fixed-arity `TUPLE`-flagged type.
     fn tuple_element_types(&self, t: TypeId) -> Vec<TypeId> {
         self.get_type(t)
@@ -1135,27 +1234,129 @@ impl Checker {
             .unwrap_or_default()
     }
 
-    // Pairwise-relates fixed-arity tuple element types by position (Go's
-    // `propertiesRelatedTo` tuple arm, fixed-arity subset).
+    // Fixed-arity subset of Go's tuple `propertiesRelatedTo` arm when the target
+    // is a tuple and the source is an array or another tuple. Arrays are treated
+    // as variable-length (`sourceRest`); fixed tuples reject them with `2620`/
+    // `2621` before element comparison.
     //
-    // DEFER(phase-4-checker-4ae+): variadic/optional/rest tuples and
-    // tuple-to-array assignability (fixed-arity length mismatch is in
-    // `report_tuple_types_related_to`).
+    // DEFER(phase-4-checker-4ae+): variadic/optional/rest tuples.
     // Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm)
-    fn tuple_types_related_to(
+    fn array_or_tuple_to_tuple_types_related_to(
         &mut self,
         program: &dyn BoundProgram,
         source: TypeId,
         target: TypeId,
         relation: RelationKind,
     ) -> bool {
-        if !self.tuple_elements_related_to(program, source, target, relation) {
+        let source_is_tuple = self.is_tuple_type(source);
+        let source_rest = !source_is_tuple;
+        let target_elements = self.tuple_element_types(target);
+        let target_arity = target_elements.len();
+        let source_arity = if source_is_tuple {
+            self.tuple_element_types(source).len()
+        } else {
+            1
+        };
+        let source_min_length = if source_is_tuple { source_arity } else { 0 };
+        let target_min_length = target_arity;
+        if !source_rest && source_arity < target_min_length {
             return false;
         }
-        !self.readonly_blocks_mutable_assignability(source, target, relation)
+        if target_arity < source_min_length {
+            return false;
+        }
+        if source_rest || target_arity < source_arity {
+            return false;
+        }
+        if source_is_tuple {
+            if !self.tuple_elements_related_to(program, source, target, relation) {
+                return false;
+            }
+            return !self.readonly_blocks_mutable_assignability(source, target, relation);
+        }
+        let Some(array_element) = self.get_element_type_of_array_type(source) else {
+            return false;
+        };
+        target_elements.iter().all(|&target_type| {
+            self.is_type_related_to(program, array_element, target_type, relation)
+        })
     }
 
-    // Reporting twin of [`tuple_types_related_to`]: on the first incompatible
+    // Reporting twin of [`array_or_tuple_to_tuple_types_related_to`].
+    fn report_array_or_tuple_to_tuple_types_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+        reporter: &mut ChainReporter,
+    ) -> bool {
+        let source_is_tuple = self.is_tuple_type(source);
+        let source_rest = !source_is_tuple;
+        let target_elements = self.tuple_element_types(target);
+        let target_arity = target_elements.len();
+        let source_arity = if source_is_tuple {
+            self.tuple_element_types(source).len()
+        } else {
+            1
+        };
+        let source_min_length = if source_is_tuple { source_arity } else { 0 };
+        let target_min_length = target_arity;
+        if !source_rest && source_arity < target_min_length {
+            reporter.report(
+                &tsgo_diagnostics::SOURCE_HAS_0_ELEMENT_S_BUT_TARGET_REQUIRES_1,
+                vec![source_arity.to_string(), target_min_length.to_string()],
+            );
+            return false;
+        }
+        if target_arity < source_min_length {
+            reporter.report(
+                &tsgo_diagnostics::SOURCE_HAS_0_ELEMENT_S_BUT_TARGET_ALLOWS_ONLY_1,
+                vec![source_min_length.to_string(), target_arity.to_string()],
+            );
+            return false;
+        }
+        if source_rest || target_arity < source_arity {
+            if source_min_length < target_min_length {
+                reporter.report(
+                    &tsgo_diagnostics::TARGET_REQUIRES_0_ELEMENT_S_BUT_SOURCE_MAY_HAVE_FEWER,
+                    vec![target_min_length.to_string()],
+                );
+            } else {
+                reporter.report(
+                    &tsgo_diagnostics::TARGET_ALLOWS_ONLY_0_ELEMENT_S_BUT_SOURCE_MAY_HAVE_MORE,
+                    vec![target_arity.to_string()],
+                );
+            }
+            return false;
+        }
+        if source_is_tuple {
+            return self.report_tuple_types_related_to(program, source, target, relation, reporter);
+        }
+        let Some(array_element) = self.get_element_type_of_array_type(source) else {
+            return false;
+        };
+        for (position, &target_type) in target_elements.iter().enumerate() {
+            if !self.report_is_related_to(
+                program,
+                array_element,
+                target_type,
+                relation,
+                reporter,
+            ) {
+                if target_arity > 1 {
+                    reporter.report(
+                        &tsgo_diagnostics::TYPE_AT_POSITION_0_IN_SOURCE_IS_NOT_COMPATIBLE_WITH_TYPE_AT_POSITION_1_IN_TARGET,
+                        vec![position.to_string(), position.to_string()],
+                    );
+                }
+                return false;
+            }
+        }
+        true
+    }
+
+    // On the first incompatible positional element, hang `2626` over the child's
     // positional element, hang `2626` over the child's head when either tuple
     // has arity greater than one (Go's tuple `reportErrors` arm).
     // Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm)
@@ -1221,20 +1422,28 @@ impl Checker {
         target: TypeId,
         relation: RelationKind,
     ) -> bool {
-        // Go's tuple `propertiesRelatedTo` arm: a readonly array source cannot
-        // satisfy a mutable tuple target before arity/element checks. When both
-        // sides are tuples, `tuple_types_related_to` checks elements first so
-        // an element mismatch (`2626`) wins over readonly (`4104`).
-        if self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
-            && self.is_array_type(source)
+        // A readonly tuple cannot satisfy a mutable array target (Go's
+        // `tryElaborateArrayLikeErrors` tuple-source arm).
+        if self.is_tuple_type(source)
+            && self.is_array_type(target)
             && self.readonly_blocks_mutable_assignability(source, target, relation)
         {
             return false;
         }
-        if self.get_type(source).object_flags().contains(ObjectFlags::TUPLE)
-            && self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
+        // Go's tuple `propertiesRelatedTo` arm: a readonly array source cannot
+        // satisfy a mutable tuple target before arity/element checks. Tuple-tuple
+        // readonly is checked after elements so `2626` wins over `4104`.
+        if self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
+            && self.is_array_or_tuple_type(source)
         {
-            return self.tuple_types_related_to(program, source, target, relation);
+            if self.is_array_type(source)
+                && self.readonly_blocks_mutable_assignability(source, target, relation)
+            {
+                return false;
+            }
+            return self.array_or_tuple_to_tuple_types_related_to(
+                program, source, target, relation,
+            );
         }
         // Go: subtype/strictSubtype relations still require optional members to
         // be matched; assignability/comparability/identity do not.
@@ -1778,6 +1987,11 @@ impl Checker {
             // Same-target generic references elaborate their type arguments (Go's
             // variance arm), mirroring the bool path; everything else elaborates
             // structurally.
+            if let Some(related) = self.report_array_target_index_types_related_to(
+                program, source, target, relation, reporter,
+            ) {
+                related
+            } else {
             match self.report_reference_type_arguments_related_to(
                 program, source, target, relation, reporter,
             ) {
@@ -1804,6 +2018,7 @@ impl Checker {
                             Some(&mut *reporter),
                         )
                 }
+            }
             }
         } else {
             // Identity and other structured/instantiable shapes: no elaboration.
@@ -1869,16 +2084,23 @@ impl Checker {
         relation: RelationKind,
         reporter: &mut ChainReporter,
     ) -> bool {
-        if self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
-            && self.is_array_type(source)
+        if self.is_tuple_type(source)
+            && self.is_array_type(target)
             && self.readonly_blocks_mutable_assignability(source, target, relation)
         {
             return false;
         }
-        if self.get_type(source).object_flags().contains(ObjectFlags::TUPLE)
-            && self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
+        if self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
+            && self.is_array_or_tuple_type(source)
         {
-            return self.report_tuple_types_related_to(program, source, target, relation, reporter);
+            if self.is_array_type(source)
+                && self.readonly_blocks_mutable_assignability(source, target, relation)
+            {
+                return false;
+            }
+            return self.report_array_or_tuple_to_tuple_types_related_to(
+                program, source, target, relation, reporter,
+            );
         }
         // Go: subtype/strictSubtype require matching optional members too.
         let require_optional_properties =

@@ -18006,3 +18006,94 @@ fn unsigned_shift_void_right_operand_reports_2363() {
         "The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
     );
 }
+
+// ---- T1-E batch 88: tuple-array assignability ----
+
+const BATCH_88_ARRAY_STUBS: &str = "interface Array<T> { [n: number]: T; length: number; }\n\
+interface ReadonlyArray<T> { readonly [n: number]: T; readonly length: number; }\n";
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm, 2620)
+#[test]
+fn assignability_chain_array_to_fixed_tuple_reports_2620() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{BATCH_88_ARRAY_STUBS}declare const src: number[];\nconst o: [number, number] = src;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2620);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Target requires 2 element(s) but source may have fewer."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.structuredTypeRelatedToWorker (array target, index types)
+#[test]
+fn assignability_tuple_to_mutable_array_is_allowed() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{BATCH_88_ARRAY_STUBS}declare const src: [number, number];\nconst o: number[] = src;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "mutable tuple to number[] must assign without diagnostics, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.structuredTypeRelatedToWorker (array target, index types)
+#[test]
+fn assignability_chain_tuple_to_array_element_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{BATCH_88_ARRAY_STUBS}declare const src: [number, string];\nconst o: number[] = src;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2322);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Type 'string | number' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.tryElaborateArrayLikeErrors (readonly tuple to mutable array)
+#[test]
+fn assignability_readonly_tuple_to_mutable_array_reports_4104() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{BATCH_88_ARRAY_STUBS}const src = [1, 2] as const;\nconst o: number[] = src;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 4104, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 4104);
+    assert_eq!(
+        d.message,
+        "The type 'readonly [1, 2]' is 'readonly' and cannot be assigned to the mutable type 'Array<number>'."
+    );
+    assert!(d.message_chain.is_empty());
+}
