@@ -3054,6 +3054,29 @@ impl Checker {
             containing_type,
             &name,
         );
+        if let Some(promised) = self.get_promised_type_of_promise(program, containing_type) {
+            let promised_apparent = get_apparent_type(self, promised);
+            if get_property_of_type(self, promised_apparent, &name).is_some() {
+                let mut diagnostic = self.diagnostic_for_node(
+                    program,
+                    name_node,
+                    &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
+                    &[name.as_str(), type_str.as_str()],
+                );
+                let related = self.diagnostic_for_node(
+                    program,
+                    name_node,
+                    &tsgo_diagnostics::DID_YOU_FORGET_TO_USE_AWAIT,
+                    &[],
+                );
+                diagnostic.add_related_info(related);
+                if !message_chain.is_empty() {
+                    diagnostic.message_chain = message_chain;
+                }
+                self.add_diagnostic(program, diagnostic);
+                return;
+            }
+        }
         let mut diagnostic = if self.type_has_static_property(program, &name, containing_type) {
             let static_access = self.static_member_access_suggestion(
                 program,
@@ -3703,13 +3726,34 @@ impl Checker {
                     let right_base =
                         self.get_base_type_of_literal_type_for_comparison(right_type);
                     if !self.relational_operands_comparable(program, left_base, right_base) {
+                        let awaited_left =
+                            self.get_awaited_type_no_alias(program, left_base);
+                        let awaited_right =
+                            self.get_awaited_type_no_alias(program, right_base);
+                        let would_work_with_await = (awaited_left != left_base
+                            || awaited_right != right_base)
+                            && self.relational_operands_comparable(
+                                program,
+                                awaited_left,
+                                awaited_right,
+                            );
+                        let (error_left, error_right) = if would_work_with_await {
+                            (left_base, right_base)
+                        } else {
+                            self.get_base_types_if_unrelated(
+                                program,
+                                left_base,
+                                right_base,
+                                |c, p, l, r| c.relational_operands_comparable(p, l, r),
+                            )
+                        };
                         self.report_binary_operator_error(
                             program,
                             node,
                             operator_token,
-                            left_base,
-                            right_base,
-                            false,
+                            error_left,
+                            error_right,
+                            would_work_with_await,
                         );
                     }
                 }
@@ -3725,19 +3769,34 @@ impl Checker {
             | Kind::EqualsEqualsEqualsToken
             | Kind::ExclamationEqualsEqualsToken => {
                 if !self.equality_operands_comparable(program, left_type, right_type) {
-                    let (error_left, error_right) = self.get_base_types_if_unrelated(
-                        program,
-                        left_type,
-                        right_type,
-                        |c, p, l, r| c.equality_operands_comparable(p, l, r),
-                    );
+                    let awaited_left =
+                        self.get_awaited_type_no_alias(program, left_type);
+                    let awaited_right =
+                        self.get_awaited_type_no_alias(program, right_type);
+                    let would_work_with_await = (awaited_left != left_type
+                        || awaited_right != right_type)
+                        && self.equality_operands_comparable(
+                            program,
+                            awaited_left,
+                            awaited_right,
+                        );
+                    let (error_left, error_right) = if would_work_with_await {
+                        (left_type, right_type)
+                    } else {
+                        self.get_base_types_if_unrelated(
+                            program,
+                            left_type,
+                            right_type,
+                            |c, p, l, r| c.equality_operands_comparable(p, l, r),
+                        )
+                    };
                     self.report_binary_operator_error(
                         program,
                         node,
                         operator_token,
                         error_left,
                         error_right,
-                        false,
+                        would_work_with_await,
                     );
                 }
                 self.boolean_type

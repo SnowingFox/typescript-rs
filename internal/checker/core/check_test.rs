@@ -16735,3 +16735,114 @@ fn element_access_static_member_reports_2576_with_bracket_suggestion() {
         "Property 'y' does not exist on type 'A'. Did you mean to access the static member 'A[\"y\"]' instead?"
     );
 }
+
+// ---- T1-E batch 77: await suggestions on property access and comparisons ----
+
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty (GetPromisedTypeOfPromise)
+#[test]
+fn property_access_on_promise_missing_property_suggests_await() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         declare const p: Promise<{ x: number }>;\np.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+    assert_eq!(
+        diags[0].message,
+        "Property 'x' does not exist on type 'Promise<{ x: number; }>'."
+    );
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 2773);
+    assert_eq!(
+        diags[0].related_information[0].message,
+        "Did you forget to use 'await'?"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.reportNonexistentProperty (GetPromisedTypeOfPromise)
+#[test]
+fn element_access_on_promise_missing_property_suggests_await() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         declare const p: Promise<{ x: number }>;\np[\"x\"];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 2773);
+}
+
+// Go: internal/checker/checker.go:Checker.reportOperatorError (relational await)
+#[test]
+fn relational_comparison_on_promise_operand_suggests_await() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         declare const p: Promise<number>;\np < 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2365, got {diags:?}");
+    assert_eq!(diags[0].code, 2365);
+    assert_eq!(
+        diags[0].message,
+        "Operator '<' cannot be applied to types 'Promise<number>' and 'number'."
+    );
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 2773);
+    assert_eq!(
+        diags[0].related_information[0].message,
+        "Did you forget to use 'await'?"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.reportOperatorError (equality await)
+#[test]
+fn equality_comparison_on_promise_operand_suggests_await() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         declare const p: Promise<number>;\ndeclare const n: number;\np === n;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2367, got {diags:?}");
+    assert_eq!(diags[0].code, 2367);
+    assert_eq!(
+        diags[0].message,
+        "This comparison appears to be unintentional because the types 'Promise<number>' and 'number' have no overlap."
+    );
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 2773);
+}
+
+// Go: internal/checker/checker.go:Checker.reportOperatorError (+ await)
+#[test]
+fn plus_on_two_promise_operands_suggests_await() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         declare const a: Promise<number>;\ndeclare const b: Promise<number>;\na + b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2365, got {diags:?}");
+    assert_eq!(diags[0].code, 2365);
+    assert_eq!(
+        diags[0].message,
+        "Operator '+' cannot be applied to types 'Promise<number>' and 'Promise<number>'."
+    );
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 2773);
+}
