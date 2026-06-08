@@ -15078,3 +15078,180 @@ fn valid_override_modifier_reports_no_diagnostic() {
         "valid override must not report override-modifier errors"
     );
 }
+
+// ---- T1-E batch 58: mixin constructors, property-kind overrides, override spelling ----
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4314)
+#[test]
+fn mixin_class_without_rest_constructor_reports_2545() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Ctor = new (...args: any[]) => object;\n\
+         function f<T extends Ctor>(B: T) {\n\
+           class M extends B {}\n\
+           return M;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2545),
+        "expected mixin 2545; got {diags:?}"
+    );
+    let d = diags.iter().find(|d| d.code == 2545).unwrap();
+    assert_eq!(
+        d.message,
+        "A mixin class must have a constructor with a single rest parameter of type 'any[]'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4320)
+#[test]
+fn mixin_class_extending_abstract_type_variable_without_abstract_reports_2797() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T extends abstract new (...args: any[]) => object>(B: T) {\n\
+           class M extends B {\n\
+             constructor(...args: any[]) { super(...args); }\n\
+           }\n\
+           return M;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2797),
+        "expected mixin abstract 2797; got {diags:?}"
+    );
+    let d = diags.iter().find(|d| d.code == 2797).unwrap();
+    assert_eq!(
+        d.message,
+        "A mixin class that extends from a type variable containing an abstract construct signature must also be declared 'abstract'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkKindsOfPropertyMemberOverrides(4633)
+#[test]
+fn derived_method_overriding_base_property_reports_2425() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B { x = 1; }\nclass D extends B { x() {} }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2425)
+        .unwrap_or_else(|| panic!("expected 2425; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Class 'B' defines instance member property 'x', but extended class 'D' defines it as instance member function."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkKindsOfPropertyMemberOverrides(4628)
+#[test]
+fn derived_accessor_overriding_base_method_reports_2423() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B { x() {} }\nclass D extends B { get x() { return 1; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2423)
+        .unwrap_or_else(|| panic!("expected 2423; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Class 'B' defines instance member function 'x', but extended class 'D' defines it as instance member accessor."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkKindsOfPropertyMemberOverrides(4631)
+#[test]
+fn derived_method_overriding_base_accessor_reports_2426() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class B { get x() { return 1; } }\nclass D extends B { x() {} }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2426)
+        .unwrap_or_else(|| panic!("expected 2426; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Class 'B' defines instance member accessor 'x', but extended class 'D' defines it as instance member function."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkMemberForOverrideModifier(4733)
+#[test]
+fn override_modifier_misspelling_suggests_base_member_reports_4117() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class A { doSomething() {} }\nclass B extends A { override doSomethang() {} }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 4117);
+    assert_eq!(
+        diags[0].message,
+        "This member cannot have an 'override' modifier because it is not declared in the base class 'A'. Did you mean 'doSomething'?"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkMemberForOverrideModifier(4745)
+#[test]
+fn parameter_property_missing_override_reports_4115() {
+    let options = CompilerOptions {
+        no_implicit_override: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "class B { a: string }\nclass D extends B {\n  constructor(public a: string) { super(); }\n}",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 4115);
+    assert_eq!(
+        diags[0].message,
+        "This parameter property must have an 'override' modifier because it overrides a member in base class 'B'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkMemberForOverrideModifier(4751)
+#[test]
+fn abstract_member_missing_override_reports_4116() {
+    let options = CompilerOptions {
+        no_implicit_override: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "abstract class B { abstract m(): void; }\nabstract class D extends B { abstract m(): void; }",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 4116);
+    assert_eq!(
+        diags[0].message,
+        "This member must have an 'override' modifier because it overrides an abstract method that is declared in the base class 'B'."
+    );
+}

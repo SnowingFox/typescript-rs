@@ -8330,6 +8330,41 @@ impl Checker {
         // clause does not contribute), so a non-empty list means the class
         // extends a base class. The monomorphic `baseWithThis` is the base type.
         // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4287)
+        // Mixin constructor checks when the `extends` expression is a type
+        // variable (Go's `baseConstructorType.flags&TypeFlagsTypeVariable`).
+        // Runs even when `base_types` is empty (monomorphic heritage resolution
+        // does not yet resolve constructor-typed `extends` parameters).
+        // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4312)
+        if let Some(base_type_node) = get_extends_heritage_clause_element(program, node) {
+            let expression = match program.arena().data(base_type_node) {
+                NodeData::ExpressionWithTypeArguments(e) => Some(e.expression),
+                _ => None,
+            };
+            if let Some(expression) = expression {
+                if let Some(base_constructor_type) =
+                    self.extends_expression_type_variable(program, expression)
+                {
+                    if !is_mixin_constructor_class(self, program, node) {
+                        self.error(
+                            program,
+                            error_node,
+                            &tsgo_diagnostics::A_MIXIN_CLASS_MUST_HAVE_A_CONSTRUCTOR_WITH_A_SINGLE_REST_PARAMETER_OF_TYPE_ANY,
+                            &[],
+                        );
+                    } else if !has_abstract_modifier(program.arena(), node)
+                        && self.has_abstract_construct_signature(program, base_constructor_type)
+                    {
+                        self.error(
+                            program,
+                            error_node,
+                            &tsgo_diagnostics::A_MIXIN_CLASS_THAT_EXTENDS_FROM_A_TYPE_VARIABLE_CONTAINING_AN_ABSTRACT_CONSTRUCT_SIGNATURE_MUST_ALSO_BE_DECLARED_ABSTRACT,
+                            &[],
+                        );
+                    }
+                }
+            }
+        }
+
         let base_types = self
             .get_type(class_type)
             .as_object()
@@ -8518,18 +8553,81 @@ impl Checker {
             let Some(derived_prop) = get_property_of_type(self, class_type, &name) else {
                 continue;
             };
-            if derived_prop != base_prop {
+            let base_target = get_target_symbol(self, program, base_prop);
+            let derived_target = get_target_symbol(self, program, derived_prop);
+            if derived_target == base_target {
+                let base_flags =
+                    declaration_modifier_flags_from_symbol(self, program, base_prop, false);
+                if !base_flags.contains(ModifierFlags::ABSTRACT) {
+                    continue;
+                }
+                if has_abstract_modifier(program.arena(), node) {
+                    continue;
+                }
+                missed.push(super::nodebuilder::symbol_to_string(program, base_prop));
                 continue;
             }
             let base_flags =
                 declaration_modifier_flags_from_symbol(self, program, base_prop, false);
-            if !base_flags.contains(ModifierFlags::ABSTRACT) {
+            let derived_flags =
+                declaration_modifier_flags_from_symbol(self, program, derived_prop, false);
+            if base_flags.contains(ModifierFlags::PRIVATE)
+                || derived_flags.contains(ModifierFlags::PRIVATE)
+            {
                 continue;
             }
-            if has_abstract_modifier(program.arena(), node) {
+            let base_sym = program.symbol(base_target);
+            let derived_sym = program.symbol(derived_target);
+            let base_property_flags = base_sym.flags & SymbolFlags::PROPERTY_OR_ACCESSOR;
+            let derived_property_flags = derived_sym.flags & SymbolFlags::PROPERTY_OR_ACCESSOR;
+            if !base_property_flags.is_empty() && !derived_property_flags.is_empty() {
+                let overridden_instance_property = !base_property_flags
+                    .intersects(SymbolFlags::PROPERTY)
+                    && derived_property_flags.intersects(SymbolFlags::PROPERTY);
+                let overridden_instance_accessor = base_property_flags
+                    .intersects(SymbolFlags::PROPERTY)
+                    && !derived_property_flags.intersects(SymbolFlags::PROPERTY);
+                if overridden_instance_property || overridden_instance_accessor {
+                    let error_node = override_member_error_node(program, derived_target);
+                    let prop_name = super::nodebuilder::symbol_to_string(program, base_prop);
+                    let base_name = super::nodebuilder::type_to_string(self, program, base_type);
+                    let class_name = super::nodebuilder::type_to_string(self, program, class_type);
+                    let message = if overridden_instance_property {
+                        &tsgo_diagnostics::X_0_IS_DEFINED_AS_AN_ACCESSOR_IN_CLASS_1_BUT_IS_OVERRIDDEN_HERE_IN_2_AS_AN_INSTANCE_PROPERTY
+                    } else {
+                        &tsgo_diagnostics::X_0_IS_DEFINED_AS_A_PROPERTY_IN_CLASS_1_BUT_IS_OVERRIDDEN_HERE_IN_2_AS_AN_ACCESSOR
+                    };
+                    self.error(
+                        program,
+                        error_node,
+                        message,
+                        &[prop_name.as_str(), base_name.as_str(), class_name.as_str()],
+                    );
+                }
                 continue;
             }
-            missed.push(super::nodebuilder::symbol_to_string(program, base_prop));
+            let error_node = override_member_error_node(program, derived_target);
+            let base_name = super::nodebuilder::type_to_string(self, program, base_type);
+            let prop_name = super::nodebuilder::symbol_to_string(program, base_prop);
+            let class_name = super::nodebuilder::type_to_string(self, program, class_type);
+            let message = if is_prototype_property(self, program, base_target) {
+                if is_prototype_property(self, program, derived_target)
+                    || derived_sym.flags.intersects(SymbolFlags::PROPERTY)
+                {
+                    continue;
+                }
+                &tsgo_diagnostics::CLASS_0_DEFINES_INSTANCE_MEMBER_FUNCTION_1_BUT_EXTENDED_CLASS_2_DEFINES_IT_AS_INSTANCE_MEMBER_ACCESSOR
+            } else if base_sym.flags.intersects(SymbolFlags::ACCESSOR) {
+                &tsgo_diagnostics::CLASS_0_DEFINES_INSTANCE_MEMBER_ACCESSOR_1_BUT_EXTENDED_CLASS_2_DEFINES_IT_AS_INSTANCE_MEMBER_FUNCTION
+            } else {
+                &tsgo_diagnostics::CLASS_0_DEFINES_INSTANCE_MEMBER_PROPERTY_1_BUT_EXTENDED_CLASS_2_DEFINES_IT_AS_INSTANCE_MEMBER_FUNCTION
+            };
+            self.error(
+                program,
+                error_node,
+                message,
+                &[base_name.as_str(), prop_name.as_str(), class_name.as_str()],
+            );
         }
         if missed.is_empty() {
             return;
@@ -8556,6 +8654,232 @@ impl Checker {
                 &[class_name.as_str(), base_name.as_str(), props.as_str()],
             );
         }
+    }
+
+    // Resolves the type-variable (type parameter) referenced by a class `extends`
+    // expression. `checkExpression` on a parameter typed with a type parameter
+    // may not yield a `TYPE_PARAMETER` type id, so fall back to the parameter's
+    // annotation when needed.
+    fn extends_expression_type_variable(
+        &mut self,
+        program: &dyn BoundProgram,
+        expression: NodeId,
+    ) -> Option<TypeId> {
+        let t = self.check_expression(program, expression);
+        if self
+            .get_type(t)
+            .flags()
+            .intersects(TypeFlags::TYPE_PARAMETER)
+        {
+            return Some(t);
+        }
+        if program.arena().kind(expression) != Kind::Identifier {
+            return None;
+        }
+        let name = program.arena().text(expression).to_string();
+        let globals = program.globals();
+        if let Some(tp_sym) = resolve_name(
+            program,
+            expression,
+            &name,
+            SymbolFlags::TYPE_PARAMETER,
+            false,
+            globals,
+        ) {
+            let tp_type = get_declared_type_of_symbol(self, program, tp_sym, globals);
+            if self
+                .get_type(tp_type)
+                .flags()
+                .intersects(TypeFlags::TYPE_PARAMETER)
+            {
+                return Some(tp_type);
+            }
+        }
+        let sym = resolve_name(
+            program,
+            expression,
+            &name,
+            SymbolFlags::VALUE | SymbolFlags::EXPORT_VALUE,
+            false,
+            globals,
+        )?;
+        let decl = program.symbol(sym).value_declaration?;
+        let NodeData::ParameterDeclaration(d) = program.arena().data(decl) else {
+            return None;
+        };
+        let type_node = d.type_node?;
+        let ann = get_type_from_type_node(self, program, type_node, None);
+        if self
+            .get_type(ann)
+            .flags()
+            .intersects(TypeFlags::TYPE_PARAMETER)
+        {
+            Some(ann)
+        } else {
+            None
+        }
+    }
+
+    // Go: internal/checker/checker.go:Checker.isMixinConstructorType(16885)
+    fn has_abstract_construct_signature(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> bool {
+        if self.type_declares_abstract_constructor(program, t) {
+            return true;
+        }
+        if self
+            .get_type(t)
+            .flags()
+            .intersects(TypeFlags::TYPE_PARAMETER)
+        {
+            if self.type_parameter_constraint_declares_abstract_constructor(program, t) {
+                return true;
+            }
+            if let Some(constraint) = get_constraint_of_type_parameter(self, program, t) {
+                return self.has_abstract_construct_signature(program, constraint);
+            }
+        }
+        false
+    }
+
+    fn type_parameter_constraint_declares_abstract_constructor(
+        &self,
+        program: &dyn BoundProgram,
+        type_parameter: TypeId,
+    ) -> bool {
+        let Some(symbol) = self
+            .get_type(type_parameter)
+            .as_type_parameter()
+            .and_then(|d| d.symbol)
+        else {
+            return false;
+        };
+        let owner = program.view_for_symbol(symbol);
+        let prog: &dyn BoundProgram = owner.as_deref().unwrap_or(program);
+        let Some(constraint_node) = prog.symbol(symbol).declarations.iter().find_map(|&decl| {
+            match prog.arena().data(decl) {
+                NodeData::TypeParameterDeclaration(d) => d.constraint,
+                _ => None,
+            }
+        }) else {
+            return false;
+        };
+        let mut type_node = constraint_node;
+        if let NodeData::TypeReference(d) = prog.arena().data(constraint_node) {
+            if prog.arena().kind(d.type_name) == Kind::Identifier {
+                let name = prog.arena().text(d.type_name).to_string();
+                if let Some(alias_sym) = resolve_name(
+                    prog,
+                    d.type_name,
+                    &name,
+                    SymbolFlags::TYPE,
+                    false,
+                    prog.globals(),
+                ) {
+                    for &decl in &prog.symbol(alias_sym).declarations {
+                        if let NodeData::TypeAliasDeclaration(ad) = prog.arena().data(decl) {
+                            type_node = ad.type_node;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        matches!(
+            prog.arena().kind(type_node),
+            Kind::ConstructorType | Kind::ConstructSignature
+        ) && has_abstract_modifier(prog.arena(), type_node)
+    }
+
+    fn type_declares_abstract_constructor(
+        &self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> bool {
+        for sig in self.get_construct_signatures_of_type(t) {
+            if self
+                .signature(sig)
+                .flags
+                .contains(SignatureFlags::ABSTRACT)
+            {
+                return true;
+            }
+            if let Some(decl) = self.signature(sig).declaration {
+                if matches!(
+                    program.arena().kind(decl),
+                    Kind::ConstructorType | Kind::ConstructSignature
+                ) && has_abstract_modifier(program.arena(), decl)
+                {
+                    return true;
+                }
+            }
+        }
+        let apparent = get_apparent_type(self, t);
+        if let Some(obj) = self.get_type(apparent).as_object() {
+            if let Some(target) = obj.target {
+                return self.type_declares_abstract_constructor(program, target);
+            }
+        }
+        let Some(sym) = self.get_type(apparent).symbol else {
+            return false;
+        };
+        let owner = program.view_for_symbol(sym);
+        let prog: &dyn BoundProgram = owner.as_deref().unwrap_or(program);
+        for &decl in &prog.symbol(sym).declarations {
+            if matches!(
+                prog.arena().kind(decl),
+                Kind::ConstructorType | Kind::ConstructSignature
+            ) && has_abstract_modifier(prog.arena(), decl)
+            {
+                return true;
+            }
+            if let NodeData::TypeAliasDeclaration(d) = prog.arena().data(decl) {
+                let type_node = d.type_node;
+                if matches!(prog.arena().kind(type_node), Kind::ConstructorType | Kind::ConstructSignature)
+                    && has_abstract_modifier(prog.arena(), type_node)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // Go: internal/checker/checker.go:Checker.getSuggestedSymbolForNonexistentClassMember(4756)
+    fn get_suggested_symbol_for_nonexistent_class_member(
+        &mut self,
+        program: &dyn BoundProgram,
+        name: &str,
+        base_type: TypeId,
+    ) -> Option<SymbolId> {
+        let candidates: Vec<SymbolId> = get_properties_of_type(self, base_type)
+            .into_iter()
+            .map(|(_, sym)| sym)
+            .collect();
+        super::name_resolution::get_spelling_suggestion_for_name(
+            program,
+            name,
+            &candidates,
+            SymbolFlags::CLASS_MEMBER,
+        )
+    }
+
+    // Go: internal/checker/checker.go:Checker.getSignaturesOfType (construct kind)
+    fn get_construct_signatures_of_type(&self, t: TypeId) -> Vec<SignatureId> {
+        let apparent = get_apparent_type(self, t);
+        let Some(obj) = self.get_type(apparent).as_object() else {
+            return Vec::new();
+        };
+        let resolved = match obj.target {
+            Some(target) => self.get_type(target).as_object(),
+            None => Some(obj),
+        };
+        let Some(obj) = resolved else {
+            return Vec::new();
+        };
+        obj.construct_signatures.clone()
     }
 
     // Go: internal/checker/checker.go:Checker.checkMembersForOverrideModifier(4678)
@@ -8670,12 +8994,25 @@ impl Checker {
         let base_prop = get_property_of_type(self, base_type, &member_name);
         if base_prop.is_none() && member_has_override {
             let base_name = super::nodebuilder::type_to_string(self, program, base_type);
-            self.error(
-                program,
-                member,
-                &tsgo_diagnostics::THIS_MEMBER_CANNOT_HAVE_AN_OVERRIDE_MODIFIER_BECAUSE_IT_IS_NOT_DECLARED_IN_THE_BASE_CLASS_0,
-                &[base_name.as_str()],
-            );
+            if let Some(suggestion) =
+                self.get_suggested_symbol_for_nonexistent_class_member(program, &member_name, base_type)
+            {
+                let suggestion_name =
+                    super::nodebuilder::symbol_to_string(program, suggestion);
+                self.error(
+                    program,
+                    member,
+                    &tsgo_diagnostics::THIS_MEMBER_CANNOT_HAVE_AN_OVERRIDE_MODIFIER_BECAUSE_IT_IS_NOT_DECLARED_IN_THE_BASE_CLASS_0_DID_YOU_MEAN_1,
+                    &[base_name.as_str(), suggestion_name.as_str()],
+                );
+            } else {
+                self.error(
+                    program,
+                    member,
+                    &tsgo_diagnostics::THIS_MEMBER_CANNOT_HAVE_AN_OVERRIDE_MODIFIER_BECAUSE_IT_IS_NOT_DECLARED_IN_THE_BASE_CLASS_0,
+                    &[base_name.as_str()],
+                );
+            }
             return;
         }
         if base_prop.is_some()
@@ -12795,6 +13132,7 @@ fn modifier_flags_of(arena: &tsgo_ast::NodeArena, node: NodeId) -> tsgo_ast::Mod
             d.modifiers.as_ref()
         }
         NodeData::ConstructorDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::ConstructorType(d) => d.modifiers.as_ref(),
         NodeData::ParameterDeclaration(d) => d.modifiers.as_ref(),
         NodeData::IndexSignatureDeclaration(d) => d.modifiers.as_ref(),
         _ => None,
@@ -12813,6 +13151,80 @@ fn has_static_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
 // Reports whether `node` carries the `abstract` modifier.
 fn has_abstract_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
     modifier_flags_of(arena, node).contains(tsgo_ast::ModifierFlags::ABSTRACT)
+}
+
+// Go: internal/checker/checker.go:Checker.getTargetSymbol(21519)
+fn get_target_symbol(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> SymbolId {
+    if checker
+        .resolved_symbol_check_flags(program, symbol)
+        .contains(CheckFlags::INSTANTIATED)
+    {
+        checker
+            .value_symbol_links
+            .try_get(&symbol)
+            .and_then(|l| l.target)
+            .unwrap_or(symbol)
+    } else {
+        symbol
+    }
+}
+
+// Go: internal/checker/checker.go:isPrototypeProperty(21533)
+fn is_prototype_property(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> bool {
+    program.symbol(symbol).flags.intersects(SymbolFlags::METHOD)
+        || checker
+            .resolved_symbol_check_flags(program, symbol)
+            .contains(CheckFlags::SYNTHETIC_METHOD)
+}
+
+// Go: internal/checker/checker.go:Checker.isMixinConstructorType(16885)
+fn is_mixin_constructor_class(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    class_node: NodeId,
+) -> bool {
+    let Some(constructor) = find_constructor_declaration(program, class_node) else {
+        return false;
+    };
+    let NodeData::ConstructorDeclaration(d) = program.arena().data(constructor) else {
+        return false;
+    };
+    if d.parameters.nodes.len() != 1 {
+        return false;
+    }
+    let param = d.parameters.nodes[0];
+    let NodeData::ParameterDeclaration(pd) = program.arena().data(param) else {
+        return false;
+    };
+    if pd.dot_dot_dot_token.is_none() {
+        return false;
+    }
+    let Some(param_sym) = program.symbol_of_node(param) else {
+        return false;
+    };
+    let param_type = get_type_of_symbol(checker, program, param_sym, program.globals());
+    if checker.get_type(param_type).flags().intersects(TypeFlags::ANY) {
+        return true;
+    }
+    checker
+        .get_element_type_of_array_type(param_type)
+        .is_some_and(|elem| checker.get_type(elem).flags().intersects(TypeFlags::ANY))
+}
+
+fn override_member_error_node(program: &dyn BoundProgram, symbol: SymbolId) -> NodeId {
+    let sym = program.symbol(symbol);
+    let Some(decl) = sym.value_declaration else {
+        return program.root();
+    };
+    super::symbols_query::name_of_declaration(program.arena(), decl).unwrap_or(decl)
 }
 
 // Returns the nearest enclosing (non-arrow) function-like container of `node`

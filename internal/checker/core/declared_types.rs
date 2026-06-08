@@ -2019,6 +2019,9 @@ fn get_signature_from_declaration(
     if has_rest_parameter(program, &param_nodes) {
         flags |= SignatureFlags::HAS_REST_PARAMETER;
     }
+    if signature_declaration_has_abstract_modifier(program, declaration) {
+        flags |= SignatureFlags::ABSTRACT;
+    }
     let mut signature = Signature::new(flags);
     signature.declaration = Some(declaration);
     signature.type_parameters = get_signature_type_parameters(checker, program, declaration);
@@ -2078,6 +2081,21 @@ fn is_optional_parameter(program: &dyn BoundProgram, param: NodeId) -> bool {
         }
         _ => false,
     }
+}
+
+fn signature_declaration_has_abstract_modifier(
+    program: &dyn BoundProgram,
+    declaration: NodeId,
+) -> bool {
+    let modifiers = match program.arena().data(declaration) {
+        NodeData::ConstructorType(d) => d.modifiers.as_ref(),
+        NodeData::MethodDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::FunctionDeclaration(d) => d.modifiers.as_ref(),
+        _ => None,
+    };
+    modifiers
+        .map(|m| m.modifier_flags.contains(ModifierFlags::ABSTRACT))
+        .unwrap_or(false)
 }
 
 // Reports whether a signature declaration's LAST parameter is a rest parameter
