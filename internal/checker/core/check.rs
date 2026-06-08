@@ -22,7 +22,7 @@
 
 use std::rc::Rc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tsgo_ast::symbol::{INTERNAL_SYMBOL_NAME_COMPUTED, INTERNAL_SYMBOL_NAME_EXPORT_EQUALS};
 use tsgo_ast::{
     utilities::is_assignment_operator, CheckFlags, Kind, ModifierFlags, NodeData, NodeFlags,
@@ -7930,6 +7930,68 @@ impl Checker {
                 self.declared_type_links.get(sym).index_signatures_checked = true;
                 self.check_type_for_duplicate_index_signatures(program, node);
             }
+            // Go: internal/checker/checker.go:Checker.checkInterfaceDeclaration(4978)
+            if !self.declared_type_links.get(sym).interface_checked {
+                self.declared_type_links.get(sym).interface_checked = true;
+                let globals = program.globals();
+                let t = get_declared_type_of_symbol(self, program, sym, globals);
+                let type_with_this = t;
+                let error_node = name.unwrap_or(node);
+                if self.check_inherited_properties_are_identical(program, t, sym, error_node) {
+                    let base_types = self
+                        .get_type(t)
+                        .as_object()
+                        .map(|o| o.base_types.clone())
+                        .unwrap_or_default();
+                    for base_type in base_types {
+                        if !self.is_type_assignable_to(program, type_with_this, base_type) {
+                            let t_str = super::nodebuilder::type_to_string(self, program, type_with_this);
+                            let base_str =
+                                super::nodebuilder::type_to_string(self, program, base_type);
+                            self.error(
+                                program,
+                                error_node,
+                                &tsgo_diagnostics::INTERFACE_0_INCORRECTLY_EXTENDS_INTERFACE_1,
+                                &[t_str.as_str(), base_str.as_str()],
+                            );
+                        }
+                    }
+                    self.check_index_constraints(program, t, sym, false);
+                }
+            }
+        }
+        // Go: internal/checker/checker.go:Checker.checkInterfaceDeclaration(4991)
+        for heritage_element in self.extends_heritage_elements(program, node) {
+            let expression = match program.arena().data(heritage_element) {
+                NodeData::ExpressionWithTypeArguments(e) => e.expression,
+                _ => continue,
+            };
+            if !is_entity_name_expression(program.arena(), expression)
+                || program
+                    .arena()
+                    .flags(expression)
+                    .contains(NodeFlags::OPTIONAL_CHAIN)
+            {
+                self.error(
+                    program,
+                    expression,
+                    &tsgo_diagnostics::AN_INTERFACE_CAN_ONLY_EXTEND_AN_IDENTIFIER_SLASHQUALIFIED_NAME_WITH_OPTIONAL_TYPE_ARGUMENTS,
+                    &[],
+                );
+            }
+            self.check_heritage_type_reference_node(program, heritage_element);
+            if let Some(base_type) =
+                self.resolve_heritage_clause_type(program, heritage_element)
+            {
+                if base_type != self.error_type() && !self.is_valid_base_type(base_type) {
+                    self.error(
+                        program,
+                        heritage_element,
+                        &tsgo_diagnostics::AN_INTERFACE_CAN_ONLY_EXTEND_AN_OBJECT_TYPE_OR_INTERSECTION_OF_OBJECT_TYPES_WITH_STATICALLY_KNOWN_MEMBERS,
+                        &[],
+                    );
+                }
+            }
         }
         self.register_for_unused_identifiers_check(node);
     }
@@ -9978,6 +10040,191 @@ impl Checker {
             }
         }
         result
+    }
+
+    // Returns the `ExpressionWithTypeArguments` elements of an interface's
+    // `extends` heritage clause (Go's `ast.GetExtendsHeritageClauseElements`).
+    // Go: internal/ast/utilities.go:GetExtendsHeritageClauseElements
+    fn extends_heritage_elements(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> Vec<NodeId> {
+        let heritage = match program.arena().data(node) {
+            NodeData::InterfaceDeclaration(d) => d.heritage_clauses.clone(),
+            _ => None,
+        };
+        let Some(clauses) = heritage else {
+            return Vec::new();
+        };
+        let mut result = Vec::new();
+        for clause in clauses.nodes {
+            if let NodeData::HeritageClause(h) = program.arena().data(clause) {
+                if h.token == Kind::ExtendsKeyword {
+                    result.extend(h.types.nodes.iter().copied());
+                }
+            }
+        }
+        result
+    }
+
+    // Arity + constraint checking for a heritage `ExpressionWithTypeArguments`
+    // (Go's `checkTypeReferenceNode` over an extends/implements element).
+    // Go: internal/checker/checker.go:Checker.checkTypeReferenceOrImport
+    fn check_heritage_type_reference_node(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let (expression, type_arg_nodes) = match program.arena().data(node) {
+            NodeData::ExpressionWithTypeArguments(e) => (
+                e.expression,
+                e.type_arguments
+                    .as_ref()
+                    .map(|list| list.nodes.clone())
+                    .unwrap_or_default(),
+            ),
+            _ => return,
+        };
+        let name = match program.arena().kind(expression) {
+            Kind::Identifier => program.arena().text(expression).to_string(),
+            _ => return,
+        };
+        let Some(symbol) = resolve_name(
+            program,
+            node,
+            &name,
+            SymbolFlags::TYPE,
+            false,
+            program.globals(),
+        ) else {
+            return;
+        };
+        let flags = program.symbol(symbol).flags;
+        if flags.intersects(SymbolFlags::CLASS | SymbolFlags::INTERFACE) {
+            self.check_class_or_interface_type_reference(program, node, symbol, &type_arg_nodes);
+        } else if flags.contains(SymbolFlags::TYPE_ALIAS) {
+            self.check_type_alias_type_reference(program, node, symbol, &type_arg_nodes);
+        }
+    }
+
+    // Go: internal/checker/checker.go:Checker.checkInheritedPropertiesAreIdentical(5008)
+    fn check_inherited_properties_are_identical(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        type_symbol: SymbolId,
+        error_node: NodeId,
+    ) -> bool {
+        let base_types = self
+            .get_type(t)
+            .as_object()
+            .map(|o| o.base_types.clone())
+            .unwrap_or_default();
+        if base_types.len() < 2 {
+            return true;
+        }
+        let mut seen: FxHashMap<String, (SymbolId, TypeId)> = FxHashMap::default();
+        for (name, prop) in get_properties_of_type(self, t) {
+            if program.symbol(prop).parent == Some(type_symbol) {
+                seen.insert(name, (prop, t));
+            }
+        }
+        let mut identical = true;
+        let interface_str = super::nodebuilder::type_to_string(self, program, t);
+        for base in base_types {
+            for (name, prop) in get_properties_of_type(self, base) {
+                if let Some(&(existing_prop, existing_type)) = seen.get(&name) {
+                    if existing_type != t
+                        && !self.is_property_identical_to(program, existing_prop, prop)
+                    {
+                        identical = false;
+                        let type_name1 =
+                            super::nodebuilder::type_to_string(self, program, existing_type);
+                        let type_name2 = super::nodebuilder::type_to_string(self, program, base);
+                        let prop_str = super::nodebuilder::symbol_to_string(program, prop);
+                        let related = self.diagnostic_for_node(
+                            program,
+                            error_node,
+                            &tsgo_diagnostics::NAMED_PROPERTY_0_OF_TYPES_1_AND_2_ARE_NOT_IDENTICAL,
+                            &[prop_str.as_str(), type_name1.as_str(), type_name2.as_str()],
+                        );
+                        let mut chain = self.diagnostic_for_node(
+                            program,
+                            error_node,
+                            &tsgo_diagnostics::INTERFACE_0_CANNOT_SIMULTANEOUSLY_EXTEND_TYPES_1_AND_2,
+                            &[interface_str.as_str(), type_name1.as_str(), type_name2.as_str()],
+                        );
+                        chain.add_related_info(related);
+                        self.add_diagnostic(program, chain);
+                    }
+                } else {
+                    seen.insert(name, (prop, base));
+                }
+            }
+        }
+        identical
+    }
+
+    // Go: internal/checker/checker.go:Checker.isPropertyIdenticalTo(5040)
+    fn is_property_identical_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source_prop: SymbolId,
+        target_prop: SymbolId,
+    ) -> bool {
+        self.compare_properties(program, source_prop, target_prop)
+    }
+
+    // Go: internal/checker/checker.go:Checker.compareProperties(27484)
+    fn compare_properties(
+        &mut self,
+        program: &dyn BoundProgram,
+        source_prop: SymbolId,
+        target_prop: SymbolId,
+    ) -> bool {
+        if source_prop == target_prop {
+            return true;
+        }
+        let source_accessibility = declaration_modifier_flags_from_symbol(
+            self,
+            program,
+            source_prop,
+            false,
+        ) & ModifierFlags::NON_PUBLIC_ACCESSIBILITY_MODIFIER;
+        let target_accessibility = declaration_modifier_flags_from_symbol(
+            self,
+            program,
+            target_prop,
+            false,
+        ) & ModifierFlags::NON_PUBLIC_ACCESSIBILITY_MODIFIER;
+        if source_accessibility != target_accessibility {
+            return false;
+        }
+        if source_accessibility != ModifierFlags::empty() {
+            if get_target_symbol(self, program, source_prop)
+                != get_target_symbol(self, program, target_prop)
+            {
+                return false;
+            }
+        } else {
+            let source_optional = program
+                .symbol(source_prop)
+                .flags
+                .contains(SymbolFlags::OPTIONAL);
+            let target_optional = program
+                .symbol(target_prop)
+                .flags
+                .contains(SymbolFlags::OPTIONAL);
+            if source_optional != target_optional {
+                return false;
+            }
+        }
+        if is_readonly_property_symbol(self, program, source_prop)
+            != is_readonly_property_symbol(self, program, target_prop)
+        {
+            return false;
+        }
+        let globals = program.globals();
+        let source_type = get_type_of_symbol(self, program, source_prop, globals);
+        let target_type = get_type_of_symbol(self, program, target_prop, globals);
+        self.is_type_identical_to(program, source_type, target_type)
     }
 
     // Resolves an `ExpressionWithTypeArguments` heritage element to a type id
@@ -13368,6 +13615,23 @@ fn has_static_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
 // Reports whether `node` carries the `abstract` modifier.
 fn has_abstract_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
     modifier_flags_of(arena, node).contains(tsgo_ast::ModifierFlags::ABSTRACT)
+}
+
+// Go: internal/checker/checker.go:Checker.isReadonlySymbol
+fn is_readonly_property_symbol(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> bool {
+    if super::is_synthesized_symbol(symbol) {
+        return checker
+            .synthesized_symbol_check_flags(symbol)
+            .contains(CheckFlags::READONLY);
+    }
+    let sym = program.symbol(symbol);
+    sym.value_declaration.is_some_and(|decl| {
+        combined_modifier_flags(program, decl).contains(ModifierFlags::READONLY)
+    })
 }
 
 // Go: internal/checker/checker.go:Checker.getTargetSymbol(21519)

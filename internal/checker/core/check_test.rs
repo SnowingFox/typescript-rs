@@ -15334,3 +15334,111 @@ fn abstract_member_missing_override_reports_4116() {
         "This member must have an 'override' modifier because it overrides an abstract method that is declared in the base class 'B'."
     );
 }
+
+// ---- T1-E batch 60: interface extends checks, index constraints, enum member ----
+
+// Go: internal/checker/checker.go:Checker.checkInterfaceDeclaration(4985)
+#[test]
+fn interface_incorrectly_extends_interface_reports_2430() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface J { x: number; }\ninterface I extends J { x: string; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2430)
+        .unwrap_or_else(|| panic!("expected 2430; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Interface 'I' incorrectly extends interface 'J'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkInheritedPropertiesAreIdentical(5032)
+#[test]
+fn interface_cannot_simultaneously_extend_conflicting_bases_reports_2320() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface A { x: number; }\ninterface B { x: string; }\ninterface I extends A, B {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2320)
+        .unwrap_or_else(|| panic!("expected 2320; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "Interface 'I' cannot simultaneously extend types 'A' and 'B'."
+    );
+    assert_eq!(d.related_information.len(), 1);
+    assert_eq!(d.related_information[0].code, 2319);
+    assert_eq!(
+        d.related_information[0].message,
+        "Named property 'x' of types 'A' and 'B' are not identical."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkInterfaceDeclaration(4994)
+#[test]
+fn interface_extends_non_entity_name_expression_reports_2499() {
+    let codes = diag_codes("interface I extends (1 as any) {}");
+    assert!(
+        codes.contains(&2499),
+        "non-entity-name extends expression must report TS2499; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveBaseTypesOfInterface(19367)
+#[test]
+fn interface_extends_primitive_type_reports_2312() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "interface I extends number {}"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2312)
+        .unwrap_or_else(|| panic!("expected 2312; got {diags:?}"));
+    assert_eq!(
+        d.message,
+        "An interface can only extend an object type or intersection of object types with statically known members."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkInterfaceDeclaration(4987)
+#[test]
+fn interface_property_not_assignable_to_string_index_reports_2411() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I {\n  [x: string]: string;\n  a: number;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 2411);
+    assert_eq!(
+        diags[0].message,
+        "Property 'a' of type 'number' is not assignable to 'string' index type 'string'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkEnumMember(5096)
+#[test]
+fn enum_member_private_identifier_reports_18024() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "enum E { #x }"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic; got {diags:?}");
+    assert_eq!(diags[0].code, 18024);
+    assert_eq!(
+        diags[0].message,
+        "An enum member cannot be named with a private identifier."
+    );
+}
