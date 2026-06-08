@@ -17736,3 +17736,146 @@ fn exponent_void_left_operand_reports_2362() {
         "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
     );
 }
+
+// ---- T1-E batch 86: void shift/mod/div operands, readonly tuple assignability ----
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void right, 2363)
+#[test]
+fn shift_void_right_operand_reports_2363() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\n1 << f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2363, got {diags:?}");
+    assert_eq!(diags[0].code, 2363);
+    assert_eq!(
+        diags[0].message,
+        "The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void right, 2363)
+#[test]
+fn modulo_void_right_operand_reports_2363() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\n1 % f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2363, got {diags:?}");
+    assert_eq!(diags[0].code, 2363);
+    assert_eq!(
+        diags[0].message,
+        "The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void left, 2362)
+#[test]
+fn divide_void_left_operand_reports_2362() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() / 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2362, got {diags:?}");
+    assert_eq!(diags[0].code, 2362);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void left, 2362)
+#[test]
+fn unsigned_shift_void_left_operand_reports_2362() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() >>> 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2362, got {diags:?}");
+    assert_eq!(diags[0].code, 2362);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.tryElaborateArrayLikeErrors (readonly tuple, 4104)
+#[test]
+fn assignability_readonly_as_const_tuple_to_mutable_variable_reports_4104() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: [number, number] = [3, 4] as const;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 4104, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 4104);
+    assert_eq!(
+        d.message,
+        "The type 'readonly [3, 4]' is 'readonly' and cannot be assigned to the mutable type '[number, number]'."
+    );
+    assert!(d.message_chain.is_empty());
+}
+
+// Go: internal/checker/relater.go:Relater.tryElaborateArrayLikeErrors (readonly tuple call, 4104)
+#[test]
+fn assignability_readonly_as_const_tuple_to_mutable_param_reports_4104() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function distance([x, y]: [number, number]) { return x + y; }\n\
+         const point = [3, 4] as const;\n\
+         distance(point);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 4104);
+    assert_eq!(
+        d.message,
+        "The type 'readonly [3, 4]' is 'readonly' and cannot be assigned to the mutable type '[number, number]'."
+    );
+    assert!(d.message_chain.is_empty());
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm, 2626)
+#[test]
+fn assignability_chain_readonly_tuple_second_element_mismatch_reports_2626() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const src = [1, \"x\"] as const;\nconst o: [number, number] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2626);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Type at position 1 in source is not compatible with type at position 1 in target."
+    );
+    assert_eq!(d.message_chain[0].next.len(), 1);
+    assert_eq!(d.message_chain[0].next[0].code, 2322);
+    assert_eq!(
+        d.message_chain[0].next[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}

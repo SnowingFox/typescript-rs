@@ -1149,16 +1149,10 @@ impl Checker {
         target: TypeId,
         relation: RelationKind,
     ) -> bool {
-        let source_elements = self.tuple_element_types(source);
-        let target_elements = self.tuple_element_types(target);
-        if source_elements.len() != target_elements.len() {
+        if !self.tuple_elements_related_to(program, source, target, relation) {
             return false;
         }
-        source_elements.iter().zip(target_elements.iter()).all(
-            |(&source_type, &target_type)| {
-                self.is_type_related_to(program, source_type, target_type, relation)
-            },
-        )
+        !self.readonly_blocks_mutable_assignability(source, target, relation)
     }
 
     // Reporting twin of [`tuple_types_related_to`]: on the first incompatible
@@ -1212,7 +1206,7 @@ impl Checker {
                 return false;
             }
         }
-        true
+        !self.readonly_blocks_mutable_assignability(source, target, relation)
     }
 
     // For each property of `target`, `source` must have a property whose type is
@@ -1717,6 +1711,14 @@ impl Checker {
         // wrapper-object, never-intersection, JSX) are DEFER for the reachable
         // structural-object subset.
         // Go: internal/checker/relater.go:Relater.reportErrorResults
+        if sf.contains(TypeFlags::OBJECT) && tf.contains(TypeFlags::OBJECT) {
+            self.try_elaborate_array_like_errors_report(
+                program,
+                source,
+                target,
+                reporter,
+            );
+        }
         self.report_relation_error(program, source, target, relation, reporter);
         false
     }
@@ -2006,6 +2008,11 @@ impl Checker {
                     return;
                 }
             }
+            Some(4104) => {
+                if reporter.chain_args_match(&[Some(&generalized_source_type), Some(&target_type)]) {
+                    return;
+                }
+            }
             _ => {}
         }
         reporter.report(message, vec![generalized_source_type, target_type]);
@@ -2131,15 +2138,73 @@ impl Checker {
     }
 
     // Whether to elaborate array/tuple mutability/length errors instead of
-    // properties (Go's `Relater.tryElaborateArrayLikeErrors`). For the reachable
-    // plain-object source/target this returns Go's default `true` (so the
-    // multi-missing-property message is emitted).
-    //
-    // DEFER(phase-4-checker-4bo+): the tuple / readonly-array source arms and the
-    // tuple-target `isArrayType(source)` arm. blocked-by: tuple/array types.
+    // properties (Go's `Relater.tryElaborateArrayLikeErrors` with
+    // `reportErrors=false`). Returns `false` when a readonly source cannot be
+    // assigned to a mutable target (so property elaboration is skipped).
     // Go: internal/checker/relater.go:Relater.tryElaborateArrayLikeErrors
-    fn try_elaborate_array_like_errors(&mut self, _source: TypeId, _target: TypeId) -> bool {
+    fn try_elaborate_array_like_errors(&mut self, source: TypeId, target: TypeId) -> bool {
+        if self.is_tuple_type(source) {
+            if self.readonly_blocks_mutable_assignability(source, target, RelationKind::Assignable)
+            {
+                return false;
+            }
+            return self.is_array_or_tuple_type(target);
+        }
+        if self.readonly_blocks_mutable_assignability(source, target, RelationKind::Assignable) {
+            return false;
+        }
+        if self.is_tuple_type(target) {
+            return self.is_array_type(source);
+        }
         true
+    }
+
+    // Whether every positional tuple element of `source` relates to the
+    // corresponding element of `target` (ignoring readonly mutability).
+    fn tuple_elements_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> bool {
+        let source_elements = self.tuple_element_types(source);
+        let target_elements = self.tuple_element_types(target);
+        source_elements.len() == target_elements.len()
+            && source_elements.iter().zip(target_elements.iter()).all(
+                |(&source_type, &target_type)| {
+                    self.is_type_related_to(program, source_type, target_type, relation)
+                },
+            )
+    }
+
+    // Reporting twin: emits `4104` when a readonly array/tuple source cannot be
+    // assigned to a mutable array/tuple target and the element types otherwise
+    // match (Go skips `4104` when an element mismatch is the real failure).
+    // Go: internal/checker/relater.go:Relater.tryElaborateArrayLikeErrors (reportErrors)
+    fn try_elaborate_array_like_errors_report(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        reporter: &mut ChainReporter,
+    ) {
+        if !self.readonly_blocks_mutable_assignability(source, target, RelationKind::Assignable)
+        {
+            return;
+        }
+        if self.is_tuple_type(source)
+            && self.is_tuple_type(target)
+            && !self.tuple_elements_related_to(program, source, target, RelationKind::Assignable)
+        {
+            return;
+        }
+        let source_type = type_to_string(self, program, source);
+        let target_type = type_to_string(self, program, target);
+        reporter.report(
+            &tsgo_diagnostics::THE_TYPE_0_IS_READONLY_AND_CANNOT_BE_ASSIGNED_TO_THE_MUTABLE_TYPE_1,
+            vec![source_type, target_type],
+        );
     }
 
     /// Reports whether every constituent of `source` is included in `target`

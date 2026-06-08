@@ -6393,15 +6393,7 @@ impl Checker {
             let arg_type = self.check_expression(program, arg);
             let param_type = self.get_type_at_position(program, signature, i);
             if !self.is_type_assignable_to(program, arg_type, param_type) {
-                let generalized = self.generalized_source_for_error(arg_type, param_type);
-                let source_str = super::nodebuilder::type_to_string(self, program, generalized);
-                let target_str = super::nodebuilder::type_to_string(self, program, param_type);
-                self.error(
-                    program,
-                    arg,
-                    &tsgo_diagnostics::ARGUMENT_OF_TYPE_0_IS_NOT_ASSIGNABLE_TO_PARAMETER_OF_TYPE_1,
-                    &[source_str.as_str(), target_str.as_str()],
-                );
+                self.report_argument_not_assignable(program, arg, arg_type, param_type);
                 // Go's `isSignatureApplicable` returns at the first failure, so
                 // only one `2345` is reported per call.
                 return;
@@ -6585,15 +6577,7 @@ impl Checker {
             let arg_type = arg_types[i];
             let param_type = self.get_type_at_position(program, signature, i);
             if !self.is_type_assignable_to(program, arg_type, param_type) {
-                let generalized = self.generalized_source_for_error(arg_type, param_type);
-                let source_str = super::nodebuilder::type_to_string(self, program, generalized);
-                let target_str = super::nodebuilder::type_to_string(self, program, param_type);
-                self.error(
-                    program,
-                    args[i],
-                    &tsgo_diagnostics::ARGUMENT_OF_TYPE_0_IS_NOT_ASSIGNABLE_TO_PARAMETER_OF_TYPE_1,
-                    &[source_str.as_str(), target_str.as_str()],
-                );
+                self.report_argument_not_assignable(program, args[i], arg_type, param_type);
                 return;
             }
         }
@@ -13515,6 +13499,48 @@ impl Checker {
     // the old flat path for a non-structural mismatch (e.g. `number` vs
     // `string`), so those cases keep a single chain-less `2322`.
     // Go: internal/checker/checker.go:Checker.checkTypeAssignableTo* + relater.go
+    // Reports the first non-assignable call argument, preferring the relation
+    // error chain (e.g. `4104` readonly-to-mutable) when one is available.
+    // Go: internal/checker/checker.go:Checker.checkTypeAssignableTo (call args)
+    fn report_argument_not_assignable(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        source: TypeId,
+        target: TypeId,
+    ) {
+        if self.readonly_blocks_mutable_assignability(source, target, RelationKind::Assignable)
+        {
+            if let Some(report) =
+                self.build_relation_error_chain(program, source, target, RelationKind::Assignable)
+            {
+                if report.code == 4104 {
+                    let (start, end) = self.get_error_range_for_node(program, node);
+                    let diagnostic = Diagnostic {
+                        code: report.code,
+                        category: report.category,
+                        message: report.message,
+                        start,
+                        length: end - start,
+                        related_information: Vec::new(),
+                        message_chain: report.message_chain,
+                    };
+                    self.add_diagnostic(program, diagnostic);
+                    return;
+                }
+            }
+        }
+        let generalized = self.generalized_source_for_error(source, target);
+        let source_str = super::nodebuilder::type_to_string(self, program, generalized);
+        let target_str = super::nodebuilder::type_to_string(self, program, target);
+        self.error(
+            program,
+            node,
+            &tsgo_diagnostics::ARGUMENT_OF_TYPE_0_IS_NOT_ASSIGNABLE_TO_PARAMETER_OF_TYPE_1,
+            &[source_str.as_str(), target_str.as_str()],
+        );
+    }
+
     pub(crate) fn report_type_not_assignable(
         &mut self,
         program: &dyn BoundProgram,
@@ -14262,6 +14288,37 @@ impl Checker {
     // Go: internal/checker/checker.go:Checker.isArrayOrTupleType(23366)
     pub fn is_array_or_tuple_type(&self, t: TypeId) -> bool {
         self.is_array_type(t) || self.is_tuple_type(t)
+    }
+
+    /// Reports whether `t` is a readonly tuple (`as const` / `readonly [...]`).
+    // Go: internal/checker/checker.go:isTupleType + TargetTupleType().readonly
+    pub(crate) fn is_readonly_tuple_type(&self, t: TypeId) -> bool {
+        self.is_tuple_type(t)
+            && self
+                .get_type(t)
+                .as_object()
+                .is_some_and(|object| object.readonly)
+    }
+
+    /// Reports whether `t` is a mutable array or tuple (not `readonly`).
+    // Go: internal/checker/checker.go:Checker.isMutableArrayOrTuple(23370)
+    pub(crate) fn is_mutable_array_or_tuple(&self, t: TypeId) -> bool {
+        (self.is_array_type(t) && !self.is_readonly_array_type(t))
+            || (self.is_tuple_type(t) && !self.is_readonly_tuple_type(t))
+    }
+
+    /// Whether assignability from `source` to `target` is blocked because a
+    /// readonly array/tuple cannot be assigned to a mutable one.
+    // Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm)
+    pub(crate) fn readonly_blocks_mutable_assignability(
+        &self,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> bool {
+        relation == RelationKind::Assignable
+            && self.is_mutable_array_or_tuple(target)
+            && (self.is_readonly_array_type(source) || self.is_readonly_tuple_type(source))
     }
 
     /// Returns the element type of an array type reference (`Array<T>` /
