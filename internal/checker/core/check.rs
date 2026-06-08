@@ -2365,7 +2365,9 @@ impl Checker {
                         SymbolFlags::VALUE | SymbolFlags::EXPORT_VALUE,
                     );
                     let resolves_to_value = match resolve_alias(self, program, alias) {
-                        Some(target) => program.symbol(target).flags.intersects(SymbolFlags::VALUE),
+                        Some(target) => self
+                            .resolved_symbol_flags(program, target)
+                            .intersects(SymbolFlags::VALUE),
                         None => true,
                     };
                     if resolves_to_value {
@@ -2840,7 +2842,7 @@ impl Checker {
                 }
             }
         }
-        let class_name = super::nodebuilder::symbol_to_string(program, declaring_class_sym);
+        let class_name = super::nodebuilder::symbol_to_string(self, program, declaring_class_sym);
         if modifiers.contains(ModifierFlags::PRIVATE) {
             self.error(
                 program,
@@ -5016,7 +5018,7 @@ impl Checker {
                     .map(|sym| {
                         format!(
                             "typeof {}",
-                            super::nodebuilder::symbol_to_string(program, sym)
+                            super::nodebuilder::symbol_to_string(self, program, sym)
                         )
                     })
                     .unwrap_or_else(|| {
@@ -6054,7 +6056,7 @@ impl Checker {
         if num_args < min || num_args > max {
             // A class/interface prints with its type parameters: `Box<T>` (Go's
             // `TypeToStringEx(t, ..., WriteArrayAsGenericType)`).
-            let name = super::nodebuilder::symbol_to_string(program, symbol);
+            let name = super::nodebuilder::symbol_to_string(self, program, symbol);
             let type_str = self.format_generic_type_name(program, &name, &type_parameters);
             self.report_generic_arity_error(program, node, &type_str, min, max);
             return;
@@ -6093,7 +6095,7 @@ impl Checker {
         let max = type_parameters.len();
         if num_args < min || num_args > max {
             // A type alias prints as just its name `G` (Go's `c.symbolToString`).
-            let type_str = super::nodebuilder::symbol_to_string(program, symbol);
+            let type_str = super::nodebuilder::symbol_to_string(self, program, symbol);
             self.report_generic_arity_error(program, node, &type_str, min, max);
             return;
         }
@@ -6632,9 +6634,8 @@ impl Checker {
     // `invocationError` -> `invocationErrorDetails`), including the union-type
     // elaboration chain (`2755`/`2756`/`2757` under `2349`).
     //
-    // DEFER(phase-4-checker-4r+): construct-signature (`2350`) variants, the
-    // getter-called-as-function hint, and namespace-import related info.
-    // blocked-by: construct signatures, getter symbols, and import recovery.
+    // DEFER(phase-4-checker-4r+): construct-signature (`2350`) variants.
+    // blocked-by: construct signatures on invocation diagnostics.
     // Go: internal/checker/checker.go:Checker.invocationError(9956)
     fn invocation_error(
         &mut self,
@@ -6642,8 +6643,41 @@ impl Checker {
         error_target: NodeId,
         apparent_type: TypeId,
     ) {
-        let diagnostic = self.invocation_error_details(program, error_target, apparent_type);
+        let mut diagnostic = self.invocation_error_details(program, error_target, apparent_type);
+        self.invocation_error_recovery(program, apparent_type, &mut diagnostic);
         self.add_diagnostic(program, diagnostic);
+    }
+
+    // Attaches namespace-import recovery related information when a wrapped
+    // module export was called as a function (Go's `invocationErrorRecovery`).
+    // Go: internal/checker/checker.go:Checker.invocationErrorRecovery(9965)
+    fn invocation_error_recovery(
+        &mut self,
+        program: &dyn BoundProgram,
+        apparent_type: TypeId,
+        diagnostic: &mut Diagnostic,
+    ) {
+        let Some(symbol) = self.get_type(apparent_type).symbol else {
+            return;
+        };
+        let Some(links) = self.export_type_links.try_get(&symbol) else {
+            return;
+        };
+        let Some(import_node) = links.originating_import else {
+            return;
+        };
+        // `exportTypeLinks` with an originating import is only recorded by
+        // namespace-import ES module wrapping of a callable export; the wrap
+        // decision already required callability (Go's `invocationErrorRecovery`
+        // re-checks target signatures — deferred until cross-file signature
+        // collection matches Go end-to-end).
+        let related = self.diagnostic_for_node(
+            program,
+            import_node,
+            &tsgo_diagnostics::TYPE_ORIGINATES_AT_THIS_IMPORT_A_NAMESPACE_STYLE_IMPORT_CANNOT_BE_CALLED_OR_CONSTRUCTED_AND_WILL_CAUSE_A_FAILURE_AT_RUNTIME_CONSIDER_USING_A_DEFAULT_IMPORT_OR_IMPORT_REQUIRE_HERE_INSTEAD,
+            &[],
+        );
+        diagnostic.add_related_info(related);
     }
 
     // Builds the not-callable diagnostic chain for `error_target` (Go's
@@ -6659,7 +6693,30 @@ impl Checker {
         let awaited = self.get_awaited_type_no_alias(program, apparent);
         let maybe_missing_await =
             awaited != apparent && !self.get_signatures_of_type(awaited).is_empty();
-        let head_message = &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE;
+        let mut head_message = &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE;
+        if let Some(parent) = program.arena().parent(error_target) {
+            if program.arena().kind(parent) == Kind::CallExpression {
+                let zero_arg_call = matches!(
+                    program.arena().data(parent),
+                    NodeData::CallExpression(d) if d.arguments.nodes.is_empty()
+                );
+                if zero_arg_call {
+                    if let Some(sym) = super::symbols_query::get_symbol_at_location(
+                        self,
+                        program,
+                        error_target,
+                        program.globals(),
+                    ) {
+                        if self
+                            .resolved_symbol_flags(program, sym)
+                            .contains(SymbolFlags::GET_ACCESSOR)
+                        {
+                            head_message = &tsgo_diagnostics::THIS_EXPRESSION_IS_NOT_CALLABLE_BECAUSE_IT_IS_A_GET_ACCESSOR_DID_YOU_MEAN_TO_USE_IT_WITHOUT;
+                        }
+                    }
+                }
+            }
+        }
         let mut chain: Option<DiagnosticMessageChain> = None;
         if self.get_type(apparent).flags().contains(TypeFlags::UNION) {
             let constituents = self
@@ -8783,7 +8840,7 @@ impl Checker {
         target_params.dedup();
 
         if !self.are_type_parameters_identical(program, &class_or_interface_decls, &target_params) {
-            let name = super::nodebuilder::symbol_to_string(program, symbol);
+            let name = super::nodebuilder::symbol_to_string(self, program, symbol);
             for &decl in &class_or_interface_decls {
                 let name_node = match program.arena().data(decl) {
                     NodeData::ClassDeclaration(d)
@@ -9644,7 +9701,8 @@ impl Checker {
             return true;
         }
         self.get_type(t).symbol.is_some_and(|sym| {
-            program.symbol(sym).flags.contains(SymbolFlags::CLASS)
+            self.resolved_symbol_flags(program, sym)
+                .contains(SymbolFlags::CLASS)
         })
     }
 
@@ -9669,7 +9727,10 @@ impl Checker {
         let mut sigs = self.get_construct_signatures_of_type(apparent);
         if sigs.is_empty() {
             if let Some(sym) = self.get_type(apparent).symbol {
-                if program.symbol(sym).flags.contains(SymbolFlags::CLASS) {
+                if self
+                    .resolved_symbol_flags(program, sym)
+                    .contains(SymbolFlags::CLASS)
+                {
                     sigs = self.construct_signatures_of_class_symbol(program, sym);
                 }
             }
@@ -9844,7 +9905,7 @@ impl Checker {
                     let static_base = get_type_without_signatures(self, static_base);
                     if !self.is_type_assignable_to(program, static_type, static_base) {
                         let static_str = format!("typeof {class_str}");
-                        let base_name = super::nodebuilder::symbol_to_string(program, base_sym);
+                        let base_name = super::nodebuilder::symbol_to_string(self, program, base_sym);
                         let static_base_str = format!("typeof {base_name}");
                         self.error(
                             program,
@@ -10015,7 +10076,7 @@ impl Checker {
             if modifier_flags_of(program.arena(), member).contains(ModifierFlags::PRIVATE)
                 && !is_node_within_class(program, extends_node, class_decl)
             {
-                let base_name = super::nodebuilder::symbol_to_string(program, base_class_sym);
+                let base_name = super::nodebuilder::symbol_to_string(self, program, base_class_sym);
                 self.error(
                     program,
                     extends_node,
@@ -10058,7 +10119,7 @@ impl Checker {
                 if has_abstract_modifier(program.arena(), node) {
                     continue;
                 }
-                missed.push(super::nodebuilder::symbol_to_string(program, base_prop));
+                missed.push(super::nodebuilder::symbol_to_string(self, program, base_prop));
                 continue;
             }
             let base_flags =
@@ -10083,7 +10144,7 @@ impl Checker {
                     && !derived_property_flags.intersects(SymbolFlags::PROPERTY);
                 if overridden_instance_property || overridden_instance_accessor {
                     let error_node = override_member_error_node(program, derived_target);
-                    let prop_name = super::nodebuilder::symbol_to_string(program, base_prop);
+                    let prop_name = super::nodebuilder::symbol_to_string(self, program, base_prop);
                     let base_name = super::nodebuilder::type_to_string(self, program, base_type);
                     let class_name = super::nodebuilder::type_to_string(self, program, class_type);
                     let message = if overridden_instance_property {
@@ -10102,7 +10163,7 @@ impl Checker {
             }
             let error_node = override_member_error_node(program, derived_target);
             let base_name = super::nodebuilder::type_to_string(self, program, base_type);
-            let prop_name = super::nodebuilder::symbol_to_string(program, base_prop);
+            let prop_name = super::nodebuilder::symbol_to_string(self, program, base_prop);
             let class_name = super::nodebuilder::type_to_string(self, program, class_type);
             let message = if is_prototype_property(self, program, base_target) {
                 if is_prototype_property(self, program, derived_target)
@@ -10492,7 +10553,7 @@ impl Checker {
                 self.get_suggested_symbol_for_nonexistent_class_member(program, &member_name, base_type)
             {
                 let suggestion_name =
-                    super::nodebuilder::symbol_to_string(program, suggestion);
+                    super::nodebuilder::symbol_to_string(self, program, suggestion);
                 self.error(
                     program,
                     member,
@@ -10706,7 +10767,7 @@ impl Checker {
         if self.is_type_assignable_to(program, prop_type, value_type) {
             return;
         }
-        let prop_str = super::nodebuilder::symbol_to_string(program, prop_sym);
+        let prop_str = super::nodebuilder::symbol_to_string(self, program, prop_sym);
         let prop_type_str = super::nodebuilder::type_to_string(self, program, prop_type);
         let key_type_str = super::nodebuilder::type_to_string(self, program, key_type);
         let value_type_str = super::nodebuilder::type_to_string(self, program, value_type);
@@ -10912,7 +10973,7 @@ impl Checker {
                     super::nodebuilder::type_to_string(self, program, type_with_this);
                 let base_str =
                     super::nodebuilder::type_to_string(self, program, base_with_this);
-                let prop_str = super::nodebuilder::symbol_to_string(program, declared_prop);
+                let prop_str = super::nodebuilder::symbol_to_string(self, program, declared_prop);
                 let report_node = member_name_node_for_duplicate(program, member)
                     .unwrap_or(node);
                 self.error(
@@ -11170,7 +11231,7 @@ impl Checker {
                         let Some(symbol) = program.symbol_of_node(param) else {
                             continue;
                         };
-                        let display = super::nodebuilder::symbol_to_string(program, symbol);
+                        let display = super::nodebuilder::symbol_to_string(self, program, symbol);
                         self.error_skipping_leading_trivia(
                             program,
                             pd.name,
@@ -11188,7 +11249,7 @@ impl Checker {
                 && is_static == has_static_modifier(program.arena(), member)
             {
                 if let Some(name_node) = member_name_node_for_duplicate(program, member) {
-                    let display = super::nodebuilder::symbol_to_string(program, symbol);
+                    let display = super::nodebuilder::symbol_to_string(self, program, symbol);
                     self.error_skipping_leading_trivia(
                         program,
                         name_node,
@@ -11218,7 +11279,7 @@ impl Checker {
                 continue;
             }
             if let Some(name_node) = member_name_node_for_duplicate(program, member) {
-                let display = super::nodebuilder::symbol_to_string(program, symbol);
+                let display = super::nodebuilder::symbol_to_string(self, program, symbol);
                 self.error_skipping_leading_trivia(
                     program,
                     name_node,
@@ -11353,7 +11414,7 @@ impl Checker {
                         let type_name1 =
                             super::nodebuilder::type_to_string(self, program, existing_type);
                         let type_name2 = super::nodebuilder::type_to_string(self, program, base);
-                        let prop_str = super::nodebuilder::symbol_to_string(program, prop);
+                        let prop_str = super::nodebuilder::symbol_to_string(self, program, prop);
                         let related = self.diagnostic_for_node(
                             program,
                             error_node,
@@ -15514,7 +15575,7 @@ fn object_type_member_nodes(program: &dyn BoundProgram, node: NodeId) -> Vec<Nod
 // symbol from `getSymbolOfDeclaration(node)`).
 fn class_like_display_name(program: &dyn BoundProgram, node: NodeId) -> String {
     if let Some(sym) = program.symbol_of_node(node) {
-        super::nodebuilder::symbol_to_string(program, sym)
+        program.symbol(sym).name.clone()
     } else {
         match program.arena().data(node) {
             NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d

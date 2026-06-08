@@ -16924,3 +16924,135 @@ fn call_property_on_promise_callable_suggests_await() {
     assert_eq!(diags[0].related_information.len(), 1);
     assert_eq!(diags[0].related_information[0].code, 2773);
 }
+
+// ---- T1-E batch 79: getter-as-function hint (6234) + namespace import recovery ----
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (get accessor)
+#[test]
+fn call_get_accessor_with_empty_parens_reports_6234() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { get prop(): number { return 1; } }\n\
+         declare const c: C;\nc.prop();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 6234);
+    assert_eq!(
+        diags[0].message,
+        "This expression is not callable because it is a 'get' accessor. Did you mean to use it without '()'?"
+    );
+    assert_eq!(diags[0].message_chain.len(), 1);
+    assert_eq!(diags[0].message_chain[0].code, 2757);
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (non-getter)
+#[test]
+fn call_non_getter_property_still_reports_2349_head() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const o: { x: number };\no.x();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].message, "This expression is not callable.");
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorDetails (getter with args)
+#[test]
+fn call_get_accessor_with_arguments_keeps_2349_head() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { get prop(): number { return 1; } }\n\
+         declare const c: C;\nc.prop(1);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].message, "This expression is not callable.");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveESModuleSymbol
+#[test]
+fn namespace_import_resolve_alias_targets_wrapped_clone() {
+    use crate::core::declared_types::resolve_alias;
+    use crate::core::is_es_module_symbol;
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/foo.ts", "function foo(): void {}\nexport = foo;"),
+        ("/index.ts", "import * as ns from \"./foo\";"),
+    ]));
+    let index = p.source_files()[1];
+    let view = p.file_view(index).unwrap();
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p) as std::rc::Rc<dyn BoundProgram>);
+    let locals = view.locals(view.root()).expect("module locals");
+    let alias = *locals.get("ns").expect("import binding ns");
+    let target = resolve_alias(&mut c, view.as_ref(), alias).expect("alias target");
+    assert!(
+        is_es_module_symbol(target),
+        "namespace import of export= callable must resolve to a wrapped clone"
+    );
+    assert!(
+        c.resolved_symbol_flags(view.as_ref(), target).intersects(tsgo_ast::SymbolFlags::VALUE),
+        "wrapped clone flags={:?}",
+        c.resolved_symbol_flags(view.as_ref(), target)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkCallExpression
+#[test]
+fn namespace_import_call_expression_type_carries_export_type_links() {
+    use crate::core::is_es_module_symbol;
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/foo.ts", "function foo(): void {}\nexport = foo;"),
+        ("/index.ts", "import * as ns from \"./foo\";\nns();"),
+    ]));
+    let index = p.source_files()[1];
+    let view = p.file_view(index).unwrap();
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p) as std::rc::Rc<dyn BoundProgram>);
+    let stmts = match view.arena().data(view.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let call_expr = match view.arena().data(stmts[1]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expression statement"),
+    };
+    let callee = match view.arena().data(call_expr) {
+        NodeData::CallExpression(d) => d.expression,
+        _ => panic!("call expression"),
+    };
+    let ty = c.check_expression(view.as_ref(), callee);
+    let sym = c.get_type(ty).symbol.expect("wrapped type symbol");
+    assert!(is_es_module_symbol(sym));
+    assert!(
+        c.export_type_originating_import(sym).is_some(),
+        "wrapped namespace import must record originating import"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.invocationErrorRecovery(9965)
+#[test]
+fn namespace_import_callable_export_reports_7038_related_info() {
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/foo.ts", "function foo(): void {}\nexport = foo;"),
+        ("/index.ts", "import * as ns from \"./foo\";\nns();"),
+    ]));
+    let index = p.source_files()[1];
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(index);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 7038);
+    assert_eq!(
+        diags[0].related_information[0].message,
+        "Type originates at this import. A namespace-style import cannot be called or constructed, and will cause a failure at runtime. Consider using a default import or import require here instead."
+    );
+}

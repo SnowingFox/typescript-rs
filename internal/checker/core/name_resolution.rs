@@ -188,7 +188,13 @@ fn get_type_only_alias_declaration_ex(
 ) -> Option<NodeId> {
     let arena = program.arena();
     loop {
-        let flags = program.symbol(symbol).flags;
+        // Alias chains can end at checker-minted ES-module clone symbols
+        // (namespace-import wrapping); those live in the checker arena, not the
+        // program symbol vector.
+        if super::is_checker_minted_symbol(symbol) {
+            break;
+        }
+        let flags = checker.resolved_symbol_flags(program, symbol);
         if !flags.contains(SymbolFlags::ALIAS) || flags.intersects(meaning) {
             break;
         }

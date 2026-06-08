@@ -17,8 +17,9 @@ fn sym(p: &StubProgram, name: &str) -> SymbolId {
 #[test]
 fn symbol_to_string_returns_declaration_name() {
     let p = StubProgram::parse_and_bind("/a.ts", "interface Foo {\n  bar: string;\n}");
+    let c = Checker::new();
     let foo = sym(&p, "Foo");
-    assert_eq!(symbol_to_string(&p, foo), "Foo");
+    assert_eq!(symbol_to_string(&c, &p, foo), "Foo");
 }
 
 // Go: internal/checker/checker.go:Checker.typeToString (named interface)

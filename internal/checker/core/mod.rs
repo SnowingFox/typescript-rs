@@ -38,7 +38,7 @@ use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tsgo_ast::{CheckFlags, NodeId, SymbolId, SymbolTable};
+use tsgo_ast::{CheckFlags, NodeId, Symbol, SymbolId, SymbolTable};
 use tsgo_core::compileroptions::CompilerOptions;
 use tsgo_core::tristate::Tristate;
 
@@ -48,9 +48,9 @@ use program::{default_compiler_options, BoundProgram};
 use relations::RelationCache;
 use signatures::{IndexInfo, IndexInfoArena, IndexInfoId, Signature, SignatureArena, SignatureId};
 use symbols::{
-    DeclaredTypeLinks, LateBoundLinks, MappedSymbolLinks, MappedTypeLinks, MembersAndExportsLinks,
-    ModuleSymbolLinks, SymbolLinks, SymbolNodeLinks, SymbolReferenceLinks, TypeAliasLinks,
-    ValueSymbolLinks,
+    DeclaredTypeLinks, LateBoundLinks, MappedSymbolLinks, MappedTypeLinks,
+    MembersAndExportsLinks, ModuleSymbolLinks, SymbolLinks, SymbolNodeLinks, SymbolReferenceLinks,
+    TypeAliasLinks, ValueSymbolLinks,
 };
 use types::{
     ConditionalRoot, ConditionalType, IntersectionType, IntrinsicType, LiteralType, LiteralValue,
@@ -105,12 +105,22 @@ struct ConditionalMappers {
 /// disjoint while letting one `SymbolId` type flow through the checker.
 // Go: internal/checker/checker.go:Checker.symbolArena / newSymbol
 const SYNTHESIZED_SYMBOL_TAG: u32 = 1 << 31;
+/// Tag bit for checker-minted ES-module namespace-import clone symbols.
+const ES_MODULE_SYMBOL_TAG: u32 = 1 << 30;
 
 /// Reports whether `id` addresses a checker-synthesized (transient) symbol
 /// rather than a binder/program symbol.
 // Go: internal/checker/checker.go:Checker.newSymbol (SymbolFlagsTransient marker)
 pub(crate) fn is_synthesized_symbol(id: symbols::SymbolId) -> bool {
     id.0 & SYNTHESIZED_SYMBOL_TAG != 0
+}
+
+pub(crate) fn is_es_module_symbol(id: symbols::SymbolId) -> bool {
+    id.0 & ES_MODULE_SYMBOL_TAG != 0
+}
+
+pub(crate) fn is_checker_minted_symbol(id: symbols::SymbolId) -> bool {
+    is_synthesized_symbol(id) || is_es_module_symbol(id)
 }
 
 /// A checker-minted transient property symbol (Go's `newSymbolEx` result plus
@@ -248,6 +258,13 @@ pub struct Checker {
     /// `unionOrIntersectionType.propertyCache`). `None` records a definitively
     /// absent property.
     synthesized_property_cache: RefCell<FxHashMap<(TypeId, String), Option<symbols::SymbolId>>>,
+    /// Checker-minted symbols for ES-module namespace-import clones (Go's
+    /// `cloneTypeAsModuleType` results).
+    es_module_symbols: RefCell<Vec<Symbol>>,
+    /// Per-symbol export-type metadata for namespace-import recovery (Go's
+    /// `exportTypeLinks`).
+    // Go: internal/checker/checker.go:Checker.exportTypeLinks
+    export_type_links: SymbolLinks<symbols::ExportTypeLinks>,
     /// Owns every [`Signature`] this checker creates.
     signatures: SignatureArena,
     /// Owns every [`IndexInfo`] this checker creates.
@@ -599,6 +616,8 @@ impl Checker {
             assignment_declaration_resolving: rustc_hash::FxHashSet::default(),
             synthesized_symbols: RefCell::new(Vec::new()),
             synthesized_property_cache: RefCell::new(FxHashMap::default()),
+            es_module_symbols: RefCell::new(Vec::new()),
+            export_type_links: SymbolLinks::default(),
             signatures: SignatureArena::new(),
             index_infos: IndexInfoArena::new(),
             relations: RelationCache::default(),
@@ -1020,6 +1039,13 @@ impl Checker {
     /// Panics if `id` was not produced by this checker.
     ///
     /// Side effects: none (pure).
+    #[cfg(test)]
+    pub(crate) fn export_type_originating_import(&self, symbol: SymbolId) -> Option<NodeId> {
+        self.export_type_links
+            .try_get(&symbol)
+            .and_then(|l| l.originating_import)
+    }
+
     pub fn get_type(&self, id: TypeId) -> &Type {
         self.types.get(id)
     }
@@ -1522,6 +1548,38 @@ impl Checker {
         (id.0 & !SYNTHESIZED_SYMBOL_TAG) as usize
     }
 
+    fn es_module_index(id: symbols::SymbolId) -> usize {
+        (id.0 & !ES_MODULE_SYMBOL_TAG) as usize
+    }
+
+    /// Mints a checker-owned clone symbol for namespace-import ES module
+    /// interop wrapping (Go's `cloneTypeAsModuleType`).
+    // Go: internal/checker/checker.go:Checker.cloneTypeAsModuleType
+    pub(crate) fn new_es_module_clone_symbol(
+        &self,
+        name: &str,
+        flags: symbols::SymbolFlags,
+    ) -> symbols::SymbolId {
+        let mut arena = self.es_module_symbols.borrow_mut();
+        let index = arena.len() as u32;
+        arena.push(Symbol {
+            flags,
+            name: name.to_string(),
+            ..Default::default()
+        });
+        symbols::SymbolId(ES_MODULE_SYMBOL_TAG | index)
+    }
+
+    pub(crate) fn es_module_symbol_name(&self, id: symbols::SymbolId) -> String {
+        self.es_module_symbols.borrow()[Self::es_module_index(id)]
+            .name
+            .clone()
+    }
+
+    pub(crate) fn es_module_symbol_flags(&self, id: symbols::SymbolId) -> symbols::SymbolFlags {
+        self.es_module_symbols.borrow()[Self::es_module_index(id)].flags
+    }
+
     /// Returns the cached synthesized property for `(containing, name)`:
     /// `Some(Some(id))` for a hit, `Some(None)` for a known-absent property, and
     /// `None` when nothing has been computed yet.
@@ -1594,6 +1652,8 @@ impl Checker {
     ) -> CheckFlags {
         if is_synthesized_symbol(id) {
             self.synthesized_symbol_check_flags(id)
+        } else if is_es_module_symbol(id) {
+            self.es_module_symbols.borrow()[Self::es_module_index(id)].check_flags
         } else {
             program.symbol(id).check_flags
         }
@@ -1637,6 +1697,8 @@ impl Checker {
     ) -> symbols::SymbolFlags {
         if is_synthesized_symbol(id) {
             self.synthesized_symbol_flags(id)
+        } else if is_es_module_symbol(id) {
+            self.es_module_symbol_flags(id)
         } else {
             program.symbol(id).flags
         }
@@ -1655,6 +1717,8 @@ impl Checker {
     ) -> String {
         if is_synthesized_symbol(id) {
             self.synthesized_symbol_name(id)
+        } else if is_es_module_symbol(id) {
+            self.es_module_symbol_name(id)
         } else {
             program.symbol(id).name.clone()
         }

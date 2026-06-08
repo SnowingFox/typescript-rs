@@ -192,6 +192,11 @@ pub(crate) struct FileView {
     /// The collision-free program file handle (see [`encode_file_handle`]); the
     /// diagnostics partition key, distinct from the raw arena `root`.
     handle: NodeId,
+    file_name: String,
+    file_symbol: Option<SymbolId>,
+    file_index: usize,
+    all_file_names: Rc<Vec<String>>,
+    all_file_symbols: Rc<Vec<Option<SymbolId>>>,
     symbols: Rc<Vec<Symbol>>,
     globals: Rc<SymbolTable>,
     node_symbol: Rc<FxHashMap<NodeId, SymbolId>>,
@@ -202,6 +207,9 @@ pub(crate) struct FileView {
     flow_switch: Rc<FxHashMap<FlowNodeId, FlowSwitchClauseData>>,
     /// Every file view in a multi-file program (filled after all views are built).
     all_views: Rc<OnceLock<Rc<Vec<Rc<FileView>>>>>,
+    /// Merged-symbol id ranges per file (parallel to `all_views`), for
+    /// [`BoundProgram::view_for_symbol`].
+    symbol_ranges: Rc<Vec<(u32, u32)>>,
 }
 
 impl BoundProgram for FileView {
@@ -249,6 +257,15 @@ impl BoundProgram for FileView {
         self.flow_switch.get(&id).copied()
     }
 
+    fn resolve_module_symbol(&self, _importing_file: NodeId, specifier: &str) -> Option<SymbolId> {
+        resolve_test_module_symbol(
+            &self.file_name,
+            specifier,
+            &self.all_file_names,
+            &self.all_file_symbols,
+        )
+    }
+
     fn source_files(&self) -> Vec<NodeId> {
         self.all_views
             .get()
@@ -261,6 +278,18 @@ impl BoundProgram for FileView {
         self.all_views
             .get()
             .and_then(|views| views.get(index).map(|view| Rc::clone(view) as Rc<dyn BoundProgram>))
+    }
+
+    fn view_for_symbol(&self, symbol: SymbolId) -> Option<Rc<dyn BoundProgram>> {
+        let index = self
+            .symbol_ranges
+            .iter()
+            .position(|&(start, end)| symbol.0 >= start && symbol.0 < end)?;
+        self.all_views.get().and_then(|views| {
+            views
+                .get(index)
+                .map(|view| Rc::clone(view) as Rc<dyn BoundProgram>)
+        })
     }
 }
 
@@ -283,6 +312,8 @@ impl BoundProgram for FileView {
 pub(crate) struct MultiFileProgram {
     views: Vec<Rc<FileView>>,
     merged_globals: Rc<SymbolTable>,
+    file_names: Vec<String>,
+    file_symbols: Vec<Option<SymbolId>>,
     /// `[start, end)` merged-symbol-id range owned by each file, parallel to
     /// `views`, used to map a merged symbol back to its declaring file.
     symbol_ranges: Vec<(u32, u32)>,
@@ -292,6 +323,7 @@ impl MultiFileProgram {
     /// Parses and binds each `(file_name, text)` and joins them into one
     /// multi-file program (all files as global/script `.ts` files).
     pub(crate) fn build(files: &[(&str, &str)]) -> MultiFileProgram {
+        let file_names: Vec<String> = files.iter().map(|(name, _)| (*name).to_string()).collect();
         let parsed: Vec<(NodeArena, NodeId, BindResult)> = files
             .iter()
             .map(|(name, text)| {
@@ -349,9 +381,19 @@ impl MultiFileProgram {
         let merged_symbols = Rc::new(merged_symbols);
         let merged_globals = Rc::new(merged_globals);
 
+        let mut file_symbols: Vec<Option<SymbolId>> = Vec::with_capacity(parsed.len());
+        for (i, (_, _, bind)) in parsed.iter().enumerate() {
+            let off = offsets[i];
+            file_symbols.push(
+                bind.file_symbol
+                    .map(|s| SymbolId(s.0 + off)),
+            );
+        }
+        let all_file_names = Rc::new(file_names.clone());
+        let all_file_symbols = Rc::new(file_symbols.clone());
         let all_views_slot: Rc<OnceLock<Rc<Vec<Rc<FileView>>>>> = Rc::new(OnceLock::new());
         let mut views = Vec::with_capacity(parsed.len());
-        let mut symbol_ranges = Vec::with_capacity(parsed.len());
+        let mut symbol_range_vec = Vec::with_capacity(parsed.len());
         for (i, (arena, root, bind)) in parsed.into_iter().enumerate() {
             let off = offsets[i];
             let node_symbol: FxHashMap<NodeId, SymbolId> = bind
@@ -370,11 +412,16 @@ impl MultiFileProgram {
                 .iter()
                 .map(|(&container, table)| (container, remap_table(table, off)))
                 .collect();
-            symbol_ranges.push((off, off + bind.symbols.len() as u32));
+            symbol_range_vec.push((off, off + bind.symbols.len() as u32));
             views.push(Rc::new(FileView {
                 arena: Rc::new(arena),
                 root,
                 handle: encode_file_handle(i, root),
+                file_name: file_names[i].clone(),
+                file_symbol: file_symbols[i],
+                file_index: i,
+                all_file_names: Rc::clone(&all_file_names),
+                all_file_symbols: Rc::clone(&all_file_symbols),
                 symbols: Rc::clone(&merged_symbols),
                 globals: Rc::clone(&merged_globals),
                 node_symbol: Rc::new(node_symbol),
@@ -384,15 +431,136 @@ impl MultiFileProgram {
                 flow_lists: Rc::new(bind.flow_lists),
                 flow_switch: Rc::new(bind.flow_switch_data),
                 all_views: Rc::clone(&all_views_slot),
+                symbol_ranges: Rc::new(symbol_range_vec.clone()),
             }));
         }
         let _ = all_views_slot.set(Rc::new(views.clone()));
+        let symbol_ranges = symbol_range_vec;
         MultiFileProgram {
             views,
             merged_globals,
+            file_names,
+            file_symbols,
             symbol_ranges,
         }
     }
+}
+
+fn normalize_module_base(path: &str) -> &str {
+    path.strip_suffix(".d.ts")
+        .or_else(|| path.strip_suffix(".tsx"))
+        .or_else(|| path.strip_suffix(".ts"))
+        .unwrap_or(path)
+}
+
+fn resolve_relative_module_path(from: &str, specifier: &str) -> String {
+    if let Some(rest) = specifier.strip_prefix("./") {
+        let dir = from.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        if dir.is_empty() {
+            format!("/{rest}")
+        } else {
+            format!("{dir}/{rest}")
+        }
+    } else if let Some(rest) = specifier.strip_prefix("../") {
+        let dir = from.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        let parent = dir.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        if parent.is_empty() {
+            format!("/{rest}")
+        } else {
+            format!("{parent}/{rest}")
+        }
+    } else {
+        specifier.to_string()
+    }
+}
+
+#[cfg(test)]
+mod multi_file_tests {
+    use super::*;
+    use tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_EXPORT_EQUALS;
+    use tsgo_ast::SymbolFlags;
+
+    #[test]
+    fn export_equals_is_recorded_on_module_exports() {
+        let p = MultiFileProgram::build(&[("/foo.ts", "function foo(): void {}\nexport = foo;")]);
+        let module_sym = p.file_symbols[0].expect("file module symbol");
+        assert!(
+            p.views[0]
+                .symbol(module_sym)
+                .exports
+                .contains_key(INTERNAL_SYMBOL_NAME_EXPORT_EQUALS),
+            "exports: {:?}",
+            p.views[0].symbol(module_sym).exports.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn namespace_export_resolves_from_importer_context() {
+        use crate::core::declared_types::resolve_external_module_symbol;
+        use crate::Checker;
+        let p = std::rc::Rc::new(MultiFileProgram::build(&[
+            ("/foo.ts", "function foo(): void {}\nexport = foo;"),
+            ("/index.ts", "import * as ns from \"./foo\";"),
+        ]));
+        let index = p.source_files()[1];
+        let view = p.file_view(index).unwrap();
+        let module_sym = view
+            .resolve_module_symbol(index, "./foo")
+            .expect("module symbol");
+        let mut c = Checker::new_checker(std::rc::Rc::clone(&p) as std::rc::Rc<dyn BoundProgram>);
+        let resolved = resolve_external_module_symbol(&mut c, view.as_ref(), module_sym);
+        assert!(
+            c.resolved_symbol_flags(view.as_ref(), resolved).intersects(SymbolFlags::FUNCTION),
+            "from importer context flags={:?}",
+            c.resolved_symbol_flags(view.as_ref(), resolved)
+        );
+    }
+
+    #[test]
+    fn export_equals_alias_resolves_to_exported_value() {
+        use crate::core::declared_types::resolve_external_module_symbol;
+        use crate::Checker;
+        let p = std::rc::Rc::new(MultiFileProgram::build(&[(
+            "/foo.ts",
+            "function foo(): void {}\nexport = foo;",
+        )]));
+        let module_sym = p.file_symbols[0].expect("file module symbol");
+        let mut c = Checker::new_checker(std::rc::Rc::clone(&p) as std::rc::Rc<dyn BoundProgram>);
+        let resolved = resolve_external_module_symbol(&mut c, p.as_ref(), module_sym);
+        assert!(
+            c.resolved_symbol_flags(p.as_ref(), resolved)
+                .intersects(SymbolFlags::FUNCTION),
+            "export= must resolve to the function, got flags on resolved={resolved:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_module_symbol_finds_sibling_file() {
+        let p = MultiFileProgram::build(&[
+            ("/foo.ts", "function foo(): void {}\nexport = foo;"),
+            ("/index.ts", "import * as ns from \"./foo\";"),
+        ]);
+        let index = p.source_files()[1];
+        let view = p.file_view(index).unwrap();
+        assert!(
+            view.resolve_module_symbol(index, "./foo").is_some(),
+            "module resolution must find /foo.ts"
+        );
+    }
+}
+
+fn resolve_test_module_symbol(
+    importing_file_name: &str,
+    specifier: &str,
+    file_names: &[String],
+    file_symbols: &[Option<SymbolId>],
+) -> Option<SymbolId> {
+    let resolved = resolve_relative_module_path(importing_file_name, specifier);
+    let resolved_base = normalize_module_base(&resolved);
+    file_names.iter().position(|name| {
+        normalize_module_base(name) == resolved_base || name == &resolved
+    })
+    .and_then(|index| file_symbols[index])
 }
 
 /// Folds a file index and its raw root node id into a collision-free file
@@ -458,6 +626,17 @@ impl BoundProgram for MultiFileProgram {
             .iter()
             .position(|&(start, end)| symbol.0 >= start && symbol.0 < end)?;
         Some(Rc::clone(&self.views[index]) as Rc<dyn BoundProgram>)
+    }
+
+    fn resolve_module_symbol(&self, importing_file: NodeId, specifier: &str) -> Option<SymbolId> {
+        let index = (importing_file.0 >> FILE_INDEX_SHIFT) as usize;
+        let importing_name = self.file_names.get(index)?;
+        resolve_test_module_symbol(
+            importing_name,
+            specifier,
+            &self.file_names,
+            &self.file_symbols,
+        )
     }
 }
 

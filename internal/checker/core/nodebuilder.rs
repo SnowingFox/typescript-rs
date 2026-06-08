@@ -161,8 +161,12 @@ pub struct SynthesizedProperty {
 ///
 /// Side effects: none (pure).
 // Go: internal/checker/checker.go:Checker.symbolToString
-pub fn symbol_to_string(program: &dyn BoundProgram, symbol: SymbolId) -> String {
-    program.symbol(symbol).name.clone()
+pub fn symbol_to_string(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> String {
+    checker.resolved_symbol_name(program, symbol)
 }
 
 /// Returns the printed form of `ty` (Go's `typeToString`).
@@ -212,22 +216,21 @@ fn type_to_string_inner(checker: &mut Checker, program: &dyn BoundProgram, ty: T
         .intersects(TypeFlags::ENUM_LIKE)
     {
         if let Some(symbol) = checker.get_type(ty).symbol {
-            if program
-                .symbol(symbol)
-                .flags
+            if checker
+                .resolved_symbol_flags(program, symbol)
                 .intersects(SymbolFlags::ENUM_MEMBER)
             {
                 if let Some(parent) = program.symbol(symbol).parent {
-                    let parent_name = symbol_to_string(program, parent);
+                    let parent_name = symbol_to_string(checker, program, parent);
                     let globals = program.globals();
                     if get_declared_type_of_symbol(checker, program, parent, globals) == ty {
                         return parent_name;
                     }
-                    let member_name = symbol_to_string(program, symbol);
+                    let member_name = symbol_to_string(checker, program, symbol);
                     return format!("{parent_name}.{member_name}");
                 }
             }
-            return symbol_to_string(program, symbol);
+            return symbol_to_string(checker, program, symbol);
         }
     }
     // A union prints its constituents (each program-aware) joined by ` | `.
@@ -321,7 +324,7 @@ fn type_to_string_inner(checker: &mut Checker, program: &dyn BoundProgram, ty: T
             let name = checker
                 .get_type(target)
                 .symbol
-                .map(|s| symbol_to_string(program, s))
+                .map(|s| symbol_to_string(checker, program, s))
                 .unwrap_or_default();
             if type_arguments.is_empty() {
                 return name;
@@ -338,13 +341,16 @@ fn type_to_string_inner(checker: &mut Checker, program: &dyn BoundProgram, ty: T
         // member literal instead (Go's `createAnonymousTypeNode` only emits a
         // type-reference node for a symbol with a real name).
         if let Some(symbol) = symbol {
-            let name = symbol_to_string(program, symbol);
+            let name = symbol_to_string(checker, program, symbol);
             if !name.starts_with(tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_PREFIX) {
                 // A namespace/module value type prints as `typeof N` (Go emits a
                 // `typeQuery` node for a value-module symbol's anonymous type in
                 // `typeToTypeNodeWorker`), distinguishing the value side from the
                 // namespace's type side.
-                if program.symbol(symbol).flags.intersects(SymbolFlags::MODULE) {
+                if checker
+                    .resolved_symbol_flags(program, symbol)
+                    .intersects(SymbolFlags::MODULE)
+                {
                     return format!("typeof {name}");
                 }
                 return name;
@@ -432,7 +438,7 @@ pub fn type_to_type_node(
     if flags.intersects(TypeFlags::ENUM_LIKE) {
         if let Some(symbol) = checker.get_type(ty).symbol {
             return Some(SynthesizedTypeNode::TypeReference {
-                name: symbol_to_string(program, symbol),
+                name: symbol_to_string(checker, program, symbol),
                 args: Vec::new(),
             });
         }
@@ -539,7 +545,7 @@ pub fn type_to_type_node(
             let target_name = checker
                 .get_type(target)
                 .symbol
-                .map(|s| symbol_to_string(program, s))
+                .map(|s| symbol_to_string(checker, program, s))
                 .unwrap_or_default();
             if target_name == "Array" && type_arguments.len() == 1 {
                 let element = type_to_type_node(checker, program, type_arguments[0])?;
@@ -558,9 +564,12 @@ pub fn type_to_type_node(
         // type prints as `typeof N`. An anonymous type-literal symbol carries an
         // internal `__type`/`__object` name and serializes its member literal.
         if let Some(symbol) = symbol {
-            let name = symbol_to_string(program, symbol);
+            let name = symbol_to_string(checker, program, symbol);
             if !name.starts_with(tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_PREFIX) {
-                if program.symbol(symbol).flags.intersects(SymbolFlags::MODULE) {
+                if checker
+                    .resolved_symbol_flags(program, symbol)
+                    .intersects(SymbolFlags::MODULE)
+                {
                     return Some(SynthesizedTypeNode::TypeQuery(name));
                 }
                 return Some(SynthesizedTypeNode::TypeReference {

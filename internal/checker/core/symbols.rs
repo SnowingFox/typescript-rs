@@ -135,6 +135,17 @@ pub struct AliasSymbolLinks {
     pub type_only_declaration: Option<NodeId>,
 }
 
+/// Per-symbol links for an export-type symbol produced by namespace-import ES
+/// module interop wrapping (Go's `ExportTypeLinks`).
+// Go: internal/checker/types.go:ExportTypeLinks
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExportTypeLinks {
+    /// The underlying export symbol the namespace import re-exports.
+    pub target: Option<SymbolId>,
+    /// The import declaration that produced the wrapped symbol.
+    pub originating_import: Option<NodeId>,
+}
+
 /// Per-symbol links for a module symbol's resolved exports.
 ///
 /// # Examples

@@ -1548,6 +1548,13 @@ pub fn get_type_of_symbol(
     if super::is_synthesized_symbol(symbol) {
         return get_type_of_synthesized_symbol(checker, program, symbol, globals);
     }
+    if super::is_es_module_symbol(symbol) {
+        return checker
+            .value_symbol_links
+            .try_get(&symbol)
+            .and_then(|l| l.resolved_type)
+            .unwrap_or_else(|| checker.error_type());
+    }
     // Build the value type against the view of the file that DECLARES the
     // symbol. In a multi-file program a value symbol (variable / property /
     // function / method) may be declared in another file — most commonly a lib
@@ -1703,6 +1710,7 @@ fn is_alias_symbol_declaration(arena: &NodeArena, node: NodeId) -> bool {
             | Kind::ExportSpecifier
             | Kind::ImportClause
             | Kind::NamespaceExport
+            | Kind::ExportAssignment
     )
 }
 
@@ -1762,7 +1770,10 @@ pub(crate) fn resolve_alias(
 /// followed to its target; anything else is returned unchanged.
 // Go: internal/checker/checker.go:Checker.resolveSymbolEx
 fn resolve_symbol(checker: &mut Checker, program: &dyn BoundProgram, symbol: SymbolId) -> SymbolId {
-    if program.symbol(symbol).flags.contains(SymbolFlags::ALIAS) {
+    if checker
+        .resolved_symbol_flags(program, symbol)
+        .contains(SymbolFlags::ALIAS)
+    {
         if let Some(target) = resolve_alias(checker, program, symbol) {
             return target;
         }
@@ -1785,7 +1796,30 @@ fn get_target_of_alias_declaration(
         Kind::ImportEqualsDeclaration => {
             get_target_of_import_equals_declaration(checker, program, node)
         }
-        // DEFER(phase-4): ExportSpecifier / NamespaceExport / ExportAssignment.
+        Kind::ExportAssignment => get_target_of_export_assignment(program, node),
+        // DEFER(phase-4): ExportSpecifier / NamespaceExport.
+        _ => None,
+    }
+}
+
+/// Resolves `export = <entity>` to the exported symbol (Go's
+/// `getTargetOfExportAssignment` reachable subset: entity-name expressions).
+// Go: internal/checker/checker.go:Checker.getTargetOfExportAssignment
+fn get_target_of_export_assignment(
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Option<SymbolId> {
+    let NodeData::ExportAssignment(d) = program.arena().data(node) else {
+        return None;
+    };
+    let expression = d.expression;
+    match program.arena().kind(expression) {
+        Kind::Identifier | Kind::QualifiedName => resolve_entity_name(
+            program,
+            expression,
+            SymbolFlags::VALUE | SymbolFlags::TYPE | SymbolFlags::NAMESPACE,
+            program.globals(),
+        ),
         _ => None,
     }
 }
@@ -1871,7 +1905,7 @@ fn get_target_of_module_default(
 
 /// Resolves `import * as ns from "m"` to the module symbol itself, so `ns.x`
 /// reads the module's exports (Go's `getTargetOfNamespaceImport` ->
-/// `resolveESModuleSymbol`; the synthetic-default wrapper DEFER).
+/// `resolveESModuleSymbol`).
 // Go: internal/checker/checker.go:Checker.getTargetOfNamespaceImport
 fn get_target_of_namespace_import(
     checker: &mut Checker,
@@ -1883,11 +1917,89 @@ fn get_target_of_namespace_import(
     let import_decl = program.arena().parent(import_clause)?;
     let specifier = module_specifier_text(program.arena(), import_decl)?;
     let module_symbol = resolve_external_module_name(program, &specifier)?;
-    Some(resolve_external_module_symbol(
+    Some(resolve_es_module_symbol(
         checker,
         program,
         module_symbol,
+        import_decl,
     ))
+}
+
+/// Wraps a callable module export for namespace-import use and records
+/// `exportTypeLinks` for invocation recovery (Go's `resolveESModuleSymbol`
+/// reachable subset).
+// Go: internal/checker/checker.go:Checker.resolveESModuleSymbol(15447)
+fn resolve_es_module_symbol(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    module_symbol: SymbolId,
+    originating_import: NodeId,
+) -> SymbolId {
+    let symbol = resolve_external_module_symbol(checker, program, module_symbol);
+    let typ = get_type_of_symbol(checker, program, symbol, program.globals());
+    // Namespace imports of a callable export (or an `export=` indirection) are
+    // wrapped so the import is not directly callable (Go's `resolveESModuleSymbol`).
+    let should_wrap = symbol != module_symbol
+        || !get_signatures_of_symbol(checker, program, symbol).is_empty()
+        || !checker.get_signatures_of_type(typ).is_empty();
+    if !should_wrap {
+        return symbol;
+    }
+    let module_type = create_default_property_wrapper_for_module(checker, program, symbol);
+    clone_type_as_module_symbol(checker, program, symbol, module_type, originating_import)
+}
+
+/// Builds `{ default: <export> }` for a callable module export (Go's
+/// `createDefaultPropertyWrapperForModule`).
+// Go: internal/checker/checker.go:Checker.createDefaultPropertyWrapperForModule(15585)
+fn create_default_property_wrapper_for_module(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> TypeId {
+    use tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_DEFAULT;
+    let default_sym = checker.new_es_module_clone_symbol(
+        INTERNAL_SYMBOL_NAME_DEFAULT,
+        SymbolFlags::ALIAS,
+    );
+    let resolved = resolve_symbol(checker, program, symbol);
+    checker.alias_targets.insert(default_sym, Some(resolved));
+    checker.value_symbol_links.get(default_sym).name_type =
+        Some(checker.get_string_literal_type("default"));
+    let mut members = SymbolTable::default();
+    members.insert(INTERNAL_SYMBOL_NAME_DEFAULT.to_string(), default_sym);
+    let object = ObjectType {
+        members: members.clone(),
+        properties: vec![default_sym],
+        ..Default::default()
+    };
+    checker.new_object_type(ObjectFlags::ANONYMOUS, None, object)
+}
+
+/// Clones a module export symbol for namespace-import typing and records the
+/// originating import for recovery diagnostics (Go's `cloneTypeAsModuleType`).
+// Go: internal/checker/checker.go:Checker.cloneTypeAsModuleType(15595)
+fn clone_type_as_module_symbol(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+    module_type: TypeId,
+    originating_import: NodeId,
+) -> SymbolId {
+    let name = checker.resolved_symbol_name(program, symbol);
+    let flags = checker.resolved_symbol_flags(program, symbol);
+    let clone = checker.new_es_module_clone_symbol(&name, flags);
+    checker.export_type_links.get(clone).target = Some(symbol);
+    checker.export_type_links.get(clone).originating_import = Some(originating_import);
+    let object = checker
+        .get_type(module_type)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    checker.value_symbol_links.get(clone).resolved_type = Some(
+        checker.new_object_type(ObjectFlags::ANONYMOUS, Some(clone), object),
+    );
+    clone
 }
 
 /// Resolves `import x = require("m")` (Go's
@@ -2675,7 +2787,7 @@ pub fn get_type_of_accessors(
     let mut t = match t {
         Some(t) => t,
         None => {
-            let sym_name = super::nodebuilder::symbol_to_string(program, symbol);
+            let sym_name = super::nodebuilder::symbol_to_string(checker, program, symbol);
             if let Some(setter) = setter {
                 checker.add_error_or_suggestion(
                     program,
@@ -2706,7 +2818,7 @@ pub fn get_type_of_accessors(
     };
     checker.accessors_type_resolving.remove(&symbol);
     if checker.accessor_type_resolution_cyclic {
-        let sym_name = super::nodebuilder::symbol_to_string(program, symbol);
+        let sym_name = super::nodebuilder::symbol_to_string(checker, program, symbol);
         if getter
             .and_then(|g| get_annotated_accessor_type_node(program, g))
             .is_some()
@@ -2781,7 +2893,7 @@ pub fn get_write_type_of_accessors(
     let mut write_type = setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals));
     checker.accessors_write_type_resolving.remove(&symbol);
     if checker.accessor_write_type_resolution_cyclic {
-        let sym_name = super::nodebuilder::symbol_to_string(program, symbol);
+        let sym_name = super::nodebuilder::symbol_to_string(checker, program, symbol);
         if let Some(setter) = setter {
             if get_annotated_accessor_type_node(program, setter).is_some() {
                 checker.error(
