@@ -2279,6 +2279,12 @@ pub(crate) fn get_class_construct_signatures(
     program: &dyn BoundProgram,
     class_sym: SymbolId,
 ) -> Vec<SignatureId> {
+    // Namespace-import ES-module clones copy the export's CLASS flags but are not
+    // directly constructable; their construct signatures are empty (Go's wrapped
+    // module type). `program.symbol` would panic on the tagged id.
+    if super::is_es_module_symbol(class_sym) {
+        return Vec::new();
+    }
     let sym = program.symbol(class_sym);
     if let Some(&ctor_member) = sym.members.get(INTERNAL_SYMBOL_NAME_CONSTRUCTOR) {
         let sigs = get_signatures_of_symbol(checker, program, ctor_member);

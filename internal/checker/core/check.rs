@@ -9853,9 +9853,10 @@ impl Checker {
         let mut sigs = self.get_construct_signatures_of_type(apparent);
         if sigs.is_empty() {
             if let Some(sym) = self.get_type(apparent).symbol {
-                if self
-                    .resolved_symbol_flags(program, sym)
-                    .contains(SymbolFlags::CLASS)
+                if !super::is_es_module_symbol(sym)
+                    && self
+                        .resolved_symbol_flags(program, sym)
+                        .contains(SymbolFlags::CLASS)
                 {
                     sigs = self.construct_signatures_of_class_symbol(program, sym);
                 }

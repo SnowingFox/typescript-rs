@@ -17320,3 +17320,61 @@ fn object_literal_excess_on_union_discriminant_misspelling_reports_2561() {
         "Object literal may only specify known properties, but 'prop' does not exist in type '{ prop1: number; kind: \"a\"; }'. Did you mean to write 'prop1'?"
     );
 }
+
+// ---- T1-E batch 82: MultiFileProgram ES-module symbol routing, operators, relations ----
+
+// Go: internal/checker/checker.go:Checker.invocationErrorRecovery (class export=, 7038)
+#[test]
+fn namespace_import_class_export_construct_reports_7038() {
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/foo.ts", "class Foo {}\nexport = Foo;"),
+        ("/index.ts", "import * as ns from \"./foo\";\nnew ns();"),
+    ]));
+    let index = p.source_files()[1];
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(index);
+    assert_eq!(diags.len(), 1, "expected one 2351, got {diags:?}");
+    assert_eq!(diags[0].code, 2351);
+    assert_eq!(diags[0].related_information.len(), 1);
+    assert_eq!(diags[0].related_information[0].code, 7038);
+    assert_eq!(
+        diags[0].related_information[0].message,
+        "Type originates at this import. A namespace-style import cannot be called or constructed, and will cause a failure at runtime. Consider using a default import or import require here instead."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void right, 2363)
+#[test]
+fn multiply_void_right_operand_reports_2363() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\n2 * f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2363, got {diags:?}");
+    assert_eq!(diags[0].code, 2363);
+    assert_eq!(
+        diags[0].message,
+        "The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.hasExcessProperties (error node on property name)
+#[test]
+fn object_literal_excess_property_targets_property_name_span() {
+    let src = "interface O { prop1: number; }\nconst o: O = { prop: 1 };";
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2561);
+    let prop_pos = src.find("prop:").expect("prop: in source") as i32;
+    assert_eq!(
+        diags[0].start, prop_pos,
+        "excess-property diagnostic must start at the property name, not leading trivia; got start={} src={src:?}",
+        diags[0].start
+    );
+}
