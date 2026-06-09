@@ -20332,3 +20332,212 @@ fn keyof_lookup_type_assignability_e2e() {
     );
 }
 
+// ---- T1-E batch 103: narrowing, switch, catch unknown, optional chain, spread, namespace, export, decorator ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword
+#[test]
+fn in_guard_narrows_union_member_access_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         declare const v: A | B;\n\
+         if (\"a\" in v) {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality
+#[test]
+fn literal_equality_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: \"a\" | \"b\";\nif (x === \"a\") {\n  const s: \"a\" = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkSwitchStatement (7029)
+#[test]
+fn switch_fallthrough_reports_7029() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+    let options = CompilerOptions {
+        no_fallthrough_cases_in_switch: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "switch (1) {\n  case 1: const x = 1;\n  case 2: break;\n}",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 7029, got {diags:?}");
+    assert_eq!(diags[0].code, 7029);
+    assert_eq!(diags[0].message, "Fallthrough case in switch.");
+}
+
+// Go: internal/checker/checker.go:Checker.checkAllCodePathsInNonVoidFunctionReturnOrThrow (2366)
+#[test]
+fn non_exhaustive_switch_union_function_reports_2366() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(x: \"a\" | \"b\"): number {\n  switch (x) {\n    case \"a\": return 1;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2366),
+        "expected TS2366 for non-exhaustive switch; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkNonNullTypeWithReporter (18046)
+#[test]
+fn catch_variable_unknown_member_access_reports_18046() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+    let options = CompilerOptions {
+        use_unknown_in_catch_variables: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "try {} catch (e) { e.toString(); }",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 18046, got {diags:?}");
+    assert_eq!(diags[0].code, 18046);
+    assert_eq!(diags[0].message, "'e' is of type 'unknown'.");
+}
+
+// Go: internal/checker/checker.go:Checker.checkReferenceExpression (2777)
+#[test]
+fn increment_on_optional_property_access_reports_2777() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const o: { x?: number };\no?.x++;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2777),
+        "expected TS2777 for optional-chain increment; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkNonNullAssertion (unnecessary on non-null)
+#[test]
+fn non_null_assertion_on_non_nullable_operand_ok() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string;\nconst y: string = x!;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "unnecessary ! on string is OK; got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getArgumentArityError (2556)
+#[test]
+fn spread_non_tuple_to_fixed_parameter_reports_2556() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(a: number): void;\n\
+         declare const o: { a: number; b: number };\n\
+         f(...o);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2556),
+        "expected TS2556 for spread of non-tuple; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getExportsOfSymbol (function+namespace merge)
+#[test]
+fn function_namespace_merge_exports_member() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function Foo() {}\nnamespace Foo { export const x = 1; }\nconst a: number = Foo.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "merged Foo.x should be number; got {diags:?}");
+}
+
+// Go: internal/checker/grammarchecks.go:Checker.checkGrammarModuleElementContext (1231)
+#[test]
+fn export_assignment_in_function_reports_1231() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() { export = 1; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 1231),
+        "expected TS1231 for nested export=; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveDecorator (1329)
+#[test]
+fn decorator_uncalled_zero_arg_reports_1329() {
+    use tsgo_core::compileroptions::CompilerOptions;
+    use tsgo_core::tristate::Tristate;
+    let options = CompilerOptions {
+        experimental_decorators: Tristate::True,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "function dec() { return 1; }\n@dec class C {}",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 1329),
+        "expected TS1329 for uncalled decorator factory; got {diags:?}"
+    );
+    let d = diags.iter().find(|d| d.code == 1329).unwrap();
+    assert_eq!(
+        d.message,
+        "'dec' accepts too few arguments to be used as a decorator here. Did you mean to call it first and write '@dec()'?"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkNamedTupleMember (5086)
+#[test]
+fn named_tuple_optional_mark_after_name_reports_5086() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = [label: string?];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 5086, got {diags:?}");
+    assert_eq!(diags[0].code, 5086);
+}
+

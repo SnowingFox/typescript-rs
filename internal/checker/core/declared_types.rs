@@ -3071,6 +3071,12 @@ fn get_type_of_variable_or_property(
             let initializer_type = checker.check_expression(program, initializer);
             get_widened_literal_type_for_initializer(checker, program, decl, initializer_type)
         }
+    } else if declaration.is_some_and(|decl| is_catch_clause_variable_declaration(program, decl)) {
+        if checker.use_unknown_in_catch_variables() {
+            checker.unknown_type()
+        } else {
+            checker.any_type()
+        }
     } else {
         // No annotation and nothing to infer from (Go falls back to `any`).
         checker.any_type()
@@ -5705,6 +5711,23 @@ pub fn get_global_type(
     let t = get_declared_type_of_symbol(checker, program, symbol, Some(globals));
     checker.global_types.insert(name.to_string(), t);
     Some(t)
+}
+
+fn is_catch_clause_variable_declaration(program: &dyn BoundProgram, id: NodeId) -> bool {
+    let arena = program.arena();
+    if arena.kind(id) != Kind::VariableDeclaration {
+        return false;
+    }
+    let Some(parent) = arena.parent(id) else {
+        return false;
+    };
+    if arena.kind(parent) != Kind::CatchClause {
+        return false;
+    }
+    match arena.data(parent) {
+        NodeData::CatchClause(c) => c.variable_declaration == Some(id),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

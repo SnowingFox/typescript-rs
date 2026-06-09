@@ -426,6 +426,27 @@ impl Checker {
             _ => return t,
         };
         let op = arena.kind(op_token);
+        if op == Kind::InKeyword {
+            if let NodeData::BinaryExpression(d) = arena.data(expr) {
+                let target = d.right;
+                if self.is_matching_reference(program, reference, target) {
+                    let value_type = self.check_expression(program, d.left);
+                    if self
+                        .get_type(value_type)
+                        .flags()
+                        .contains(TypeFlags::STRING_LITERAL)
+                    {
+                        let name = super::late_binding::get_property_name_from_type(self, value_type);
+                        return self.narrow_type_by_in(t, &name, assume_true);
+                    }
+                    if arena.kind(d.left) == Kind::StringLiteral {
+                        let name = arena.text(d.left).to_string();
+                        return self.narrow_type_by_in(t, &name, assume_true);
+                    }
+                }
+            }
+            return t;
+        }
         let is_equality = matches!(
             op,
             Kind::EqualsEqualsEqualsToken
@@ -434,7 +455,7 @@ impl Checker {
                 | Kind::ExclamationEqualsToken
         );
         if !is_equality {
-            // DEFER(phase-4-checker-4g): `&&`/`||`/`instanceof`/`in` binary flow.
+            // DEFER(phase-4-checker-4g): `&&`/`||`/`instanceof` binary flow.
             return t;
         }
         let negated = matches!(

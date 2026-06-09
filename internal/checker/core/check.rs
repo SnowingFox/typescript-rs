@@ -2353,6 +2353,27 @@ impl Checker {
         if !self.strict_null_checks() {
             return t;
         }
+        if self.get_type(t).flags().contains(TypeFlags::UNKNOWN) {
+            if is_entity_name_expression(program.arena(), node) {
+                let node_text = entity_name_to_string(program.arena(), node);
+                if node_text.len() < 100 {
+                    self.error(
+                        program,
+                        node,
+                        &tsgo_diagnostics::X_0_IS_OF_TYPE_UNKNOWN,
+                        &[node_text.as_str()],
+                    );
+                    return self.error_type;
+                }
+            }
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::OBJECT_IS_OF_TYPE_UNKNOWN,
+                &[],
+            );
+            return self.error_type;
+        }
         let facts = self.get_type_facts(t) & TypeFacts::IS_UNDEFINED_OR_NULL;
         if !facts.intersects(TypeFacts::IS_UNDEFINED_OR_NULL) {
             return t;
@@ -5553,7 +5574,9 @@ impl Checker {
         // reports `2554` after still checking the argument expressions so nested
         // diagnostics surface.
         if self.has_correct_arity(signature, args.len()) {
-            self.check_applicable_signature_for_call(program, signature, &args);
+            if self.check_spread_arguments_for_call(program, signature, &args) {
+                self.check_applicable_signature_for_call(program, signature, &args);
+            }
         } else {
             for &arg in &args {
                 self.check_expression(program, arg);
@@ -8219,6 +8242,14 @@ impl Checker {
         is_export_equals: bool,
         expression: NodeId,
     ) {
+        let illegal_context = if is_export_equals {
+            &tsgo_diagnostics::AN_EXPORT_ASSIGNMENT_MUST_BE_AT_THE_TOP_LEVEL_OF_A_FILE_OR_MODULE_DECLARATION
+        } else {
+            &tsgo_diagnostics::A_DEFAULT_EXPORT_MUST_BE_AT_THE_TOP_LEVEL_OF_A_FILE_OR_MODULE_DECLARATION
+        };
+        if self.check_grammar_module_element_context(program, node, illegal_context) {
+            return;
+        }
         let arena = program.arena();
         let container = arena.parent(node);
         let container = container.and_then(|c| {
@@ -8848,8 +8879,8 @@ impl Checker {
                 NodeData::CaseBlock(c) => c.clauses.nodes.clone(),
                 _ => Vec::new(),
             };
-            for clause in clauses {
-                let (clause_expression, statements) = match program.arena().data(clause) {
+            for (i, clause) in clauses.iter().enumerate() {
+                let (clause_expression, statements) = match program.arena().data(*clause) {
                     NodeData::CaseOrDefaultClause(c) => (c.expression, c.statements.nodes.clone()),
                     _ => (None, Vec::new()),
                 };
@@ -8857,8 +8888,23 @@ impl Checker {
                 if let Some(clause_expression) = clause_expression {
                     self.check_expression(program, clause_expression);
                 }
+                let fallthrough = i + 1 < clauses.len()
+                    && self.switch_case_has_fallthrough(program, &statements);
                 for statement in statements {
                     self.check_statement(program, statement);
+                }
+                if self
+                    .compiler_options()
+                    .no_fallthrough_cases_in_switch
+                    .is_true()
+                    && fallthrough
+                {
+                    self.error(
+                        program,
+                        *clause,
+                        &tsgo_diagnostics::FALLTHROUGH_CASE_IN_SWITCH,
+                        &[],
+                    );
                 }
             }
         }
@@ -9522,6 +9568,9 @@ impl Checker {
         if !flags.contains(NodeFlags::HAS_IMPLICIT_RETURN) {
             return;
         }
+        if self.function_body_is_exhaustive_switch_with_returns(program, fn_node) {
+            return;
+        }
         if !self.strict_null_checks() {
             return;
         }
@@ -9535,6 +9584,70 @@ impl Checker {
             &tsgo_diagnostics::FUNCTION_LACKS_ENDING_RETURN_STATEMENT_AND_RETURN_TYPE_DOES_NOT_INCLUDE_UNDEFINED,
             &[],
         );
+    }
+
+    /// Returns true when the function body is a single `switch` over a literal
+    /// union that covers every member and returns from each arm (so no trailing
+    /// return is required).
+    fn function_body_is_exhaustive_switch_with_returns(
+        &mut self,
+        program: &dyn BoundProgram,
+        fn_node: NodeId,
+    ) -> bool {
+        let Some(body) = function_like_body(program, fn_node) else {
+            return false;
+        };
+        let NodeData::Block(block) = program.arena().data(body) else {
+            return false;
+        };
+        if block.list.nodes.len() != 1 {
+            return false;
+        }
+        let stmt = block.list.nodes[0];
+        let NodeData::SwitchStatement(sw) = program.arena().data(stmt) else {
+            return false;
+        };
+        let discriminant_type = self.check_expression(program, sw.expression);
+        let expected = union_literal_names(self, discriminant_type);
+        if expected.is_empty() {
+            return false;
+        }
+        let NodeData::CaseBlock(cb) = program.arena().data(sw.case_block) else {
+            return false;
+        };
+        let mut covered = FxHashSet::default();
+        let mut has_default = false;
+        for &clause in &cb.clauses.nodes {
+            match program.arena().kind(clause) {
+                Kind::DefaultClause => {
+                    has_default = true;
+                    if !switch_clause_always_returns(program, clause) {
+                        return false;
+                    }
+                }
+                Kind::CaseClause => {
+                    let NodeData::CaseOrDefaultClause(cc) = program.arena().data(clause) else {
+                        continue;
+                    };
+                    let Some(expr) = cc.expression else {
+                        return false;
+                    };
+                    let case_type = self.check_expression(program, expr);
+                    let Some(name) = try_get_name_from_type(self, case_type) else {
+                        return false;
+                    };
+                    covered.insert(name);
+                    if !switch_clause_always_returns(program, clause) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if has_default {
+            return true;
+        }
+        expected.len() == covered.len() && expected.iter().all(|v| covered.contains(v))
     }
 
     // Checks a `typeof expr` expression. The result type is `string` (Go's
@@ -9809,9 +9922,119 @@ impl Checker {
         let modifiers = super::grammar::modifier_nodes_pub(program.arena(), node);
         for m in modifiers {
             if program.arena().kind(m) == Kind::Decorator {
-                self.check_grammar_decorator(program, m);
+                self.check_decorator(program, node, m);
             }
         }
+    }
+
+    /// Validates a decorator modifier: grammar, then whether the decorator
+    /// expression is callable with the synthetic decorator argument count.
+    // Go: internal/checker/checker.go:Checker.checkDecorator(6031)
+    fn check_decorator(
+        &mut self,
+        program: &dyn BoundProgram,
+        decorated_node: NodeId,
+        decorator_node: NodeId,
+    ) {
+        if self.check_grammar_decorator(program, decorator_node) {
+            return;
+        }
+        let expr = match program.arena().data(decorator_node) {
+            NodeData::Decorator(d) => d.expression,
+            _ => return,
+        };
+        if program.arena().kind(expr) == Kind::CallExpression {
+            return;
+        }
+        if program
+            .arena()
+            .flags(expr)
+            .contains(NodeFlags::OPTIONAL_CHAIN)
+            || matches!(
+                program.arena().kind(expr),
+                Kind::ParenthesizedExpression | Kind::BinaryExpression
+            )
+        {
+            return;
+        }
+        let func_type = self.check_expression(program, expr);
+        let signatures = self.get_signatures_of_type(func_type);
+        if signatures.is_empty() {
+            return;
+        }
+        let decorator_arg_count =
+            self.legacy_decorator_argument_count(program, decorated_node);
+        let uncalled = signatures.iter().all(|&sig| {
+            !self.has_effective_rest_parameter(sig)
+                && self.get_min_argument_count(sig) == 0
+                && (self.get_parameter_count(sig) as i32) < decorator_arg_count
+        });
+        if uncalled {
+            let name = declaration_name_to_string(program, expr);
+            self.error(
+                program,
+                decorator_node,
+                &tsgo_diagnostics::X_0_ACCEPTS_TOO_FEW_ARGUMENTS_TO_BE_USED_AS_A_DECORATOR_HERE_DID_YOU_MEAN_TO_CALL_IT_FIRST_AND_WRITE_0,
+                &[name.as_str()],
+            );
+        }
+    }
+
+    /// Synthetic argument count for a legacy (experimental) decorator on `node`.
+    // Go: internal/checker/checker.go:Checker.getLegacyDecoratorArgumentCount(9156)
+    fn legacy_decorator_argument_count(&self, program: &dyn BoundProgram, node: NodeId) -> i32 {
+        match program.arena().kind(node) {
+            Kind::ClassDeclaration | Kind::ClassExpression => 1,
+            Kind::PropertyDeclaration => 2,
+            Kind::MethodDeclaration | Kind::GetAccessor | Kind::SetAccessor => 2,
+            Kind::Parameter => 3,
+            _ => 0,
+        }
+    }
+
+    /// Reports `2556` when a spread argument is not a tuple type and the target
+    /// signature has no rest parameter.
+    // Go: internal/checker/checker.go:Checker.getArgumentArityError (2556)
+    fn check_spread_arguments_for_call(
+        &mut self,
+        program: &dyn BoundProgram,
+        signature: SignatureId,
+        args: &[NodeId],
+    ) -> bool {
+        if self.has_effective_rest_parameter(signature) {
+            return true;
+        }
+        for &arg in args {
+            if program.arena().kind(arg) != Kind::SpreadElement {
+                continue;
+            }
+            let spread_expr = match program.arena().data(arg) {
+                NodeData::SpreadElement(d) => d.expression,
+                _ => continue,
+            };
+            let spread_type = self.check_expression(program, spread_expr);
+            if !self.is_tuple_type(spread_type) {
+                self.error(
+                    program,
+                    arg,
+                    &tsgo_diagnostics::A_SPREAD_ARGUMENT_MUST_EITHER_HAVE_A_TUPLE_TYPE_OR_BE_PASSED_TO_A_REST_PARAMETER,
+                    &[],
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Returns whether a switch `case`/`default` falls through to the next clause.
+    fn switch_case_has_fallthrough(&self, program: &dyn BoundProgram, statements: &[NodeId]) -> bool {
+        let Some(&last) = statements.last() else {
+            return false;
+        };
+        !matches!(
+            program.arena().kind(last),
+            Kind::BreakStatement | Kind::ReturnStatement | Kind::ThrowStatement | Kind::ContinueStatement
+        )
     }
 
     fn check_class_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
@@ -10274,6 +10497,15 @@ impl Checker {
         }
         if let Some(body) = body {
             self.check_statement(program, body);
+        }
+        if let Some(return_type_node) = return_type {
+            if body.is_some() && !is_generator_function(program, node) {
+                let return_type =
+                    self.get_type_from_type_node(program, return_type_node, program.globals());
+                self.check_all_code_paths_in_non_void_function_return_or_throw(
+                    program, node, return_type,
+                );
+            }
         }
         self.register_for_unused_identifiers_check(node);
     }
@@ -17085,6 +17317,31 @@ fn property_name_for_property_name_node(
         }
         _ => None,
     }
+}
+
+fn union_literal_names(checker: &Checker, t: TypeId) -> Vec<String> {
+    if let Some(types) = checker.get_type(t).union_types() {
+        types
+            .iter()
+            .filter_map(|&ut| try_get_name_from_type(checker, ut))
+            .collect()
+    } else {
+        try_get_name_from_type(checker, t).into_iter().collect()
+    }
+}
+
+fn switch_clause_always_returns(program: &dyn BoundProgram, clause: NodeId) -> bool {
+    let NodeData::CaseOrDefaultClause(d) = program.arena().data(clause) else {
+        return false;
+    };
+    let statements = &d.statements.nodes;
+    if statements.is_empty() {
+        return false;
+    }
+    matches!(
+        program.arena().kind(*statements.last().unwrap()),
+        Kind::ReturnStatement | Kind::ThrowStatement
+    )
 }
 
 // Go: internal/checker/checker.go:tryGetNameFromType(18577)

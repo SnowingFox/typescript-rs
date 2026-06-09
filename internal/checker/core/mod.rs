@@ -866,6 +866,13 @@ impl Checker {
         self.get_strict_option_value(self.compiler_options().no_implicit_any)
     }
 
+    /// Reports whether `useUnknownInCatchVariables` is in effect (Go's
+    /// `c.useUnknownInCatchVariables`).
+    // Go: internal/checker/checker.go:NewChecker (c.useUnknownInCatchVariables)
+    pub fn use_unknown_in_catch_variables(&self) -> bool {
+        self.get_strict_option_value(self.compiler_options().use_unknown_in_catch_variables)
+    }
+
     /// Clones the shared handle to the retained program, if any.
     ///
     /// Returning an owned `Rc` lets a `&mut self` driver (e.g.
