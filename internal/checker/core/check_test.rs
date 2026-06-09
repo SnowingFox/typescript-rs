@@ -2,7 +2,7 @@ use crate::core::check::{get_effective_return_type_node, DiagnosticMessageChain}
 use crate::core::program::BoundProgram;
 use crate::core::signatures::{Signature, SignatureFlags};
 use crate::core::test_support::{MultiFileProgram, StubProgram};
-use crate::core::types::{ObjectFlags, ObjectType};
+use crate::core::types::{LiteralValue, ObjectFlags, ObjectType, TypeFlags};
 use crate::core::Checker;
 use tsgo_ast::{Kind, NodeData, SymbolId};
 use tsgo_core::compileroptions::CompilerOptions;
@@ -20722,5 +20722,148 @@ fn call_intersection_parameter_excess_property_reports_2353() {
         diags[0].message,
         "Object literal may only specify known properties, and 'c' does not exist in type '{ a: number; } & { b: string; }'."
     );
+}
+
+// ---- T1-E batch 105: switch typeof, negated flow, primitive falsy &&, typeof guards, negative literal type ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeof
+#[test]
+fn typeof_number_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: number | string;\nif (typeof x === \"number\") {\n  const n: number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeof
+#[test]
+fn typeof_symbol_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: symbol | string;\nif (typeof x === \"symbol\") {\n  const s: symbol = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeof
+#[test]
+fn typeof_object_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: object | string;\nif (typeof x === \"object\") {\n  const o: object = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeof
+#[test]
+fn typeof_undefined_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nif (typeof x === \"undefined\") {\n  const u: undefined = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnTypeOf
+#[test]
+fn switch_typeof_string_case_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | number;\nswitch (typeof x) {\n  case \"string\": {\n    const s: string = x;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnTypeOf
+#[test]
+fn switch_typeof_default_narrows_complement_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | number | boolean;\nswitch (typeof x) {\n  case \"string\":\n    break;\n  case \"number\":\n    break;\n  default: {\n    const b: boolean = x;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowType (prefix `!`)
+#[test]
+fn negated_truthiness_guard_narrows_else_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | null | undefined;\nif (!x) {\n} else {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (`&&` truthy left)
+#[test]
+fn logical_and_number_primitive_includes_zero_falsy_part() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: number;\ndeclare const b: number;\na && b;",
+    );
+    let root = p.root();
+    let mut c = Checker::new();
+    let and = match p.arena().data(root) {
+        NodeData::SourceFile(d) => match p.arena().data(d.statements.nodes[2]) {
+            NodeData::ExpressionStatement(d) => d.expression,
+            _ => panic!("expression statement"),
+        },
+        _ => panic!("source file"),
+    };
+    let t = c.check_expression(&p, and);
+    assert_eq!(
+        c.type_to_string(t),
+        "number | 0",
+        "number && number should union the zero falsy part of the right base with the right operand"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromLiteralTypeNode
+#[test]
+fn negative_numeric_literal_type_assignable_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type N = -1;\nconst x: N = -1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality (loose `!= null`)
+#[test]
+fn loose_null_inequality_guard_narrows_else_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | null | undefined;\nif (x != null) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 

@@ -394,6 +394,7 @@ impl Checker {
         expr: NodeId,
         assume_true: bool,
     ) -> TypeId {
+        let expr = skip_parentheses(program, expr);
         match program.arena().kind(expr) {
             Kind::Identifier => {
                 if self.is_matching_reference(program, reference, expr) {
@@ -405,7 +406,22 @@ impl Checker {
             Kind::BinaryExpression => {
                 self.narrow_type_by_binary(program, reference, t, expr, assume_true)
             }
-            // DEFER(phase-4-checker-4g): parenthesized, prefix `!`, `&&`/`||` flow.
+            Kind::PrefixUnaryExpression => {
+                let NodeData::PrefixUnaryExpression(d) = program.arena().data(expr) else {
+                    return t;
+                };
+                if d.operator == Kind::ExclamationToken {
+                    return self.narrow_type_at_condition(
+                        program,
+                        reference,
+                        t,
+                        d.operand,
+                        !assume_true,
+                    );
+                }
+                t
+            }
+            // DEFER(phase-4-checker-4g): `&&`/`||` flow.
             _ => t,
         }
     }
@@ -730,11 +746,140 @@ impl Checker {
         if self.is_matching_reference(program, reference, expr) {
             return self.narrow_type_by_switch_on_discriminant(program, t, &data);
         }
-        // DEFER(phase-4-checker-4u): `switch (typeof x)`, `switch (true)`, and
-        // discriminant-property `switch (x.kind)`. blocked-by: typeof-switch
-        // witnesses, `narrowType` on case expressions, and discriminant-property
-        // access matching.
+        if program.arena().kind(expr) == Kind::TypeOfExpression {
+            let NodeData::TypeOfExpression(d) = program.arena().data(expr) else {
+                return t;
+            };
+            if self.is_matching_reference(program, reference, d.expression) {
+                return self.narrow_type_by_switch_on_typeof(program, t, switch_stmt, &data);
+            }
+        }
+        // DEFER(phase-4-checker-4u): `switch (true)` and discriminant-property
+        // `switch (x.kind)`. blocked-by: `narrowType` on case expressions and
+        // discriminant-property access matching.
         t
+    }
+
+    // Narrows `t` at a `switch (typeof ref)` clause. Non-default clauses union
+    // the `narrow_type_by_typeof` result for each witness in the range; the
+    // default clause keeps constituents not narrowed by any other clause's
+    // witness (Go's `narrowTypeBySwitchOnTypeOf`).
+    // Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnTypeOf
+    fn narrow_type_by_switch_on_typeof(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        switch_stmt: NodeId,
+        data: &FlowSwitchClauseData,
+    ) -> TypeId {
+        let witnesses = match self.get_switch_clause_typeof_witnesses(program, switch_stmt) {
+            Some(w) => w,
+            None => return t,
+        };
+        let clauses = self.switch_case_clauses(program, switch_stmt);
+        let default_index = clauses.iter().position(|&c| {
+            matches!(
+                program.arena().data(c),
+                NodeData::CaseOrDefaultClause(d) if d.expression.is_none()
+            )
+        });
+        let start = data.clause_start.max(0) as usize;
+        let end = (data.clause_end.max(0) as usize).min(witnesses.len());
+        let has_default = start == end
+            || default_index.is_some_and(|i| i >= start && i < end);
+        if has_default {
+            return self.narrow_type_by_switch_on_typeof_default(program, t, start, end, &witnesses);
+        }
+        let mut narrowed = Vec::new();
+        for w in &witnesses[start..end] {
+            if w.is_empty() {
+                narrowed.push(self.never_type());
+            } else {
+                narrowed.push(self.narrow_type_by_typeof(program, t, w, true));
+            }
+        }
+        self.get_union_type(&narrowed)
+    }
+
+    // Default-clause arm of `switch (typeof x)`: keep constituents not captured
+    // by any witness outside the current clause range.
+    // Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnTypeOf (default)
+    fn narrow_type_by_switch_on_typeof_default(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        start: usize,
+        end: usize,
+        witnesses: &[String],
+    ) -> TypeId {
+        let outside: Vec<&str> = witnesses
+            .iter()
+            .enumerate()
+            .filter(|(i, w)| (*i < start || *i >= end) && !w.is_empty())
+            .map(|(_, w)| w.as_str())
+            .collect();
+        if outside.is_empty() {
+            return t;
+        }
+        let members = self.distributed_types(t);
+        let kept: Vec<TypeId> = members
+            .into_iter()
+            .filter(|&m| {
+                outside.iter().all(|&w| {
+                    let narrowed = self.narrow_type_by_typeof(program, m, w, true);
+                    let is_empty = self
+                        .get_type(narrowed)
+                        .flags()
+                        .contains(TypeFlags::NEVER)
+                        || self.distributed_types(narrowed).is_empty();
+                    is_empty || narrowed != m
+                })
+            })
+            .collect();
+        self.get_union_type(&kept)
+    }
+
+    // Returns the `typeof` witness string for each `switch` clause (`""` for
+    // `default` or duplicate witnesses; `None` when a case is not a string
+    // literal). Mirrors Go's `getSwitchClauseTypeOfWitnesses`.
+    // Go: internal/checker/flow.go:Checker.getSwitchClauseTypeOfWitnesses
+    fn get_switch_clause_typeof_witnesses(
+        &self,
+        program: &dyn BoundProgram,
+        switch_stmt: NodeId,
+    ) -> Option<Vec<String>> {
+        let mut witnesses = Vec::new();
+        for clause in self.switch_case_clauses(program, switch_stmt) {
+            let NodeData::CaseOrDefaultClause(d) = program.arena().data(clause) else {
+                return None;
+            };
+            let Some(expr) = d.expression else {
+                witnesses.push(String::new());
+                continue;
+            };
+            if !is_string_literal_like(program, expr) {
+                return None;
+            }
+            let text = program.arena().text(expr).to_string();
+            if witnesses.contains(&text) {
+                witnesses.push(String::new());
+            } else {
+                witnesses.push(text);
+            }
+        }
+        Some(witnesses)
+    }
+
+    // Returns the case/default clause nodes of `switch_stmt`.
+    fn switch_case_clauses(&self, program: &dyn BoundProgram, switch_stmt: NodeId) -> Vec<NodeId> {
+        let case_block = match program.arena().data(switch_stmt) {
+            NodeData::SwitchStatement(d) => d.case_block,
+            _ => return Vec::new(),
+        };
+        match program.arena().data(case_block) {
+            NodeData::CaseBlock(d) => d.clauses.nodes.clone(),
+            _ => Vec::new(),
+        }
     }
 
     // Narrows a union `t` by the clause range `[clause_start, clause_end)` of a
@@ -1142,6 +1287,28 @@ impl Checker {
             vec![t]
         }
     }
+}
+
+// Strips outer parenthesized wrappers from `node` (Go's `SkipParentheses` subset).
+fn skip_parentheses(program: &dyn BoundProgram, mut node: NodeId) -> NodeId {
+    loop {
+        if program.arena().kind(node) != Kind::ParenthesizedExpression {
+            break;
+        }
+        node = match program.arena().data(node) {
+            NodeData::ParenthesizedExpression(d) => d.expression,
+            _ => break,
+        };
+    }
+    node
+}
+
+// Reports whether `node` is a string literal usable as a `typeof` switch witness.
+fn is_string_literal_like(program: &dyn BoundProgram, node: NodeId) -> bool {
+    matches!(
+        program.arena().kind(node),
+        Kind::StringLiteral | Kind::NoSubstitutionTemplateLiteral
+    )
 }
 
 #[cfg(test)]

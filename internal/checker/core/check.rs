@@ -14401,13 +14401,8 @@ impl Checker {
     // literals) are their own falsy part; everything else has no falsy part
     // (`never`).
     //
-    // DEFER(phase-4-checker-4p+): the falsy literal for the `string`/`number`/
-    // `bigint` primitives (Go maps them to the `emptyString`/`zero`/`zeroBigInt`
-    // literal intrinsics). Returning `never` here coincides with Go's *reduced*
-    // union result whenever the other operand already carries that primitive.
-    // blocked-by: the falsy literal intrinsics + 4b union literal reduction.
     // Go: internal/checker/checker.go:Checker.getDefinitelyFalsyPartOfType(28790)
-    fn get_definitely_falsy_part_of_type(&self, t: TypeId) -> TypeId {
+    fn get_definitely_falsy_part_of_type(&mut self, t: TypeId) -> TypeId {
         let ty = self.get_type(t);
         let f = ty.flags();
         if t == self.regular_false_type
@@ -14419,9 +14414,38 @@ impl Checker {
         match ty.literal_value() {
             Some(LiteralValue::String(s)) if s.is_empty() => return t,
             Some(LiteralValue::Number(n)) if f64::from(*n) == 0.0 => return t,
+            Some(LiteralValue::BigInt(bi)) if bi.sign() == 0 => return t,
             _ => {}
         }
+        if f.intersects(TypeFlags::STRING) {
+            return self.get_empty_string_literal_type();
+        }
+        if f.intersects(TypeFlags::NUMBER) {
+            return self.get_zero_number_literal_type();
+        }
+        if f.intersects(TypeFlags::BIG_INT) {
+            return self.get_zero_bigint_literal_type();
+        }
         self.never_type
+    }
+
+    // Go: internal/checker/checker.go:Checker.emptyStringType (intrinsic)
+    fn get_empty_string_literal_type(&mut self) -> TypeId {
+        self.new_literal_type(
+            TypeFlags::STRING_LITERAL,
+            LiteralValue::String(String::new()),
+            None,
+        )
+    }
+
+    // Go: internal/checker/checker.go:Checker.zeroType (intrinsic)
+    fn get_zero_number_literal_type(&mut self) -> TypeId {
+        self.get_number_literal_type(tsgo_jsnum::Number::from(0.0))
+    }
+
+    // Go: internal/checker/checker.go:Checker.zeroBigIntType (intrinsic)
+    fn get_zero_bigint_literal_type(&mut self) -> TypeId {
+        self.get_bigint_literal_type("0n")
     }
 
     // Returns the base type of a literal type (Go's `getBaseTypeOfLiteralType`,
