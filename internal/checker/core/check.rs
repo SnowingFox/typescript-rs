@@ -14599,13 +14599,30 @@ impl Checker {
     }
 
     // Returns the fixed (non-rest) length of a tuple (Go's
-    // `TargetTupleType().fixedLength`). For the fixed-arity subset this equals
-    // the full arity.
-    //
-    // DEFER(phase-4-checker-4af+): variadic/rest tuples where `fixedLength` <
-    // arity. blocked-by: tuple element flags.
-    fn tuple_fixed_length(&self, t: TypeId) -> Option<usize> {
-        self.tuple_reference_arity(t)
+    // `TargetTupleType().fixedLength`).
+    pub(crate) fn tuple_fixed_length(&self, t: TypeId) -> Option<usize> {
+        let obj = self.get_type(t).as_object()?;
+        let arity = obj.resolved_type_arguments.len();
+        Some(obj.tuple_fixed_length.unwrap_or(arity))
+    }
+
+    // Reports whether `t` is a tuple with a rest element (`[A, ...B]`).
+    pub(crate) fn tuple_has_rest_element(&self, t: TypeId) -> bool {
+        let Some(obj) = self.get_type(t).as_object() else {
+            return false;
+        };
+        let arity = obj.resolved_type_arguments.len();
+        obj.tuple_fixed_length.is_some_and(|fixed| fixed < arity)
+    }
+
+    // Minimum required element count for tuple assignability (Go's `minLength`).
+    pub(crate) fn tuple_min_length(&self, t: TypeId) -> usize {
+        let Some(obj) = self.get_type(t).as_object() else {
+            return 0;
+        };
+        obj.tuple_min_length.unwrap_or_else(|| {
+            self.tuple_fixed_length(t).unwrap_or(0)
+        })
     }
 
     /// Performs assignability checking with optional elaboration (Go's

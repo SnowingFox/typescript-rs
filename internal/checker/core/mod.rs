@@ -1812,9 +1812,23 @@ impl Checker {
         element_types: Vec<TypeId>,
         readonly: bool,
     ) -> TypeId {
+        self.create_tuple_type_structured(element_types, readonly, None, None)
+    }
+
+    // Creates a tuple type with optional rest/optional-element structure metadata.
+    // Go: internal/checker/checker.go:Checker.createTupleTypeEx / createNormalizedTupleType
+    pub(crate) fn create_tuple_type_structured(
+        &mut self,
+        element_types: Vec<TypeId>,
+        readonly: bool,
+        tuple_fixed_length: Option<usize>,
+        tuple_min_length: Option<usize>,
+    ) -> TypeId {
         let object = ObjectType {
             resolved_type_arguments: element_types,
             readonly,
+            tuple_fixed_length,
+            tuple_min_length,
             ..Default::default()
         };
         self.new_object_type(ObjectFlags::TUPLE, None, object)

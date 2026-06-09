@@ -737,6 +737,14 @@ pub struct ObjectType {
     /// target `readonly` flag, set for an `[...] as const` readonly tuple).
     /// Has no meaning for non-tuple object types.
     pub readonly: bool,
+    /// For a `TUPLE`-flagged type with a rest element (`[A, ...B[]]`), the
+    /// count of fixed (non-rest) elements. When `Some(k)` and `k <
+    /// resolved_type_arguments.len()`, element `k` is the rest element type.
+    /// `None` means every element is fixed-arity (Go's `fixedLength == arity`).
+    pub tuple_fixed_length: Option<usize>,
+    /// Minimum required element count for tuple assignability (Go's `minLength`).
+    /// `None` defaults to the fixed length / full arity for fixed-arity tuples.
+    pub tuple_min_length: Option<usize>,
 }
 
 /// The payload of a union type (`A | B`), holding its constituents by id.

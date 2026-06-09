@@ -18097,3 +18097,169 @@ fn assignability_readonly_tuple_to_mutable_array_reports_4104() {
     );
     assert!(d.message_chain.is_empty());
 }
+
+// ---- T1-E batch 89: empty-tuple 2621, remaining void operands, readonly tuple-array ----
+
+const BATCH_89_ARRAY_STUBS: &str = "interface Array<T> { [n: number]: T; length: number; }\n\
+interface ReadonlyArray<T> { readonly [n: number]: T; readonly length: number; }\n";
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm, 2621)
+#[test]
+fn assignability_chain_array_to_empty_tuple_reports_2621() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{BATCH_89_ARRAY_STUBS}declare const src: number[];\nconst o: [] = src;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2621);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Target allows only 0 element(s) but source may have more."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm, 2620)
+#[test]
+fn assignability_chain_array_to_single_element_tuple_reports_2620() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{BATCH_89_ARRAY_STUBS}declare const src: number[];\nconst o: [number] = src;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2620);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Target requires 1 element(s) but source may have fewer."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.structuredTypeRelatedToWorker (readonly tuple to readonly array)
+#[test]
+fn assignability_readonly_tuple_to_readonly_array_is_allowed() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{BATCH_89_ARRAY_STUBS}declare const src: readonly [number, number];\n\
+             const o: readonly number[] = src;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "readonly tuple to readonly number[] must assign without diagnostics, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void left, 2362)
+#[test]
+fn bitwise_xor_void_left_operand_reports_2362() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() ^ 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2362, got {diags:?}");
+    assert_eq!(diags[0].code, 2362);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void right, 2363)
+#[test]
+fn bitwise_xor_void_right_operand_reports_2363() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\n1 ^ f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2363, got {diags:?}");
+    assert_eq!(diags[0].code, 2363);
+    assert_eq!(
+        diags[0].message,
+        "The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void right, 2363)
+#[test]
+fn bitwise_or_void_right_operand_reports_2363() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\n1 | f();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2363, got {diags:?}");
+    assert_eq!(diags[0].code, 2363);
+    assert_eq!(
+        diags[0].message,
+        "The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm, 2620)
+#[test]
+fn assignability_chain_readonly_array_to_readonly_tuple_reports_2620() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{BATCH_89_ARRAY_STUBS}declare const src: readonly number[];\n\
+             const o: readonly [number, number] = src;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2620);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Target requires 2 element(s) but source may have fewer."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (rest tuple arm)
+#[test]
+fn assignability_rest_tuple_accepts_matching_source() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: [string, number, number];\n\
+         const o: [string, ...number[]] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "fixed+rest tuple target must accept a matching source tuple, got {diags:?}"
+    );
+}
+

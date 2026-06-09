@@ -4078,15 +4078,106 @@ fn get_type_from_tuple_type_node(
         NodeData::TupleType(d) => d.types.nodes.clone(),
         _ => return checker.error_type(),
     };
-    // DEFER(phase-4-checker-4ae+): variadic/optional/labeled element kinds
-    // (`RestType`/`OptionalType`/`NamedTupleMember`). The fixed-arity subset
-    // resolves each element node to its plain type.
-    // blocked-by: tuple element flags + `getTupleElementInfo`.
-    let element_types: Vec<TypeId> = element_nodes
-        .iter()
-        .map(|&n| get_type_from_type_node(checker, program, n, globals))
-        .collect();
-    checker.create_tuple_type(element_types)
+    let mut element_types = Vec::with_capacity(element_nodes.len());
+    let mut min_length = 0usize;
+    let mut tuple_fixed_length = None;
+    for &element_node in &element_nodes {
+        let parsed = parse_tuple_element_type(checker, program, element_node, globals);
+        if parsed.rest {
+            element_types.push(parsed.element_type);
+            tuple_fixed_length = Some(element_types.len() - 1);
+        } else {
+            element_types.push(parsed.element_type);
+            if !parsed.optional {
+                min_length += 1;
+            }
+        }
+    }
+    let readonly = is_readonly_type_operator_parent(program, node);
+    let tuple_min_length = if min_length < element_types.len() {
+        Some(min_length)
+    } else {
+        None
+    };
+    checker.create_tuple_type_structured(
+        element_types,
+        readonly,
+        tuple_fixed_length,
+        tuple_min_length,
+    )
+}
+
+struct ParsedTupleElement {
+    element_type: TypeId,
+    optional: bool,
+    rest: bool,
+}
+
+// Resolves one tuple element node to its element type and flags.
+// Go: internal/checker/checker.go:Checker.getTupleElementInfo / getTypeFromTypeNode (tuple elements)
+fn parse_tuple_element_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: tsgo_ast::NodeId,
+    globals: Option<&SymbolTable>,
+) -> ParsedTupleElement {
+    let arena = program.arena();
+    match arena.data(node) {
+        NodeData::RestType(d) => ParsedTupleElement {
+            element_type: get_rest_tuple_element_type(checker, program, d.type_node, globals),
+            optional: false,
+            rest: true,
+        },
+        NodeData::OptionalType(d) => {
+            let element_type =
+                get_type_from_type_node(checker, program, d.type_node, globals);
+            let widened =
+                checker.get_union_type(&[element_type, checker.undefined_type()]);
+            ParsedTupleElement {
+                element_type: widened,
+                optional: true,
+                rest: false,
+            }
+        }
+        NodeData::NamedTupleMember(d) => {
+            let element_type = get_type_from_type_node(checker, program, d.type_node, globals);
+            let optional = d.question_token.is_some();
+            let widened = if optional {
+                checker.get_union_type(&[element_type, checker.undefined_type()])
+            } else {
+                element_type
+            };
+            ParsedTupleElement {
+                element_type: widened,
+                optional,
+                rest: false,
+            }
+        }
+        _ => ParsedTupleElement {
+            element_type: get_type_from_type_node(checker, program, node, globals),
+            optional: false,
+            rest: false,
+        },
+    }
+}
+
+// Unwraps a rest tuple element (`...T` / `...T[]`) to the element type `T`.
+// Go: internal/checker/checker.go:Checker.getTypeFromTypeNode (RestType arm)
+fn get_rest_tuple_element_type(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: tsgo_ast::NodeId,
+    globals: Option<&SymbolTable>,
+) -> TypeId {
+    if program.arena().kind(node) == Kind::ArrayType {
+        let element_node = match program.arena().data(node) {
+            NodeData::ArrayType(d) => d.element_type,
+            _ => return checker.error_type(),
+        };
+        get_type_from_type_node(checker, program, element_node, globals)
+    } else {
+        get_type_from_type_node(checker, program, node, globals)
+    }
 }
 
 // Resolves a `TypeLiteral` type node (`{ value: T }`) to an anonymous object

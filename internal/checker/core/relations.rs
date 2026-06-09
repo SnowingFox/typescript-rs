@@ -1239,7 +1239,6 @@ impl Checker {
     // as variable-length (`sourceRest`); fixed tuples reject them with `2620`/
     // `2621` before element comparison.
     //
-    // DEFER(phase-4-checker-4ae+): variadic/optional/rest tuples.
     // Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm)
     fn array_or_tuple_to_tuple_types_related_to(
         &mut self,
@@ -1252,27 +1251,25 @@ impl Checker {
         let source_rest = !source_is_tuple;
         let target_elements = self.tuple_element_types(target);
         let target_arity = target_elements.len();
+        let target_has_rest = self.tuple_has_rest_element(target);
+        let target_min_length = self.tuple_min_length(target);
         let source_arity = if source_is_tuple {
             self.tuple_element_types(source).len()
         } else {
             1
         };
         let source_min_length = if source_is_tuple { source_arity } else { 0 };
-        let target_min_length = target_arity;
-        if !source_rest && source_arity < target_min_length {
+        if !source_rest && source_min_length < target_min_length {
             return false;
         }
-        if target_arity < source_min_length {
+        if !target_has_rest && target_arity < source_min_length {
             return false;
         }
-        if source_rest || target_arity < source_arity {
+        if !target_has_rest && (source_rest || target_arity < source_arity) {
             return false;
         }
         if source_is_tuple {
-            if !self.tuple_elements_related_to(program, source, target, relation) {
-                return false;
-            }
-            return !self.readonly_blocks_mutable_assignability(source, target, relation);
+            return self.tuple_to_tuple_types_related_to(program, source, target, relation);
         }
         let Some(array_element) = self.get_element_type_of_array_type(source) else {
             return false;
@@ -1280,6 +1277,36 @@ impl Checker {
         target_elements.iter().all(|&target_type| {
             self.is_type_related_to(program, array_element, target_type, relation)
         })
+    }
+
+    // Relates a tuple source to a tuple target, including rest-tuple targets.
+    // Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple element loop)
+    fn tuple_to_tuple_types_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> bool {
+        let source_elements = self.tuple_element_types(source);
+        let target_elements = self.tuple_element_types(target);
+        let target_fixed = self.tuple_fixed_length(target).unwrap_or(target_elements.len());
+        if self.tuple_has_rest_element(target) {
+            let rest_type = target_elements[target_fixed];
+            for (index, &source_type) in source_elements.iter().enumerate() {
+                let target_type = if index < target_fixed {
+                    target_elements[index]
+                } else {
+                    rest_type
+                };
+                if !self.is_type_related_to(program, source_type, target_type, relation) {
+                    return false;
+                }
+            }
+        } else if !self.tuple_elements_related_to(program, source, target, relation) {
+            return false;
+        }
+        !self.readonly_blocks_mutable_assignability(source, target, relation)
     }
 
     // Reporting twin of [`array_or_tuple_to_tuple_types_related_to`].
@@ -1301,22 +1328,23 @@ impl Checker {
             1
         };
         let source_min_length = if source_is_tuple { source_arity } else { 0 };
-        let target_min_length = target_arity;
-        if !source_rest && source_arity < target_min_length {
+        let target_has_rest = self.tuple_has_rest_element(target);
+        let target_min_length = self.tuple_min_length(target);
+        if !source_rest && source_min_length < target_min_length {
             reporter.report(
                 &tsgo_diagnostics::SOURCE_HAS_0_ELEMENT_S_BUT_TARGET_REQUIRES_1,
-                vec![source_arity.to_string(), target_min_length.to_string()],
+                vec![source_min_length.to_string(), target_min_length.to_string()],
             );
             return false;
         }
-        if target_arity < source_min_length {
+        if !target_has_rest && target_arity < source_min_length {
             reporter.report(
                 &tsgo_diagnostics::SOURCE_HAS_0_ELEMENT_S_BUT_TARGET_ALLOWS_ONLY_1,
                 vec![source_min_length.to_string(), target_arity.to_string()],
             );
             return false;
         }
-        if source_rest || target_arity < source_arity {
+        if !target_has_rest && (source_rest || target_arity < source_arity) {
             if source_min_length < target_min_length {
                 reporter.report(
                     &tsgo_diagnostics::TARGET_REQUIRES_0_ELEMENT_S_BUT_SOURCE_MAY_HAVE_FEWER,
@@ -1370,9 +1398,32 @@ impl Checker {
     ) -> bool {
         let source_elements = self.tuple_element_types(source);
         let target_elements = self.tuple_element_types(target);
+        let target_fixed = self.tuple_fixed_length(target).unwrap_or(target_elements.len());
+        if self.tuple_has_rest_element(target) {
+            let rest_type = target_elements[target_fixed];
+            for (source_position, &source_type) in source_elements.iter().enumerate() {
+                let (target_position, target_type) = if source_position < target_fixed {
+                    (source_position, target_elements[source_position])
+                } else {
+                    (target_fixed, rest_type)
+                };
+                if !self.report_is_related_to(program, source_type, target_type, relation, reporter)
+                {
+                    if source_elements.len() > 1 || target_elements.len() > 1 {
+                        reporter.report(
+                            &tsgo_diagnostics::TYPE_AT_POSITION_0_IN_SOURCE_IS_NOT_COMPATIBLE_WITH_TYPE_AT_POSITION_1_IN_TARGET,
+                            vec![
+                                source_position.to_string(),
+                                target_position.to_string(),
+                            ],
+                        );
+                    }
+                    return false;
+                }
+            }
+            return !self.readonly_blocks_mutable_assignability(source, target, relation);
+        }
         if source_elements.len() != target_elements.len() {
-            // Fixed-arity subset: no rest/variadic tuples yet, so min length
-            // equals arity (Go's `propertiesRelatedTo` tuple arm).
             if source_elements.len() < target_elements.len() {
                 reporter.report(
                     &tsgo_diagnostics::SOURCE_HAS_0_ELEMENT_S_BUT_TARGET_REQUIRES_1,
