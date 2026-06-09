@@ -18698,3 +18698,95 @@ fn prefix_decrement_on_void_operand_reports_2356() {
         "expected TS2356 on --void; got {codes:?}"
     );
 }
+
+// ---- T1-E batch 94: readonly property writes, postfix enum, default import assign ----
+
+// Go: internal/checker/checker.go:Checker.isAssignmentToReadonlyEntity (2540)
+#[test]
+fn assign_to_readonly_property_reports_2540() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O { readonly x: number; }\ndeclare const o: O;\no.x = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2540, got {diags:?}");
+    assert_eq!(diags[0].code, 2540);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'x' because it is a read-only property."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to enum, 2628)
+#[test]
+fn postfix_increment_on_enum_identifier_reports_2628() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A }\nE++;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2628, got {diags:?}");
+    assert_eq!(diags[0].code, 2628);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'E' because it is an enum."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to import, 2632)
+#[test]
+fn assign_to_default_import_binding_reports_2632() {
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/a.ts", "export default 1;"),
+        ("/b.ts", "import d from \"./a\";\nd = 2;"),
+    ]));
+    let index = p.source_files()[1];
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(index);
+    assert_eq!(diags.len(), 1, "expected one 2632, got {diags:?}");
+    assert_eq!(diags[0].code, 2632);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'd' because it is an import."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to function, 2630)
+#[test]
+fn compound_assignment_to_function_identifier_reports_2630() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() {}\nf += 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2630, got {diags:?}");
+    assert_eq!(diags[0].code, 2630);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'f' because it is a function."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isAssignmentToReadonlyEntity (2540, class property)
+#[test]
+fn assign_to_readonly_class_property_outside_constructor_reports_2540() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { readonly x = 1; }\nconst c = new C();\nc.x = 2;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2540, got {diags:?}");
+    assert_eq!(diags[0].code, 2540);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'x' because it is a read-only property."
+    );
+}

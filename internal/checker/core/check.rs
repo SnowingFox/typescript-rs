@@ -3080,6 +3080,8 @@ impl Checker {
             );
         }
         let name = program.arena().text(name_node).to_string();
+        let assignment_kind =
+            tsgo_ast::utilities::get_assignment_target_kind(program.arena(), node);
         if is_property_access_write_only(program, node) {
             if let Some(prop) = get_property_of_type(self, apparent, &name)
                 .or_else(|| get_property_of_union_or_intersection_type(self, apparent, &name))
@@ -3137,6 +3139,21 @@ impl Checker {
                     prop,
                     Some(name_node),
                 ) {
+                    return self.error_type;
+                }
+                if is_assignment_to_readonly_entity(
+                    self,
+                    program,
+                    node,
+                    prop,
+                    assignment_kind,
+                ) {
+                    self.error(
+                        program,
+                        name_node,
+                        &tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_READ_ONLY_PROPERTY,
+                        &[name.as_str()],
+                    );
                     return self.error_type;
                 }
             }
@@ -15473,7 +15490,8 @@ fn modifier_flags_of(arena: &tsgo_ast::NodeArena, node: NodeId) -> tsgo_ast::Mod
     let modifiers = match arena.data(node) {
         NodeData::ClassDeclaration(d) | NodeData::ClassExpression(d) => d.modifiers.as_ref(),
         NodeData::MethodDeclaration(d) => d.modifiers.as_ref(),
-        NodeData::PropertyDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::PropertyDeclaration(d) | NodeData::PropertySignature(d) => d.modifiers.as_ref(),
+        NodeData::MethodSignature(d) => d.modifiers.as_ref(),
         NodeData::GetAccessorDeclaration(d) | NodeData::SetAccessorDeclaration(d) => {
             d.modifiers.as_ref()
         }
@@ -15499,6 +15517,75 @@ fn has_static_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
 // Reports whether `node` carries the `abstract` modifier.
 fn has_abstract_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
     modifier_flags_of(arena, node).contains(tsgo_ast::ModifierFlags::ABSTRACT)
+}
+
+// Reports whether `expr` assigns to a readonly entity (`symbol` or a namespace
+// import receiver). Constructor-local `this.x` writes to readonly properties
+// are deferred (blocked-by: control-flow container + constructor property
+// assignment rules).
+// Go: internal/checker/checker.go:Checker.isAssignmentToReadonlyEntity
+fn is_assignment_to_readonly_entity(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    expr: NodeId,
+    symbol: SymbolId,
+    assignment_kind: tsgo_ast::utilities::AssignmentKind,
+) -> bool {
+    if assignment_kind == tsgo_ast::utilities::AssignmentKind::None {
+        return false;
+    }
+    if is_access_expression(program.arena().kind(expr)) {
+        let object = skip_parentheses(program, {
+            match program.arena().data(expr) {
+                NodeData::PropertyAccessExpression(d) => d.expression,
+                NodeData::ElementAccessExpression(d) => d.expression,
+                _ => return is_readonly_symbol(checker, program, symbol),
+            }
+        });
+        if program.arena().kind(object) == Kind::Identifier {
+            if let Some(expression_symbol) = resolve_name(
+                program,
+                object,
+                program.arena().text(object),
+                SymbolFlags::VALUE | SymbolFlags::EXPORT_VALUE,
+                true,
+                program.globals(),
+            ) {
+                if checker
+                    .resolved_symbol_flags(program, expression_symbol)
+                    .intersects(SymbolFlags::MODULE_EXPORTS)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    if is_readonly_symbol(checker, program, symbol) {
+        return true;
+    }
+    if is_access_expression(program.arena().kind(expr)) {
+        let object = skip_parentheses(program, {
+            match program.arena().data(expr) {
+                NodeData::PropertyAccessExpression(d) => d.expression,
+                NodeData::ElementAccessExpression(d) => d.expression,
+                _ => return false,
+            }
+        });
+        if program.arena().kind(object) == Kind::Identifier {
+            if let Some(expression_symbol) = resolve_name(
+                program,
+                object,
+                program.arena().text(object),
+                SymbolFlags::ALIAS,
+                true,
+                program.globals(),
+            ) {
+                return get_declaration_of_alias_symbol(program, expression_symbol)
+                    .is_some_and(|decl| program.arena().kind(decl) == Kind::NamespaceImport);
+            }
+        }
+    }
+    false
 }
 
 // Go: internal/checker/checker.go:Checker.isReadonlySymbol
