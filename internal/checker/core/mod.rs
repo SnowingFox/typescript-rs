@@ -48,14 +48,14 @@ use program::{default_compiler_options, BoundProgram};
 use relations::RelationCache;
 use signatures::{IndexInfo, IndexInfoArena, IndexInfoId, Signature, SignatureArena, SignatureId};
 use symbols::{
-    DeclaredTypeLinks, LateBoundLinks, MappedSymbolLinks, MappedTypeLinks,
-    MembersAndExportsLinks, ModuleSymbolLinks, SymbolLinks, SymbolNodeLinks, SymbolReferenceLinks,
-    TypeAliasLinks, ValueSymbolLinks,
+    DeclaredTypeLinks, LateBoundLinks, MappedSymbolLinks, MappedTypeLinks, MembersAndExportsLinks,
+    ModuleSymbolLinks, SymbolLinks, SymbolNodeLinks, SymbolReferenceLinks, TypeAliasLinks,
+    ValueSymbolLinks,
 };
 use types::{
     ConditionalRoot, ConditionalType, IntersectionType, IntrinsicType, LiteralType, LiteralValue,
-    ObjectFlags, ObjectType, StringMappingKind, StringMappingType, TemplateLiteralType,
-    UniqueESSymbolType, Type, TypeArena, TypeData, TypeFlags, TypeId, TypeParameter, UnionType,
+    ObjectFlags, ObjectType, StringMappingKind, StringMappingType, TemplateLiteralType, Type,
+    TypeArena, TypeData, TypeFlags, TypeId, TypeParameter, UnionType, UniqueESSymbolType,
 };
 
 /// The bound program a checker retains (Go's `c.program` pointer field).
@@ -2077,11 +2077,7 @@ impl Checker {
     ///
     /// Side effects: allocates a type in the checker's arena.
     // Go: internal/checker/checker.go:Checker.newUniqueESSymbolType(24916)
-    pub(crate) fn new_unique_es_symbol_type(
-        &mut self,
-        symbol: SymbolId,
-        name: &str,
-    ) -> TypeId {
+    pub(crate) fn new_unique_es_symbol_type(&mut self, symbol: SymbolId, name: &str) -> TypeId {
         self.types.alloc(
             TypeFlags::UNIQUE_ES_SYMBOL,
             ObjectFlags::empty(),

@@ -118,16 +118,15 @@ impl Checker {
                 .iter()
                 .find(|(m, _)| *m == *member)
                 .map(|(_, v)| v.clone());
-            let eval_result = initializer.map(|_| {
-                evaluate_enum_member_initializer(program, *member, &by_name)
-            });
+            let eval_result =
+                initializer.map(|_| evaluate_enum_member_initializer(program, *member, &by_name));
 
             if let Some(init) = initializer {
                 if has_string_valued_member
                     && !is_string_or_numeric_literal_like(program, init)
-                    && !eval_result.as_ref().is_some_and(|r| {
-                        matches!(r.value, EvalValue::Str(_))
-                    })
+                    && !eval_result
+                        .as_ref()
+                        .is_some_and(|r| matches!(r.value, EvalValue::Str(_)))
                 {
                     self.error(
                         program,
@@ -160,11 +159,8 @@ impl Checker {
                             && matches!(result.value, EvalValue::Str(_))
                             && !result.is_syntactically_string
                         {
-                            let qualified = enum_member_qualified_name(
-                                program,
-                                enum_declaration,
-                                name_node,
-                            );
+                            let qualified =
+                                enum_member_qualified_name(program, enum_declaration, name_node);
                             self.error(
                                 program,
                                 init,
@@ -190,13 +186,14 @@ impl Checker {
                         } else {
                             let expr_type = self.check_expression(program, init);
                             if !self.is_type_assignable_to(program, expr_type, self.number_type) {
-                                let source_for_msg =
-                                    self.get_base_type_of_literal_type(expr_type);
+                                let source_for_msg = self.get_base_type_of_literal_type(expr_type);
                                 let source_str = if source_for_msg == self.boolean_type {
                                     "boolean".to_string()
                                 } else {
                                     super::nodebuilder::type_to_string(
-                                        self, program, source_for_msg,
+                                        self,
+                                        program,
+                                        source_for_msg,
                                     )
                                 };
                                 let target_str = super::nodebuilder::type_to_string(

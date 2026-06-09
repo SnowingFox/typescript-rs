@@ -33,22 +33,20 @@ use tsgo_diagnostics::{Category, Message};
 
 use super::contextual::ContextFlags;
 use super::declared_types::{
-    combined_node_flags, fill_missing_type_arguments, get_apparent_type,
-    get_applicable_index_info, get_applicable_index_info_for_name, get_applicable_index_infos,
-    get_class_construct_signatures, get_constraint_of_type_parameter,
-    get_declaration_of_alias_symbol, get_declared_type_of_symbol, get_default_from_type_parameter,
-    has_base_type, get_index_info_of_type, get_index_infos_of_type,
-    get_index_type_of_type, get_indexed_access_type, get_min_type_argument_count,
-    get_property_of_type,     get_property_of_union_or_intersection_type, get_properties_of_type,
-    get_explicit_accessor_return_type, get_index_type, get_property_type_for_index_type,
-    get_type_from_type_node,
-    get_type_of_property_of_type, get_type_of_symbol, get_type_without_signatures,
-    is_generic_object_type, resolve_alias,
+    combined_node_flags, fill_missing_type_arguments, get_apparent_type, get_applicable_index_info,
+    get_applicable_index_info_for_name, get_applicable_index_infos, get_class_construct_signatures,
+    get_constraint_of_type_parameter, get_declaration_of_alias_symbol, get_declared_type_of_symbol,
+    get_default_from_type_parameter, get_explicit_accessor_return_type, get_index_info_of_type,
+    get_index_infos_of_type, get_index_type, get_index_type_of_type, get_indexed_access_type,
+    get_min_type_argument_count, get_properties_of_type, get_property_of_type,
+    get_property_of_union_or_intersection_type, get_property_type_for_index_type,
+    get_type_from_type_node, get_type_of_property_of_type, get_type_of_symbol,
+    get_type_without_signatures, has_base_type, is_generic_object_type, resolve_alias,
 };
 use super::inference::{InferenceContext, InferencePriority};
+use super::late_binding::get_property_name_from_type;
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
-use super::late_binding::get_property_name_from_type;
 use super::reachability::{is_instantiated_module, module_is_value_module};
 use super::relations::RelationKind;
 use super::signatures::{IndexInfo, IndexInfoId, Signature, SignatureFlags, SignatureId};
@@ -441,7 +439,10 @@ impl Checker {
     ) -> Option<TypeId> {
         let this_parameter = self.signature(signature).this_parameter?;
         Some(super::declared_types::get_type_of_symbol(
-            self, program, this_parameter, None,
+            self,
+            program,
+            this_parameter,
+            None,
         ))
     }
 
@@ -483,9 +484,7 @@ impl Checker {
                 }
             }
             Kind::NewExpression => self.check_new_expression(program, node),
-            Kind::TaggedTemplateExpression => {
-                self.check_tagged_template_expression(program, node)
-            }
+            Kind::TaggedTemplateExpression => self.check_tagged_template_expression(program, node),
             Kind::PrefixUnaryExpression => self.check_prefix_unary_expression(program, node),
             Kind::PostfixUnaryExpression => self.check_postfix_unary_expression(program, node),
             Kind::BinaryExpression => self.check_binary_expression(program, node),
@@ -691,11 +690,7 @@ impl Checker {
     /// Checks `import.meta`. Reports TS1343 when `--module` does not support
     /// import meta (Go's `checkImportMetaProperty`, module-kind subset).
     // Go: internal/checker/checker.go:Checker.checkImportMetaProperty(10741)
-    fn check_import_meta_property(
-        &mut self,
-        program: &dyn BoundProgram,
-        node: NodeId,
-    ) -> TypeId {
+    fn check_import_meta_property(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         use tsgo_core::compileroptions::ModuleKind;
         let module_kind = self.compiler_options().module;
         let mk = module_kind as i32;
@@ -852,10 +847,8 @@ impl Checker {
                     );
                     continue;
                 }
-                if let Some(union_members) = self
-                    .get_type(spread_type)
-                    .union_types()
-                    .map(|m| m.to_vec())
+                if let Some(union_members) =
+                    self.get_type(spread_type).union_types().map(|m| m.to_vec())
                 {
                     // A spread-only object literal defers to `getSpreadType` so
                     // union-with-empty-object rewriting and distribution both
@@ -944,9 +937,11 @@ impl Checker {
                         if self.is_type_assignable_to(program, name_type, string_number_symbol) {
                             if self.is_type_assignable_to(program, name_type, self.number_type) {
                                 has_computed_number_property = true;
-                            } else if self
-                                .is_type_assignable_to(program, name_type, self.es_symbol_type)
-                            {
+                            } else if self.is_type_assignable_to(
+                                program,
+                                name_type,
+                                self.es_symbol_type,
+                            ) {
                                 has_computed_symbol_property = true;
                             } else {
                                 has_computed_string_property = true;
@@ -1208,7 +1203,9 @@ impl Checker {
         properties: &mut Vec<tsgo_ast::SymbolId>,
         all_members: &mut Vec<ObjectLiteralMember>,
     ) {
-        use super::declared_types::{get_apparent_type, get_properties_of_type, get_type_of_symbol};
+        use super::declared_types::{
+            get_apparent_type, get_properties_of_type, get_type_of_symbol,
+        };
         let apparent = get_apparent_type(self, spread_type);
         let globals = program.globals();
         let mut skipped_private_members = FxHashSet::default();
@@ -1235,35 +1232,36 @@ impl Checker {
                     let flags = SymbolFlags::PROPERTY
                         | (self.spread_source_symbol_flags(program, existing)
                             & SymbolFlags::OPTIONAL);
-                    let merged_prop = self.new_object_literal_property(
-                        &name,
-                        flags,
-                        member_check_flags,
-                        merged,
-                    );
-                    if let Some(pos) = properties.iter().position(|&s| {
-                        self.spread_property_name(program, s) == name
-                    }) {
+                    let merged_prop =
+                        self.new_object_literal_property(&name, flags, member_check_flags, merged);
+                    if let Some(pos) = properties
+                        .iter()
+                        .position(|&s| self.spread_property_name(program, s) == name)
+                    {
                         properties[pos] = merged_prop;
                     }
-                    if let Some(pos) = all_members.iter().position(|m| {
-                        self.spread_property_name(program, m.symbol) == name
-                    }) {
+                    if let Some(pos) = all_members
+                        .iter()
+                        .position(|m| self.spread_property_name(program, m.symbol) == name)
+                    {
                         all_members[pos].symbol = merged_prop;
                     }
                     members.insert(name, merged_prop);
                     continue;
                 }
             }
-            if let Some(pos) = properties.iter().position(|&s| {
-                self.spread_property_name(program, s) == name
-            }) {
+            if let Some(pos) = properties
+                .iter()
+                .position(|&s| self.spread_property_name(program, s) == name)
+            {
                 properties[pos] = prop;
             } else {
                 properties.push(prop);
             }
             members.insert(name.clone(), prop);
-            if !all_members.iter().any(|m| self.spread_property_name(program, m.symbol) == name)
+            if !all_members
+                .iter()
+                .any(|m| self.spread_property_name(program, m.symbol) == name)
             {
                 all_members.push(ObjectLiteralMember {
                     symbol: prop,
@@ -1274,8 +1272,7 @@ impl Checker {
         for skipped in skipped_private_members {
             members.remove(&skipped);
             properties.retain(|&s| self.spread_property_name(program, s) != skipped);
-            all_members
-                .retain(|m| self.spread_property_name(program, m.symbol) != skipped);
+            all_members.retain(|m| self.spread_property_name(program, m.symbol) != skipped);
         }
     }
 
@@ -1365,15 +1362,21 @@ impl Checker {
             if self.is_empty_object_type(left) {
                 return right;
             }
-            if self.get_type(left).flags().intersects(TypeFlags::INTERSECTION) {
-                if let Some(mut types) = self.get_type(left).intersection_types().map(|m| m.to_vec())
+            if self
+                .get_type(left)
+                .flags()
+                .intersects(TypeFlags::INTERSECTION)
+            {
+                if let Some(mut types) =
+                    self.get_type(left).intersection_types().map(|m| m.to_vec())
                 {
                     if let Some(last_left) = types.last().copied() {
                         if self.is_non_generic_object_type(last_left)
                             && self.is_non_generic_object_type(right)
                         {
                             let last = types.len() - 1;
-                            types[last] = self.get_spread_type(program, types[last], right, readonly);
+                            types[last] =
+                                self.get_spread_type(program, types[last], right, readonly);
                             return self.get_intersection_type(&types);
                         }
                     }
@@ -1388,8 +1391,7 @@ impl Checker {
     // `isNonGenericObjectType`).
     // Go: internal/checker/checker.go:Checker.isNonGenericObjectType(13440)
     fn is_non_generic_object_type(&mut self, t: TypeId) -> bool {
-        self.get_type(t).flags().intersects(TypeFlags::OBJECT)
-            && !is_generic_object_type(self, t)
+        self.get_type(t).flags().intersects(TypeFlags::OBJECT) && !is_generic_object_type(self, t)
     }
 
     // When a union is exactly one object type plus members that spread into an
@@ -1410,23 +1412,21 @@ impl Checker {
             .iter()
             .all(|&m| self.is_empty_object_type_or_spreads_into_empty_object(m))
         {
-            if let Some(&empty) = members
-                .iter()
-                .find(|&&m| self.is_empty_object_type(m))
-            {
+            if let Some(&empty) = members.iter().find(|&&m| self.is_empty_object_type(m)) {
                 return empty;
             }
             return self.empty_object_type();
         }
-        let first_type = members.iter().find(|&&m| {
-            !self.is_empty_object_type_or_spreads_into_empty_object(m)
-        });
+        let first_type = members
+            .iter()
+            .find(|&&m| !self.is_empty_object_type_or_spreads_into_empty_object(m));
         let Some(&first_type) = first_type else {
             return t;
         };
-        if members.iter().any(|&m| {
-            m != first_type && !self.is_empty_object_type_or_spreads_into_empty_object(m)
-        }) {
+        if members
+            .iter()
+            .any(|&m| m != first_type && !self.is_empty_object_type_or_spreads_into_empty_object(m))
+        {
             return t;
         }
         self.make_all_properties_optional_for_spread(program, first_type, readonly)
@@ -1496,7 +1496,9 @@ impl Checker {
             ..Default::default()
         };
         self.new_object_type(
-            ObjectFlags::ANONYMOUS | ObjectFlags::OBJECT_LITERAL | ObjectFlags::CONTAINS_OBJECT_OR_ARRAY_LITERAL,
+            ObjectFlags::ANONYMOUS
+                | ObjectFlags::OBJECT_LITERAL
+                | ObjectFlags::CONTAINS_OBJECT_OR_ARRAY_LITERAL,
             self.get_type(t).symbol,
             object,
         )
@@ -1556,13 +1558,10 @@ impl Checker {
                     let right_type = get_type_of_symbol(self, program, right_prop, globals);
                     let merged = self.merge_optional_spread_property_types(left_type, right_type);
                     let flags = SymbolFlags::PROPERTY
-                        | (self.spread_source_symbol_flags(program, prop_sym) & SymbolFlags::OPTIONAL);
-                    let prop = self.new_object_literal_property(
-                        &name,
-                        flags,
-                        spread_check_flags,
-                        merged,
-                    );
+                        | (self.spread_source_symbol_flags(program, prop_sym)
+                            & SymbolFlags::OPTIONAL);
+                    let prop =
+                        self.new_object_literal_property(&name, flags, spread_check_flags, merged);
                     members.insert(name, prop);
                 }
                 continue;
@@ -1578,7 +1577,8 @@ impl Checker {
         }
         let mut seen = FxHashSet::default();
         for (name, prop_sym) in get_properties_of_type(self, left) {
-            if skipped_private_members.contains(&name) || !is_spreadable_property(program, prop_sym) {
+            if skipped_private_members.contains(&name) || !is_spreadable_property(program, prop_sym)
+            {
                 continue;
             }
             if let Some(&prop) = members.get(&name) {
@@ -1587,7 +1587,8 @@ impl Checker {
             }
         }
         for (name, prop_sym) in get_properties_of_type(self, right) {
-            if skipped_private_members.contains(&name) || !is_spreadable_property(program, prop_sym) {
+            if skipped_private_members.contains(&name) || !is_spreadable_property(program, prop_sym)
+            {
                 continue;
             }
             if seen.contains(&name) {
@@ -1673,10 +1674,8 @@ impl Checker {
         left_type: TypeId,
         right_type: TypeId,
     ) -> TypeId {
-        let left_without_undefined =
-            self.get_type_with_facts(left_type, TypeFacts::NE_UNDEFINED);
-        let right_without_undefined =
-            self.get_type_with_facts(right_type, TypeFacts::NE_UNDEFINED);
+        let left_without_undefined = self.get_type_with_facts(left_type, TypeFacts::NE_UNDEFINED);
+        let right_without_undefined = self.get_type_with_facts(right_type, TypeFacts::NE_UNDEFINED);
         if left_without_undefined == right_without_undefined {
             left_type
         } else {
@@ -1702,11 +1701,7 @@ impl Checker {
                 if info.is_readonly {
                     id
                 } else {
-                    self.new_index_info(IndexInfo::new(
-                        info.key_type,
-                        info.value_type,
-                        true,
-                    ))
+                    self.new_index_info(IndexInfo::new(info.key_type, info.value_type, true))
                 }
             })
             .collect()
@@ -2068,11 +2063,9 @@ impl Checker {
                 // Go's `c.error(errorNode, …)` uses `GetErrorRangeForNode` =
                 // `skipTrivia(pos)..end`, so the span starts at the property name,
                 // not the leading whitespace before it.
-                if let Some(suggested) = self.get_suggestion_for_nonexistent_property_name(
-                    program,
-                    &name,
-                    error_target,
-                ) {
+                if let Some(suggested) =
+                    self.get_suggestion_for_nonexistent_property_name(program, &name, error_target)
+                {
                     self.error_skipping_leading_trivia(
                         program,
                         error_node,
@@ -2224,9 +2217,7 @@ impl Checker {
                 );
                 element_types.push(rest_element_type.unwrap_or(self.error_type));
             } else {
-                element_types.push(
-                    self.check_expression_for_mutable_location(program, element),
-                );
+                element_types.push(self.check_expression_for_mutable_location(program, element));
             }
         }
         // In a const context (`[1, 2] as const`) the literal is a readonly tuple
@@ -2637,12 +2628,7 @@ impl Checker {
                     tsgo_ast::utilities::get_assignment_target_kind(program.arena(), node);
                 if assignment_kind != tsgo_ast::utilities::AssignmentKind::None
                     && self
-                        .check_assignment_target_symbol(
-                            program,
-                            node,
-                            original_symbol,
-                            symbol,
-                        )
+                        .check_assignment_target_symbol(program, node, original_symbol, symbol)
                         .is_err()
                 {
                     return self.error_type;
@@ -2670,10 +2656,9 @@ impl Checker {
         symbol: SymbolId,
     ) -> Result<(), ()> {
         let flags = self.resolved_symbol_flags(program, symbol);
-        let js_value_module_ok = is_in_js_file(program.arena(), node)
-            && flags.intersects(SymbolFlags::VALUE_MODULE);
-        let name =
-            super::nodebuilder::symbol_to_string(self, program, display_symbol);
+        let js_value_module_ok =
+            is_in_js_file(program.arena(), node) && flags.intersects(SymbolFlags::VALUE_MODULE);
+        let name = super::nodebuilder::symbol_to_string(self, program, display_symbol);
         if !flags.intersects(SymbolFlags::VARIABLE) && !js_value_module_ok {
             let message = if flags.intersects(SymbolFlags::ENUM) {
                 &tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_AN_ENUM
@@ -2974,20 +2959,16 @@ impl Checker {
             for &arg in &args {
                 self.check_expression(program, arg);
             }
-            self.invocation_error(
-                program,
-                callee,
-                callee_type,
-                InvocationKind::Construct,
-            );
+            self.invocation_error(program, callee, callee_type, InvocationKind::Construct);
             return self.error_type;
         }
         if let Some(&sig) = construct_sigs.first() {
             if let Some(decl) = self.signature(sig).declaration {
                 if program.arena().kind(decl) == Kind::Constructor {
-                    if let Some(class_sym) = program.symbol_of_node(decl).and_then(|ctor_sym| {
-                        program.symbol(ctor_sym).parent
-                    }) {
+                    if let Some(class_sym) = program
+                        .symbol_of_node(decl)
+                        .and_then(|ctor_sym| program.symbol(ctor_sym).parent)
+                    {
                         if !self.is_constructor_accessible(program, node, class_sym, decl) {
                             for &arg in &args {
                                 self.check_expression(program, arg);
@@ -3140,7 +3121,8 @@ impl Checker {
         is_super: bool,
     ) -> TypeId {
         let prop_name = program.arena().text(name_node);
-        let lex_sym = lookup_symbol_for_private_identifier_declaration(program, prop_name, name_node);
+        let lex_sym =
+            lookup_symbol_for_private_identifier_declaration(program, prop_name, name_node);
         let prop = lex_sym.and_then(|sym| {
             let mangled = program.symbol(sym).name.clone();
             get_property_of_type(self, apparent, &mangled)
@@ -3148,10 +3130,7 @@ impl Checker {
         });
         if let Some(prop) = prop {
             if is_property_access_write_only(program, node)
-                && program
-                    .symbol(prop)
-                    .flags
-                    .intersects(SymbolFlags::ACCESSOR)
+                && program.symbol(prop).flags.intersects(SymbolFlags::ACCESSOR)
             {
                 if !self.check_property_accessibility(
                     program,
@@ -3167,12 +3146,9 @@ impl Checker {
                     self, program, prop, None,
                 );
             }
-            if let Some(t) = get_type_of_property_of_type(
-                self,
-                program,
-                apparent,
-                &program.symbol(prop).name,
-            ) {
+            if let Some(t) =
+                get_type_of_property_of_type(self, program, apparent, &program.symbol(prop).name)
+            {
                 if !self.check_property_accessibility(
                     program,
                     node,
@@ -3239,11 +3215,7 @@ impl Checker {
             if let Some(prop) = get_property_of_type(self, apparent, &name)
                 .or_else(|| get_property_of_union_or_intersection_type(self, apparent, &name))
             {
-                if program
-                    .symbol(prop)
-                    .flags
-                    .intersects(SymbolFlags::ACCESSOR)
-                {
+                if program.symbol(prop).flags.intersects(SymbolFlags::ACCESSOR) {
                     if !self.check_property_accessibility(
                         program,
                         node,
@@ -3294,13 +3266,7 @@ impl Checker {
                 ) {
                     return self.error_type;
                 }
-                if is_assignment_to_readonly_entity(
-                    self,
-                    program,
-                    node,
-                    prop,
-                    assignment_kind,
-                ) {
+                if is_assignment_to_readonly_entity(self, program, node, prop, assignment_kind) {
                     self.error(
                         program,
                         name_node,
@@ -3361,12 +3327,8 @@ impl Checker {
     ) {
         let name = program.arena().text(name_node).to_string();
         let type_str = super::nodebuilder::type_to_string(self, program, containing_type);
-        let message_chain = self.union_missing_property_chain(
-            program,
-            name_node,
-            containing_type,
-            &name,
-        );
+        let message_chain =
+            self.union_missing_property_chain(program, name_node, containing_type, &name);
         if let Some(promised) = self.get_promised_type_of_promise(program, containing_type) {
             let promised_apparent = get_apparent_type(self, promised);
             if get_property_of_type(self, promised_apparent, &name).is_some() {
@@ -3391,12 +3353,8 @@ impl Checker {
             }
         }
         let mut diagnostic = if self.type_has_static_property(program, &name, containing_type) {
-            let static_access = self.static_member_access_suggestion(
-                program,
-                access_node,
-                &type_str,
-                &name,
-            );
+            let static_access =
+                self.static_member_access_suggestion(program, access_node, &type_str, &name);
             self.diagnostic_for_node(
                 program,
                 name_node,
@@ -3500,8 +3458,7 @@ impl Checker {
         let Some(class_sym) = self.get_type(containing_type).symbol else {
             return false;
         };
-        let static_type =
-            get_type_of_symbol(self, program, class_sym, program.globals());
+        let static_type = get_type_of_symbol(self, program, class_sym, program.globals());
         let apparent = get_apparent_type(self, static_type);
         let Some(prop) = get_property_of_type(self, apparent, prop_name) else {
             return false;
@@ -3737,9 +3694,9 @@ impl Checker {
             super::declared_types::get_indexed_access_type(self, program, object_type, index_type)
         {
             let apparent = get_apparent_type(self, object_type);
-            if let Some(info) =
-                super::declared_types::get_applicable_index_info(self, program, apparent, index_type)
-            {
+            if let Some(info) = super::declared_types::get_applicable_index_info(
+                self, program, apparent, index_type,
+            ) {
                 self.error_if_writing_to_readonly_index(program, node, apparent, info);
             }
             return t;
@@ -3812,7 +3769,11 @@ impl Checker {
     // `await`-suggestion path on arithmetic operands. blocked-by: base-constraint
     // type facts + awaited-type machinery (lib globals, P6).
     // Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression(10814)
-    fn check_prefix_unary_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+    fn check_prefix_unary_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
         let (operator, operand) = match program.arena().data(node) {
             NodeData::PrefixUnaryExpression(d) => (d.operator, d.operand),
             _ => return self.error_type,
@@ -3847,8 +3808,7 @@ impl Checker {
         }
         match operator {
             Kind::PlusToken | Kind::MinusToken | Kind::TildeToken => {
-                let operand_type =
-                    self.check_non_null_type(program, operand_type, operand);
+                let operand_type = self.check_non_null_type(program, operand_type, operand);
                 let op = tsgo_scanner::token_to_string(operator);
                 if self.maybe_type_of_kind_considering_base_constraint(
                     program,
@@ -3897,8 +3857,7 @@ impl Checker {
                 };
             }
             Kind::PlusPlusToken | Kind::MinusMinusToken => {
-                let non_null =
-                    self.check_non_null_type(program, operand_type, operand);
+                let non_null = self.check_non_null_type(program, operand_type, operand);
                 let ok = self.check_arithmetic_operand_type(
                     program,
                     operand,
@@ -3925,7 +3884,11 @@ impl Checker {
     // DEFER(phase-4-checker-4o+): the `await`-suggestion path on arithmetic
     // operands. blocked-by: awaited-type machinery (lib globals, P6).
     // Go: internal/checker/checker.go:Checker.checkPostfixUnaryExpression(10868)
-    fn check_postfix_unary_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+    fn check_postfix_unary_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
         let operand = match program.arena().data(node) {
             NodeData::PostfixUnaryExpression(d) => d.operand,
             _ => return self.error_type,
@@ -3966,9 +3929,11 @@ impl Checker {
             .flags()
             .intersects(TypeFlags::BIG_INT_LIKE)
         {
-            if self.get_type(operand_type).flags().intersects(
-                TypeFlags::ANY | TypeFlags::UNKNOWN | TypeFlags::NUMBER_LIKE,
-            ) {
+            if self
+                .get_type(operand_type)
+                .flags()
+                .intersects(TypeFlags::ANY | TypeFlags::UNKNOWN | TypeFlags::NUMBER_LIKE)
+            {
                 return self.number_or_bigint_type;
             }
             return self.bigint_type;
@@ -4033,22 +3998,13 @@ impl Checker {
             | Kind::LessThanEqualsToken
             | Kind::GreaterThanEqualsToken => {
                 if self.check_for_disallowed_es_symbol_operand(
-                    program,
-                    left,
-                    right,
-                    left_type,
-                    right_type,
-                    operator,
+                    program, left, right, left_type, right_type, operator,
                 ) {
-                    let left_base =
-                        self.get_base_type_of_literal_type_for_comparison(left_type);
-                    let right_base =
-                        self.get_base_type_of_literal_type_for_comparison(right_type);
+                    let left_base = self.get_base_type_of_literal_type_for_comparison(left_type);
+                    let right_base = self.get_base_type_of_literal_type_for_comparison(right_type);
                     if !self.relational_operands_comparable(program, left_base, right_base) {
-                        let awaited_left =
-                            self.get_awaited_type_no_alias(program, left_base);
-                        let awaited_right =
-                            self.get_awaited_type_no_alias(program, right_base);
+                        let awaited_left = self.get_awaited_type_no_alias(program, left_base);
+                        let awaited_right = self.get_awaited_type_no_alias(program, right_base);
                         let would_work_with_await = (awaited_left != left_base
                             || awaited_right != right_base)
                             && self.relational_operands_comparable(
@@ -4088,17 +4044,11 @@ impl Checker {
             | Kind::EqualsEqualsEqualsToken
             | Kind::ExclamationEqualsEqualsToken => {
                 if !self.equality_operands_comparable(program, left_type, right_type) {
-                    let awaited_left =
-                        self.get_awaited_type_no_alias(program, left_type);
-                    let awaited_right =
-                        self.get_awaited_type_no_alias(program, right_type);
+                    let awaited_left = self.get_awaited_type_no_alias(program, left_type);
+                    let awaited_right = self.get_awaited_type_no_alias(program, right_type);
                     let would_work_with_await = (awaited_left != left_type
                         || awaited_right != right_type)
-                        && self.equality_operands_comparable(
-                            program,
-                            awaited_left,
-                            awaited_right,
-                        );
+                        && self.equality_operands_comparable(program, awaited_left, awaited_right);
                     let (error_left, error_right) = if would_work_with_await {
                         (left_type, right_type)
                     } else {
@@ -4189,7 +4139,8 @@ impl Checker {
                     program,
                     right_type,
                     TypeFlags::ANY_OR_UNKNOWN,
-                ) || !self.maybe_type_of_kind(left_type, TypeFlags::BIG_INT_LIKE)
+                ) || !self
+                    .maybe_type_of_kind(left_type, TypeFlags::BIG_INT_LIKE)
                     && !self.maybe_type_of_kind(right_type, TypeFlags::BIG_INT_LIKE)
                 {
                     self.number_type
@@ -4211,8 +4162,7 @@ impl Checker {
                     if matches!(
                         operator,
                         Kind::AsteriskAsteriskToken | Kind::AsteriskAsteriskEqualsToken
-                    ) && (self.compiler_options().target as i32)
-                        < (ScriptTarget::Es2016 as i32)
+                    ) && (self.compiler_options().target as i32) < (ScriptTarget::Es2016 as i32)
                     {
                         self.error(
                             program,
@@ -4235,13 +4185,7 @@ impl Checker {
                 };
                 if left_ok && right_ok {
                     if is_compound_assignment(operator) {
-                        self.check_assignment_operator(
-                            program,
-                            left,
-                            left_type,
-                            result_type,
-                            None,
-                        );
+                        self.check_assignment_operator(program, left, left_type, result_type, None);
                     }
                     self.check_shift_simplification(
                         program,
@@ -4385,12 +4329,7 @@ impl Checker {
                 match result {
                     Some(rt) => {
                         if !self.check_for_disallowed_es_symbol_operand(
-                            program,
-                            left,
-                            right,
-                            left_type,
-                            right_type,
-                            operator,
+                            program, left, right, left_type, right_type, operator,
                         ) {
                             return rt;
                         }
@@ -4416,8 +4355,11 @@ impl Checker {
                         let would_work_with_await = (awaited_left != left_type
                             || awaited_right != right_type)
                             && self.is_type_assignable_to_kind(program, awaited_left, close_enough)
-                            && self
-                                .is_type_assignable_to_kind(program, awaited_right, close_enough);
+                            && self.is_type_assignable_to_kind(
+                                program,
+                                awaited_right,
+                                close_enough,
+                            );
                         let (error_left, error_right) = if would_work_with_await {
                             (left_type, right_type)
                         } else {
@@ -4576,7 +4518,7 @@ impl Checker {
         // `resolveInstanceofExpression` else-branch). The synthetic global
         // `interface Function {}` supplies `globalFunctionType` here.
         if !self.get_type(right_type).flags().intersects(TypeFlags::ANY)
-            && !self.type_has_call_or_construct_signatures(right_type)
+            && !self.type_has_call_or_construct_signatures(program, right_type)
             && !self.is_type_subtype_of_global_function(program, right_type)
         {
             self.error(
@@ -4592,11 +4534,16 @@ impl Checker {
     // Reports whether `t` has at least one call signature (Go's
     // `typeHasCallOrConstructSignatures`, 4ab subset: call signatures only).
     //
-    // DEFER(phase-4-checker-later): construct signatures. blocked-by:
-    // construct-signature collection on object types.
     // Go: internal/checker/checker.go:Checker.typeHasCallOrConstructSignatures
-    fn type_has_call_or_construct_signatures(&self, t: TypeId) -> bool {
+    pub(crate) fn type_has_call_or_construct_signatures(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> bool {
         !self.get_signatures_of_type(t).is_empty()
+            || !self
+                .collect_construct_signatures_of_type(program, t)
+                .is_empty()
     }
 
     // Reports whether `t` is a subtype of the (synthetic) global `Function`
@@ -4604,7 +4551,7 @@ impl Checker {
     // when there is no global `Function` (no lib / no synthetic declaration).
     // Go: the `c.isTypeSubtypeOf(rightType, c.globalFunctionType)` clause of
     //     Checker.resolveInstanceofExpression(8784)
-    fn is_type_subtype_of_global_function(
+    pub(crate) fn is_type_subtype_of_global_function(
         &mut self,
         program: &dyn BoundProgram,
         t: TypeId,
@@ -4685,16 +4632,16 @@ impl Checker {
     // an intersection whose base constraint is an empty anonymous object (Go's
     // `hasEmptyObjectIntersection`).
     // Go: internal/checker/checker.go:Checker.hasEmptyObjectIntersection(13043)
-    fn has_empty_object_intersection(
-        &mut self,
-        program: &dyn BoundProgram,
-        t: TypeId,
-    ) -> bool {
+    fn has_empty_object_intersection(&mut self, program: &dyn BoundProgram, t: TypeId) -> bool {
         self.distributed_types(t).iter().any(|&member| {
             if member == self.unknown_empty_object_type {
                 return true;
             }
-            if !self.get_type(member).flags().intersects(TypeFlags::INTERSECTION) {
+            if !self
+                .get_type(member)
+                .flags()
+                .intersects(TypeFlags::INTERSECTION)
+            {
                 return false;
             }
             let base = self.get_base_constraint_or_type(program, member);
@@ -4793,9 +4740,7 @@ impl Checker {
                 .union_types()
                 .or_else(|| self.get_type(t).intersection_types())
                 .unwrap_or(&[]);
-            return members
-                .iter()
-                .any(|&m| self.maybe_type_of_kind(m, kind));
+            return members.iter().any(|&m| self.maybe_type_of_kind(m, kind));
         }
         false
     }
@@ -4965,8 +4910,7 @@ impl Checker {
             Some(ty) => ty,
             None => return false,
         };
-        let then_type =
-            self.get_type_with_facts(then_type, TypeFacts::NE_UNDEFINED_OR_NULL);
+        let then_type = self.get_type_with_facts(then_type, TypeFacts::NE_UNDEFINED_OR_NULL);
         !self.get_signatures_of_type(then_type).is_empty()
     }
 
@@ -4992,11 +4936,7 @@ impl Checker {
     // Checks a `cond ? whenTrue : whenFalse` expression (Go's
     // `checkConditionalExpression`).
     // Go: internal/checker/checker.go:Checker.checkConditionalExpression(10893)
-    fn check_conditional_expression(
-        &mut self,
-        program: &dyn BoundProgram,
-        node: NodeId,
-    ) -> TypeId {
+    fn check_conditional_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let NodeData::ConditionalExpression(d) = program.arena().data(node) else {
             return self.error_type;
         };
@@ -5016,8 +4956,7 @@ impl Checker {
             _ => return self.error_type,
         };
         let container = get_containing_function(program, node);
-        let is_generator =
-            container.is_some_and(|f| is_generator_function(program, f));
+        let is_generator = container.is_some_and(|f| is_generator_function(program, f));
         if !is_generator {
             self.error(
                 program,
@@ -5030,13 +4969,9 @@ impl Checker {
         if let Some(expr) = expression {
             let expr_type = self.check_expression(program, expr);
             if let Some(fn_node) = container {
-                if let Some(return_type_node) = get_effective_return_type_node(program, fn_node)
-                {
-                    let return_type = self.get_type_from_type_node(
-                        program,
-                        return_type_node,
-                        program.globals(),
-                    );
+                if let Some(return_type_node) = get_effective_return_type_node(program, fn_node) {
+                    let return_type =
+                        self.get_type_from_type_node(program, return_type_node, program.globals());
                     let yield_type = self.unwrap_generator_yield_type(return_type);
                     if !self.is_type_assignable_to(program, expr_type, yield_type) {
                         self.check_type_assignable_to_and_optionally_elaborate(
@@ -5609,11 +5544,7 @@ impl Checker {
         node: NodeId,
     ) -> TypeId {
         let (tag, template, type_arguments_ref) = match program.arena().data(node) {
-            NodeData::TaggedTemplateExpression(d) => (
-                d.tag,
-                d.template,
-                d.type_arguments.as_ref(),
-            ),
+            NodeData::TaggedTemplateExpression(d) => (d.tag, d.template, d.type_arguments.as_ref()),
             _ => return self.error_type,
         };
         self.check_grammar_type_arguments(program, node, type_arguments_ref);
@@ -5651,10 +5582,8 @@ impl Checker {
                 &substitutions,
             );
         } else {
-            let effective_args = self.tagged_template_effective_argument_nodes(
-                template,
-                &substitutions,
-            );
+            let effective_args =
+                self.tagged_template_effective_argument_nodes(template, &substitutions);
             self.report_argument_arity_error(program, node, signature, &effective_args);
         }
         self.get_return_type_of_call(program, signature, &[], &[])
@@ -5784,17 +5713,12 @@ impl Checker {
             if !self.has_correct_arity(signature, effective_arg_count) {
                 continue;
             }
-            if self.signature_applicable_for_tagged_template(
-                program,
-                signature,
-                &arg_types,
-            ) {
+            if self.signature_applicable_for_tagged_template(program, signature, &arg_types) {
                 return self.get_return_type_of_call(program, signature, &[], &[]);
             }
             arity_matched.push(signature);
         }
-        let effective_args =
-            self.tagged_template_effective_argument_nodes(template, substitutions);
+        let effective_args = self.tagged_template_effective_argument_nodes(template, substitutions);
         match arity_matched.len() {
             0 => self.report_overload_arity_error(program, node, signatures, &effective_args),
             1 => self.report_inapplicable_tagged_template_argument(
@@ -5806,8 +5730,8 @@ impl Checker {
             ),
             _ => {
                 let last = *arity_matched.last().unwrap();
-                if let Some((arg_node, source_str, target_str)) =
-                    self.first_failing_tagged_template_argument(
+                if let Some((arg_node, source_str, target_str)) = self
+                    .first_failing_tagged_template_argument(
                         program,
                         last,
                         template,
@@ -6525,11 +6449,7 @@ impl Checker {
     // Descends into a union/intersection type node's constituents and resolves the
     // composite type (Go's `checkUnionOrIntersectionType`).
     // Go: internal/checker/checker.go:Checker.checkUnionOrIntersectionType(3250)
-    fn check_union_or_intersection_type_node(
-        &mut self,
-        program: &dyn BoundProgram,
-        node: NodeId,
-    ) {
+    fn check_union_or_intersection_type_node(&mut self, program: &dyn BoundProgram, node: NodeId) {
         let members = match program.arena().data(node) {
             NodeData::UnionType(d) | NodeData::IntersectionType(d) => d.types.nodes.clone(),
             _ => return,
@@ -6607,8 +6527,7 @@ impl Checker {
         self.check_type_node(program, type_parameter);
         if let Some(name_type) = name_type {
             self.check_type_node(program, name_type);
-        } else if let NodeData::TypeParameterDeclaration(d) = program.arena().data(type_parameter)
-        {
+        } else if let NodeData::TypeParameterDeclaration(d) = program.arena().data(type_parameter) {
             if let Some(constraint) = d.constraint {
                 self.check_type_node(program, constraint);
                 // `keyof T` and other type-parameter constraints are valid mapped-type
@@ -6621,8 +6540,7 @@ impl Checker {
                         self.number_type(),
                         self.es_symbol_type(),
                     ]);
-                    if !self.is_type_assignable_to(program, constraint_type, string_number_symbol)
-                    {
+                    if !self.is_type_assignable_to(program, constraint_type, string_number_symbol) {
                         self.report_type_not_assignable(
                             program,
                             constraint,
@@ -6700,19 +6618,20 @@ impl Checker {
             program.globals(),
         ) {
             Some(symbol) => symbol,
-            None => match super::declared_types::resolve_type_parameter_in_scope(program, node, &name)
-            {
-                Some(_) => return,
-                None => {
-                    self.error(
-                        program,
-                        type_name,
-                        &tsgo_diagnostics::CANNOT_FIND_NAME_0,
-                        &[name.as_str()],
-                    );
-                    return;
+            None => {
+                match super::declared_types::resolve_type_parameter_in_scope(program, node, &name) {
+                    Some(_) => return,
+                    None => {
+                        self.error(
+                            program,
+                            type_name,
+                            &tsgo_diagnostics::CANNOT_FIND_NAME_0,
+                            &[name.as_str()],
+                        );
+                        return;
+                    }
                 }
-            },
+            }
         };
         let flags = program.symbol(symbol).flags;
         if flags.intersects(SymbolFlags::CLASS | SymbolFlags::INTERFACE) {
@@ -7047,24 +6966,14 @@ impl Checker {
             let param_type = self.get_type_at_position(program, signature, i);
             if self.is_type_assignable_to(program, arg_type, param_type) {
                 if program.arena().kind(arg) == Kind::ObjectLiteralExpression
-                    && self.check_object_literal_excess_properties(
-                        program,
-                        arg,
-                        arg_type,
-                        param_type,
-                    )
+                    && self
+                        .check_object_literal_excess_properties(program, arg, arg_type, param_type)
                 {
                     return;
                 }
                 continue;
             }
-            if self.elaborate_error(
-                program,
-                arg,
-                arg_type,
-                param_type,
-                RelationKind::Assignable,
-            ) {
+            if self.elaborate_error(program, arg, arg_type, param_type, RelationKind::Assignable) {
                 return;
             }
             self.report_argument_not_assignable(program, arg, arg_type, param_type);
@@ -7206,10 +7115,7 @@ impl Checker {
                 }
             }
         }
-        signatures
-            .last()
-            .copied()
-            .unwrap_or_else(|| signatures[0])
+        signatures.last().copied().unwrap_or_else(|| signatures[0])
     }
 
     // Reports whether every overlapping argument of a call is assignable to its
@@ -7356,9 +7262,7 @@ impl Checker {
     ) -> Vec<SignatureId> {
         match kind {
             InvocationKind::Call => self.get_signatures_of_type(t),
-            InvocationKind::Construct => {
-                self.collect_construct_signatures_of_type(program, t)
-            }
+            InvocationKind::Construct => self.collect_construct_signatures_of_type(program, t),
         }
     }
 
@@ -7384,12 +7288,8 @@ impl Checker {
         let Some(target_sym) = links.target else {
             return;
         };
-        let target_type = super::declared_types::get_type_of_symbol(
-            self,
-            program,
-            target_sym,
-            program.globals(),
-        );
+        let target_type =
+            super::declared_types::get_type_of_symbol(self, program, target_sym, program.globals());
         if self
             .signatures_for_invocation(program, target_type, kind)
             .is_empty()
@@ -7414,8 +7314,7 @@ impl Checker {
     ) -> NodeId {
         if let Some(parent) = program.arena().parent(error_target) {
             if program.arena().kind(parent) == Kind::CallExpression {
-                if let NodeData::PropertyAccessExpression(d) = program.arena().data(error_target)
-                {
+                if let NodeData::PropertyAccessExpression(d) = program.arena().data(error_target) {
                     return d.name;
                 }
             }
@@ -7538,7 +7437,10 @@ impl Checker {
                 chain = Some(DiagnosticMessageChain {
                     code: message.code(),
                     category: message.category(),
-                    message: tsgo_diagnostics::format(&message.to_string(), &[apparent_str.as_str()]),
+                    message: tsgo_diagnostics::format(
+                        &message.to_string(),
+                        &[apparent_str.as_str()],
+                    ),
                     next: Vec::new(),
                 });
             } else if chain.is_none() {
@@ -7553,7 +7455,10 @@ impl Checker {
                 chain = Some(DiagnosticMessageChain {
                     code: message.code(),
                     category: message.category(),
-                    message: tsgo_diagnostics::format(&message.to_string(), &[apparent_str.as_str()]),
+                    message: tsgo_diagnostics::format(
+                        &message.to_string(),
+                        &[apparent_str.as_str()],
+                    ),
                     next: Vec::new(),
                 });
             }
@@ -8889,8 +8794,8 @@ impl Checker {
                 if let Some(clause_expression) = clause_expression {
                     self.check_expression(program, clause_expression);
                 }
-                let fallthrough = i + 1 < clauses.len()
-                    && self.switch_case_has_fallthrough(program, &statements);
+                let fallthrough =
+                    i + 1 < clauses.len() && self.switch_case_has_fallthrough(program, &statements);
                 for statement in statements {
                     self.check_statement(program, statement);
                 }
@@ -9151,11 +9056,7 @@ impl Checker {
     // DEFER(phase-4-checker-later): `instantiateTypeWithSingleGenericCallSignature`
     // for generic object-literal methods. blocked-by: generic call-site inference.
     // Go: internal/checker/checker.go:Checker.checkObjectLiteralMethod(13771)
-    fn check_object_literal_method(
-        &mut self,
-        program: &dyn BoundProgram,
-        node: NodeId,
-    ) -> TypeId {
+    fn check_object_literal_method(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         self.check_grammar_function_like_declaration(program, node);
         self.check_function_expression_or_object_literal_method(program, node)
     }
@@ -9276,16 +9177,12 @@ impl Checker {
                     .map(|sym| get_type_of_symbol(self, program, sym, program.globals()))
                     .unwrap_or(self.error_type());
                 if !self.is_type_assignable_to(program, predicate_type, param_type) {
-                    let generalized =
-                        self.generalized_source_for_error(predicate_type, param_type);
-                    let source_str =
-                        super::nodebuilder::type_to_string(self, program, generalized);
-                    let target_str =
-                        super::nodebuilder::type_to_string(self, program, param_type);
+                    let generalized = self.generalized_source_for_error(predicate_type, param_type);
+                    let source_str = super::nodebuilder::type_to_string(self, program, generalized);
+                    let target_str = super::nodebuilder::type_to_string(self, program, param_type);
                     let inner = DiagnosticMessageChain {
                         code: tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1.code(),
-                        category: tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1
-                            .category(),
+                        category: tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1.category(),
                         message: tsgo_diagnostics::format(
                             &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1.to_string(),
                             &[source_str.as_str(), target_str.as_str()],
@@ -9460,8 +9357,7 @@ impl Checker {
         let Some(container) = get_containing_function(program, node) else {
             return;
         };
-        let is_async =
-            modifier_flags_of(program.arena(), container).contains(ModifierFlags::ASYNC);
+        let is_async = modifier_flags_of(program.arena(), container).contains(ModifierFlags::ASYNC);
         let unwrapped_return_type = if is_async {
             self.get_awaited_type_no_alias(program, return_type)
         } else {
@@ -9963,8 +9859,7 @@ impl Checker {
         if signatures.is_empty() {
             return;
         }
-        let decorator_arg_count =
-            self.legacy_decorator_argument_count(program, decorated_node);
+        let decorator_arg_count = self.legacy_decorator_argument_count(program, decorated_node);
         let uncalled = signatures.iter().all(|&sig| {
             !self.has_effective_rest_parameter(sig)
                 && self.get_min_argument_count(sig) == 0
@@ -10028,13 +9923,20 @@ impl Checker {
     }
 
     /// Returns whether a switch `case`/`default` falls through to the next clause.
-    fn switch_case_has_fallthrough(&self, program: &dyn BoundProgram, statements: &[NodeId]) -> bool {
+    fn switch_case_has_fallthrough(
+        &self,
+        program: &dyn BoundProgram,
+        statements: &[NodeId],
+    ) -> bool {
         let Some(&last) = statements.last() else {
             return false;
         };
         !matches!(
             program.arena().kind(last),
-            Kind::BreakStatement | Kind::ReturnStatement | Kind::ThrowStatement | Kind::ContinueStatement
+            Kind::BreakStatement
+                | Kind::ReturnStatement
+                | Kind::ThrowStatement
+                | Kind::ContinueStatement
         )
     }
 
@@ -10143,7 +10045,8 @@ impl Checker {
                         .unwrap_or_default();
                     for base_type in base_types {
                         if !self.is_type_assignable_to(program, type_with_this, base_type) {
-                            let t_str = super::nodebuilder::type_to_string(self, program, type_with_this);
+                            let t_str =
+                                super::nodebuilder::type_to_string(self, program, type_with_this);
                             let base_str =
                                 super::nodebuilder::type_to_string(self, program, base_type);
                             self.error(
@@ -10178,9 +10081,7 @@ impl Checker {
                 );
             }
             self.check_heritage_type_reference_node(program, heritage_element);
-            if let Some(base_type) =
-                self.resolve_heritage_clause_type(program, heritage_element)
-            {
+            if let Some(base_type) = self.resolve_heritage_clause_type(program, heritage_element) {
                 if base_type != self.error_type() && !self.is_valid_base_type(base_type) {
                     self.error(
                         program,
@@ -10218,10 +10119,7 @@ impl Checker {
             return;
         };
         let members = d.members.nodes.clone();
-        let in_ambient = program
-            .arena()
-            .flags(node)
-            .contains(NodeFlags::AMBIENT);
+        let in_ambient = program.arena().flags(node).contains(NodeFlags::AMBIENT);
         self.check_grammar_modifiers(program, node);
         if should_check_erasable_syntax(program, node) && !in_ambient {
             self.error(
@@ -10303,11 +10201,7 @@ impl Checker {
         }
     }
 
-    fn check_enum_member_initializer_shifts(
-        &mut self,
-        program: &dyn BoundProgram,
-        expr: NodeId,
-    ) {
+    fn check_enum_member_initializer_shifts(&mut self, program: &dyn BoundProgram, expr: NodeId) {
         let node = skip_parentheses(program, expr);
         if let NodeData::BinaryExpression(d) = program.arena().data(node) {
             let operator = program.arena().kind(d.operator_token);
@@ -10376,7 +10270,8 @@ impl Checker {
             node,
             program.compiler_options().should_preserve_const_enums(),
         );
-        if program.symbol(module_symbol)
+        if program
+            .symbol(module_symbol)
             .flags
             .intersects(SymbolFlags::VALUE_MODULE)
             && !in_ambient
@@ -10504,7 +10399,9 @@ impl Checker {
                 let return_type =
                     self.get_type_from_type_node(program, return_type_node, program.globals());
                 self.check_all_code_paths_in_non_void_function_return_or_throw(
-                    program, node, return_type,
+                    program,
+                    node,
+                    return_type,
                 );
             }
         }
@@ -10585,9 +10482,10 @@ impl Checker {
                     &[],
                 );
             }
-            let super_call_should_be_root_level = !self.compiler_options().get_emit_standard_class_fields()
-                && (class_has_initialized_property_or_private_identifier(program, class_decl)
-                    || constructor_has_parameter_property(program, node));
+            let super_call_should_be_root_level =
+                !self.compiler_options().get_emit_standard_class_fields()
+                    && (class_has_initialized_property_or_private_identifier(program, class_decl)
+                        || constructor_has_parameter_property(program, node));
             if super_call_should_be_root_level {
                 if !super_call_is_root_level_in_constructor(program, super_call, body) {
                     self.error(
@@ -10666,7 +10564,9 @@ impl Checker {
                 super::declared_types::get_type_of_accessors(self, program, symbol, globals);
             if program.arena().kind(node) == Kind::GetAccessor {
                 self.check_all_code_paths_in_non_void_function_return_or_throw(
-                    program, node, return_type,
+                    program,
+                    node,
+                    return_type,
                 );
             }
         }
@@ -10777,12 +10677,14 @@ impl Checker {
             }
         };
         let base_constructor_type = self.check_expression(program, expression);
-        if !self.get_type(base_constructor_type).flags().contains(TypeFlags::ANY)
+        if !self
+            .get_type(base_constructor_type)
+            .flags()
+            .contains(TypeFlags::ANY)
             && base_constructor_type != self.null_type()
             && !self.is_constructor_type(program, base_constructor_type)
         {
-            let type_str =
-                super::nodebuilder::type_to_string(self, program, base_constructor_type);
+            let type_str = super::nodebuilder::type_to_string(self, program, base_constructor_type);
             self.error(
                 program,
                 expression,
@@ -10807,8 +10709,7 @@ impl Checker {
             return false;
         };
         let class_type = get_declared_type_of_symbol(self, program, sym, program.globals());
-        let base_constructor_type =
-            self.get_base_constructor_type_of_class(program, class_type);
+        let base_constructor_type = self.get_base_constructor_type_of_class(program, class_type);
         base_constructor_type == self.null_type()
     }
 
@@ -10833,7 +10734,7 @@ impl Checker {
     }
 
     // Go: internal/checker/checker.go:Checker.getSignaturesOfType (construct, intersection)
-    fn collect_construct_signatures_of_type(
+    pub(crate) fn collect_construct_signatures_of_type(
         &mut self,
         program: &dyn BoundProgram,
         t: TypeId,
@@ -10899,8 +10800,7 @@ impl Checker {
         base_type_node: NodeId,
     ) -> Vec<SignatureId> {
         let type_arg_nodes = type_arguments_of_heritage_node(program, base_type_node);
-        let constructors =
-            self.get_constructors_for_type_arguments(program, t, &type_arg_nodes);
+        let constructors = self.get_constructors_for_type_arguments(program, t, &type_arg_nodes);
         let type_arguments: Vec<TypeId> = type_arg_nodes
             .iter()
             .map(|&n| get_type_from_type_node(self, program, n, None))
@@ -11032,7 +10932,8 @@ impl Checker {
                     let static_base = get_type_without_signatures(self, static_base);
                     if !self.is_type_assignable_to(program, static_type, static_base) {
                         let static_str = format!("typeof {class_str}");
-                        let base_name = super::nodebuilder::symbol_to_string(self, program, base_sym);
+                        let base_name =
+                            super::nodebuilder::symbol_to_string(self, program, base_sym);
                         let static_base_str = format!("typeof {base_name}");
                         self.error(
                             program,
@@ -11044,12 +10945,7 @@ impl Checker {
                 }
             } else {
                 let base_str = super::nodebuilder::type_to_string(self, program, base_type);
-                if !self.issue_member_specific_error(
-                    program,
-                    node,
-                    type_with_this,
-                    base_type,
-                ) {
+                if !self.issue_member_specific_error(program, node, type_with_this, base_type) {
                     self.error(
                         program,
                         error_node,
@@ -11061,16 +10957,16 @@ impl Checker {
             // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4334)
             self.check_kinds_of_property_member_overrides(program, node, class_type, base_type);
             // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4324)
-            let static_is_class = self.get_type(static_base_type).symbol.is_some_and(|sym| {
-                program.symbol(sym).flags.contains(SymbolFlags::CLASS)
-            });
+            let static_is_class = self
+                .get_type(static_base_type)
+                .symbol
+                .is_some_and(|sym| program.symbol(sym).flags.contains(SymbolFlags::CLASS));
             let base_is_type_variable = self
                 .get_type(base_constructor_type)
                 .flags()
                 .intersects(TypeFlags::TYPE_PARAMETER);
             if !static_is_class && !base_is_type_variable {
-                if let Some(base_type_node) = get_extends_heritage_clause_element(program, node)
-                {
+                if let Some(base_type_node) = get_extends_heritage_clause_element(program, node) {
                     let constructors = self.get_instantiated_constructors_for_type_arguments(
                         program,
                         static_base_type,
@@ -11101,13 +10997,7 @@ impl Checker {
         }
 
         // Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration(4337)
-        self.check_members_for_override_modifier(
-            program,
-            node,
-            class_type,
-            type_with_this,
-            symbol,
-        );
+        self.check_members_for_override_modifier(program, node, class_type, type_with_this, symbol);
 
         // `implements`-clause satisfaction (2420). Each implemented type must be
         // assignable from the class instance type.
@@ -11156,9 +11046,7 @@ impl Checker {
                 let implements_class = self
                     .get_type(interface_type)
                     .symbol
-                    .is_some_and(|sym| {
-                        program.symbol(sym).flags.intersects(SymbolFlags::CLASS)
-                    });
+                    .is_some_and(|sym| program.symbol(sym).flags.intersects(SymbolFlags::CLASS));
                 if implements_class {
                     self.error(
                         program,
@@ -11246,7 +11134,9 @@ impl Checker {
                 if has_abstract_modifier(program.arena(), node) {
                     continue;
                 }
-                missed.push(super::nodebuilder::symbol_to_string(self, program, base_prop));
+                missed.push(super::nodebuilder::symbol_to_string(
+                    self, program, base_prop,
+                ));
                 continue;
             }
             let base_flags =
@@ -11403,11 +11293,7 @@ impl Checker {
     }
 
     // Go: internal/checker/checker.go:Checker.isMixinConstructorType(16885)
-    fn has_abstract_construct_signature(
-        &mut self,
-        program: &dyn BoundProgram,
-        t: TypeId,
-    ) -> bool {
+    fn has_abstract_construct_signature(&mut self, program: &dyn BoundProgram, t: TypeId) -> bool {
         if self.type_declares_abstract_constructor(program, t) {
             return true;
         }
@@ -11475,17 +11361,9 @@ impl Checker {
         ) && has_abstract_modifier(prog.arena(), type_node)
     }
 
-    fn type_declares_abstract_constructor(
-        &self,
-        program: &dyn BoundProgram,
-        t: TypeId,
-    ) -> bool {
+    fn type_declares_abstract_constructor(&self, program: &dyn BoundProgram, t: TypeId) -> bool {
         for sig in self.get_construct_signatures_of_type(t) {
-            if self
-                .signature(sig)
-                .flags
-                .contains(SignatureFlags::ABSTRACT)
-            {
+            if self.signature(sig).flags.contains(SignatureFlags::ABSTRACT) {
                 return true;
             }
             if let Some(decl) = self.signature(sig).declaration {
@@ -11519,8 +11397,10 @@ impl Checker {
             }
             if let NodeData::TypeAliasDeclaration(d) = prog.arena().data(decl) {
                 let type_node = d.type_node;
-                if matches!(prog.arena().kind(type_node), Kind::ConstructorType | Kind::ConstructSignature)
-                    && has_abstract_modifier(prog.arena(), type_node)
+                if matches!(
+                    prog.arena().kind(type_node),
+                    Kind::ConstructorType | Kind::ConstructSignature
+                ) && has_abstract_modifier(prog.arena(), type_node)
                 {
                     return true;
                 }
@@ -11644,12 +11524,7 @@ impl Checker {
             }
             return;
         }
-        if !member_has_override
-            && !self
-                .compiler_options()
-                .no_implicit_override
-                .is_true()
-        {
+        if !member_has_override && !self.compiler_options().no_implicit_override.is_true() {
             return;
         }
         let Some(member_sym) = program.symbol_of_node(member) else {
@@ -11676,9 +11551,11 @@ impl Checker {
         let base_prop = get_property_of_type(self, base_type, &member_name);
         if base_prop.is_none() && member_has_override {
             let base_name = super::nodebuilder::type_to_string(self, program, base_type);
-            if let Some(suggestion) =
-                self.get_suggested_symbol_for_nonexistent_class_member(program, &member_name, base_type)
-            {
+            if let Some(suggestion) = self.get_suggested_symbol_for_nonexistent_class_member(
+                program,
+                &member_name,
+                base_type,
+            ) {
                 let suggestion_name =
                     super::nodebuilder::symbol_to_string(self, program, suggestion);
                 self.error(
@@ -11710,11 +11587,8 @@ impl Checker {
                     .contains(ModifierFlags::ABSTRACT)
             });
             if !base_has_abstract {
-                let base_name = super::nodebuilder::type_to_string(
-                    self,
-                    program,
-                    base_with_this.unwrap(),
-                );
+                let base_name =
+                    super::nodebuilder::type_to_string(self, program, base_with_this.unwrap());
                 let message = if program.arena().kind(member) == Kind::Parameter {
                     &tsgo_diagnostics::THIS_PARAMETER_PROPERTY_MUST_HAVE_AN_OVERRIDE_MODIFIER_BECAUSE_IT_OVERRIDES_A_MEMBER_IN_BASE_CLASS_0
                 } else {
@@ -11722,11 +11596,8 @@ impl Checker {
                 };
                 self.error(program, member, message, &[base_name.as_str()]);
             } else if has_abstract_modifier(program.arena(), member) && base_has_abstract {
-                let base_name = super::nodebuilder::type_to_string(
-                    self,
-                    program,
-                    base_with_this.unwrap(),
-                );
+                let base_name =
+                    super::nodebuilder::type_to_string(self, program, base_with_this.unwrap());
                 self.error(
                     program,
                     member,
@@ -11791,9 +11662,7 @@ impl Checker {
             return true;
         }
         if let Some(union) = self.get_type(t).union_types() {
-            return union
-                .iter()
-                .any(|&u| self.contains_undefined_type(u));
+            return union.iter().any(|&u| self.contains_undefined_type(u));
         }
         false
     }
@@ -11877,12 +11746,11 @@ impl Checker {
             let info = self.index_info(info_id);
             (info.key_type, info.value_type, info.declaration)
         };
-        let local_prop_declaration =
-            if program.symbol(prop_sym).parent == Some(type_symbol) {
-                declaration
-            } else {
-                None
-            };
+        let local_prop_declaration = if program.symbol(prop_sym).parent == Some(type_symbol) {
+            declaration
+        } else {
+            None
+        };
         let local_index_declaration = index_declaration.filter(|&decl| {
             program
                 .symbol_of_node(decl)
@@ -12096,13 +11964,10 @@ impl Checker {
             let prop_type = get_type_of_symbol(self, program, prop, globals);
             let base_prop_type = get_type_of_symbol(self, program, base_prop, globals);
             if !self.is_type_assignable_to(program, prop_type, base_prop_type) {
-                let type_str =
-                    super::nodebuilder::type_to_string(self, program, type_with_this);
-                let base_str =
-                    super::nodebuilder::type_to_string(self, program, base_with_this);
+                let type_str = super::nodebuilder::type_to_string(self, program, type_with_this);
+                let base_str = super::nodebuilder::type_to_string(self, program, base_with_this);
                 let prop_str = super::nodebuilder::symbol_to_string(self, program, declared_prop);
-                let report_node = member_name_node_for_duplicate(program, member)
-                    .unwrap_or(node);
+                let report_node = member_name_node_for_duplicate(program, member).unwrap_or(node);
                 self.error(
                     program,
                     report_node,
@@ -12152,9 +12017,7 @@ impl Checker {
             if !node_in_ambient && is_static {
                 if let Some(sym) = symbol {
                     if program.symbol(sym).name == "prototype" {
-                        if let Some(name_node) =
-                            member_name_node_for_duplicate(program, member)
-                        {
+                        if let Some(name_node) = member_name_node_for_duplicate(program, member) {
                             let class_display = class_like_display_name(program, node);
                             self.error(
                                 program,
@@ -12180,9 +12043,7 @@ impl Checker {
                             program, node, names, &name, kind, is_static,
                         );
                     // Only members that MERGED into one symbol can be duplicates.
-                    if !skip_merged_duplicate_pass
-                        && program.symbol(sym).declarations.len() > 1
-                    {
+                    if !skip_merged_duplicate_pass && program.symbol(sym).declarations.len() > 1 {
                         let state = names.get(&name).copied().unwrap_or(0);
                         if state == 0 {
                             // On first occurrence just record the kind.
@@ -12348,8 +12209,7 @@ impl Checker {
                         {
                             continue;
                         }
-                        let NodeData::ParameterDeclaration(pd) = program.arena().data(param)
-                        else {
+                        let NodeData::ParameterDeclaration(pd) = program.arena().data(param) else {
                             continue;
                         };
                         if property_name_text(program, pd.name).as_deref() != Some(name) {
@@ -12448,11 +12308,7 @@ impl Checker {
     // Returns the `ExpressionWithTypeArguments` elements of an interface's
     // `extends` heritage clause (Go's `ast.GetExtendsHeritageClauseElements`).
     // Go: internal/ast/utilities.go:GetExtendsHeritageClauseElements
-    fn extends_heritage_elements(
-        &self,
-        program: &dyn BoundProgram,
-        node: NodeId,
-    ) -> Vec<NodeId> {
+    fn extends_heritage_elements(&self, program: &dyn BoundProgram, node: NodeId) -> Vec<NodeId> {
         let heritage = match program.arena().data(node) {
             NodeData::InterfaceDeclaration(d) => d.heritage_clauses.clone(),
             _ => None,
@@ -12585,18 +12441,12 @@ impl Checker {
         if source_prop == target_prop {
             return true;
         }
-        let source_accessibility = declaration_modifier_flags_from_symbol(
-            self,
-            program,
-            source_prop,
-            false,
-        ) & ModifierFlags::NON_PUBLIC_ACCESSIBILITY_MODIFIER;
-        let target_accessibility = declaration_modifier_flags_from_symbol(
-            self,
-            program,
-            target_prop,
-            false,
-        ) & ModifierFlags::NON_PUBLIC_ACCESSIBILITY_MODIFIER;
+        let source_accessibility =
+            declaration_modifier_flags_from_symbol(self, program, source_prop, false)
+                & ModifierFlags::NON_PUBLIC_ACCESSIBILITY_MODIFIER;
+        let target_accessibility =
+            declaration_modifier_flags_from_symbol(self, program, target_prop, false)
+                & ModifierFlags::NON_PUBLIC_ACCESSIBILITY_MODIFIER;
         if source_accessibility != target_accessibility {
             return false;
         }
@@ -13528,8 +13378,7 @@ impl Checker {
             let Some(type_node) = type_node else {
                 return;
             };
-            let declared =
-                get_type_from_type_node(self, program, type_node, program.globals());
+            let declared = get_type_from_type_node(self, program, type_node, program.globals());
             let initializer_type = self.check_expression(program, initializer);
             self.check_initializer_assignable_to_declared_type(
                 program,
@@ -14742,8 +14591,7 @@ impl Checker {
         source: TypeId,
         target: TypeId,
     ) {
-        if self.readonly_blocks_mutable_assignability(source, target, RelationKind::Assignable)
-        {
+        if self.readonly_blocks_mutable_assignability(source, target, RelationKind::Assignable) {
             if let Some(report) =
                 self.build_relation_error_chain(program, source, target, RelationKind::Assignable)
             {
@@ -15853,9 +15701,8 @@ impl Checker {
         let Some(obj) = self.get_type(t).as_object() else {
             return 0;
         };
-        obj.tuple_min_length.unwrap_or_else(|| {
-            self.tuple_fixed_length(t).unwrap_or(0)
-        })
+        obj.tuple_min_length
+            .unwrap_or_else(|| self.tuple_fixed_length(t).unwrap_or(0))
     }
 
     // Whether tuple position `index` is optional (Go's `ElementFlagsOptional`).
@@ -16400,9 +16247,9 @@ fn is_spreadable_property(program: &dyn BoundProgram, prop: SymbolId) -> bool {
         .iter()
         .copied()
         .any(|d| is_private_identifier_class_element_declaration(program, d));
-    let is_method_or_accessor = sym.flags.intersects(
-        SymbolFlags::METHOD | SymbolFlags::GET_ACCESSOR | SymbolFlags::SET_ACCESSOR,
-    );
+    let is_method_or_accessor = sym
+        .flags
+        .intersects(SymbolFlags::METHOD | SymbolFlags::GET_ACCESSOR | SymbolFlags::SET_ACCESSOR);
     let in_class = sym.declarations.iter().copied().any(|d| {
         program
             .arena()
@@ -16597,8 +16444,9 @@ fn get_suggested_lib_for_non_existent_name(name: &str) -> &'static str {
 // Go: internal/ast/utilities.go:GetContainingFunction
 fn is_generator_function(program: &dyn BoundProgram, node: NodeId) -> bool {
     match program.arena().data(node) {
-        NodeData::FunctionDeclaration(d)
-        | NodeData::FunctionExpression(d) => d.asterisk_token.is_some(),
+        NodeData::FunctionDeclaration(d) | NodeData::FunctionExpression(d) => {
+            d.asterisk_token.is_some()
+        }
         NodeData::MethodDeclaration(d) => d.asterisk_token.is_some(),
         _ => false,
     }
@@ -16652,9 +16500,7 @@ fn modifier_flags_of(arena: &tsgo_ast::NodeArena, node: NodeId) -> tsgo_ast::Mod
         NodeData::IndexSignatureDeclaration(d) => d.modifiers.as_ref(),
         NodeData::EnumDeclaration(d) => d.modifiers.as_ref(),
         NodeData::ModuleDeclaration(d) => d.modifiers.as_ref(),
-        NodeData::FunctionDeclaration(d) | NodeData::FunctionExpression(d) => {
-            d.modifiers.as_ref()
-        }
+        NodeData::FunctionDeclaration(d) | NodeData::FunctionExpression(d) => d.modifiers.as_ref(),
         NodeData::ArrowFunction(d) => d.modifiers.as_ref(),
         _ => None,
     };
@@ -16742,16 +16588,14 @@ fn is_assignment_to_readonly_entity(
                     let is_local_property_declaration =
                         arena.parent(ctor) == arena.parent(value_decl);
                     let is_local_parameter_property = Some(ctor) == arena.parent(value_decl);
-                    let parent_value_decl = sym
-                        .parent
-                        .and_then(|p| program.symbol(p).value_declaration);
+                    let parent_value_decl =
+                        sym.parent.and_then(|p| program.symbol(p).value_declaration);
                     let is_local_this_property_assignment = is_assignment_declaration
                         && parent_value_decl
                             .is_some_and(|vd| arena.parent(ctor) == arena.parent(vd));
                     let is_local_this_property_assignment_constructor_function =
                         is_assignment_declaration
-                            && parent_value_decl
-                                .is_some_and(|vd| Some(ctor) == arena.parent(vd));
+                            && parent_value_decl.is_some_and(|vd| Some(ctor) == arena.parent(vd));
                     let is_writable_symbol = is_local_property_declaration
                         || is_local_parameter_property
                         || is_local_this_property_assignment
@@ -16788,11 +16632,7 @@ fn is_assignment_to_readonly_entity(
 }
 
 // Go: internal/checker/checker.go:Checker.isReadonlySymbol
-fn is_readonly_symbol(
-    checker: &Checker,
-    program: &dyn BoundProgram,
-    symbol: SymbolId,
-) -> bool {
+fn is_readonly_symbol(checker: &Checker, program: &dyn BoundProgram, symbol: SymbolId) -> bool {
     if super::is_synthesized_symbol(symbol) {
         return checker
             .synthesized_symbol_check_flags(symbol)
@@ -16806,9 +16646,10 @@ fn is_readonly_symbol(
     }
     if flags.intersects(SymbolFlags::VARIABLE) {
         let sym = program.symbol(symbol);
-        if sym.value_declaration.is_some_and(|decl| {
-            combined_node_flags(program, decl).intersects(NodeFlags::CONSTANT)
-        }) {
+        if sym
+            .value_declaration
+            .is_some_and(|decl| combined_node_flags(program, decl).intersects(NodeFlags::CONSTANT))
+        {
             return true;
         }
     }
@@ -16836,11 +16677,7 @@ fn is_readonly_property_symbol(
 }
 
 // Go: internal/checker/checker.go:Checker.getTargetSymbol(21519)
-fn get_target_symbol(
-    checker: &Checker,
-    program: &dyn BoundProgram,
-    symbol: SymbolId,
-) -> SymbolId {
+fn get_target_symbol(checker: &Checker, program: &dyn BoundProgram, symbol: SymbolId) -> SymbolId {
     if checker
         .resolved_symbol_check_flags(program, symbol)
         .contains(CheckFlags::INSTANTIATED)
@@ -16856,11 +16693,7 @@ fn get_target_symbol(
 }
 
 // Go: internal/checker/checker.go:isPrototypeProperty(21533)
-fn is_prototype_property(
-    checker: &Checker,
-    program: &dyn BoundProgram,
-    symbol: SymbolId,
-) -> bool {
+fn is_prototype_property(checker: &Checker, program: &dyn BoundProgram, symbol: SymbolId) -> bool {
     program.symbol(symbol).flags.intersects(SymbolFlags::METHOD)
         || checker
             .resolved_symbol_check_flags(program, symbol)
@@ -16893,7 +16726,11 @@ fn is_mixin_constructor_class(
         return false;
     };
     let param_type = get_type_of_symbol(checker, program, param_sym, program.globals());
-    if checker.get_type(param_type).flags().intersects(TypeFlags::ANY) {
+    if checker
+        .get_type(param_type)
+        .flags()
+        .intersects(TypeFlags::ANY)
+    {
         return true;
     }
     checker
@@ -17190,14 +17027,8 @@ fn is_valid_const_assertion_argument(
             if !is_entity_name_expression(arena, expr) {
                 return false;
             }
-            let symbol = checker.resolve_entity_name(
-                program,
-                expr,
-                SymbolFlags::VALUE,
-                true,
-                false,
-                None,
-            );
+            let symbol =
+                checker.resolve_entity_name(program, expr, SymbolFlags::VALUE, true, false, None);
             symbol.is_some_and(|sym| {
                 checker
                     .resolved_symbol_flags(program, sym)
@@ -17328,7 +17159,9 @@ fn property_name_for_property_name_node(
     // Go only reads literal text from computed names; identifier expressions are
     // resolved later via `getTypeOfExpression` / `tryGetNameFromType`.
     match program.arena().kind(expr) {
-        Kind::StringLiteral | Kind::NumericLiteral | Kind::NoSubstitutionTemplateLiteral
+        Kind::StringLiteral
+        | Kind::NumericLiteral
+        | Kind::NoSubstitutionTemplateLiteral
         | Kind::BigIntLiteral => property_name_text(program, expr),
         Kind::PrefixUnaryExpression => {
             let NodeData::PrefixUnaryExpression(ud) = program.arena().data(expr) else {
@@ -17564,9 +17397,7 @@ fn is_indirect_call(program: &dyn BoundProgram, comma_node: NodeId) -> bool {
         NodeData::BinaryExpression(d) => (d.left, d.right),
         _ => return false,
     };
-    if program.arena().kind(left) != Kind::NumericLiteral
-        || program.arena().text(left) != "0"
-    {
+    if program.arena().kind(left) != Kind::NumericLiteral || program.arena().text(left) != "0" {
         return false;
     }
     let grandparent = match program.arena().parent(parent) {
@@ -17881,9 +17712,10 @@ fn constructor_has_parameter_property(program: &dyn BoundProgram, constructor: N
     let NodeData::ConstructorDeclaration(d) = program.arena().data(constructor) else {
         return false;
     };
-    d.parameters.nodes.iter().any(|&param| {
-        is_parameter_property_declaration(program, param)
-    })
+    d.parameters
+        .nodes
+        .iter()
+        .any(|&param| is_parameter_property_declaration(program, param))
 }
 
 /// Reports whether `super_call` is a direct child expression statement of `body`.
@@ -17954,11 +17786,9 @@ fn node_immediately_references_super_or_this(program: &dyn BoundProgram, node: N
                 false
             }
         }
-        _ => program
-            .arena()
-            .for_each_child(node, &mut |child| {
-                node_immediately_references_super_or_this(program, child)
-            }),
+        _ => program.arena().for_each_child(node, &mut |child| {
+            node_immediately_references_super_or_this(program, child)
+        }),
     }
 }
 

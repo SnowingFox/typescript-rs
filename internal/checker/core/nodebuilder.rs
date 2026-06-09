@@ -161,11 +161,7 @@ pub struct SynthesizedProperty {
 ///
 /// Side effects: none (pure).
 // Go: internal/checker/checker.go:Checker.symbolToString
-pub fn symbol_to_string(
-    checker: &Checker,
-    program: &dyn BoundProgram,
-    symbol: SymbolId,
-) -> String {
+pub fn symbol_to_string(checker: &Checker, program: &dyn BoundProgram, symbol: SymbolId) -> String {
     checker.resolved_symbol_name(program, symbol)
 }
 
@@ -609,9 +605,9 @@ fn synthesize_members(
         // transient arena, and an `as const` member carries the `Readonly` check
         // flag; a program (interface/class) member reads its name from the
         // program. Mirrors [`serialize_members`].
-        let (name, readonly, optional) = property_name_readonly_optional(checker, program, property);
-        let property_type =
-            printable_property_type(checker, program, property, optional);
+        let (name, readonly, optional) =
+            property_name_readonly_optional(checker, program, property);
+        let property_type = printable_property_type(checker, program, property, optional);
         let type_node = type_to_type_node(checker, program, property_type)?;
         members.push(SynthesizedProperty {
             name,
@@ -748,9 +744,9 @@ fn serialize_members(checker: &mut Checker, program: &dyn BoundProgram, ty: Type
         // DEFER(phase-4-checker-4bi+): the readonly modifier on a program (non
         // synthesized) member symbol (interface/class `readonly` field).
         // blocked-by: declaration-modifier readonly on bound symbols.
-        let (name, readonly, optional) = property_name_readonly_optional(checker, program, property);
-        let property_type =
-            printable_property_type(checker, program, property, optional);
+        let (name, readonly, optional) =
+            property_name_readonly_optional(checker, program, property);
+        let property_type = printable_property_type(checker, program, property, optional);
         let printed = type_to_string(checker, program, property_type);
         let prefix = if readonly { "readonly " } else { "" };
         let separator = if optional { "?: " } else { ": " };

@@ -593,7 +593,11 @@ impl Checker {
         context_flags: ContextFlags,
     ) -> Option<TypeId> {
         if is_object_literal_method(program, node) {
-            return self.get_contextual_type_for_object_literal_element(program, node, context_flags);
+            return self.get_contextual_type_for_object_literal_element(
+                program,
+                node,
+                context_flags,
+            );
         }
         self.get_contextual_type(program, node, context_flags)
     }

@@ -1147,11 +1147,7 @@ impl Checker {
 
     // The `number`-index element type of an array or tuple, falling back to `any`
     // when no index signature applies (Go's `getIndexTypeOfTypeEx(_, number, any)`).
-    fn number_index_element_type(
-        &mut self,
-        program: &dyn BoundProgram,
-        t: TypeId,
-    ) -> TypeId {
+    fn number_index_element_type(&mut self, program: &dyn BoundProgram, t: TypeId) -> TypeId {
         let number = self.number_type();
         if let Some(element) = get_index_type_of_type(self, t, number) {
             return element;
@@ -1217,13 +1213,7 @@ impl Checker {
         }
         let source_index = self.number_index_element_type(program, source);
         let target_index = self.number_index_element_type(program, target);
-        Some(self.report_is_related_to(
-            program,
-            source_index,
-            target_index,
-            relation,
-            reporter,
-        ))
+        Some(self.report_is_related_to(program, source_index, target_index, relation, reporter))
     }
 
     // Returns the positional element types of a fixed-arity `TUPLE`-flagged type.
@@ -1326,10 +1316,7 @@ impl Checker {
             let target_variadic = self.tuple_element_is_variadic(target, target_position);
             let target_rest = self.tuple_element_is_rest(target, target_position)
                 || (self.tuple_has_rest_element(target)
-                    && target_position
-                        >= self
-                            .tuple_fixed_length(target)
-                            .unwrap_or(target_arity));
+                    && target_position >= self.tuple_fixed_length(target).unwrap_or(target_arity));
             let target_variable = target_variadic || target_rest;
             if target_variadic && !source_variadic {
                 if let Some(r) = reporter.as_mut() {
@@ -1364,20 +1351,17 @@ impl Checker {
                 return false;
             }
             let source_type = source_elements[source_position];
-            let target_type = target_elements.get(target_position).copied().unwrap_or_else(|| self.any_type());
+            let target_type = target_elements
+                .get(target_position)
+                .copied()
+                .unwrap_or_else(|| self.any_type());
             let target_check_type = if source_variadic && target_rest {
                 self.create_array_type(target_type)
             } else {
                 target_type
             };
             let related = if let Some(r) = reporter.as_mut() {
-                self.report_is_related_to(
-                    program,
-                    source_type,
-                    target_check_type,
-                    relation,
-                    r,
-                )
+                self.report_is_related_to(program, source_type, target_check_type, relation, r)
             } else {
                 self.is_type_related_to(program, source_type, target_check_type, relation)
             };
@@ -1470,13 +1454,7 @@ impl Checker {
             return false;
         };
         for (position, &target_type) in target_elements.iter().enumerate() {
-            if !self.report_is_related_to(
-                program,
-                array_element,
-                target_type,
-                relation,
-                reporter,
-            ) {
+            if !self.report_is_related_to(program, array_element, target_type, relation, reporter) {
                 if target_arity > 1 {
                     reporter.report(
                         &tsgo_diagnostics::TYPE_AT_POSITION_0_IN_SOURCE_IS_NOT_COMPATIBLE_WITH_TYPE_AT_POSITION_1_IN_TARGET,
@@ -1579,7 +1557,10 @@ impl Checker {
         // Go's tuple `propertiesRelatedTo` arm: a readonly array source cannot
         // satisfy a mutable tuple target before arity/element checks. Tuple-tuple
         // readonly is checked after elements so `2626` wins over `4104`.
-        if self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
+        if self
+            .get_type(target)
+            .object_flags()
+            .contains(ObjectFlags::TUPLE)
             && self.is_array_or_tuple_type(source)
         {
             if self.is_array_type(source)
@@ -1587,9 +1568,8 @@ impl Checker {
             {
                 return false;
             }
-            return self.array_or_tuple_to_tuple_types_related_to(
-                program, source, target, relation,
-            );
+            return self
+                .array_or_tuple_to_tuple_types_related_to(program, source, target, relation);
         }
         // Go: subtype/strictSubtype relations still require optional members to
         // be matched; assignability/comparability/identity do not.
@@ -2077,12 +2057,7 @@ impl Checker {
         // structural-object subset.
         // Go: internal/checker/relater.go:Relater.reportErrorResults
         if sf.contains(TypeFlags::OBJECT) && tf.contains(TypeFlags::OBJECT) {
-            self.try_elaborate_array_like_errors_report(
-                program,
-                source,
-                target,
-                reporter,
-            );
+            self.try_elaborate_array_like_errors_report(program, source, target, reporter);
         }
         self.report_relation_error(program, source, target, relation, reporter);
         false
@@ -2138,24 +2113,24 @@ impl Checker {
             ) {
                 related
             } else {
-            match self.report_reference_type_arguments_related_to(
-                program, source, target, relation, reporter,
-            ) {
-                Some(result) => result,
-                None => {
-                    // Elaborate properties, then call/construct signatures (the
-                    // reporting twin of the bool object arm), so a function-type
-                    // mismatch hangs its `2328`/return-type chain under the head.
-                    self.report_properties_related_to(program, source, target, relation, reporter)
-                        && self.signatures_related_to(
+                match self.report_reference_type_arguments_related_to(
+                    program, source, target, relation, reporter,
+                ) {
+                    Some(result) => result,
+                    None => {
+                        // Elaborate properties, then call/construct signatures (the
+                        // reporting twin of the bool object arm), so a function-type
+                        // mismatch hangs its `2328`/return-type chain under the head.
+                        self.report_properties_related_to(
+                            program, source, target, relation, reporter,
+                        ) && self.signatures_related_to(
                             program,
                             source,
                             target,
                             SignatureKind::Call,
                             relation,
                             Some(&mut *reporter),
-                        )
-                        && self.signatures_related_to(
+                        ) && self.signatures_related_to(
                             program,
                             source,
                             target,
@@ -2163,8 +2138,8 @@ impl Checker {
                             relation,
                             Some(&mut *reporter),
                         )
+                    }
                 }
-            }
             }
         } else {
             // Identity and other structured/instantiable shapes: no elaboration.
@@ -2236,7 +2211,10 @@ impl Checker {
         {
             return false;
         }
-        if self.get_type(target).object_flags().contains(ObjectFlags::TUPLE)
+        if self
+            .get_type(target)
+            .object_flags()
+            .contains(ObjectFlags::TUPLE)
             && self.is_array_or_tuple_type(source)
         {
             if self.is_array_type(source)
@@ -2393,7 +2371,8 @@ impl Checker {
                 }
             }
             Some(4104) => {
-                if reporter.chain_args_match(&[Some(&generalized_source_type), Some(&target_type)]) {
+                if reporter.chain_args_match(&[Some(&generalized_source_type), Some(&target_type)])
+                {
                     return;
                 }
             }
@@ -2580,8 +2559,7 @@ impl Checker {
         target: TypeId,
         reporter: &mut ChainReporter,
     ) {
-        if !self.readonly_blocks_mutable_assignability(source, target, RelationKind::Assignable)
-        {
+        if !self.readonly_blocks_mutable_assignability(source, target, RelationKind::Assignable) {
             return;
         }
         if self.is_tuple_type(source)

@@ -80,8 +80,22 @@ impl Checker {
             "symbol" => self.es_symbol_type(),
             "undefined" => self.undefined_type(),
             "object" => self.non_primitive_type(),
-            // DEFER(phase-4-checker-4g): "function"/host-object typeof names.
-            // blocked-by: the global `Function` type (lib globals, P6).
+            "function" => {
+                let members = self.distributed_types(t);
+                let kept: Vec<TypeId> = members
+                    .into_iter()
+                    .filter(|&m| {
+                        let is_function = !self.get_signatures_of_type(m).is_empty()
+                            || self.get_global_type("Function").is_some_and(|fn_type| {
+                                self.is_type_subtype_of(program, m, fn_type)
+                                    || self.is_type_subtype_of(program, fn_type, m)
+                            });
+                        is_function == assume_true
+                    })
+                    .collect();
+                return self.get_union_type(&kept);
+            }
+            // DEFER(phase-4-checker-4g): host-object typeof names.
             _ => return t,
         };
         let members = self.distributed_types(t);
@@ -450,9 +464,14 @@ impl Checker {
                 if !self.is_matching_reference(program, reference, expr)
                     && self.flow_inline_level < 5
                 {
-                    if let Some(sym) =
-                        resolve_name(program, expr, program.arena().text(expr), SymbolFlags::VALUE, false, None)
-                    {
+                    if let Some(sym) = resolve_name(
+                        program,
+                        expr,
+                        program.arena().text(expr),
+                        SymbolFlags::VALUE,
+                        false,
+                        None,
+                    ) {
                         if self.is_constant_variable(program, sym) {
                             let sym_rec = program.symbol(sym);
                             if let Some(decl) = sym_rec.value_declaration {
@@ -467,7 +486,11 @@ impl Checker {
                                             if self.is_constant_reference(program, reference) {
                                                 self.flow_inline_level += 1;
                                                 let result = self.narrow_type_at_condition(
-                                                    program, reference, t, init, assume_true,
+                                                    program,
+                                                    reference,
+                                                    t,
+                                                    init,
+                                                    assume_true,
                                                 );
                                                 self.flow_inline_level -= 1;
                                                 return result;
@@ -527,10 +550,7 @@ impl Checker {
         let Some(signature) = self.get_effects_signature(program, call_expression) else {
             return t;
         };
-        let Some(predicate) = self
-            .get_type_predicate_of_signature(signature)
-            .cloned()
-        else {
+        let Some(predicate) = self.get_type_predicate_of_signature(signature).cloned() else {
             return t;
         };
         self.narrow_type_by_type_predicate(
@@ -586,9 +606,7 @@ impl Checker {
         &self,
         signature: super::signatures::SignatureId,
     ) -> Option<&TypePredicateInfo> {
-        self.signature(signature)
-            .resolved_type_predicate
-            .as_ref()
+        self.signature(signature).resolved_type_predicate.as_ref()
     }
 
     // Narrows by a binary condition; 4f handles `typeof x === "<name>"`.
@@ -617,7 +635,8 @@ impl Checker {
                         .flags()
                         .contains(TypeFlags::STRING_LITERAL)
                     {
-                        let name = super::late_binding::get_property_name_from_type(self, value_type);
+                        let name =
+                            super::late_binding::get_property_name_from_type(self, value_type);
                         return self.narrow_type_by_in(t, &name, assume_true);
                     }
                     if arena.kind(d.left) == Kind::StringLiteral {
@@ -633,26 +652,20 @@ impl Checker {
         }
         if op == Kind::AmpersandAmpersandToken {
             if assume_true {
-                let t_left =
-                    self.narrow_type_at_condition(program, reference, t, left, true);
+                let t_left = self.narrow_type_at_condition(program, reference, t, left, true);
                 return self.narrow_type_at_condition(program, reference, t_left, right, true);
             }
-            let t_left =
-                self.narrow_type_at_condition(program, reference, t, left, false);
-            let t_right =
-                self.narrow_type_at_condition(program, reference, t, right, false);
+            let t_left = self.narrow_type_at_condition(program, reference, t, left, false);
+            let t_right = self.narrow_type_at_condition(program, reference, t, right, false);
             return self.get_union_type(&[t_left, t_right]);
         }
         if op == Kind::BarBarToken {
             if assume_true {
-                let t_left =
-                    self.narrow_type_at_condition(program, reference, t, left, true);
-                let t_right =
-                    self.narrow_type_at_condition(program, reference, t, right, true);
+                let t_left = self.narrow_type_at_condition(program, reference, t, left, true);
+                let t_right = self.narrow_type_at_condition(program, reference, t, right, true);
                 return self.get_union_type(&[t_left, t_right]);
             }
-            let t_left =
-                self.narrow_type_at_condition(program, reference, t, left, false);
+            let t_left = self.narrow_type_at_condition(program, reference, t, left, false);
             return self.narrow_type_at_condition(program, reference, t_left, right, false);
         }
         let is_equality = matches!(
@@ -662,8 +675,10 @@ impl Checker {
                 | Kind::ExclamationEqualsEqualsToken
                 | Kind::ExclamationEqualsToken
         );
+        if op == Kind::InstanceOfKeyword {
+            return self.narrow_type_by_instanceof(program, reference, t, expr, assume_true);
+        }
         if !is_equality {
-            // DEFER(phase-4-checker-4g): `instanceof` binary flow.
             return t;
         }
         let negated = matches!(
@@ -726,12 +741,24 @@ impl Checker {
         }
         if is_boolean_literal(program, right) && !is_access_expression(program, left) {
             return self.narrow_type_by_boolean_comparison(
-                program, reference, t, left, right, op, assume_true,
+                program,
+                reference,
+                t,
+                left,
+                right,
+                op,
+                assume_true,
             );
         }
         if is_boolean_literal(program, left) && !is_access_expression(program, right) {
             return self.narrow_type_by_boolean_comparison(
-                program, reference, t, right, left, op, assume_true,
+                program,
+                reference,
+                t,
+                right,
+                left,
+                op,
+                assume_true,
             );
         }
         t
@@ -1088,10 +1115,10 @@ impl Checker {
         });
         let start = data.clause_start.max(0) as usize;
         let end = (data.clause_end.max(0) as usize).min(witnesses.len());
-        let has_default = start == end
-            || default_index.is_some_and(|i| i >= start && i < end);
+        let has_default = start == end || default_index.is_some_and(|i| i >= start && i < end);
         if has_default {
-            return self.narrow_type_by_switch_on_typeof_default(program, t, start, end, &witnesses);
+            return self
+                .narrow_type_by_switch_on_typeof_default(program, t, start, end, &witnesses);
         }
         let mut narrowed = Vec::new();
         for w in &witnesses[start..end] {
@@ -1130,10 +1157,7 @@ impl Checker {
             .filter(|&m| {
                 outside.iter().all(|&w| {
                     let narrowed = self.narrow_type_by_typeof(program, m, w, true);
-                    let is_empty = self
-                        .get_type(narrowed)
-                        .flags()
-                        .contains(TypeFlags::NEVER)
+                    let is_empty = self.get_type(narrowed).flags().contains(TypeFlags::NEVER)
                         || self.distributed_types(narrowed).is_empty();
                     is_empty || narrowed != m
                 })
@@ -1546,6 +1570,178 @@ impl Checker {
         t
     }
 
+    // Narrows by an `instanceof` guard (`x instanceof Ctor`).
+    // Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof(791)
+    fn narrow_type_by_instanceof(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        t: TypeId,
+        expr: NodeId,
+        assume_true: bool,
+    ) -> TypeId {
+        let arena = program.arena();
+        let (left, right) = match arena.data(expr) {
+            NodeData::BinaryExpression(d) => (d.left, d.right),
+            _ => return t,
+        };
+        if !self.is_matching_reference(program, reference, left) {
+            return t;
+        }
+        let right_type = self.check_expression(program, right);
+        if !self.get_type(right_type).flags().intersects(TypeFlags::ANY)
+            && !self.type_has_call_or_construct_signatures(program, right_type)
+            && !self.is_type_subtype_of_global_function(program, right_type)
+        {
+            return t;
+        }
+        let instance_type = self.get_instance_type(program, right_type);
+        self.get_narrowed_type_derived(program, t, instance_type, assume_true)
+    }
+
+    // Returns the instance type created by a constructor type.
+    // Go: internal/checker/flow.go:Checker.getInstanceType(946)
+    fn get_instance_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        constructor_type: TypeId,
+    ) -> TypeId {
+        if let Some(prototype_type) = super::declared_types::get_type_of_property_of_type(
+            self,
+            program,
+            constructor_type,
+            "prototype",
+        ) {
+            if !self
+                .get_type(prototype_type)
+                .flags()
+                .intersects(TypeFlags::ANY)
+                && !self.is_empty_object_type(prototype_type)
+            {
+                return prototype_type;
+            }
+        }
+        let sigs = self.collect_construct_signatures_of_type(program, constructor_type);
+        if !sigs.is_empty() {
+            let return_types: Vec<TypeId> = sigs
+                .iter()
+                .map(|&sig| self.get_return_type_of_signature(sig))
+                .collect();
+            return self.get_union_type(&return_types);
+        }
+        self.empty_object_type()
+    }
+
+    // Reports whether `source` is derived from `target` in the inheritance hierarchy.
+    // Go: internal/checker/relater.go:Checker.isTypeDerivedFrom(4934)
+    fn is_type_derived_from(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+    ) -> bool {
+        if source == target {
+            return true;
+        }
+        if super::declared_types::get_target_type(self, source)
+            == super::declared_types::get_target_type(self, target)
+        {
+            return true;
+        }
+        if self.get_type(source).flags().contains(TypeFlags::UNION) {
+            return self
+                .distributed_types(source)
+                .into_iter()
+                .all(|m| self.is_type_derived_from(program, m, target));
+        }
+        if self.get_type(target).flags().contains(TypeFlags::UNION) {
+            return self
+                .distributed_types(target)
+                .into_iter()
+                .any(|m| self.is_type_derived_from(program, source, m));
+        }
+        if self.is_empty_object_type(target) {
+            return self
+                .get_type(source)
+                .flags()
+                .intersects(TypeFlags::OBJECT | TypeFlags::NON_PRIMITIVE);
+        }
+        if let Some(global_object) = self.get_global_type("Object") {
+            if target == global_object {
+                return self
+                    .get_type(source)
+                    .flags()
+                    .intersects(TypeFlags::OBJECT | TypeFlags::NON_PRIMITIVE)
+                    && !self.is_empty_object_type(source);
+            }
+        }
+        let target_type = super::declared_types::get_target_type(self, target);
+        super::declared_types::has_base_type(self, source, target_type)
+    }
+
+    // `getNarrowedType` with prototype/`instanceof` derived-type filtering.
+    // Go: internal/checker/flow.go:Checker.getNarrowedType(826)
+    fn get_narrowed_type_derived(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        candidate: TypeId,
+        assume_true: bool,
+    ) -> TypeId {
+        if !assume_true {
+            if t == candidate {
+                return self.never_type();
+            }
+            if self.get_type(t).flags().contains(TypeFlags::UNION) {
+                let members: Vec<TypeId> = self
+                    .distributed_types(t)
+                    .into_iter()
+                    .filter(|&m| {
+                        m != candidate && !self.is_type_derived_from(program, m, candidate)
+                    })
+                    .collect();
+                return self.get_union_type(&members);
+            }
+            if self.is_type_derived_from(program, t, candidate) {
+                return self.never_type();
+            }
+            return t;
+        }
+        if self
+            .get_type(t)
+            .flags()
+            .intersects(TypeFlags::ANY | TypeFlags::UNKNOWN)
+        {
+            return candidate;
+        }
+        if t == candidate {
+            return candidate;
+        }
+        if self.get_type(t).flags().contains(TypeFlags::UNION) {
+            let members: Vec<TypeId> = self
+                .distributed_types(t)
+                .into_iter()
+                .filter_map(|m| {
+                    if m == candidate || self.is_type_derived_from(program, m, candidate) {
+                        Some(m)
+                    } else if self.is_type_derived_from(program, candidate, m) {
+                        Some(candidate)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            return self.get_union_type(&members);
+        }
+        if self.is_type_derived_from(program, t, candidate) {
+            return t;
+        }
+        if self.is_type_derived_from(program, candidate, t) {
+            return candidate;
+        }
+        self.never_type()
+    }
+
     // Simplified `getNarrowedType` for type-predicate matching (true/false arms).
     // Go: internal/checker/flow.go:Checker.getNarrowedType(826)
     fn get_narrowed_type_simple(
@@ -1624,9 +1820,7 @@ fn is_boolean_literal(program: &dyn BoundProgram, node: NodeId) -> bool {
 fn is_access_expression(program: &dyn BoundProgram, node: NodeId) -> bool {
     matches!(
         program.arena().kind(node),
-        Kind::PropertyAccessExpression
-            | Kind::ElementAccessExpression
-            | Kind::NonNullExpression
+        Kind::PropertyAccessExpression | Kind::ElementAccessExpression | Kind::NonNullExpression
     )
 }
 

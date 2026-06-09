@@ -826,8 +826,7 @@ fn resolve_base_types_of_class(
     let Some(base_type_node) = base_type_node else {
         return Vec::new();
     };
-    let base_constructor_type =
-        checker.get_base_constructor_type_of_class(program, class_type);
+    let base_constructor_type = checker.get_base_constructor_type_of_class(program, class_type);
     if base_constructor_type == checker.undefined_type()
         || base_constructor_type == checker.error_type()
     {
@@ -840,13 +839,7 @@ fn resolve_base_types_of_class(
     }
     let base_type = if let Some(sym) = checker.get_type(static_base).symbol {
         if program.symbol(sym).flags.contains(SymbolFlags::CLASS) {
-            resolve_class_extends_instance_type(
-                checker,
-                program,
-                base_type_node,
-                sym,
-                globals,
-            )
+            resolve_class_extends_instance_type(checker, program, base_type_node, sym, globals)
         } else {
             let constructors = checker.get_instantiated_constructors_for_type_arguments(
                 program,
@@ -1009,7 +1002,7 @@ fn resolve_base_types(
 
 // Returns the target of a class/interface type reference.
 // Go: internal/checker/checker.go:getTargetType
-fn get_target_type(checker: &Checker, t: TypeId) -> TypeId {
+pub(crate) fn get_target_type(checker: &Checker, t: TypeId) -> TypeId {
     checker
         .get_type(t)
         .as_object()
@@ -1265,14 +1258,7 @@ fn try_evaluate_const_variable_reference(
 ) -> Option<tsgo_evaluator::Result> {
     use tsgo_evaluator::{new_evaluator, new_result, EvalValue, OuterExpressionKinds};
     let globals = program.globals();
-    let sym = resolve_name(
-        program,
-        location,
-        name,
-        SymbolFlags::VALUE,
-        true,
-        globals,
-    )?;
+    let sym = resolve_name(program, location, name, SymbolFlags::VALUE, true, globals)?;
     let decl = program.symbol(sym).value_declaration?;
     let init = match program.arena().data(decl) {
         NodeData::VariableDeclaration(d) => d.initializer?,
@@ -1341,7 +1327,9 @@ pub(crate) fn evaluate_enum_member_initializer(
     use tsgo_evaluator::{new_evaluator, OuterExpressionKinds};
     let init = match program.arena().data(member) {
         NodeData::EnumMember(d) => d.initializer,
-        _ => return tsgo_evaluator::new_result(tsgo_evaluator::EvalValue::None, false, false, false),
+        _ => {
+            return tsgo_evaluator::new_result(tsgo_evaluator::EvalValue::None, false, false, false)
+        }
     };
     let Some(init) = init else {
         return tsgo_evaluator::new_result(tsgo_evaluator::EvalValue::None, false, false, false);
@@ -1832,10 +1820,7 @@ fn get_target_of_alias_declaration(
 /// Resolves `export = <entity>` to the exported symbol (Go's
 /// `getTargetOfExportAssignment` reachable subset: entity-name expressions).
 // Go: internal/checker/checker.go:Checker.getTargetOfExportAssignment
-fn get_target_of_export_assignment(
-    program: &dyn BoundProgram,
-    node: NodeId,
-) -> Option<SymbolId> {
+fn get_target_of_export_assignment(program: &dyn BoundProgram, node: NodeId) -> Option<SymbolId> {
     let NodeData::ExportAssignment(d) = program.arena().data(node) else {
         return None;
     };
@@ -1968,8 +1953,7 @@ fn resolve_es_module_symbol(
     // indirection are wrapped so the import is not directly callable (Go's
     // `resolveESModuleSymbol` reachable subset: `hasSignatures` and
     // `getPropertyOfTypeEx(..., default)`).
-    let has_default_export =
-        get_export_of_module(checker, program, symbol, "default").is_some();
+    let has_default_export = get_export_of_module(checker, program, symbol, "default").is_some();
     let should_wrap = symbol != module_symbol
         || has_default_export
         || !get_signatures_of_symbol(checker, program, symbol).is_empty()
@@ -1990,10 +1974,8 @@ fn create_default_property_wrapper_for_module(
     symbol: SymbolId,
 ) -> TypeId {
     use tsgo_ast::symbol::INTERNAL_SYMBOL_NAME_DEFAULT;
-    let default_sym = checker.new_es_module_clone_symbol(
-        INTERNAL_SYMBOL_NAME_DEFAULT,
-        SymbolFlags::ALIAS,
-    );
+    let default_sym =
+        checker.new_es_module_clone_symbol(INTERNAL_SYMBOL_NAME_DEFAULT, SymbolFlags::ALIAS);
     let resolved = resolve_symbol(checker, program, symbol);
     checker.alias_targets.insert(default_sym, Some(resolved));
     checker.value_symbol_links.get(default_sym).name_type =
@@ -2028,9 +2010,8 @@ fn clone_type_as_module_symbol(
         .as_object()
         .cloned()
         .unwrap_or_default();
-    checker.value_symbol_links.get(clone).resolved_type = Some(
-        checker.new_object_type(ObjectFlags::ANONYMOUS, Some(clone), object),
-    );
+    checker.value_symbol_links.get(clone).resolved_type =
+        Some(checker.new_object_type(ObjectFlags::ANONYMOUS, Some(clone), object));
     clone
 }
 
@@ -2221,8 +2202,7 @@ fn get_type_of_func_class_enum_module(
     let properties: Vec<SymbolId> = members.values().copied().collect();
     let mut index_infos = Vec::new();
     if sym.flags.intersects(SymbolFlags::CLASS) {
-        let type_param_map =
-            build_type_parameter_name_map(checker, program, &sym.declarations);
+        let type_param_map = build_type_parameter_name_map(checker, program, &sym.declarations);
         index_infos = collect_index_infos_of_members(
             checker,
             program,
@@ -2440,8 +2420,12 @@ fn get_signature_from_declaration(
     } else {
         match return_type_node {
             Some(node) if program.arena().kind(node) == Kind::TypePredicate => {
-                resolved_type_predicate =
-                    create_type_predicate_from_type_predicate_node(checker, program, node, &parameters);
+                resolved_type_predicate = create_type_predicate_from_type_predicate_node(
+                    checker,
+                    program,
+                    node,
+                    &parameters,
+                );
                 checker.boolean_type()
             }
             Some(node) => get_type_from_type_node(checker, program, node, None),
@@ -2501,9 +2485,10 @@ fn create_type_predicate_from_type_predicate_node(
         return None;
     }
     let predicate_name = program.arena().text(d.parameter_name).to_string();
-    let parameter_index = parameters.iter().position(|&sym| {
-        program.symbol(sym).name == predicate_name
-    })? as i32;
+    let parameter_index = parameters
+        .iter()
+        .position(|&sym| program.symbol(sym).name == predicate_name)?
+        as i32;
     let predicate_type = d
         .type_node
         .map(|type_node| get_type_from_type_node(checker, program, type_node, None));
@@ -2541,8 +2526,7 @@ fn get_signature_type_parameters(
                 .parent(declaration)
                 .and_then(|parent| program.symbol_of_node(parent))
                 .map(|class_sym| {
-                    let class_type =
-                        get_declared_type_of_symbol(checker, program, class_sym, None);
+                    let class_type = get_declared_type_of_symbol(checker, program, class_sym, None);
                     checker
                         .get_type(class_type)
                         .as_object()
@@ -2716,11 +2700,7 @@ fn get_type_of_synthesized_symbol(
     resolved
 }
 
-fn declaration_of_kind(
-    program: &dyn BoundProgram,
-    symbol: SymbolId,
-    kind: Kind,
-) -> Option<NodeId> {
+fn declaration_of_kind(program: &dyn BoundProgram, symbol: SymbolId, kind: Kind) -> Option<NodeId> {
     program
         .symbol(symbol)
         .declarations
@@ -2735,9 +2715,8 @@ fn auto_accessor_property_declaration(
     program: &dyn BoundProgram,
     symbol: SymbolId,
 ) -> Option<NodeId> {
-    declaration_of_kind(program, symbol, Kind::PropertyDeclaration).filter(|&decl| {
-        is_auto_accessor_property_declaration(program.arena(), decl)
-    })
+    declaration_of_kind(program, symbol, Kind::PropertyDeclaration)
+        .filter(|&decl| is_auto_accessor_property_declaration(program.arena(), decl))
 }
 
 fn is_auto_accessor_property_declaration(arena: &NodeArena, node: NodeId) -> bool {
@@ -2768,9 +2747,7 @@ pub(crate) fn get_explicit_accessor_return_type(
     let auto_accessor = auto_accessor_property_declaration(program, symbol);
     getter
         .and_then(|g| get_annotated_accessor_type(checker, program, g, globals))
-        .or_else(|| {
-            setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals))
-        })
+        .or_else(|| setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals)))
         .or_else(|| {
             auto_accessor.and_then(|a| get_annotated_accessor_type(checker, program, a, globals))
         })
@@ -2779,16 +2756,22 @@ pub(crate) fn get_explicit_accessor_return_type(
 // Returns the type-annotation node of an accessor declaration, if any (Go's
 // `getAnnotatedAccessorTypeNode`).
 // Go: internal/checker/checker.go:Checker.getAnnotatedAccessorTypeNode(19961)
-fn get_annotated_accessor_type_node(program: &dyn BoundProgram, accessor: NodeId) -> Option<NodeId> {
+fn get_annotated_accessor_type_node(
+    program: &dyn BoundProgram,
+    accessor: NodeId,
+) -> Option<NodeId> {
     match program.arena().data(accessor) {
         NodeData::GetAccessorDeclaration(d) => d.type_node,
         NodeData::PropertyDeclaration(d) => d.type_node,
-        NodeData::SetAccessorDeclaration(d) => d.parameters.nodes.first().and_then(|&param| {
-            match program.arena().data(param) {
-                NodeData::ParameterDeclaration(p) => p.type_node,
-                _ => None,
-            }
-        }),
+        NodeData::SetAccessorDeclaration(d) => {
+            d.parameters
+                .nodes
+                .first()
+                .and_then(|&param| match program.arena().data(param) {
+                    NodeData::ParameterDeclaration(p) => p.type_node,
+                    _ => None,
+                })
+        }
         _ => None,
     }
 }
@@ -2803,7 +2786,9 @@ fn get_annotated_accessor_type(
     globals: Option<&SymbolTable>,
 ) -> Option<TypeId> {
     let type_node = get_annotated_accessor_type_node(program, accessor)?;
-    Some(get_type_from_type_node(checker, program, type_node, globals))
+    Some(get_type_from_type_node(
+        checker, program, type_node, globals,
+    ))
 }
 
 // Resolves the read type of an accessor symbol: getter annotation, else setter
@@ -2834,8 +2819,7 @@ pub fn get_type_of_accessors(
         t = setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals));
     }
     if t.is_none() {
-        t = auto_accessor
-            .and_then(|a| get_annotated_accessor_type(checker, program, a, globals));
+        t = auto_accessor.and_then(|a| get_annotated_accessor_type(checker, program, a, globals));
     }
     if t.is_none() {
         if let Some(getter) = getter {
@@ -2968,7 +2952,8 @@ pub fn get_write_type_of_accessors(
     if setter.is_none() {
         setter = auto_accessor_property_declaration(program, symbol);
     }
-    let mut write_type = setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals));
+    let mut write_type =
+        setter.and_then(|s| get_annotated_accessor_type(checker, program, s, globals));
     checker.accessors_write_type_resolving.remove(&symbol);
     if checker.accessor_write_type_resolution_cyclic {
         let sym_name = super::nodebuilder::symbol_to_string(checker, program, symbol);
@@ -3034,12 +3019,15 @@ fn get_type_of_variable_or_property(
         NodeData::GetAccessorDeclaration(d) => d.type_node,
         // A setter's declared type is its value-parameter annotation (Go's
         // `getAnnotatedAccessorType` / `getEffectiveSetAccessorTypeAnnotationNode`).
-        NodeData::SetAccessorDeclaration(d) => d.parameters.nodes.first().and_then(|&param| {
-            match program.arena().data(param) {
-                NodeData::ParameterDeclaration(p) => p.type_node,
-                _ => None,
-            }
-        }),
+        NodeData::SetAccessorDeclaration(d) => {
+            d.parameters
+                .nodes
+                .first()
+                .and_then(|&param| match program.arena().data(param) {
+                    NodeData::ParameterDeclaration(p) => p.type_node,
+                    _ => None,
+                })
+        }
         // A parameter symbol's type comes from its annotation (Go's
         // `getTypeOfParameter` -> `getTypeOfSymbol` -> annotation), so a
         // signature's parameter types resolve for call checking (4q).
@@ -4095,9 +4083,9 @@ fn is_valid_es_symbol_declaration(program: &dyn BoundProgram, node: NodeId) -> b
                 )
                 && arena.parent(node).is_some_and(|list| {
                     arena.kind(list) == Kind::VariableDeclarationList
-                        && arena.parent(list).is_some_and(|stmt| {
-                            arena.kind(stmt) == Kind::VariableStatement
-                        })
+                        && arena
+                            .parent(list)
+                            .is_some_and(|stmt| arena.kind(stmt) == Kind::VariableStatement)
                 })
         }
         Kind::PropertyDeclaration => {
@@ -4133,14 +4121,9 @@ pub(crate) fn get_es_symbol_like_type_for_node(
         return cached;
     }
     let sym = program.symbol(symbol);
-    let name = format!(
-        "{INTERNAL_SYMBOL_NAME_PREFIX}@{}@{}",
-        sym.name, symbol.0
-    );
+    let name = format!("{INTERNAL_SYMBOL_NAME_PREFIX}@{}@{}", sym.name, symbol.0);
     let unique_type = checker.new_unique_es_symbol_type(symbol, &name);
-    checker
-        .unique_es_symbol_types
-        .insert(symbol, unique_type);
+    checker.unique_es_symbol_types.insert(symbol, unique_type);
     unique_type
 }
 
@@ -4234,10 +4217,8 @@ fn parse_tuple_element_type(
             }
         }
         NodeData::OptionalType(d) => {
-            let element_type =
-                get_type_from_type_node(checker, program, d.type_node, globals);
-            let widened =
-                checker.get_union_type(&[element_type, checker.undefined_type()]);
+            let element_type = get_type_from_type_node(checker, program, d.type_node, globals);
+            let widened = checker.get_union_type(&[element_type, checker.undefined_type()]);
             ParsedTupleElement {
                 element_type: widened,
                 optional: true,

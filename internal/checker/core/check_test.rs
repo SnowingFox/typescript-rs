@@ -2670,9 +2670,9 @@ fn class_incorrectly_extends_base_class_reports_diagnostic() {
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, 2416);
     assert!(
-        diags[0]
-            .message
-            .contains("Property 'x' in type 'D' is not assignable to the same property in base type 'B'."),
+        diags[0].message.contains(
+            "Property 'x' in type 'D' is not assignable to the same property in base type 'B'."
+        ),
         "unexpected message: {}",
         diags[0].message
     );
@@ -2775,9 +2775,9 @@ fn class_extends_and_implements_both_relations_checked() {
     assert_eq!(diags.len(), 2);
     assert_eq!(diags[0].code, 2416);
     assert!(
-        diags[0]
-            .message
-            .contains("Property 'x' in type 'D' is not assignable to the same property in base type 'B'."),
+        diags[0].message.contains(
+            "Property 'x' in type 'D' is not assignable to the same property in base type 'B'."
+        ),
         "unexpected extends message: {}",
         diags[0].message
     );
@@ -12113,10 +12113,7 @@ fn nullish_coalesce_null_left_reports_2871() {
     let diags = c.get_diagnostics(root);
     assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
     assert_eq!(diags[0].code, 2871);
-    assert_eq!(
-        diags[0].message,
-        "This expression is always nullish."
-    );
+    assert_eq!(diags[0].message, "This expression is always nullish.");
 }
 
 // Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperandLeft(12880)
@@ -12128,10 +12125,7 @@ fn nullish_coalesce_undefined_left_reports_2871() {
     let diags = c.get_diagnostics(root);
     assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
     assert_eq!(diags[0].code, 2871);
-    assert_eq!(
-        diags[0].message,
-        "This expression is always nullish."
-    );
+    assert_eq!(diags[0].message, "This expression is always nullish.");
 }
 
 // Go: internal/checker/checker.go:Checker.checkNullishCoalesceOperandLeft(12880)
@@ -12265,7 +12259,10 @@ fn bitwise_xor_on_boolean_literals_reports_2447() {
 // Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression(12316)
 #[test]
 fn bitwise_or_compound_on_boolean_literals_reports_2447() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "var a = true;\na |= false;"));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "var a = true;\na |= false;",
+    ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -12996,10 +12993,7 @@ fn object_spread_never_right_operand_returns_left() {
 // Go: internal/checker/checker.go:Checker.getSpreadType(13302)
 #[test]
 fn object_spread_any_operand_yields_any() {
-    let p = StubProgram::parse_and_bind(
-        "/a.ts",
-        "declare const a: any;\nconst o = { ...a };\no;",
-    );
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const a: any;\nconst o = { ...a };\no;");
     let usage = expr_stmt_expression(&p, 2);
     let mut c = Checker::new();
     let t = c.check_expression(&p, usage);
@@ -13053,8 +13047,8 @@ fn const_assertion_on_spread_object_literal_marks_spread_property_readonly() {
     let usage = expr_stmt_expression(&p, 2);
     let mut c = Checker::new();
     let t = c.check_expression(&p, usage);
-    let x = crate::core::declared_types::get_property_of_type(&c, t, "x")
-        .expect("spread property `x`");
+    let x =
+        crate::core::declared_types::get_property_of_type(&c, t, "x").expect("spread property `x`");
     assert!(
         c.synthesized_symbol_check_flags(x)
             .contains(tsgo_ast::CheckFlags::READONLY),
@@ -13150,10 +13144,7 @@ fn object_spread_generic_type_parameter_alone_yields_type_parameter() {
     };
     let mut c = Checker::new();
     let t = c.check_expression(&p, usage);
-    assert_eq!(
-        crate::core::nodebuilder::type_to_string(&mut c, &p, t),
-        "T"
-    );
+    assert_eq!(crate::core::nodebuilder::type_to_string(&mut c, &p, t), "T");
 }
 
 // Go: internal/checker/checker.go:Checker.getSpreadType(13301)
@@ -13202,10 +13193,7 @@ fn object_spread_unknown_operand_reports_2698() {
 // Go: internal/checker/checker.go:Checker.checkObjectLiteral(13165) / getPropertyNameFromType
 #[test]
 fn object_literal_string_literal_computed_name_creates_named_property() {
-    let p = StubProgram::parse_and_bind(
-        "/a.ts",
-        "const o = { ['foo']: 1 };\no.foo;",
-    );
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { ['foo']: 1 };\no.foo;");
     let access = expr_stmt_expression(&p, 1);
     let mut c = Checker::new();
     let t = c.check_expression(&p, access);
@@ -13228,8 +13216,7 @@ fn object_literal_number_literal_computed_name_creates_named_property() {
     );
     let prop = crate::core::declared_types::get_property_of_type(&c, t, "0")
         .expect("literal computed name `0` is a named property");
-    let prop_type =
-        crate::core::declared_types::get_type_of_symbol(&mut c, &p, prop, p.globals());
+    let prop_type = crate::core::declared_types::get_type_of_symbol(&mut c, &p, prop, p.globals());
     assert_eq!(
         crate::core::nodebuilder::type_to_string(&mut c, &p, prop_type),
         "number"
@@ -13340,10 +13327,7 @@ fn object_literal_unique_symbol_value_preserved_by_contextual_type() {
 // Go: internal/checker/checker.go:Checker.getContextualTypeForObjectLiteralElement(29596)
 #[test]
 fn object_literal_computed_name_property_value_gets_contextual_type() {
-    let p = StubProgram::parse_and_bind(
-        "/a.ts",
-        "const o: { [\"k\"]: number } = { [\"k\"]: 1 };",
-    );
+    let p = StubProgram::parse_and_bind("/a.ts", "const o: { [\"k\"]: number } = { [\"k\"]: 1 };");
     let literal = match p.arena().data(source_statements(&p)[0]) {
         NodeData::VariableStatement(d) => {
             let list = match p.arena().data(d.declaration_list) {
@@ -13479,10 +13463,7 @@ fn object_literal_get_accessor_infers_return_type_from_body() {
 // Go: internal/checker/checker.go:Checker.checkObjectLiteral(13076) (accessor arm)
 #[test]
 fn object_literal_set_accessor_member_is_writable_property() {
-    let p = StubProgram::parse_and_bind(
-        "/a.ts",
-        "const o = { set x(v: number) { } };\no.x = 1;",
-    );
+    let p = StubProgram::parse_and_bind("/a.ts", "const o = { set x(v: number) { } };\no.x = 1;");
     let literal = var_decl_initializer_batch5(&p, 0);
     let assign = expr_stmt_expression(&p, 1);
     let mut c = Checker::new();
@@ -13527,9 +13508,8 @@ fn class_accessor_assignment_uses_setter_write_type() {
 // Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors(18429)
 #[test]
 fn object_literal_accessor_assignment_uses_setter_write_type() {
-    let codes = diag_codes(
-        "const o = { get x(): number { return 1; }, set x(v: string) { } };\no.x = 1;",
-    );
+    let codes =
+        diag_codes("const o = { get x(): number { return 1; }, set x(v: string) { } };\no.x = 1;");
     assert!(
         codes.contains(&2322),
         "object-literal accessor assignment must use the setter parameter type; got {codes:?}"
@@ -13549,9 +13529,8 @@ fn getter_without_return_reports_2378() {
 // Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2946)
 #[test]
 fn accessor_abstract_mismatch_reports_2676() {
-    let codes = diag_codes(
-        "abstract class C {\n  abstract get x(): number;\n  set x(v: number) { }\n}",
-    );
+    let codes =
+        diag_codes("abstract class C {\n  abstract get x(): number;\n  set x(v: number) { }\n}");
     assert!(
         codes.iter().filter(|&&c| c == 2676).count() >= 2,
         "expected TS2676 on getter and setter when abstractness mismatches; got {codes:?}"
@@ -13603,9 +13582,7 @@ fn class_accessor_computed_name_checks_expression() {
 // Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2933) / checkComputedPropertyName
 #[test]
 fn class_accessor_computed_name_non_indexable_reports_2464() {
-    let codes = diag_codes(
-        "const k: boolean = true;\nclass C { get [k](): number { return 1; } }",
-    );
+    let codes = diag_codes("const k: boolean = true;\nclass C { get [k](): number { return 1; } }");
     assert!(
         codes.contains(&2464),
         "expected TS2464 computed accessor name must be string/number/symbol; got {codes:?}"
@@ -13803,9 +13780,8 @@ fn protected_getter_private_setter_is_accessible() {
 // Go: internal/checker/checker.go:Checker.checkAccessorDeclaration(2936)
 #[test]
 fn abstract_setter_concrete_getter_reports_2676() {
-    let codes = diag_codes(
-        "abstract class C {\n  abstract set x(v: number);\n  get x() { return 1; }\n}",
-    );
+    let codes =
+        diag_codes("abstract class C {\n  abstract set x(v: number);\n  get x() { return 1; }\n}");
     assert!(
         codes.iter().filter(|&&c| c == 2676).count() >= 2,
         "expected TS2676 when abstractness mismatches on setter vs getter; got {codes:?}"
@@ -13841,7 +13817,8 @@ fn object_literal_getter_circular_body_inference_reports_7024() {
 // Go: internal/checker/checker.go:Checker.getWriteTypeOfAccessors(18454)
 #[test]
 fn get_only_accessor_assignment_uses_read_type_and_reports_2322() {
-    let codes = diag_codes("class C { get x(): number { return 1; } }\nconst c = new C();\nc.x = \"\";");
+    let codes =
+        diag_codes("class C { get x(): number { return 1; } }\nconst c = new C();\nc.x = \"\";");
     assert!(
         codes.contains(&2322),
         "get-only accessor assignment must use read type as write type and reject mismatched values; got {codes:?}"
@@ -14357,7 +14334,8 @@ fn abstract_private_auto_accessor_conflict_reports_1243() {
 // Go: internal/checker/checker.go:Checker.checkObjectTypeForDuplicateDeclarations(3122)
 #[test]
 fn class_get_accessor_and_auto_accessor_duplicate_reports_2300() {
-    let count = duplicate_identifier_count("class C { get x() { return 1; } accessor x: number = 1; }");
+    let count =
+        duplicate_identifier_count("class C { get x() { return 1; } accessor x: number = 1; }");
     assert_eq!(
         count, 2,
         "get accessor plus auto-accessor with the same name must report TS2300 twice"
@@ -14636,9 +14614,8 @@ fn class_expression_static_name_reports_2699_when_use_define_for_class_fields_di
 // Checker.checkFunctionOrConstructorSymbolWorker (reportImplementationExpectedError)
 #[test]
 fn class_expression_method_instance_static_overload_mismatch_reports_2388() {
-    let codes = diag_codes(
-        "const C = class {\n  static foo(): void;\n  foo(): void;\n  foo() {}\n};",
-    );
+    let codes =
+        diag_codes("const C = class {\n  static foo(): void;\n  foo(): void;\n  foo() {}\n};");
     assert!(
         codes.contains(&2388),
         "expected TS2388 instance/static overload mismatch in a class expression; got {codes:?}"
@@ -14700,9 +14677,7 @@ fn class_static_computed_const_name_reports_2699_when_use_define_for_class_field
 // Go: internal/checker/checker.go:Checker.checkFunctionOrConstructorSymbolWorker (reportImplementationExpectedError)
 #[test]
 fn method_instance_static_overload_mismatch_reports_2388() {
-    let codes = diag_codes(
-        "class C {\n  static foo(): void;\n  foo(): void;\n  foo() {}\n}",
-    );
+    let codes = diag_codes("class C {\n  static foo(): void;\n  foo(): void;\n  foo() {}\n}");
     assert!(
         codes.contains(&2388),
         "expected TS2388 instance/static overload mismatch; got {codes:?}"
@@ -14939,8 +14914,15 @@ fn class_instance_extends_failure_skips_static_side_check() {
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
-    assert_eq!(diags.len(), 1, "expected only instance extends error; got {diags:?}");
-    assert_eq!(diags[0].code, 2416, "static-side 2417 must be skipped when instance extends fails");
+    assert_eq!(
+        diags.len(),
+        1,
+        "expected only instance extends error; got {diags:?}"
+    );
+    assert_eq!(
+        diags[0].code, 2416,
+        "static-side 2417 must be skipped when instance extends fails"
+    );
 }
 
 // ---- T1-E batch 57: override modifiers, base accessibility, abstract members, property init ----
@@ -15238,7 +15220,10 @@ fn parameter_property_missing_override_reports_4115() {
 // Go: internal/checker/checker.go:Checker.getBaseConstructorTypeOfClass(16843)
 #[test]
 fn class_extends_non_constructor_expression_reports_2507() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "class D extends 42 {}"));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class D extends 42 {}",
+    ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -15396,7 +15381,10 @@ fn interface_extends_non_entity_name_expression_reports_2499() {
 // Go: internal/checker/checker.go:Checker.resolveBaseTypesOfInterface(19367)
 #[test]
 fn interface_extends_primitive_type_reports_2312() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "interface I extends number {}"));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I extends number {}",
+    ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -16091,9 +16079,7 @@ fn new_protected_base_constructor_in_subclass_no_2674() {
 // Go: internal/checker/checker.go:Checker.isConstructorAccessible(8639)
 #[test]
 fn new_protected_constructor_in_unrelated_function_reports_2674() {
-    let codes = diag_codes(
-        "class C { protected constructor() {} }\nfunction f() { new C(); }",
-    );
+    let codes = diag_codes("class C { protected constructor() {} }\nfunction f() { new C(); }");
     assert!(
         codes.contains(&2674),
         "expected TS2674 for protected constructor outside class hierarchy; got {codes:?}"
@@ -16142,10 +16128,7 @@ fn new_wrong_constructor_arity_reports_2554() {
     let diags = c.get_diagnostics(root);
     assert_eq!(diags.len(), 1, "expected one 2554, got {diags:?}");
     assert_eq!(diags[0].code, 2554);
-    assert_eq!(
-        diags[0].message,
-        "Expected 1 arguments, but got 0."
-    );
+    assert_eq!(diags[0].message, "Expected 1 arguments, but got 0.");
 }
 
 // Go: internal/checker/checker.go:Checker.resolveNewExpression -> chooseOverload (2769)
@@ -16230,10 +16213,7 @@ fn tagged_template_wrong_arity_reports_2554() {
     let diags = c.get_diagnostics(root);
     assert_eq!(diags.len(), 1, "expected one 2554, got {diags:?}");
     assert_eq!(diags[0].code, 2554);
-    assert_eq!(
-        diags[0].message,
-        "Expected 0 arguments, but got 1."
-    );
+    assert_eq!(diags[0].message, "Expected 0 arguments, but got 1.");
 }
 
 // Go: internal/checker/checker.go:Checker.resolveTaggedTemplateExpression -> invocationError (2349)
@@ -16271,10 +16251,7 @@ fn tagged_template_overloaded_no_match_reports_2769() {
 // Go: internal/checker/checker.go:Checker.resolveCallExpression -> invocationError (2349)
 #[test]
 fn call_non_callable_value_reports_2349() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
-        "/a.ts",
-        "const x = 1;\nx();",
-    ));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "const x = 1;\nx();"));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -16286,10 +16263,7 @@ fn call_non_callable_value_reports_2349() {
 // Go: internal/checker/checker.go:Checker.resolveCallExpression (2348)
 #[test]
 fn call_class_value_without_new_reports_2348() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
-        "/a.ts",
-        "class C {}\nC();",
-    ));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "class C {}\nC();"));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -16417,10 +16391,7 @@ fn element_access_number_literal_missing_property_reports_2339() {
     let diags = c.get_diagnostics(root);
     assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
     assert_eq!(diags[0].code, 2339);
-    assert_eq!(
-        diags[0].message,
-        "Property '0' does not exist on type 'O'."
-    );
+    assert_eq!(diags[0].message, "Property '0' does not exist on type 'O'.");
 }
 
 // Go: internal/checker/checker.go:Checker.invocationErrorDetails (2758 + 2349)
@@ -16541,8 +16512,7 @@ fn new_non_void_function_reports_2350_message() {
     assert!(
         diags.iter().any(|d| {
             d.code == 2350
-                && d.message
-                    == "Only a void function can be called with the 'new' keyword."
+                && d.message == "Only a void function can be called with the 'new' keyword."
         }),
         "expected TS2350 with canonical message; got {diags:?}"
     );
@@ -16555,10 +16525,7 @@ fn new_void_function_no_2350_when_no_implicit_any_disabled() {
         no_implicit_any: Tristate::False,
         ..CompilerOptions::default()
     };
-    let codes = diag_codes_with_options(
-        "function fnVoid(): void {}\nnew fnVoid();",
-        options,
-    );
+    let codes = diag_codes_with_options("function fnVoid(): void {}\nnew fnVoid();", options);
     assert!(
         !codes.contains(&2350),
         "void-returning function must not report TS2350; got {codes:?}"
@@ -16999,7 +16966,8 @@ fn namespace_import_resolve_alias_targets_wrapped_clone() {
         "namespace import of export= callable must resolve to a wrapped clone"
     );
     assert!(
-        c.resolved_symbol_flags(view.as_ref(), target).intersects(tsgo_ast::SymbolFlags::VALUE),
+        c.resolved_symbol_flags(view.as_ref(), target)
+            .intersects(tsgo_ast::SymbolFlags::VALUE),
         "wrapped clone flags={:?}",
         c.resolved_symbol_flags(view.as_ref(), target)
     );
@@ -17488,15 +17456,15 @@ fn assignability_chain_nested_array_element_collapses_to_dotted_message() {
     assert_eq!(d.message_chain.len(), 1);
     let items = &d.message_chain[0];
     assert_eq!(items.code, 2326);
-    assert_eq!(
-        items.message,
-        "Types of property 'items' are incompatible."
-    );
+    assert_eq!(items.message, "Types of property 'items' are incompatible.");
     fn chain_contains_leaf(chain: &DiagnosticMessageChain, code: i32, text: &str) -> bool {
         if chain.code == code && chain.message == text {
             return true;
         }
-        chain.next.iter().any(|n| chain_contains_leaf(n, code, text))
+        chain
+            .next
+            .iter()
+            .any(|n| chain_contains_leaf(n, code, text))
     }
     assert!(
         chain_contains_leaf(
@@ -18081,9 +18049,7 @@ fn assignability_chain_tuple_to_array_element_mismatch_reports_2322() {
 fn assignability_readonly_tuple_to_mutable_array_reports_4104() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        &format!(
-            "{BATCH_88_ARRAY_STUBS}const src = [1, 2] as const;\nconst o: number[] = src;"
-        ),
+        &format!("{BATCH_88_ARRAY_STUBS}const src = [1, 2] as const;\nconst o: number[] = src;"),
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -18108,9 +18074,7 @@ interface ReadonlyArray<T> { readonly [n: number]: T; readonly length: number; }
 fn assignability_chain_array_to_empty_tuple_reports_2621() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        &format!(
-            "{BATCH_89_ARRAY_STUBS}declare const src: number[];\nconst o: [] = src;"
-        ),
+        &format!("{BATCH_89_ARRAY_STUBS}declare const src: number[];\nconst o: [] = src;"),
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -18131,9 +18095,7 @@ fn assignability_chain_array_to_empty_tuple_reports_2621() {
 fn assignability_chain_array_to_single_element_tuple_reports_2620() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        &format!(
-            "{BATCH_89_ARRAY_STUBS}declare const src: number[];\nconst o: [number] = src;"
-        ),
+        &format!("{BATCH_89_ARRAY_STUBS}declare const src: number[];\nconst o: [number] = src;"),
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -18458,10 +18420,7 @@ fn assignability_chain_optional_first_element_reports_2623() {
 // Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to enum, 2628)
 #[test]
 fn assign_to_enum_identifier_reports_2628() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
-        "/a.ts",
-        "enum E { A }\nE = 1;",
-    ));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "enum E { A }\nE = 1;"));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -18476,10 +18435,7 @@ fn assign_to_enum_identifier_reports_2628() {
 // Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to class, 2629)
 #[test]
 fn assign_to_class_identifier_reports_2629() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
-        "/a.ts",
-        "class C {}\nC = 1;",
-    ));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "class C {}\nC = 1;"));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -18646,10 +18602,7 @@ fn assign_to_named_import_binding_reports_2632() {
 // Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to const, 2588)
 #[test]
 fn assign_to_const_identifier_reports_2588() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
-        "/a.ts",
-        "const x = 1;\nx = 2;",
-    ));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "const x = 1;\nx = 2;"));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -18664,10 +18617,7 @@ fn assign_to_const_identifier_reports_2588() {
 // Go: internal/checker/checker.go:Checker.checkIdentifier (compound assignment to enum, 2628)
 #[test]
 fn prefix_increment_on_enum_identifier_reports_2628() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
-        "/a.ts",
-        "enum E { A }\n++E;",
-    ));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "enum E { A }\n++E;"));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -18722,10 +18672,7 @@ fn assign_to_readonly_property_reports_2540() {
 // Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to enum, 2628)
 #[test]
 fn postfix_increment_on_enum_identifier_reports_2628() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
-        "/a.ts",
-        "enum E { A }\nE++;",
-    ));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "enum E { A }\nE++;"));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -19151,10 +19098,7 @@ fn postfix_increment_on_non_reference_reports_2357() {
 // Go: internal/checker/checker.go:Checker.checkAssignmentOperator (`-=` widened result, 2322)
 #[test]
 fn minus_equals_widens_literal_type_reports_2322() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
-        "/a.ts",
-        "let x: 1;\nx -= 1;",
-    ));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "let x: 1;\nx -= 1;"));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -19563,10 +19507,7 @@ fn yield_value_not_assignable_to_generator_return_type_reports_2322() {
 #[test]
 fn conditional_expression_yields_union_of_branch_types() {
     use crate::core::nodebuilder::type_to_string;
-    let p = StubProgram::parse_and_bind(
-        "/a.ts",
-        "declare const b: boolean;\n(b ? 1 : \"s\");",
-    );
+    let p = StubProgram::parse_and_bind("/a.ts", "declare const b: boolean;\n(b ? 1 : \"s\");");
     let expr = expr_stmt_expression(&p, 1);
     let mut c = Checker::new();
     let ty = c.check_expression(&p, expr);
@@ -19925,7 +19866,9 @@ fn mapped_type_invalid_constraint_type_reports_2322() {
     assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
     assert_eq!(diags[0].code, 2322);
     assert!(
-        diags[0].message.contains("not assignable to type 'string | number | symbol'"),
+        diags[0]
+            .message
+            .contains("not assignable to type 'string | number | symbol'"),
         "expected mapped constraint 2322, got {:?}",
         diags[0].message
     );
@@ -19967,7 +19910,10 @@ fn type_query_on_declared_value_resolves_without_diagnostic() {
 // Go: internal/checker/checker.go:Checker.getTypeFromTypeQueryNode / checkExpression
 #[test]
 fn type_query_on_undeclared_identifier_reports_2304() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "type T = typeof missing;"));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = typeof missing;",
+    ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -20156,7 +20102,9 @@ fn template_literal_type_invalid_span_reports_2322() {
     assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
     assert_eq!(diags[0].code, 2322);
     assert!(
-        diags[0].message.contains("Type 'object' is not assignable to type '")
+        diags[0]
+            .message
+            .contains("Type 'object' is not assignable to type '")
             && diags[0].message.contains("string")
             && diags[0].message.contains("undefined"),
         "expected template constraint 2322, got {:?}",
@@ -20449,7 +20397,10 @@ fn non_null_assertion_on_non_nullable_operand_ok() {
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
-    assert!(diags.is_empty(), "unnecessary ! on string is OK; got {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "unnecessary ! on string is OK; got {diags:?}"
+    );
 }
 
 // Go: internal/checker/checker.go:Checker.getArgumentArityError (2556)
@@ -20480,7 +20431,10 @@ fn function_namespace_merge_exports_member() {
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
-    assert!(diags.is_empty(), "merged Foo.x should be number; got {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "merged Foo.x should be number; got {diags:?}"
+    );
 }
 
 // Go: internal/checker/grammarchecks.go:Checker.checkGrammarModuleElementContext (1231)
@@ -20669,10 +20623,7 @@ fn always_falsy_empty_string_in_conditional_reports_2873() {
     let diags = c.get_diagnostics(root);
     assert_eq!(diags.len(), 1, "expected one 2873, got {diags:?}");
     assert_eq!(diags[0].code, 2873);
-    assert_eq!(
-        diags[0].message,
-        "This kind of expression is always falsy."
-    );
+    assert_eq!(diags[0].message, "This kind of expression is always falsy.");
 }
 
 // Go: internal/checker/checker.go:Checker.checkVoidExpression
@@ -20685,16 +20636,16 @@ fn void_expression_yields_undefined_assignable() {
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
-    assert!(diags.is_empty(), "void expr should be undefined; got {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "void expr should be undefined; got {diags:?}"
+    );
 }
 
 // Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (2736)
 #[test]
 fn prefix_plus_on_bigint_literal_reports_2736() {
-    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
-        "/a.ts",
-        "+1n;",
-    ));
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "+1n;"));
     let root = p.root();
     let mut c = Checker::new_checker(p);
     let diags = c.get_diagnostics(root);
@@ -21269,3 +21220,93 @@ fn numeric_literal_equality_guard_narrows_union_no_diagnostics() {
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
+// ---- T1-E batch 109: typeof function, instanceof flow, construct RHS ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeof ("function")
+#[test]
+fn typeof_function_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: (() => void) | string;\n\
+         if (typeof x === \"function\") {\n  const f: () => void = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof
+#[test]
+fn instanceof_class_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string;\n\
+         if (x instanceof C) {\n  const c: C = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (negated)
+#[test]
+fn negated_instanceof_guard_narrows_else_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string;\n\
+         if (!(x instanceof C)) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeof ("function", negated)
+#[test]
+fn typeof_function_inequality_guard_narrows_else_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: (() => void) | string;\n\
+         if (typeof x !== \"function\") {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveInstanceofExpression (class constructor RHS)
+#[test]
+fn instanceof_class_constructor_right_operand_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare const o: object;\n\
+         o instanceof C;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (derived class)
+#[test]
+fn instanceof_derived_class_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class A {}\n\
+         class B extends A {}\n\
+         declare let x: A | string;\n\
+         if (x instanceof B) {\n  const b: B = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

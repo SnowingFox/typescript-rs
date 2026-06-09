@@ -275,9 +275,11 @@ impl BoundProgram for FileView {
 
     fn file_view(&self, file: NodeId) -> Option<Rc<dyn BoundProgram>> {
         let index = (file.0 >> FILE_INDEX_SHIFT) as usize;
-        self.all_views
-            .get()
-            .and_then(|views| views.get(index).map(|view| Rc::clone(view) as Rc<dyn BoundProgram>))
+        self.all_views.get().and_then(|views| {
+            views
+                .get(index)
+                .map(|view| Rc::clone(view) as Rc<dyn BoundProgram>)
+        })
     }
 
     fn view_for_symbol(&self, symbol: SymbolId) -> Option<Rc<dyn BoundProgram>> {
@@ -384,10 +386,7 @@ impl MultiFileProgram {
         let mut file_symbols: Vec<Option<SymbolId>> = Vec::with_capacity(parsed.len());
         for (i, (_, _, bind)) in parsed.iter().enumerate() {
             let off = offsets[i];
-            file_symbols.push(
-                bind.file_symbol
-                    .map(|s| SymbolId(s.0 + off)),
-            );
+            file_symbols.push(bind.file_symbol.map(|s| SymbolId(s.0 + off)));
         }
         let all_file_names = Rc::new(file_names.clone());
         let all_file_symbols = Rc::new(file_symbols.clone());
@@ -490,7 +489,11 @@ mod multi_file_tests {
                 .exports
                 .contains_key(INTERNAL_SYMBOL_NAME_EXPORT_EQUALS),
             "exports: {:?}",
-            p.views[0].symbol(module_sym).exports.keys().collect::<Vec<_>>()
+            p.views[0]
+                .symbol(module_sym)
+                .exports
+                .keys()
+                .collect::<Vec<_>>()
         );
     }
 
@@ -510,7 +513,8 @@ mod multi_file_tests {
         let mut c = Checker::new_checker(std::rc::Rc::clone(&p) as std::rc::Rc<dyn BoundProgram>);
         let resolved = resolve_external_module_symbol(&mut c, view.as_ref(), module_sym);
         assert!(
-            c.resolved_symbol_flags(view.as_ref(), resolved).intersects(SymbolFlags::FUNCTION),
+            c.resolved_symbol_flags(view.as_ref(), resolved)
+                .intersects(SymbolFlags::FUNCTION),
             "from importer context flags={:?}",
             c.resolved_symbol_flags(view.as_ref(), resolved)
         );
@@ -557,10 +561,10 @@ fn resolve_test_module_symbol(
 ) -> Option<SymbolId> {
     let resolved = resolve_relative_module_path(importing_file_name, specifier);
     let resolved_base = normalize_module_base(&resolved);
-    file_names.iter().position(|name| {
-        normalize_module_base(name) == resolved_base || name == &resolved
-    })
-    .and_then(|index| file_symbols[index])
+    file_names
+        .iter()
+        .position(|name| normalize_module_base(name) == resolved_base || name == &resolved)
+        .and_then(|index| file_symbols[index])
 }
 
 /// Folds a file index and its raw root node id into a collision-free file

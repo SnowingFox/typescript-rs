@@ -690,7 +690,8 @@ fn object_literal_member(p: &StubProgram, member_idx: usize) -> NodeId {
 // Go: internal/checker/checker.go:Checker.getContextualTypeForObjectLiteralMethod(29640)
 #[test]
 fn get_contextual_type_of_object_literal_method_is_property_type() {
-    let p = StubProgram::parse_and_bind("/a.ts", "const o: { m(): number } = { m() { return 1 } };");
+    let p =
+        StubProgram::parse_and_bind("/a.ts", "const o: { m(): number } = { m() { return 1 } };");
     let method = object_literal_member(&p, 0);
     let mut c = Checker::new();
     let ctx = c
@@ -704,8 +705,10 @@ fn get_contextual_type_of_object_literal_method_is_property_type() {
 // Go: internal/checker/checker.go:Checker.getContextualTypeForObjectLiteralElement(29596)
 #[test]
 fn get_contextual_type_of_object_literal_get_accessor_is_property_type() {
-    let p =
-        StubProgram::parse_and_bind("/a.ts", "const o: { get x(): number } = { get x() { return 1 } };");
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "const o: { get x(): number } = { get x() { return 1 } };",
+    );
     let getter = object_literal_member(&p, 0);
     let mut c = Checker::new();
     assert_eq!(
