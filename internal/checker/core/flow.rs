@@ -13,7 +13,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use tsgo_ast::flow::{FlowFlags, FlowNodeId, FlowSwitchClauseData};
-use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags};
+use tsgo_ast::{Kind, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId};
 
 use super::program::BoundProgram;
 use super::symbols::resolve_name;
@@ -447,6 +447,38 @@ impl Checker {
         let expr = skip_parentheses(program, expr);
         match program.arena().kind(expr) {
             Kind::Identifier => {
+                if !self.is_matching_reference(program, reference, expr)
+                    && self.flow_inline_level < 5
+                {
+                    if let Some(sym) =
+                        resolve_name(program, expr, program.arena().text(expr), SymbolFlags::VALUE, false, None)
+                    {
+                        if self.is_constant_variable(program, sym) {
+                            let sym_rec = program.symbol(sym);
+                            if let Some(decl) = sym_rec.value_declaration {
+                                if program.arena().kind(decl) == Kind::VariableDeclaration {
+                                    let NodeData::VariableDeclaration(vd) =
+                                        program.arena().data(decl)
+                                    else {
+                                        return t;
+                                    };
+                                    if vd.type_node.is_none() {
+                                        if let Some(init) = vd.initializer {
+                                            if self.is_constant_reference(program, reference) {
+                                                self.flow_inline_level += 1;
+                                                let result = self.narrow_type_at_condition(
+                                                    program, reference, t, init, assume_true,
+                                                );
+                                                self.flow_inline_level -= 1;
+                                                return result;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if self.is_matching_reference(program, reference, expr) {
                     self.narrow_type_by_truthiness(t, assume_true)
                 } else {
@@ -596,6 +628,33 @@ impl Checker {
             }
             return t;
         }
+        if op == Kind::CommaToken {
+            return self.narrow_type_at_condition(program, reference, t, right, assume_true);
+        }
+        if op == Kind::AmpersandAmpersandToken {
+            if assume_true {
+                let t_left =
+                    self.narrow_type_at_condition(program, reference, t, left, true);
+                return self.narrow_type_at_condition(program, reference, t_left, right, true);
+            }
+            let t_left =
+                self.narrow_type_at_condition(program, reference, t, left, false);
+            let t_right =
+                self.narrow_type_at_condition(program, reference, t, right, false);
+            return self.get_union_type(&[t_left, t_right]);
+        }
+        if op == Kind::BarBarToken {
+            if assume_true {
+                let t_left =
+                    self.narrow_type_at_condition(program, reference, t, left, true);
+                let t_right =
+                    self.narrow_type_at_condition(program, reference, t, right, true);
+                return self.get_union_type(&[t_left, t_right]);
+            }
+            let t_left =
+                self.narrow_type_at_condition(program, reference, t, left, false);
+            return self.narrow_type_at_condition(program, reference, t_left, right, false);
+        }
         let is_equality = matches!(
             op,
             Kind::EqualsEqualsEqualsToken
@@ -604,7 +663,7 @@ impl Checker {
                 | Kind::ExclamationEqualsToken
         );
         if !is_equality {
-            // DEFER(phase-4-checker-4g): `&&`/`||`/`instanceof` binary flow.
+            // DEFER(phase-4-checker-4g): `instanceof` binary flow.
             return t;
         }
         let negated = matches!(
@@ -726,13 +785,11 @@ impl Checker {
         if !self.get_type(t).flags().contains(TypeFlags::UNION) {
             return None;
         }
-        // The candidate access: an access expression whose object matches the
-        // reference (Go's `getCandidateDiscriminantPropertyAccess`, access case).
-        if program.arena().kind(expr) != Kind::PropertyAccessExpression {
-            return None;
-        }
+        // The candidate access: a property/element access whose object matches
+        // the reference (Go's `getCandidateDiscriminantPropertyAccess`).
         let object = match program.arena().data(expr) {
             NodeData::PropertyAccessExpression(d) => d.expression,
+            NodeData::ElementAccessExpression(d) => d.expression,
             _ => return None,
         };
         if !self.is_matching_reference(program, reference, object) {
@@ -760,8 +817,33 @@ impl Checker {
     ) -> Option<String> {
         match program.arena().data(access) {
             NodeData::PropertyAccessExpression(d) => Some(program.arena().text(d.name).to_string()),
+            NodeData::ElementAccessExpression(d) => {
+                if program.arena().kind(d.argument_expression) == Kind::StringLiteral {
+                    Some(program.arena().text(d.argument_expression).to_string())
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
+    }
+
+    // Reports whether `symbol` is a `const` variable (Go's `isConstantVariable`).
+    // Go: internal/checker/utilities.go:isConstantVariable
+    fn is_constant_variable(&self, program: &dyn BoundProgram, symbol: SymbolId) -> bool {
+        let sym = program.symbol(symbol);
+        sym.flags.intersects(SymbolFlags::VARIABLE)
+            && sym.value_declaration.is_some_and(|decl| {
+                super::declared_types::combined_node_flags(program, decl)
+                    .intersects(NodeFlags::CONSTANT)
+            })
+    }
+
+    // Reports whether `node` is a reference that flow narrowing may refine via
+    // const-alias inlining (Go's `isConstantReference` subset: identifiers only).
+    // Go: internal/checker/flow.go:Checker.isConstantReference
+    fn is_constant_reference(&self, program: &dyn BoundProgram, node: NodeId) -> bool {
+        program.arena().kind(node) == Kind::Identifier
     }
 
     // Reports whether `name` is a literal discriminant property of the union

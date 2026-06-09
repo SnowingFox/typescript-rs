@@ -4266,7 +4266,8 @@ impl Checker {
                 let mut result = left_type;
                 if self.has_type_facts(left_type, TypeFacts::FALSY) {
                     let truthy = self.remove_definitely_falsy_types(left_type);
-                    result = self.get_union_dropping_never(&[truthy, right_type]);
+                    let reduced = self.subtype_reduce(program, &[truthy, right_type]);
+                    result = self.get_union_type(&reduced);
                 }
                 if operator == Kind::BarBarEqualsToken {
                     self.check_assignment_operator(program, left, left_type, right_type, None);

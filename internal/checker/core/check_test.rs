@@ -21174,3 +21174,98 @@ fn nullish_coalesce_nullable_left_yields_union_with_right() {
     );
 }
 
+// ---- T1-E batch 108: comma flow, || subtype reduce, const alias, &&/|| flow ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (CommaToken)
+#[test]
+fn comma_operator_condition_narrows_right_operand_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         let a = 0;\n\
+         if ((a = 1, typeof x === \"string\")) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (`||` subtype reduction)
+#[test]
+fn logical_or_result_is_subtype_reduced() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: \"a\" | null;\ndeclare const y: string;\nconst n: number = x || y;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.narrowType (const-alias inlining)
+#[test]
+fn const_alias_typeof_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         const isStr = typeof x === \"string\";\n\
+         if (isStr) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (AmpersandAmpersandToken)
+#[test]
+fn logical_and_condition_narrows_both_operands_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number | null;\n\
+         declare const ok: boolean;\n\
+         const guard = ok && typeof x === \"string\";\n\
+         if (guard) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getDiscriminantPropertyAccess (element access)
+#[test]
+fn element_access_discriminant_equality_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         if (v[\"kind\"] === \"a\") {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality (numeric literal)
+#[test]
+fn numeric_literal_equality_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: 0 | 1 | 2;\nif (x === 0) {\n  const z: 0 = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+

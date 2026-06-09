@@ -419,6 +419,10 @@ pub struct Checker {
     accessors_write_type_resolving: FxHashSet<SymbolId>,
     /// Set when a re-entrant `get_write_type_of_accessors` detects a cycle.
     accessor_write_type_resolution_cyclic: bool,
+    /// Nesting depth while inlining const-alias conditions during flow narrowing
+    /// (Go's `inlineLevel`; capped at 5).
+    // Go: internal/checker/checker.go:Checker.inlineLevel
+    flow_inline_level: u8,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -674,6 +678,7 @@ impl Checker {
             object_literals_resolving: FxHashSet::default(),
             accessors_write_type_resolving: FxHashSet::default(),
             accessor_write_type_resolution_cyclic: false,
+            flow_inline_level: 0,
             any_type,
             auto_type,
             error_type,
