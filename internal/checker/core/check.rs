@@ -4521,10 +4521,9 @@ impl Checker {
     // Checks an `in` expression (Go's `checkInExpression`). The result is always
     // `boolean`.
     //
-    // DEFER(phase-4-checker-4ab+): the private-identifier left operand
-    // (`#x in obj`) and the empty-object-intersection right-operand check
-    // (`2638`) are deferred. blocked-by: private-identifier expressions +
-    // `hasEmptyObjectIntersection`.
+    // DEFER(phase-4-checker-4ab+): the private-identifier left operand's
+    // `reportNonexistentProperty` / emit-helper path when the field symbol is
+    // unresolved. blocked-by: `symbolNodeLinks.resolvedSymbol` wiring.
     //
     // Note: Go checks the operands with `checkTypeAssignableTo(..., nil)`, so a
     // bad operand surfaces as the generic assignability error `2322` (TS-go has
@@ -4538,15 +4537,53 @@ impl Checker {
         left_type: TypeId,
         right_type: TypeId,
     ) -> TypeId {
-        // The left operand must be assignable to `string | number | symbol`.
-        let string_number_symbol =
-            self.get_union_type(&[self.string_type, self.number_type, self.es_symbol_type]);
-        self.check_type_assignable_to_or_error(program, left, left_type, string_number_symbol);
+        if left_type == self.silent_never_type || right_type == self.silent_never_type {
+            return self.silent_never_type;
+        }
+        if program.arena().kind(left) != Kind::PrivateIdentifier {
+            // The left operand must be assignable to `string | number | symbol`.
+            let string_number_symbol =
+                self.get_union_type(&[self.string_type, self.number_type, self.es_symbol_type]);
+            self.check_type_assignable_to_or_error(program, left, left_type, string_number_symbol);
+        }
         // The right operand must be assignable to `object` (the non-primitive
         // intrinsic).
         let non_primitive = self.non_primitive_type;
-        self.check_type_assignable_to_or_error(program, right, right_type, non_primitive);
+        if self.is_type_assignable_to(program, right_type, non_primitive)
+            && self.has_empty_object_intersection(program, right_type)
+        {
+            let type_str = super::nodebuilder::type_to_string(self, program, right_type);
+            self.error(
+                program,
+                right,
+                &tsgo_diagnostics::TYPE_0_MAY_REPRESENT_A_PRIMITIVE_VALUE_WHICH_IS_NOT_PERMITTED_AS_THE_RIGHT_OPERAND_OF_THE_IN_OPERATOR,
+                &[type_str.as_str()],
+            );
+        } else {
+            self.check_type_assignable_to_or_error(program, right, right_type, non_primitive);
+        }
         self.boolean_type
+    }
+
+    // Reports whether any constituent of `t` is the unknown-narrowed `{}` type or
+    // an intersection whose base constraint is an empty anonymous object (Go's
+    // `hasEmptyObjectIntersection`).
+    // Go: internal/checker/checker.go:Checker.hasEmptyObjectIntersection(13043)
+    fn has_empty_object_intersection(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> bool {
+        self.distributed_types(t).iter().any(|&member| {
+            if member == self.unknown_empty_object_type {
+                return true;
+            }
+            if !self.get_type(member).flags().intersects(TypeFlags::INTERSECTION) {
+                return false;
+            }
+            let base = self.get_base_constraint_or_type(program, member);
+            self.is_empty_object_type(base)
+        })
     }
 
     // Reports `2322` at `node` when `source` is not assignable to `target`,
@@ -4583,10 +4620,8 @@ impl Checker {
     // `checkTypeAssignableToAndOptionallyElaborate(rightType, leftType, left, ...)`).
     //
     // DEFER(phase-4-checker-4n+): compound assignment operators (using the
-    // setter's type), the "left-hand side is not a reference/optional chain"
-    // diagnostics, destructuring targets, and `exactOptionalPropertyTypes`
-    // elaboration. blocked-by: `checkReferenceExpression`'s diagnostics +
-    // write-type resolution + destructuring.
+    // setter's type), destructuring targets, and `exactOptionalPropertyTypes`
+    // elaboration. blocked-by: write-type resolution + destructuring.
     // Go: internal/checker/checker.go:Checker.checkAssignmentOperator(12701)
     fn check_assignment_operator(
         &mut self,
@@ -4596,9 +4631,12 @@ impl Checker {
         right_type: TypeId,
         expr: Option<NodeId>,
     ) {
-        // A reference target is an identifier or an access expression (Go's
-        // `checkReferenceExpression`); other targets are skipped here.
-        if !is_reference_expression(program, left) {
+        if !self.check_reference_expression(
+            program,
+            left,
+            &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_AN_ASSIGNMENT_EXPRESSION_MUST_BE_A_VARIABLE_OR_A_PROPERTY_ACCESS,
+            &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_AN_ASSIGNMENT_EXPRESSION_MAY_NOT_BE_AN_OPTIONAL_PROPERTY_ACCESS,
+        ) {
             return;
         }
         if left_type == self.error_type {

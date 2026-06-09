@@ -445,6 +445,9 @@ pub struct Checker {
     /// Empty anonymous object type used as the left operand when folding spreads
     /// (Go's `emptyObjectType`).
     empty_object_type: TypeId,
+    /// The `{}` type produced when narrowing `unknown` after a truthiness guard
+    /// (Go's `unknownEmptyObjectType`).
+    unknown_empty_object_type: TypeId,
 }
 
 impl Default for Checker {
@@ -579,6 +582,12 @@ impl Checker {
             None,
             TypeData::Object(ObjectType::default()),
         );
+        let unknown_empty_object_type = types.alloc(
+            TypeFlags::OBJECT,
+            ObjectFlags::ANONYMOUS,
+            None,
+            TypeData::Object(ObjectType::default()),
+        );
 
         Checker {
             types,
@@ -670,12 +679,18 @@ impl Checker {
             string_or_number_type,
             number_or_bigint_type,
             empty_object_type,
+            unknown_empty_object_type,
         }
     }
 
     /// Returns the checker-wide empty object type (Go's `emptyObjectType`).
     pub(crate) fn empty_object_type(&self) -> TypeId {
         self.empty_object_type
+    }
+
+    /// Returns the unknown-narrowed empty object type (Go's `unknownEmptyObjectType`).
+    pub(crate) fn unknown_empty_object_type(&self) -> TypeId {
+        self.unknown_empty_object_type
     }
 
     /// Constructs a checker over a bound `program`, retaining it (Go's

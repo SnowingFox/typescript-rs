@@ -19105,3 +19105,115 @@ fn compound_assignment_to_namespace_identifier_reports_2631() {
         "Cannot assign to 'N' because it is a namespace."
     );
 }
+
+// ---- T1-E batch 98: assignment refs, compound ops, in/private ----
+
+// Go: internal/checker/checker.go:Checker.checkAssignmentOperator (2364)
+#[test]
+fn assignment_to_literal_reports_2364() {
+    let codes = diag_codes("1 = 2;");
+    assert!(
+        codes.contains(&2364),
+        "expected TS2364 on literal assignment target; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAssignmentOperator (2364)
+#[test]
+fn logical_and_equals_to_literal_reports_2364() {
+    let codes = diag_codes("true &&= false;");
+    assert!(
+        codes.contains(&2364),
+        "expected TS2364 on non-reference &&= target; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAssignmentOperator (2364)
+#[test]
+fn compound_assignment_to_literal_reports_2364() {
+    let codes = diag_codes("1 += 1;");
+    assert!(
+        codes.contains(&2364),
+        "expected TS2364 on non-reference += target; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPostfixUnaryExpression (2357)
+#[test]
+fn postfix_increment_on_non_reference_reports_2357() {
+    let codes = diag_codes("1++;");
+    assert!(
+        codes.contains(&2357),
+        "expected TS2357 on postfix ++literal; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAssignmentOperator (`-=` widened result, 2322)
+#[test]
+fn minus_equals_widens_literal_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: 1;\nx -= 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type '1'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (2362)
+#[test]
+fn bitwise_and_on_string_operands_reports_2362() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: string;\ndeclare const b: string;\na & b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 2362),
+        "expected TS2362 on string & string left operand; got {diags:?}"
+    );
+    assert!(
+        diags.iter().any(|d| d.code == 2363),
+        "expected TS2363 on string & string right operand; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkInExpression (private identifier left)
+#[test]
+fn in_expression_private_identifier_left_reports_no_left_operand_error() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  #x: number;\n  m(o: object) {\n    #x in o;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        !diags.iter().any(|d| {
+            d.code == 2322
+                && d.message.contains("string | number | symbol")
+        }),
+        "private identifier left operand must not be checked as string|number|symbol; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkInExpression (valid private identifier left)
+#[test]
+fn in_expression_private_identifier_on_object_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  #x: number;\n  m(o: object) {\n    #x in o;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
