@@ -6,10 +6,10 @@ use symbols::{SymbolFlags, SymbolId};
 #[test]
 fn new_constructs_intrinsics_in_order() {
     let c = Checker::new();
-    // 4b constructs 23 types in allocation order (the 4a intrinsics plus the
-    // boolean literal/union types, the string|number / number|bigint unions,
-    // `emptyObjectType`, and `unknownEmptyObjectType`).
-    assert_eq!(c.type_count(), 23);
+    // 4b constructs 24 types in allocation order (the 4a intrinsics plus the
+    // boolean literal/union types, the string|number / number|bigint /
+    // template-constraint unions, `emptyObjectType`, and `unknownEmptyObjectType`).
+    assert_eq!(c.type_count(), 24);
     assert_eq!(c.any_type(), TypeId(1));
     assert_eq!(c.auto_type(), TypeId(2));
     assert_eq!(c.error_type(), TypeId(3));
@@ -23,8 +23,9 @@ fn new_constructs_intrinsics_in_order() {
     assert_eq!(c.non_primitive_type(), TypeId(19));
     assert_eq!(c.string_or_number_type(), TypeId(20));
     assert_eq!(c.number_or_bigint_type(), TypeId(21));
-    assert_eq!(c.empty_object_type(), TypeId(22));
-    assert_eq!(c.unknown_empty_object_type(), TypeId(23));
+    assert_eq!(c.template_constraint_type(), TypeId(22));
+    assert_eq!(c.empty_object_type(), TypeId(23));
+    assert_eq!(c.unknown_empty_object_type(), TypeId(24));
 }
 
 // Go: internal/checker/checker.go:NewChecker (boolean = false | true union)

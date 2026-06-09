@@ -442,6 +442,10 @@ pub struct Checker {
     non_primitive_type: TypeId,
     string_or_number_type: TypeId,
     number_or_bigint_type: TypeId,
+    /// Valid placeholder types for template-literal-type spans (Go's
+    /// `templateConstraintType`: `string | number | boolean | bigint | null |
+    /// undefined`).
+    template_constraint_type: TypeId,
     /// Empty anonymous object type used as the left operand when folding spreads
     /// (Go's `emptyObjectType`).
     empty_object_type: TypeId,
@@ -576,6 +580,19 @@ impl Checker {
         let number_or_bigint_type =
             intern_union(&mut types, &mut union_types, vec![number_type, bigint_type])
                 .expect("number|bigint union has two members");
+        let template_constraint_type = intern_union(
+            &mut types,
+            &mut union_types,
+            vec![
+                string_type,
+                number_type,
+                boolean_type,
+                bigint_type,
+                null_type,
+                undefined_type,
+            ],
+        )
+        .expect("template constraint union has six members");
         let empty_object_type = types.alloc(
             TypeFlags::OBJECT,
             ObjectFlags::ANONYMOUS,
@@ -678,6 +695,7 @@ impl Checker {
             non_primitive_type,
             string_or_number_type,
             number_or_bigint_type,
+            template_constraint_type,
             empty_object_type,
             unknown_empty_object_type,
         }
@@ -2654,6 +2672,11 @@ impl Checker {
     /// Side effects: none (pure).
     pub fn number_or_bigint_type(&self) -> TypeId {
         self.number_or_bigint_type
+    }
+
+    /// Returns the template-literal-type placeholder constraint union.
+    pub(crate) fn template_constraint_type(&self) -> TypeId {
+        self.template_constraint_type
     }
 }
 

@@ -6457,20 +6457,12 @@ impl Checker {
                     }
                 }
             }
-            Kind::UnionType => {
-                if let NodeData::UnionType(d) = program.arena().data(node) {
-                    for member in d.types.nodes.clone() {
-                        self.check_type_node(program, member);
-                    }
-                }
+            Kind::UnionType | Kind::IntersectionType => {
+                self.check_union_or_intersection_type_node(program, node);
             }
-            Kind::IntersectionType => {
-                if let NodeData::IntersectionType(d) = program.arena().data(node) {
-                    for member in d.types.nodes.clone() {
-                        self.check_type_node(program, member);
-                    }
-                }
-            }
+            Kind::ConditionalType => self.check_conditional_type_node(program, node),
+            Kind::InferType => self.check_infer_type_node(program, node),
+            Kind::TemplateLiteralType => self.check_template_literal_type_node(program, node),
             Kind::ParenthesizedType => {
                 if let NodeData::ParenthesizedType(d) = program.arena().data(node) {
                     let inner = d.type_node;
@@ -6504,6 +6496,80 @@ impl Checker {
             }
             _ => {}
         }
+    }
+
+    // Descends into a union/intersection type node's constituents and resolves the
+    // composite type (Go's `checkUnionOrIntersectionType`).
+    // Go: internal/checker/checker.go:Checker.checkUnionOrIntersectionType(3250)
+    fn check_union_or_intersection_type_node(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) {
+        let members = match program.arena().data(node) {
+            NodeData::UnionType(d) | NodeData::IntersectionType(d) => d.types.nodes.clone(),
+            _ => return,
+        };
+        for member in members {
+            self.check_type_node(program, member);
+        }
+        let _ = get_type_from_type_node(self, program, node, program.globals());
+    }
+
+    // Descends into a conditional type node's children (Go's `checkConditionalType`).
+    // Go: internal/checker/checker.go:Checker.checkConditionalType(3264)
+    fn check_conditional_type_node(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::ConditionalType(d) = program.arena().data(node) else {
+            return;
+        };
+        self.check_type_node(program, d.check_type);
+        self.check_type_node(program, d.extends_type);
+        self.check_type_node(program, d.true_type);
+        self.check_type_node(program, d.false_type);
+    }
+
+    // Reports `TS1338` when `infer` appears outside a conditional `extends`
+    // clause, then checks the inferred type parameter (Go's `checkInferType`).
+    // Go: internal/checker/checker.go:Checker.checkInferType(3268)
+    fn check_infer_type_node(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        if !infer_is_in_conditional_extends_clause(program, node) {
+            self.grammar_error_on_node(
+                program,
+                node,
+                &tsgo_diagnostics::X_INFER_DECLARATIONS_ARE_ONLY_PERMITTED_IN_THE_EXTENDS_CLAUSE_OF_A_CONDITIONAL_TYPE,
+                &[],
+            );
+        }
+        let NodeData::InferType(d) = program.arena().data(node) else {
+            return;
+        };
+        self.check_type_parameter_declaration(program, d.type_parameter);
+    }
+
+    // Validates each template-literal-type placeholder is assignable to the
+    // template constraint union, then resolves the type (Go's
+    // `checkTemplateLiteralType`).
+    // Go: internal/checker/checker.go:Checker.checkTemplateLiteralType(3295)
+    fn check_template_literal_type_node(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::TemplateLiteralType(d) = program.arena().data(node) else {
+            return;
+        };
+        for span in d.template_spans.nodes.clone() {
+            let NodeData::TemplateLiteralTypeSpan(span_data) = program.arena().data(span) else {
+                continue;
+            };
+            let span_type_node = span_data.expression;
+            self.check_type_node(program, span_type_node);
+            let span_type =
+                get_type_from_type_node(self, program, span_type_node, program.globals());
+            self.check_type_assignable_to_or_error(
+                program,
+                span_type_node,
+                span_type,
+                self.template_constraint_type,
+            );
+        }
+        let _ = get_type_from_type_node(self, program, node, program.globals());
     }
 
     // Validates a mapped type's constraint is assignable to `string | number |
@@ -6601,15 +6667,28 @@ impl Checker {
             return;
         }
         let name = program.arena().text(type_name).to_string();
-        let Some(symbol) = resolve_name(
+        let symbol = match resolve_name(
             program,
             node,
             &name,
             SymbolFlags::TYPE,
             false,
             program.globals(),
-        ) else {
-            return;
+        ) {
+            Some(symbol) => symbol,
+            None => match super::declared_types::resolve_type_parameter_in_scope(program, node, &name)
+            {
+                Some(_) => return,
+                None => {
+                    self.error(
+                        program,
+                        type_name,
+                        &tsgo_diagnostics::CANNOT_FIND_NAME_0,
+                        &[name.as_str()],
+                    );
+                    return;
+                }
+            },
         };
         let flags = program.symbol(symbol).flags;
         if flags.intersects(SymbolFlags::CLASS | SymbolFlags::INTERFACE) {
@@ -9099,15 +9178,93 @@ impl Checker {
             return;
         }
         let predicate_name = program.arena().text(parameter_name).to_string();
-        // The predicate parameter index: found when some parameter's top-level
-        // identifier name equals the predicate name (Go's `FindIndex(signature
-        // .parameters, p.Name == name) >= 0`).
-        let found = params.iter().any(|&param| {
-            matches!(program.arena().data(param), NodeData::ParameterDeclaration(p)
+        // The predicate parameter index: found when some non-`this` parameter's
+        // top-level identifier name equals the predicate name (Go's
+        // `FindIndex(signature.parameters, p.Name == name) >= 0`).
+        let mut signature_param_index = None;
+        let mut matched_param = None;
+        let mut sig_index = 0usize;
+        for &param in params {
+            if is_this_parameter(program, param) {
+                continue;
+            }
+            if matches!(program.arena().data(param), NodeData::ParameterDeclaration(p)
                 if program.arena().kind(p.name) == Kind::Identifier
                     && program.arena().text(p.name) == predicate_name)
-        });
-        if found {
+            {
+                signature_param_index = Some(sig_index);
+                matched_param = Some(param);
+                break;
+            }
+            sig_index += 1;
+        }
+        if let (Some(param_index), Some(param_node)) = (signature_param_index, matched_param) {
+            let has_rest = params.last().is_some_and(|&last| {
+                matches!(
+                    program.arena().data(last),
+                    NodeData::ParameterDeclaration(d) if d.dot_dot_dot_token.is_some()
+                )
+            });
+            if has_rest {
+                let rest_signature_index = params
+                    .iter()
+                    .filter(|&&p| !is_this_parameter(program, p))
+                    .count()
+                    .saturating_sub(1);
+                if param_index == rest_signature_index {
+                    self.error_skipping_leading_trivia(
+                        program,
+                        parameter_name,
+                        &tsgo_diagnostics::A_TYPE_PREDICATE_CANNOT_REFERENCE_A_REST_PARAMETER,
+                        &[],
+                    );
+                    return;
+                }
+            }
+            if let Some(type_node) = d.type_node {
+                let predicate_type =
+                    get_type_from_type_node(self, program, type_node, program.globals());
+                let param_type = program
+                    .symbol_of_node(param_node)
+                    .map(|sym| get_type_of_symbol(self, program, sym, program.globals()))
+                    .unwrap_or(self.error_type());
+                if !self.is_type_assignable_to(program, predicate_type, param_type) {
+                    let generalized =
+                        self.generalized_source_for_error(predicate_type, param_type);
+                    let source_str =
+                        super::nodebuilder::type_to_string(self, program, generalized);
+                    let target_str =
+                        super::nodebuilder::type_to_string(self, program, param_type);
+                    let inner = DiagnosticMessageChain {
+                        code: tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1.code(),
+                        category: tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1
+                            .category(),
+                        message: tsgo_diagnostics::format(
+                            &tsgo_diagnostics::TYPE_0_IS_NOT_ASSIGNABLE_TO_TYPE_1.to_string(),
+                            &[source_str.as_str(), target_str.as_str()],
+                        ),
+                        next: Vec::new(),
+                    };
+                    let loc = program.arena().loc(type_node);
+                    let diagnostic = Diagnostic {
+                        code: tsgo_diagnostics::A_TYPE_PREDICATE_S_TYPE_MUST_BE_ASSIGNABLE_TO_ITS_PARAMETER_S_TYPE
+                            .code(),
+                        category:
+                            tsgo_diagnostics::A_TYPE_PREDICATE_S_TYPE_MUST_BE_ASSIGNABLE_TO_ITS_PARAMETER_S_TYPE
+                                .category(),
+                        message: tsgo_diagnostics::format(
+                            &tsgo_diagnostics::A_TYPE_PREDICATE_S_TYPE_MUST_BE_ASSIGNABLE_TO_ITS_PARAMETER_S_TYPE
+                                .to_string(),
+                            &[],
+                        ),
+                        start: loc.pos(),
+                        length: loc.end() - loc.pos(),
+                        related_information: Vec::new(),
+                        message_chain: vec![inner],
+                    };
+                    self.add_diagnostic(program, diagnostic);
+                }
+            }
             return;
         }
         // The name does not match a plain parameter; before reporting it as
@@ -15611,6 +15768,25 @@ fn is_this_parameter(program: &dyn BoundProgram, node: NodeId) -> bool {
     } else {
         false
     }
+}
+
+// Reports whether `node` is the `extends` operand of an enclosing conditional
+// type (Go's `FindAncestor` predicate in `checkInferType`).
+fn infer_is_in_conditional_extends_clause(program: &dyn BoundProgram, node: NodeId) -> bool {
+    let mut current = Some(node);
+    while let Some(n) = current {
+        if let Some(parent) = program.arena().parent(n) {
+            if program.arena().kind(parent) == Kind::ConditionalType {
+                if let NodeData::ConditionalType(d) = program.arena().data(parent) {
+                    if d.extends_type == n {
+                        return true;
+                    }
+                }
+            }
+        }
+        current = program.arena().parent(n);
+    }
+    false
 }
 
 // Reports whether `node` is a parameter property (has accessibility modifier).

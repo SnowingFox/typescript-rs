@@ -4541,7 +4541,7 @@ fn qualified_name_right_text(
 // parameter anonymously (`bindAnonymousDeclaration`) instead of into the
 // conditional node's locals, so this lookup recovers the Go scoping.
 // Go: internal/checker/checker.go:Checker.resolveName (type-parameter meaning)
-fn resolve_type_parameter_in_scope(
+pub(crate) fn resolve_type_parameter_in_scope(
     program: &dyn BoundProgram,
     node: tsgo_ast::NodeId,
     name: &str,

@@ -20094,3 +20094,241 @@ fn class_missing_interface_call_signature_reports_2420() {
     );
 }
 
+// ---- T1-E batch 102: conditional/infer, template literal, union/intersection, type predicate, recursive alias, implements ----
+
+// Go: internal/checker/checker.go:Checker.checkInferType (1338)
+#[test]
+fn infer_outside_conditional_extends_reports_1338() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "type Bad = infer U;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1338, got {diags:?}");
+    assert_eq!(diags[0].code, 1338);
+    assert_eq!(
+        diags[0].message,
+        "'infer' declarations are only permitted in the 'extends' clause of a conditional type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkInferType (valid infer in extends)
+#[test]
+fn infer_in_conditional_extends_clause_reports_no_1338() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Element<T> = T extends (infer U)[] ? U : never;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 1338),
+        "infer in extends must not report 1338; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkConditionalType
+#[test]
+fn infer_in_conditional_check_type_reports_1338() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Bad = (infer U) extends string ? U : never;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().any(|d| d.code == 1338),
+        "expected 1338 for infer in check type; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkTemplateLiteralType
+#[test]
+fn template_literal_type_invalid_span_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = `a${object}b`;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert!(
+        diags[0].message.contains("Type 'object' is not assignable to type '")
+            && diags[0].message.contains("string")
+            && diags[0].message.contains("undefined"),
+        "expected template constraint 2322, got {:?}",
+        diags[0].message
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkTemplateLiteralType
+#[test]
+fn template_literal_type_valid_span_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = `a${string}b`;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkUnionOrIntersectionType
+#[test]
+fn union_type_with_missing_member_reports_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type U = number | Missing;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2304, got {diags:?}");
+    assert_eq!(diags[0].code, 2304);
+    assert_eq!(diags[0].message, "Cannot find name 'Missing'.");
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (1229)
+#[test]
+fn type_predicate_referencing_rest_parameter_reports_1229() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f(...args: unknown[]): args is unknown[] { return true; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1229, got {diags:?}");
+    assert_eq!(diags[0].code, 1229);
+    assert_eq!(
+        diags[0].message,
+        "A type predicate cannot reference a rest parameter."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (2677)
+#[test]
+fn type_predicate_type_not_assignable_to_parameter_reports_2677() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function g(x: string): x is number { return true; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2677, got {diags:?}");
+    assert_eq!(diags[0].code, 2677);
+    assert_eq!(
+        diags[0].message,
+        "A type predicate's type must be assignable to its parameter's type."
+    );
+    assert_eq!(diags[0].message_chain.len(), 1);
+    assert_eq!(
+        diags[0].message_chain[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (parameterIndex >= 0)
+#[test]
+fn type_predicate_type_assignable_to_parameter_reports_no_2677() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function isStr(x: string | number): x is string { return typeof x === \"string\"; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2677),
+        "valid predicate type must not report 2677; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (implements satisfaction, 2420)
+#[test]
+fn class_missing_interface_property_reports_2420() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { x: number; }\nclass C implements I {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2420, got {diags:?}");
+    assert_eq!(diags[0].code, 2420);
+    assert_eq!(
+        diags[0].message,
+        "Class 'C' incorrectly implements interface 'I'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getDeclaredTypeOfTypeAlias (circularity)
+#[test]
+fn circular_type_alias_resolves_without_crash() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "type A = A;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2589),
+        "direct self-reference is broken by cycle guard, not depth limit; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkNewExpression (2511)
+#[test]
+fn new_expression_on_abstract_class_reports_2511() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare abstract class A {}\nnew A();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2511, got {diags:?}");
+    assert_eq!(diags[0].code, 2511);
+    assert_eq!(
+        diags[0].message,
+        "Cannot create an instance of an abstract class."
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminantProperty
+#[test]
+fn discriminated_union_narrowing_in_if_branch_assigns_member() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         declare const v: A | B;\n\
+         if (v.kind === \"a\") {\n  const n: number = v.x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getIndexType (keyof lookup)
+#[test]
+fn keyof_lookup_type_assignability_e2e() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Keys = keyof { a: number; b: string };\nconst k: Keys = \"a\";\nconst bad: Keys = \"c\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '\"c\"' is not assignable to type '\"a\" | \"b\"'."
+    );
+}
+
