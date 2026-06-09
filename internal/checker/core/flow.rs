@@ -223,6 +223,16 @@ impl Checker {
                 }
             }
         }
+        if value.flags().contains(TypeFlags::NUMBER_LITERAL) {
+            if member == self.number_type() {
+                return value_type;
+            }
+        }
+        if value.flags().contains(TypeFlags::STRING_LITERAL) {
+            if member == self.string_type() {
+                return value_type;
+            }
+        }
         member
     }
 
@@ -1036,9 +1046,81 @@ impl Checker {
         if let Some(access) = self.get_discriminant_property_access(program, reference, expr, t) {
             return self.narrow_type_by_switch_on_discriminant_property(program, t, access, &data);
         }
-        // DEFER(phase-4-checker-4u): `switch (true)` and optional-chain
-        // containment. blocked-by: optional-chain reference matching.
+        let expr = skip_parentheses(program, expr);
+        if program.arena().kind(expr) == Kind::TrueKeyword {
+            return self.narrow_type_by_switch_on_true(program, reference, t, &data);
+        }
+        // DEFER(phase-4-checker-4u): optional-chain containment in switch.
+        // blocked-by: optional-chain reference matching.
         t
+    }
+
+    // Narrows `t` at a `switch (true)` clause by negating prior case conditions
+    // and unioning the narrowed types of the current clause range (Go's
+    // `narrowTypeBySwitchOnTrue`).
+    // Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnTrue(1159)
+    fn narrow_type_by_switch_on_true(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        t: TypeId,
+        data: &FlowSwitchClauseData,
+    ) -> TypeId {
+        let switch_stmt = match data.switch_statement {
+            Some(s) => s,
+            None => return t,
+        };
+        let clauses = self.switch_case_clauses(program, switch_stmt);
+        let default_index = clauses.iter().position(|&c| {
+            matches!(
+                program.arena().data(c),
+                NodeData::CaseOrDefaultClause(d) if d.expression.is_none()
+            )
+        });
+        let start = data.clause_start.max(0) as usize;
+        let end = (data.clause_end.max(0) as usize).min(clauses.len());
+        let has_default =
+            start == end || default_index.is_some_and(|i| i >= start && i < end);
+        let mut narrowed = t;
+        for &clause in &clauses[..start] {
+            let NodeData::CaseOrDefaultClause(d) = program.arena().data(clause) else {
+                continue;
+            };
+            if let Some(expr) = d.expression {
+                narrowed =
+                    self.narrow_type_at_condition(program, reference, narrowed, expr, false);
+            }
+        }
+        if has_default {
+            for &clause in &clauses[end..] {
+                let NodeData::CaseOrDefaultClause(d) = program.arena().data(clause) else {
+                    continue;
+                };
+                if let Some(expr) = d.expression {
+                    narrowed =
+                        self.narrow_type_at_condition(program, reference, narrowed, expr, false);
+                }
+            }
+            return narrowed;
+        }
+        let mut types: Vec<TypeId> = Vec::new();
+        for &clause in &clauses[start..end] {
+            let NodeData::CaseOrDefaultClause(d) = program.arena().data(clause) else {
+                types.push(self.never_type());
+                continue;
+            };
+            match d.expression {
+                Some(expr) => types.push(self.narrow_type_at_condition(
+                    program,
+                    reference,
+                    narrowed,
+                    expr,
+                    true,
+                )),
+                None => types.push(self.never_type()),
+            }
+        }
+        self.get_union_type(&types)
     }
 
     // Narrows a union `t` at a `switch (ref.prop)` clause by narrowing the
