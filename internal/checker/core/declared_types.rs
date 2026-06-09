@@ -3445,9 +3445,9 @@ fn get_type_from_array_type_node(
         globals,
     ) {
         Some(symbol) => symbol,
-        // DEFER(phase-4-checker-P6): no global `Array`/`ReadonlyArray` in
-        // scope (lib.d.ts not loaded). blocked-by: library globals (P6).
-        None => return checker.error_type(),
+        // Without lib globals, fall back to the checker's synthetic `Array` /
+        // `ReadonlyArray` target (Go loads them from lib.d.ts in P6).
+        None => return checker.create_array_type_ex(element_type, global_name == "ReadonlyArray"),
     };
     let array_target = get_declared_type_of_symbol(checker, program, array_symbol, globals);
     checker
@@ -4945,6 +4945,13 @@ fn get_index_type_ex(checker: &mut Checker, t: TypeId, index_flags: IndexFlags) 
     }
     if flags.contains(TypeFlags::UNKNOWN) {
         return checker.never_type();
+    }
+    // `keyof T[]` is `number | "length"` (named `length` plus the numeric index
+    // signature key type).
+    if checker.is_array_type(t) {
+        let length = checker.get_string_literal_type("length");
+        let number = checker.number_type();
+        return checker.get_union_type(&[length, number]);
     }
     // DEFER(phase-4-checker-C-C3): the `keyof any`/`keyof never` arm
     // (`stringNumberSymbolType`), the wildcard arm, and the mapped-type arm

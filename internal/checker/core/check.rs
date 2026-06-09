@@ -630,16 +630,39 @@ impl Checker {
         if target_type == self.error_type {
             return target_type;
         }
-        if !self.is_type_assignable_to(program, expr_type, target_type) {
-            let source_str = super::nodebuilder::type_to_string(self, program, expr_type);
-            let target_str = super::nodebuilder::type_to_string(self, program, target_type);
-            self.error(
-                program,
-                node,
-                &tsgo_diagnostics::TYPE_0_DOES_NOT_SATISFY_THE_EXPECTED_TYPE_1,
-                &[source_str.as_str(), target_str.as_str()],
-            );
+        if self.is_type_assignable_to(program, expr_type, target_type) {
+            if program.arena().kind(expr) == Kind::ObjectLiteralExpression {
+                self.check_object_literal_excess_properties(
+                    program,
+                    expr,
+                    expr_type,
+                    target_type,
+                );
+            }
+            return expr_type;
         }
+        if self.elaborate_error(
+            program,
+            expr,
+            expr_type,
+            target_type,
+            RelationKind::Assignable,
+        ) {
+            return expr_type;
+        }
+        if program.arena().kind(expr) == Kind::ObjectLiteralExpression
+            && self.check_object_literal_excess_properties(program, expr, expr_type, target_type)
+        {
+            return expr_type;
+        }
+        let source_str = super::nodebuilder::type_to_string(self, program, expr_type);
+        let target_str = super::nodebuilder::type_to_string(self, program, target_type);
+        self.error(
+            program,
+            node,
+            &tsgo_diagnostics::TYPE_0_DOES_NOT_SATISFY_THE_EXPECTED_TYPE_1,
+            &[source_str.as_str(), target_str.as_str()],
+        );
         expr_type
     }
 
@@ -6571,13 +6594,33 @@ impl Checker {
         let object_type = get_type_from_type_node(self, program, object_node, program.globals());
         let index_type = get_type_from_type_node(self, program, index_node, program.globals());
         if get_indexed_access_type(self, program, object_type, index_type).is_none() {
-            let index_str = super::nodebuilder::type_to_string(self, program, index_type);
-            self.error(
-                program,
-                index_node,
-                &tsgo_diagnostics::TYPE_0_CANNOT_BE_USED_AS_AN_INDEX_TYPE,
-                &[index_str.as_str()],
-            );
+            let apparent = get_apparent_type(self, object_type);
+            let index_flags = self.get_type(index_type).flags();
+            if index_flags.intersects(TypeFlags::STRING_LITERAL | TypeFlags::NUMBER_LITERAL)
+                && get_type_of_property_of_type(self, program, apparent, &get_property_name_from_type(
+                    self,
+                    index_type,
+                ))
+                .is_none()
+                && get_applicable_index_info(self, program, apparent, index_type).is_none()
+            {
+                let prop_name = get_property_name_from_type(self, index_type);
+                let object_str = super::nodebuilder::type_to_string(self, program, object_type);
+                self.error(
+                    program,
+                    index_node,
+                    &tsgo_diagnostics::PROPERTY_0_DOES_NOT_EXIST_ON_TYPE_1,
+                    &[prop_name.as_str(), object_str.as_str()],
+                );
+            } else {
+                let index_str = super::nodebuilder::type_to_string(self, program, index_type);
+                self.error(
+                    program,
+                    index_node,
+                    &tsgo_diagnostics::TYPE_0_CANNOT_BE_USED_AS_AN_INDEX_TYPE,
+                    &[index_str.as_str()],
+                );
+            }
         }
         let _ = get_type_from_type_node(self, program, node, program.globals());
     }

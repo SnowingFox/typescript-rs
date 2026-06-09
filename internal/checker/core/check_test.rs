@@ -21697,3 +21697,254 @@ fn switch_true_negated_prior_case_narrows_else_branch_no_diagnostics() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 111: typeof/switch narrowing, satisfies, keyof, lookup, spread ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeOf
+#[test]
+fn typeof_object_includes_null_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | null;\n\
+         if (typeof x === \"object\") { const o: { a: number } | null = x; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeOf (negated)
+#[test]
+fn typeof_symbol_negated_narrows_to_string_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const y: symbol | string;\n\
+         if (typeof y !== \"symbol\") { const s: string = y; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeOf (negated)
+#[test]
+fn typeof_undefined_negated_narrows_to_string_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\n\
+         if (typeof x !== \"undefined\") { const s: string = x; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeOf (negated)
+#[test]
+fn typeof_object_negated_narrows_to_string_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: object | string;\n\
+         if (typeof x !== \"object\") { const s: string = x; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnTypeOf
+#[test]
+fn switch_typeof_symbol_case_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: symbol | string;\n\
+         switch (typeof x) { case \"symbol\": { const s: symbol = x; break; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveCall (tuple spread to rest tuple)
+#[test]
+fn spread_tuple_to_rest_tuple_parameter_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function h(...args: [number, string]): void;\n\
+         const t: [number, string] = [1, \"a\"];\n\
+         h(...t);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveCall (array spread to rest array)
+#[test]
+fn spread_array_to_rest_array_parameter_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         function f(...args: number[]): void {}\n\
+         const a: number[] = [1, 2];\n\
+         f(...a);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromIndexedAccessTypeNode (union index)
+#[test]
+fn indexed_access_union_key_resolves_to_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = { a: number; b: string };\n\
+         type U = T[\"a\" | \"b\"];\n\
+         const v: U = 1;\n\
+         const w: U = \"s\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkSatisfiesExpression
+#[test]
+fn satisfies_compatible_object_literal_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = { a: 1 } satisfies { a: number };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkSatisfiesExpression + hasExcessProperties
+#[test]
+fn satisfies_excess_property_reports_2353() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const obj = { a: 1, b: \"x\" } satisfies { a: number };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2353, got {diags:?}");
+    assert_eq!(diags[0].code, 2353);
+}
+
+// Go: internal/checker/checker.go:Checker.getIndexType
+#[test]
+fn keyof_array_type_includes_length_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type K = keyof string[];\nconst k: K = \"length\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkIndexedAccessType
+#[test]
+fn indexed_access_missing_property_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = { a: number };\ntype U = T[\"b\"];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: internal/checker/checker.go:Checker.getArgumentArityError (tuple spread arity)
+#[test]
+fn spread_tuple_wrong_arity_reports_2554() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function h(a: number, b: string): void;\n\
+         const t: [number, string, boolean] = [1, \"a\", true];\n\
+         h(...t);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2554, got {diags:?}");
+    assert_eq!(diags[0].code, 2554);
+}
+
+// Go: internal/checker/types.go:template literal type resolution
+#[test]
+fn template_literal_type_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Prefix = \"a\" | \"b\";\n\
+         type TL = `${Prefix}-end`;\n\
+         const tl: TL = \"a-end\";\n\
+         const bad: TL = \"c-end\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.checkPropertyAccessExpression (static member)
+#[test]
+fn static_member_on_instance_reports_2576() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { static x = 1; }\nconst c = new C();\nconst n = c.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2576, got {diags:?}");
+    assert_eq!(diags[0].code, 2576);
+}
+
+// Go: internal/checker/checker.go:Checker.resolveNewExpression -> reportCallResolutionErrors
+#[test]
+fn construct_overload_no_match_reports_2769_with_chain() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  constructor(x: number);\n  constructor(x: string);\n  constructor(x: any) {}\n}\nnew C(true);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2769, got {diags:?}");
+    assert_eq!(diags[0].code, 2769);
+    assert!(!diags[0].message_chain.is_empty());
+}
+
+// Go: internal/checker/checker.go:Checker.resolveCall (overload with rest)
+#[test]
+fn overload_with_rest_parameter_resolves_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function g(x: number): void;\n\
+         function g(x: string, ...rest: number[]): void;\n\
+         function g(x: any, ...rest: any[]) {}\n\
+         g(\"s\", 1, 2);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

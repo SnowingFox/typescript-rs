@@ -138,6 +138,15 @@ impl Checker {
                 node,
                 context_flags,
             ),
+            Kind::SatisfiesExpression => match program.arena().data(parent) {
+                NodeData::SatisfiesExpression(d) => Some(super::declared_types::get_type_from_type_node(
+                    self,
+                    program,
+                    d.type_node,
+                    program.globals(),
+                )),
+                _ => None,
+            },
             _ => None,
         }
     }
