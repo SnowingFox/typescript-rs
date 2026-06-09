@@ -320,10 +320,42 @@ impl Checker {
                 );
             }
             self.infer_from_signatures(program, inferences, visited, source, target, priority);
+            self.infer_from_construct_signatures(program, inferences, visited, source, target, priority);
         }
         // DEFER(phase-4-checker-C-C): index/indexed-access/conditional/template/
-        // mapped/substitution inference and the construct-signature arm.
+        // mapped/substitution inference.
         // blocked-by: those type constructors + variance land later.
+    }
+
+    fn infer_from_construct_signatures(
+        &mut self,
+        program: &dyn BoundProgram,
+        inferences: &mut [InferenceInfo],
+        visited: &mut FxHashSet<(TypeId, TypeId)>,
+        source: TypeId,
+        target: TypeId,
+        priority: InferencePriority,
+    ) {
+        let source_signatures = self.get_construct_signatures_of_type(source);
+        if source_signatures.is_empty() {
+            return;
+        }
+        let target_signatures = self.get_construct_signatures_of_type(target);
+        let source_len = source_signatures.len();
+        let target_len = target_signatures.len();
+        for (i, &target_signature) in target_signatures.iter().enumerate() {
+            let source_index = (source_len + i)
+                .saturating_sub(target_len)
+                .min(source_len - 1);
+            self.infer_from_signature(
+                program,
+                inferences,
+                visited,
+                source_signatures[source_index],
+                target_signature,
+                priority,
+            );
+        }
     }
 
     /// Infers candidates from the call signatures of `source` matched against
@@ -395,11 +427,30 @@ impl Checker {
         // Parameters (Go: `applyToParameterTypes` with contravariant inference).
         let source_count = self.signature(source).parameters.len();
         let target_count = self.signature(target).parameters.len();
-        let param_count = source_count.min(target_count);
+        let target_has_rest = self.signature_has_rest_parameter(target);
+        let target_non_rest_count = target_count - usize::from(target_has_rest);
+        let source_has_rest = self.signature_has_rest_parameter(source);
+        let param_count = if source_has_rest {
+            target_non_rest_count
+        } else {
+            source_count.min(target_non_rest_count)
+        };
         for i in 0..param_count {
             let s = self.get_type_at_position(program, source, i);
             let t = self.get_type_at_position(program, target, i);
             self.infer_from_types(program, inferences, visited, s, t, priority);
+        }
+        if target_has_rest {
+            let source_rest = self.get_rest_type_at_position(program, source, param_count);
+            let target_rest = self.get_type_at_position(program, target, target_non_rest_count);
+            self.infer_from_types(
+                program,
+                inferences,
+                visited,
+                source_rest,
+                target_rest,
+                priority,
+            );
         }
         // Return types (Go: `applyToReturnTypes`, covariant): infer from the
         // source return type to the target return type when the latter could

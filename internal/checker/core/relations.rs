@@ -911,9 +911,44 @@ impl Checker {
         }
     }
 
+    // Reports whether `sig` is the top function/construct signature
+    // `(...args: A) => R` where `A` is `any`/`never` (or an array thereof) and
+    // `R` is `any`/`unknown` (Go's `isTopSignature`).
+    // Go: internal/checker/relater.go:Checker.isTopSignature
+    fn is_top_signature(&mut self, program: &dyn BoundProgram, sig: SignatureId) -> bool {
+        let type_parameters = self.signature(sig).type_parameters.clone();
+        if !type_parameters.is_empty() {
+            return false;
+        }
+        let this_parameter = self.signature(sig).this_parameter;
+        if let Some(this_param) = this_parameter {
+            let this_type = get_type_of_symbol(self, program, this_param, None);
+            if this_type != self.any_type {
+                return false;
+            }
+        }
+        let rest_param = match self.signature(sig).parameters.as_slice() {
+            [only] if self.signature_has_rest_parameter(sig) => *only,
+            _ => return false,
+        };
+        let rest_type = get_type_of_symbol(self, program, rest_param, None);
+        let element_type = self
+            .get_element_type_of_array_type(rest_type)
+            .unwrap_or(rest_type);
+        if !self
+            .get_type(element_type)
+            .flags()
+            .intersects(TypeFlags::ANY | TypeFlags::NEVER)
+        {
+            return false;
+        }
+        self.get_type(self.signature_return_type(sig))
+            .flags()
+            .intersects(TypeFlags::ANY_OR_UNKNOWN)
+    }
+
     // The parameter type at position `pos`, or `None` when out of range (Go's
-    // `tryGetTypeAtPosition`, reachable subset: no rest parameter, so an
-    // out-of-range position yields `None` rather than an indexed rest element).
+    // `tryGetTypeAtPosition`).
     // Go: internal/checker/relater.go:Checker.tryGetTypeAtPosition
     fn try_signature_type_at_position(
         &mut self,
@@ -921,8 +956,7 @@ impl Checker {
         sig: SignatureId,
         pos: usize,
     ) -> Option<TypeId> {
-        let param = self.signature(sig).parameters.get(pos).copied()?;
-        Some(get_type_of_symbol(self, program, param, None))
+        self.try_get_type_at_position(program, sig, pos)
     }
 
     // The parameter name at position `pos` (Go's `getParameterNameAtPosition`,
@@ -1040,13 +1074,16 @@ impl Checker {
         if source == target {
             return true;
         }
+        if self.is_top_signature(program, target) {
+            return true;
+        }
+        let source_count = self.signature_parameter_count(source);
         let target_count = self.signature_parameter_count(target);
+        let source_has_rest = self.has_effective_rest_parameter(source);
+        let target_has_rest = self.has_effective_rest_parameter(target);
         // Arity: a source requiring MORE arguments than the target accepts is
-        // not assignable. A callback may ignore trailing arguments, so a source
-        // with FEWER required parameters is fine (Go's `sourceHasMoreParameters`,
-        // reachable subset: no rest parameter, so `getMinArgumentCount(source) >
-        // targetCount`).
-        if self.signature_min_argument_count(source) > target_count as i32 {
+        // not assignable when the target has no effective rest parameter.
+        if !target_has_rest && self.signature_min_argument_count(source) > target_count as i32 {
             if let Some(r) = &mut reporter {
                 r.report(
                     &tsgo_diagnostics::TARGET_SIGNATURE_PROVIDES_TOO_FEW_ARGUMENTS_EXPECTED_0_OR_MORE_BUT_GOT_1,
@@ -1058,8 +1095,12 @@ impl Checker {
             }
             return false;
         }
-        let source_count = self.signature_parameter_count(source);
-        let param_count = source_count.max(target_count);
+        let param_count = if source_has_rest || target_has_rest {
+            source_count.min(target_count)
+        } else {
+            source_count.max(target_count)
+        };
+        let rest_index = (source_has_rest || target_has_rest).then(|| param_count.saturating_sub(1));
         // Under `strictFunctionTypes`, parameters relate strictly contravariantly;
         // otherwise (flag off OR a method/constructor target) they relate
         // bivariantly. Methods are always bivariant regardless of the flag (Go's
@@ -1067,10 +1108,18 @@ impl Checker {
         let strict_variance =
             self.strict_function_types() && !self.signature_is_method(program, target);
         for i in 0..param_count {
-            let (Some(source_type), Some(target_type)) = (
-                self.try_signature_type_at_position(program, source, i),
-                self.try_signature_type_at_position(program, target, i),
-            ) else {
+            let (source_type, target_type) = if Some(i) == rest_index {
+                (
+                    Some(self.get_rest_or_any_type_at_position(program, source, i)),
+                    Some(self.get_rest_or_any_type_at_position(program, target, i)),
+                )
+            } else {
+                (
+                    self.try_get_type_at_position(program, source, i),
+                    self.try_get_type_at_position(program, target, i),
+                )
+            };
+            let (Some(source_type), Some(target_type)) = (source_type, target_type) else {
                 continue;
             };
             if source_type == target_type {

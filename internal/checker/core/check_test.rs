@@ -22383,3 +22383,534 @@ fn conditional_type_never_branch_is_uninhabited_reports_2322() {
     assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
     assert_eq!(diags[0].code, 2322);
 }
+
+// ---- T1-E batch 113: conditional utilities, function-type infer, homomorphic mapped ----
+
+const CONDITIONAL_UTILITIES: &str = "\
+type Extract<T, U> = T extends U ? T : never;\n\
+type Exclude<T, U> = T extends U ? never : T;\n\
+type NonNullable<T> = T extends null | undefined ? never : T;\n";
+
+const FUNCTION_UTILITIES: &str = "\
+type Parameters<T extends (...args: any) => any> = T extends (...args: infer P) => any ? P : never;\n\
+type ReturnType<T extends (...args: any) => any> = T extends (...args: any) => infer R ? R : any;\n\
+type ConstructorParameters<T extends abstract new (...args: any) => any> = T extends abstract new (...args: infer P) => any ? P : never;\n\
+type InstanceType<T extends abstract new (...args: any) => any> = T extends abstract new (...args: any) => infer R ? R : any;\n";
+
+const HOMOMORPHIC_MAPPED: &str = "\
+type Partial2<T> = { [K in keyof T]?: T[K] };\n\
+type Readonly2<T> = { readonly [K in keyof T]: T[K] };\n\
+type Writable<T> = { -readonly [K in keyof T]: T[K] };\n";
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (Extract, distributive)
+#[test]
+fn extract_type_keeps_matching_string_literals_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CONDITIONAL_UTILITIES}\
+             type E = Extract<\"a\" | \"b\" | 1, string>;\n\
+             const e: E = \"a\";\n\
+             const e2: E = \"b\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (Extract mismatch)
+#[test]
+fn extract_type_non_matching_member_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CONDITIONAL_UTILITIES}\
+             type E = Extract<\"a\" | 1, string>;\n\
+             const bad: E = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (Extract number)
+#[test]
+fn extract_type_keeps_matching_number_literal_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CONDITIONAL_UTILITIES}\
+             type E = Extract<\"a\" | 1 | 2, number>;\n\
+             const e: E = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (Extract never branch)
+#[test]
+fn extract_type_no_match_yields_never_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CONDITIONAL_UTILITIES}\
+             type E = Extract<number, string>;\n\
+             const bad: E = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (Exclude)
+#[test]
+fn exclude_type_removes_matching_members_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CONDITIONAL_UTILITIES}\
+             type X = Exclude<\"a\" | \"b\" | 1, string>;\n\
+             const x: X = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (Exclude mismatch)
+#[test]
+fn exclude_type_excluded_member_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CONDITIONAL_UTILITIES}\
+             type X = Exclude<\"a\" | 1, string>;\n\
+             const bad: X = \"a\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (Exclude all match -> never)
+#[test]
+fn exclude_type_all_members_removed_yields_never_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CONDITIONAL_UTILITIES}\
+             type X = Exclude<\"a\" | \"b\", string>;\n\
+             const bad: X = \"a\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (NonNullable)
+#[test]
+fn nonnullable_type_strips_null_and_undefined_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CONDITIONAL_UTILITIES}\
+             type N = NonNullable<string | null | undefined>;\n\
+             const n: N = \"s\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (NonNullable mismatch)
+#[test]
+fn nonnullable_type_null_value_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CONDITIONAL_UTILITIES}\
+             type N = NonNullable<string | null>;\n\
+             const bad: N = null;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (NonNullable primitive)
+#[test]
+fn nonnullable_type_on_primitive_is_identity_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CONDITIONAL_UTILITIES}\
+             type N = NonNullable<number>;\n\
+             const n: N = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (Parameters infer)
+#[test]
+fn parameters_type_of_function_resolves_tuple_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{FUNCTION_UTILITIES}\
+             type F = (x: number, y: string) => void;\n\
+             type P = Parameters<F>;\n\
+             const p: P = [1, \"a\"];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (Parameters zero-arg)
+#[test]
+fn parameters_type_of_zero_arg_function_resolves_empty_tuple_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{FUNCTION_UTILITIES}\
+             type F = () => void;\n\
+             type P = Parameters<F>;\n\
+             const p: P = [];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (ReturnType infer)
+#[test]
+fn return_type_of_function_resolves_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{FUNCTION_UTILITIES}\
+             type F = (x: number) => string;\n\
+             type R = ReturnType<F>;\n\
+             const r: R = \"s\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (ReturnType void)
+#[test]
+fn return_type_of_void_function_resolves_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{FUNCTION_UTILITIES}\
+             type F = (x: number) => void;\n\
+             type R = ReturnType<F>;\n\
+             declare const f: F;\n\
+             const r: R = f(1);"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (ConstructorParameters infer)
+#[test]
+fn constructor_parameters_type_resolves_tuple_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{FUNCTION_UTILITIES}\
+             class C {{ constructor(x: number, y: string) {{}} }}\n\
+             type P = ConstructorParameters<typeof C>;\n\
+             const p: P = [1, \"a\"];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (ConstructorParameters zero-arg)
+#[test]
+fn constructor_parameters_type_of_default_ctor_resolves_empty_tuple_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{FUNCTION_UTILITIES}\
+             class C {{}}\n\
+             type P = ConstructorParameters<typeof C>;\n\
+             const p: P = [];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (InstanceType infer)
+#[test]
+fn instance_type_of_class_resolves_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{FUNCTION_UTILITIES}\
+             class C {{ x = 1; }}\n\
+             type I = InstanceType<typeof C>;\n\
+             const i: I = new C();"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (InstanceType mismatch)
+#[test]
+fn instance_type_of_class_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{FUNCTION_UTILITIES}\
+             class C {{ x = 1; }}\n\
+             type I = InstanceType<typeof C>;\n\
+             const bad: I = {{ x: \"s\" }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (ReturnType union callable)
+#[test]
+fn return_type_of_union_callable_resolves_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{FUNCTION_UTILITIES}\
+             type F = ((x: number) => string) | ((x: string) => number);\n\
+             type R = ReturnType<F>;\n\
+             const r1: R = \"s\";\n\
+             const r2: R = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (Parameters on alias)
+#[test]
+fn parameters_type_of_type_alias_callable_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{FUNCTION_UTILITIES}\
+             type F = (a: boolean) => void;\n\
+             type P = Parameters<F>;\n\
+             const p: P = [true];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.instantiateMappedType (homomorphic union)
+#[test]
+fn homomorphic_partial_over_union_distributes_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{HOMOMORPHIC_MAPPED}\
+             type U = {{ a: number }} | {{ b: string }};\n\
+             type P = Partial2<U>;\n\
+             const p1: P = {{ a: 1 }};\n\
+             const p2: P = {{ b: \"s\" }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.instantiateMappedType (homomorphic union optional)
+#[test]
+fn homomorphic_partial_over_union_allows_empty_object_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{HOMOMORPHIC_MAPPED}\
+             type U = {{ a: number }} | {{ b: string }};\n\
+             type P = Partial2<U>;\n\
+             const p: P = {{}};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (readonly +)
+#[test]
+fn homomorphic_readonly_mapped_property_write_reports_2540() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{HOMOMORPHIC_MAPPED}\
+             type R = Readonly2<{{ a: number }}>;\n\
+             declare let r: R;\n\
+             r.a = 2;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2540, got {diags:?}");
+    assert_eq!(diags[0].code, 2540);
+}
+
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (-readonly)
+#[test]
+fn homomorphic_writable_removes_readonly_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{HOMOMORPHIC_MAPPED}\
+             type W = Writable<{{ readonly a: number }}>;\n\
+             declare let w: W;\n\
+             w.a = 2;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.instantiateMappedType (homomorphic partial empty)
+#[test]
+fn homomorphic_partial_over_concrete_allows_missing_properties_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{HOMOMORPHIC_MAPPED}\
+             type P = Partial2<{{ a: number; b: string }}>;\n\
+             const p: P = {{ a: 1 }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getIndexType (keyof union)
+#[test]
+fn keyof_union_type_is_intersection_of_keys_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type U = { a: number; b: string } | { a: number; c: boolean };\n\
+         type K = keyof U;\n\
+         const k: K = \"a\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getIndexType (keyof union mismatch)
+#[test]
+fn keyof_union_type_non_shared_key_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type U = { a: number } | { b: string };\n\
+         type K = keyof U;\n\
+         const bad: K = \"b\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getIndexedAccessType (distributive union index)
+#[test]
+fn indexed_access_on_union_object_distributes_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type U = { a: number } | { a: string };\n\
+         type V = U[\"a\"];\n\
+         const v1: V = 1;\n\
+         const v2: V = \"s\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getIndexedAccessType (distributive union index mismatch)
+#[test]
+fn indexed_access_on_union_object_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type U = { a: number } | { a: string };\n\
+         type V = U[\"a\"];\n\
+         const bad: V = true;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}

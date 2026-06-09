@@ -11582,8 +11582,53 @@ impl Checker {
         )
     }
 
+    // Builds the tuple type formed by source signature parameters from `pos`
+    // onward (Go's `getRestTypeAtPosition`, reachable subset without labeled
+    // tuple elements or source-rest expansion).
+    // Go: internal/checker/relater.go:Checker.getRestTypeAtPosition
+    pub(crate) fn get_rest_type_at_position(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: SignatureId,
+        pos: usize,
+    ) -> TypeId {
+        let parameter_count = self.signature(source).parameters.len();
+        let has_rest = self.signature_has_rest_parameter(source);
+        let fixed_count = parameter_count - usize::from(has_rest);
+        if has_rest && pos >= fixed_count {
+            return self.get_type_at_position(program, source, fixed_count);
+        }
+        let length = fixed_count.saturating_sub(pos);
+        if length == 0 {
+            return self.create_tuple_type(Vec::new());
+        }
+        let mut types = Vec::with_capacity(length);
+        for i in 0..length {
+            types.push(self.get_type_at_position(program, source, pos + i));
+        }
+        self.create_tuple_type(types)
+    }
+
+    // Returns the rest type at `pos`, mapping `any[]` to `any` (Go's
+    // `getRestOrAnyTypeAtPosition`).
+    // Go: internal/checker/relater.go:Checker.getRestOrAnyTypeAtPosition
+    pub(crate) fn get_rest_or_any_type_at_position(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: SignatureId,
+        pos: usize,
+    ) -> TypeId {
+        let rest_type = self.get_rest_type_at_position(program, source, pos);
+        if let Some(element) = self.get_element_type_of_array_type(rest_type) {
+            if element == self.any_type {
+                return self.any_type;
+            }
+        }
+        rest_type
+    }
+
     // Go: internal/checker/checker.go:Checker.getSignaturesOfType (construct kind)
-    fn get_construct_signatures_of_type(&self, t: TypeId) -> Vec<SignatureId> {
+    pub(crate) fn get_construct_signatures_of_type(&self, t: TypeId) -> Vec<SignatureId> {
         let apparent = get_apparent_type(self, t);
         let Some(obj) = self.get_type(apparent).as_object() else {
             return Vec::new();

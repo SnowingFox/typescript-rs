@@ -2211,8 +2211,14 @@ fn get_type_of_func_class_enum_module(
             program.globals(),
         );
     }
+    let construct_signatures = if sym.flags.intersects(SymbolFlags::CLASS) {
+        get_class_construct_signatures(checker, program, symbol)
+    } else {
+        Vec::new()
+    };
     let object = ObjectType {
         call_signatures,
+        construct_signatures,
         members,
         properties,
         index_infos,
@@ -3699,6 +3705,26 @@ pub fn instantiate_mapped_type(
         || is_generic_object_type(checker, modifiers_type)
     {
         return checker.new_mapped_type(declaration, Some(combined));
+    }
+    if modifiers_flags.contains(TypeFlags::UNION) {
+        let members = checker
+            .get_type(modifiers_type)
+            .union_types()
+            .unwrap_or(&[])
+            .to_vec();
+        let mapped: Vec<TypeId> = members
+            .iter()
+            .map(|&member| {
+                resolve_mapped_type_members_eager(
+                    checker,
+                    program,
+                    declaration,
+                    member,
+                    &combined,
+                )
+            })
+            .collect();
+        return checker.get_union_type(&mapped);
     }
     resolve_mapped_type_members_eager(checker, program, declaration, modifiers_type, &combined)
 }
