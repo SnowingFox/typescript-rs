@@ -40,7 +40,8 @@ use super::declared_types::{
     has_base_type, get_index_info_of_type, get_index_infos_of_type,
     get_index_type_of_type, get_indexed_access_type, get_min_type_argument_count,
     get_property_of_type,     get_property_of_union_or_intersection_type, get_properties_of_type,
-    get_explicit_accessor_return_type, get_property_type_for_index_type, get_type_from_type_node,
+    get_explicit_accessor_return_type, get_index_type, get_property_type_for_index_type,
+    get_type_from_type_node,
     get_type_of_property_of_type, get_type_of_symbol, get_type_without_signatures,
     is_generic_object_type, resolve_alias,
 };
@@ -4986,6 +4987,8 @@ impl Checker {
                 && self.is_type_assignable_to(program, source, self.bigint_type))
             || (kind.intersects(TypeFlags::BOOLEAN_LIKE)
                 && self.is_type_assignable_to(program, source, self.boolean_type))
+            || (kind.intersects(TypeFlags::NON_PRIMITIVE)
+                && self.is_type_assignable_to(program, source, self.non_primitive_type()))
     }
 
     // Go: internal/checker/checker.go:Checker.bothAreBigIntLike(12727)
@@ -8462,67 +8465,12 @@ impl Checker {
         // list or an expression) and its iterated expression, then descends into
         // its body (Go's `checkForInStatement`/`checkForOfStatement`), so nested
         // diagnostics surface.
-        // DEFER(phase-4-checker-4o+): the for-in LHS/RHS type diagnostics
-        // (`The_left_hand_side_of_a_for_in_statement_must_be_of_type_string_or_any`
-        // 2405, `The_right_hand_side_of_a_for_in_statement_must_be...` 2407) and
-        // for-of iterated-element typing (`checkRightHandSideOfForOf` ->
-        // assignability of the element type to the target). blocked-by:
-        // `getIndexTypeOrString` + iterable/iterator typing (`Symbol.iterator`)
-        // need lib globals (P6) + destructuring assignment.
-        if let NodeData::ForInOrOfStatement(d) = program.arena().data(node) {
+        if let NodeData::ForInOrOfStatement(_) = program.arena().data(node) {
             let kind = program.arena().kind(node);
-            if matches!(kind, Kind::ForInStatement | Kind::ForOfStatement) {
-                self.check_grammar_for_in_or_for_of_statement(program, node);
-                let (initializer, expression, statement) =
-                    (d.initializer, d.expression, d.statement);
-                let expression_type = self.check_expression(program, expression);
-                // A for-of resolves the iterated element type from its right-hand
-                // side and reports the not-iterable diagnostics (`2488`/`2489`) on
-                // the iterated expression (Go's `checkForOfStatement` ->
-                // `checkRightHandSideOfForOf` -> `checkIteratedTypeOrElementType`),
-                // independent of whether the loop variable is annotated. The
-                // resolved element type then types each (un-annotated, identifier)
-                // loop variable before the body is descended into, so a body
-                // reference resolves with the element type rather than `any`.
-                if kind == Kind::ForOfStatement {
-                    let iterable_exists = self.iterables_resolvable_via_protocol();
-                    let element_type = self.check_iterated_type_or_element_type(
-                        program,
-                        expression_type,
-                        Some(expression),
-                        iterable_exists,
-                    );
-                    if let Some(element_type) = element_type {
-                        if program.arena().kind(initializer) == Kind::VariableDeclarationList {
-                            self.assign_for_of_element_types(program, initializer, element_type);
-                        }
-                    }
-                }
-                // A for-in declaration list types each (un-annotated, identifier)
-                // loop variable as `string` (Go's
-                // `getTypeForVariableLikeDeclaration` returns `c.stringType` for a
-                // for-in `VariableDeclaration`), so a body reference resolves with
-                // `string` rather than the un-annotated `any`.
-                // DEFER(phase-4-checker-4af+): the `keyof T` loop-variable type
-                // when the iterated expression is a type-parameter/index type
-                // (Go's `getExtractStringType(getIndexType(...))`). blocked-by:
-                // `getIndexType` (`keyof`) typing.
-                if kind == Kind::ForInStatement
-                    && program.arena().kind(initializer) == Kind::VariableDeclarationList
-                {
-                    self.assign_for_in_variable_types(program, initializer);
-                }
-                if program.arena().kind(initializer) == Kind::VariableDeclarationList {
-                    self.check_variable_declaration_list(program, initializer);
-                } else {
-                    self.check_expression(program, initializer);
-                }
-                self.check_statement(program, statement);
-                // Go: checkForInStatement / checkForOfStatement ->
-                // if node.Locals() != nil { registerForUnusedIdentifiersCheck }
-                if program.locals(node).is_some() {
-                    self.register_for_unused_identifiers_check(node);
-                }
+            if kind == Kind::ForInStatement {
+                self.check_for_in_statement(program, node);
+            } else if kind == Kind::ForOfStatement {
+                self.check_for_of_statement(program, node);
             }
         }
         // A `throw` statement checks its thrown expression (Go's
@@ -8932,6 +8880,17 @@ impl Checker {
     fn check_return_statement(&mut self, program: &dyn BoundProgram, node: NodeId) {
         if self.check_grammar_statement_in_ambient_context(program, node) {
             return;
+        }
+        if let Some(container) = get_containing_function_or_class_static_block(program, node) {
+            if program.arena().kind(container) == Kind::ClassStaticBlockDeclaration {
+                self.grammar_error_on_first_token(
+                    program,
+                    node,
+                    &tsgo_diagnostics::A_RETURN_STATEMENT_CANNOT_BE_USED_INSIDE_A_CLASS_STATIC_BLOCK,
+                    &[],
+                );
+                return;
+            }
         }
         let NodeData::ReturnStatement(d) = program.arena().data(node) else {
             return;
@@ -12932,6 +12891,152 @@ impl Checker {
             if let Some(symbol) = program.symbol_of_node(decl) {
                 self.value_symbol_links.get(symbol).resolved_type = Some(string_type);
             }
+        }
+    }
+
+    // Checks a `for-in` statement (Go's `checkForInStatement`): grammar, LHS/RHS
+    // type diagnostics (`2405`/`2407`/`2491`), declaration typing, then the body.
+    //
+    // DEFER(phase-4-checker-4af+): destructuring-assignment LHS and the `keyof T`
+    // loop-variable type when the iterated expression is a type parameter.
+    // blocked-by: binding-element typing + `getExtractStringType` via the global
+    // `Extract` type.
+    // Go: internal/checker/checker.go:Checker.checkForInStatement(3961)
+    fn check_for_in_statement(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::ForInOrOfStatement(d) = program.arena().data(node) else {
+            return;
+        };
+        self.check_grammar_for_in_or_for_of_statement(program, node);
+        let (initializer, expression, statement) = (d.initializer, d.expression, d.statement);
+        let expression_type = self.check_expression(program, expression);
+        let right_type = self.check_non_null_type(program, expression_type, expression);
+        if program.arena().kind(initializer) == Kind::VariableDeclarationList {
+            let declarations = match program.arena().data(initializer) {
+                NodeData::VariableDeclarationList(l) => l.declarations.nodes.clone(),
+                _ => Vec::new(),
+            };
+            if let Some(first_decl) = declarations.first().copied() {
+                if let NodeData::VariableDeclaration(decl) = program.arena().data(first_decl) {
+                    let name_kind = program.arena().kind(decl.name);
+                    if matches!(
+                        name_kind,
+                        Kind::ArrayBindingPattern | Kind::ObjectBindingPattern
+                    ) {
+                        self.error(
+                            program,
+                            decl.name,
+                            &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_IN_STATEMENT_CANNOT_BE_A_DESTRUCTURING_PATTERN,
+                            &[],
+                        );
+                    }
+                }
+            }
+            self.assign_for_in_variable_types(program, initializer);
+            self.check_variable_declaration_list(program, initializer);
+        } else {
+            let var_expr = initializer;
+            let var_kind = program.arena().kind(var_expr);
+            if matches!(
+                var_kind,
+                Kind::ArrayLiteralExpression | Kind::ObjectLiteralExpression
+            ) {
+                self.error(
+                    program,
+                    var_expr,
+                    &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_IN_STATEMENT_CANNOT_BE_A_DESTRUCTURING_PATTERN,
+                    &[],
+                );
+            } else {
+                let left_type = self.check_expression(program, var_expr);
+                let index_type = self.get_index_type_or_string(right_type);
+                if !self.is_type_assignable_to(program, index_type, left_type) {
+                    self.error(
+                        program,
+                        var_expr,
+                        &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_IN_STATEMENT_MUST_BE_OF_TYPE_STRING_OR_ANY,
+                        &[],
+                    );
+                } else {
+                    self.check_reference_expression(
+                        program,
+                        var_expr,
+                        &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_IN_STATEMENT_MUST_BE_A_VARIABLE_OR_A_PROPERTY_ACCESS,
+                        &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_IN_STATEMENT_MAY_NOT_BE_AN_OPTIONAL_PROPERTY_ACCESS,
+                    );
+                }
+            }
+        }
+        if right_type != self.never_type
+            && !self.is_type_assignable_to_kind(
+                program,
+                right_type,
+                TypeFlags::NON_PRIMITIVE | TypeFlags::INSTANTIABLE_NON_PRIMITIVE,
+            )
+        {
+            let type_str = super::nodebuilder::type_to_string(self, program, right_type);
+            self.error(
+                program,
+                expression,
+                &tsgo_diagnostics::THE_RIGHT_HAND_SIDE_OF_A_FOR_IN_STATEMENT_MUST_BE_OF_TYPE_ANY_AN_OBJECT_TYPE_OR_A_TYPE_PARAMETER_BUT_HERE_HAS_TYPE_0,
+                &[type_str.as_str()],
+            );
+        }
+        self.check_statement(program, statement);
+        if program.locals(node).is_some() {
+            self.register_for_unused_identifiers_check(node);
+        }
+    }
+
+    // Returns `getExtractStringType(getIndexType(t))`, falling back to `string`
+    // when the index type is `never` (Go's `getIndexTypeOrString` reachable
+    // subset: `getExtractStringType` is `stringType` when the global `Extract`
+    // alias is absent).
+    // Go: internal/checker/checker.go:Checker.getIndexTypeOrString(4003)
+    fn get_index_type_or_string(&mut self, t: TypeId) -> TypeId {
+        let index_type = get_index_type(self, t);
+        let extract = self.string_type;
+        if self.get_type(index_type).flags().contains(TypeFlags::NEVER) {
+            self.string_type
+        } else {
+            extract
+        }
+    }
+
+    // Checks a `for-of` statement (Go's `checkForOfStatement` reachable subset):
+    // grammar, iterated-element typing (`2488`/`2489`), declaration typing, then
+    // the body.
+    //
+    // DEFER(phase-4-checker-4o+): destructuring-assignment LHS assignability and
+    // `for await` static-block / async-container grammar. blocked-by: destructuring
+    // assignment + grammar infrastructure.
+    // Go: internal/checker/checker.go:Checker.checkForOfStatement(4008)
+    fn check_for_of_statement(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::ForInOrOfStatement(d) = program.arena().data(node) else {
+            return;
+        };
+        self.check_grammar_for_in_or_for_of_statement(program, node);
+        let (initializer, expression, statement) = (d.initializer, d.expression, d.statement);
+        let expression_type = self.check_expression(program, expression);
+        let iterable_exists = self.iterables_resolvable_via_protocol();
+        let element_type = self.check_iterated_type_or_element_type(
+            program,
+            expression_type,
+            Some(expression),
+            iterable_exists,
+        );
+        if let Some(element_type) = element_type {
+            if program.arena().kind(initializer) == Kind::VariableDeclarationList {
+                self.assign_for_of_element_types(program, initializer, element_type);
+            }
+        }
+        if program.arena().kind(initializer) == Kind::VariableDeclarationList {
+            self.check_variable_declaration_list(program, initializer);
+        } else {
+            self.check_expression(program, initializer);
+        }
+        self.check_statement(program, statement);
+        if program.locals(node).is_some() {
+            self.register_for_unused_identifiers_check(node);
         }
     }
 
@@ -17020,6 +17125,31 @@ fn get_super_container(
             _ => current = arena.parent(current)?,
         }
     }
+}
+
+/// Returns the innermost function-like declaration or class static block
+/// containing `node` (Go's `getContainingFunctionOrClassStaticBlock`).
+// Go: internal/checker/utilities.go:getContainingFunctionOrClassStaticBlock
+fn get_containing_function_or_class_static_block(
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Option<NodeId> {
+    let arena = program.arena();
+    let mut current = arena.parent(node);
+    while let Some(id) = current {
+        match arena.kind(id) {
+            Kind::FunctionDeclaration
+            | Kind::FunctionExpression
+            | Kind::ArrowFunction
+            | Kind::MethodDeclaration
+            | Kind::GetAccessor
+            | Kind::SetAccessor
+            | Kind::Constructor
+            | Kind::ClassStaticBlockDeclaration => return Some(id),
+            _ => current = arena.parent(id),
+        }
+    }
+    None
 }
 
 fn get_containing_class(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {

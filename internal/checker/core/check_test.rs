@@ -19217,3 +19217,220 @@ fn in_expression_private_identifier_on_object_reports_no_diagnostic() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 99: for-in, unary symbol, exponentiation, static block, import type ----
+
+// Go: internal/checker/checker.go:Checker.checkForInStatement (2407)
+#[test]
+fn for_in_rhs_number_reports_2407() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const n: number;\nfor (const x in n) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2407, got {diags:?}");
+    assert_eq!(diags[0].code, 2407);
+    assert_eq!(
+        diags[0].message,
+        "The right-hand side of a 'for...in' statement must be of type 'any', an object type or a type parameter, but here has type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkForInStatement (2405)
+#[test]
+fn for_in_expr_lhs_number_variable_reports_2405() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: number;\nfor (x in { a: 1 }) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2405, got {diags:?}");
+    assert_eq!(diags[0].code, 2405);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of a 'for...in' statement must be of type 'string' or 'any'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkForInStatement (valid object RHS)
+#[test]
+fn for_in_object_rhs_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "for (const x in { a: 1 }) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkForInStatement (2491)
+#[test]
+fn for_in_destructuring_declaration_reports_2491() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "for (const { a } in { a: 1 }) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2491, got {diags:?}");
+    assert_eq!(diags[0].code, 2491);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of a 'for...in' statement cannot be a destructuring pattern."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (2469)
+#[test]
+fn prefix_minus_on_symbol_operand_reports_2469() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const s: symbol;\n-s;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2469, got {diags:?}");
+    assert_eq!(diags[0].code, 2469);
+    assert_eq!(
+        diags[0].message,
+        "The '-' operator cannot be applied to type 'symbol'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (2469)
+#[test]
+fn prefix_tilde_on_symbol_operand_reports_2469() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const s: symbol;\n~s;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2469, got {diags:?}");
+    assert_eq!(diags[0].code, 2469);
+    assert_eq!(
+        diags[0].message,
+        "The '~' operator cannot be applied to type 'symbol'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (** bigint, 2791)
+#[test]
+fn bigint_exponentiation_below_es2016_target_reports_2791() {
+    use tsgo_core::compileroptions::ScriptTarget;
+    let options = CompilerOptions {
+        target: ScriptTarget::Es5,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "1n ** 2n;",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2791, got {diags:?}");
+    assert_eq!(diags[0].code, 2791);
+    assert_eq!(
+        diags[0].message,
+        "Exponentiation cannot be performed on 'bigint' values unless the 'target' option is set to 'es2016' or later."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (** string, 2362)
+#[test]
+fn exponentiation_string_left_operand_reports_2362() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const s: string;\ns ** 2;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2362, got {diags:?}");
+    assert_eq!(diags[0].code, 2362);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkReturnStatement (18041)
+#[test]
+fn return_in_class_static_block_reports_18041() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { static { return; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 18041, got {diags:?}");
+    assert_eq!(diags[0].code, 18041);
+    assert_eq!(
+        diags[0].message,
+        "A 'return' statement cannot be used inside a class static block."
+    );
+}
+
+// Go: internal/ast/utilities.go:IsValidTypeOnlyAliasUseSite
+#[test]
+fn import_type_value_use_reports_1361() {
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/m.ts", "export type T = number;"),
+        ("/a.ts", "import type { T } from \"./m\";\nT;"),
+    ]));
+    let file_a = p.source_files()[1];
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(file_a);
+    assert!(
+        diags.iter().any(|d| d.code == 1361),
+        "expected TS1361: {diags:?}",
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPropertyDeclaration (static initializer, 2322)
+#[test]
+fn static_property_initializer_not_assignable_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { static x: number = \"s\"; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArrayLiteral (spread non-array, 2495)
+#[test]
+fn array_literal_spread_non_array_reports_2495() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number };\nconst a = [...x];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2495, got {diags:?}");
+    assert_eq!(diags[0].code, 2495);
+    assert_eq!(
+        diags[0].message,
+        "Type '{ a: number; }' is not an array type or a string type."
+    );
+}
