@@ -363,6 +363,35 @@ impl Checker {
                     }
                     return self.create_type_reference(target, new_args);
                 }
+                if self
+                    .get_type(t)
+                    .object_flags()
+                    .contains(crate::core::types::ObjectFlags::TUPLE)
+                {
+                    let readonly = obj.readonly;
+                    let tuple_fixed_length = obj.tuple_fixed_length;
+                    let tuple_min_length = obj.tuple_min_length;
+                    let tuple_element_optional = obj.tuple_element_optional.clone();
+                    let tuple_element_rest = obj.tuple_element_rest.clone();
+                    let tuple_element_variadic = obj.tuple_element_variadic.clone();
+                    let args = obj.resolved_type_arguments.clone();
+                    let new_args: Vec<TypeId> = args
+                        .iter()
+                        .map(|&a| self.instantiate_type(a, mapper))
+                        .collect();
+                    if new_args == args {
+                        return t;
+                    }
+                    return self.create_tuple_type_structured(
+                        new_args,
+                        readonly,
+                        tuple_fixed_length,
+                        tuple_min_length,
+                        tuple_element_optional,
+                        tuple_element_rest,
+                        tuple_element_variadic,
+                    );
+                }
             }
             // DEFER(phase-4-checker-4e): anonymous/mapped object deep
             // instantiation (re-create members with instantiated types).

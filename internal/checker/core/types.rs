@@ -749,6 +749,12 @@ pub struct ObjectType {
     /// `TupleElementInfo.flags & ElementFlagsOptional`). When `None`, every
     /// fixed element is treated as required.
     pub tuple_element_optional: Option<Vec<bool>>,
+    /// Per-element rest flags (`...T[]` at this position). When `None`, no
+    /// element is a rest element.
+    pub tuple_element_rest: Option<Vec<bool>>,
+    /// Per-element variadic flags (`...T` with a type-parameter element).
+    /// When `None`, no element is variadic.
+    pub tuple_element_variadic: Option<Vec<bool>>,
 }
 
 /// The payload of a union type (`A | B`), holding its constituents by id.

@@ -18340,9 +18340,9 @@ fn bitwise_and_void_left_operand_reports_2362() {
     );
 }
 
-// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (rest tuple element mismatch)
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (rest tuple span mismatch, 2627)
 #[test]
-fn assignability_rest_tuple_element_mismatch_reports_2626() {
+fn assignability_rest_tuple_element_mismatch_reports_2627() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
         "declare const src: [string, string, string];\n\
@@ -18355,10 +18355,10 @@ fn assignability_rest_tuple_element_mismatch_reports_2626() {
     let d = &diags[0];
     assert_eq!(d.code, 2322);
     assert_eq!(d.message_chain.len(), 1);
-    assert_eq!(d.message_chain[0].code, 2626);
+    assert_eq!(d.message_chain[0].code, 2627);
     assert_eq!(
         d.message_chain[0].message,
-        "Type at position 1 in source is not compatible with type at position 1 in target."
+        "Type at positions 1 through 2 in source is not compatible with type at position 1 in target."
     );
     assert_eq!(d.message_chain[0].next.len(), 1);
     assert_eq!(d.message_chain[0].next[0].code, 2322);
@@ -18488,5 +18488,137 @@ fn assign_to_class_identifier_reports_2629() {
     assert_eq!(
         diags[0].message,
         "Cannot assign to 'C' because it is a class."
+    );
+}
+
+// ---- T1-E batch 92: variadic tuple 2624-2627, namespace/function assign 2630+, void postfix 2356 ----
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (2624, variadic target)
+#[test]
+fn assignability_variadic_target_missing_variadic_source_reports_2624() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type VariadicTarget<T extends unknown[]> = [string, ...T];\n\
+         declare const src: [string, ...number[]];\n\
+         const o: VariadicTarget<[number]> = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2624);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Source provides no match for variadic element at position 1 in target."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (2625, variadic source)
+#[test]
+fn assignability_variadic_source_to_fixed_target_reports_2625() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type VariadicSource<T extends unknown[]> = [string, ...T];\n\
+         declare const src: VariadicSource<[number]>;\n\
+         const o: [string, number] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2625);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Variadic element at position 1 in source does not match element at position 1 in target."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (2627, rest tail mismatch)
+#[test]
+fn assignability_rest_tuple_span_mismatch_reports_2627() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: [number, number, string];\n\
+         const o: [number, ...number[]] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2627);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Type at positions 1 through 2 in source is not compatible with type at position 1 in target."
+    );
+    assert_eq!(d.message_chain[0].next.len(), 1);
+    assert_eq!(d.message_chain[0].next[0].code, 2322);
+    assert_eq!(
+        d.message_chain[0].next[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to namespace, 2631)
+#[test]
+fn assign_to_namespace_identifier_reports_2631() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace M {}\nM = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2631, got {diags:?}");
+    assert_eq!(diags[0].code, 2631);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'M' because it is a namespace."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to function, 2630)
+#[test]
+fn assign_to_function_identifier_reports_2630() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() {}\nf = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2630, got {diags:?}");
+    assert_eq!(diags[0].code, 2630);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'f' because it is a function."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPostfixUnaryExpression (2356)
+#[test]
+fn postfix_increment_on_void_operand_reports_2356() {
+    let codes = diag_codes("declare function f(): void;\nlet x = f()++;");
+    assert!(
+        codes.contains(&2356),
+        "expected TS2356 on void++; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (2356)
+#[test]
+fn prefix_increment_on_void_operand_reports_2356() {
+    let codes = diag_codes("declare function f(): void;\n++f();");
+    assert!(
+        codes.contains(&2356),
+        "expected TS2356 on ++void; got {codes:?}"
     );
 }

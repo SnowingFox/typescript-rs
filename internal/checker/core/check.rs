@@ -2494,6 +2494,10 @@ impl Checker {
                             Some(&tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_AN_ENUM)
                         } else if flags.intersects(SymbolFlags::CLASS) {
                             Some(&tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_CLASS)
+                        } else if flags.intersects(SymbolFlags::MODULE) {
+                            Some(&tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_NAMESPACE)
+                        } else if flags.intersects(SymbolFlags::FUNCTION) {
+                            Some(&tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_FUNCTION)
                         } else {
                             None
                         };
@@ -14721,6 +14725,80 @@ impl Checker {
             }
         }
         !self.tuple_element_is_optional(t, index)
+    }
+
+    // Whether tuple position `index` is a rest element (`...T[]`).
+    pub(crate) fn tuple_element_is_rest(&self, t: TypeId, index: usize) -> bool {
+        let Some(obj) = self.get_type(t).as_object() else {
+            return false;
+        };
+        obj.tuple_element_rest
+            .as_ref()
+            .and_then(|flags| flags.get(index))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    // Whether tuple position `index` is a variadic element (`...T`).
+    pub(crate) fn tuple_element_is_variadic(&self, t: TypeId, index: usize) -> bool {
+        let Some(obj) = self.get_type(t).as_object() else {
+            return false;
+        };
+        obj.tuple_element_variadic
+            .as_ref()
+            .and_then(|flags| flags.get(index))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    // Whether `t` has a rest or variadic element (Go's `ElementFlagsVariable`).
+    pub(crate) fn tuple_has_variable_element(&self, t: TypeId) -> bool {
+        if self.tuple_has_rest_element(t) {
+            return true;
+        }
+        let Some(obj) = self.get_type(t).as_object() else {
+            return false;
+        };
+        obj.tuple_element_variadic
+            .as_ref()
+            .is_some_and(|flags| flags.iter().any(|&v| v))
+    }
+
+    // Count of leading fixed (non-rest) elements before a variable tail.
+    pub(crate) fn tuple_start_element_count(&self, t: TypeId) -> usize {
+        let Some(obj) = self.get_type(t).as_object() else {
+            return 0;
+        };
+        if let Some(rest) = &obj.tuple_element_rest {
+            if let Some(pos) = rest.iter().position(|&r| r) {
+                return pos;
+            }
+        }
+        if let Some(variadic) = &obj.tuple_element_variadic {
+            if let Some(pos) = variadic.iter().position(|&v| v) {
+                return pos;
+            }
+        }
+        obj.resolved_type_arguments.len()
+    }
+
+    // Count of trailing fixed elements after a variable tail (0 for `[A, ...B]`).
+    pub(crate) fn tuple_end_element_count(&self, t: TypeId) -> usize {
+        let Some(obj) = self.get_type(t).as_object() else {
+            return 0;
+        };
+        let arity = obj.resolved_type_arguments.len();
+        if let Some(rest) = &obj.tuple_element_rest {
+            if let Some(pos) = rest.iter().rposition(|&r| r) {
+                return arity - 1 - pos;
+            }
+        }
+        if let Some(variadic) = &obj.tuple_element_variadic {
+            if let Some(pos) = variadic.iter().rposition(|&v| v) {
+                return arity - 1 - pos;
+            }
+        }
+        0
     }
 
     /// Performs assignability checking with optional elaboration (Go's

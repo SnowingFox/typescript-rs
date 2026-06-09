@@ -4080,16 +4080,19 @@ fn get_type_from_tuple_type_node(
     };
     let mut element_types = Vec::with_capacity(element_nodes.len());
     let mut element_optional = Vec::with_capacity(element_nodes.len());
+    let mut element_rest = Vec::with_capacity(element_nodes.len());
+    let mut element_variadic = Vec::with_capacity(element_nodes.len());
     let mut min_length = 0usize;
     let mut tuple_fixed_length = None;
     for &element_node in &element_nodes {
         let parsed = parse_tuple_element_type(checker, program, element_node, globals);
+        element_types.push(parsed.element_type);
+        element_rest.push(parsed.rest);
+        element_variadic.push(parsed.variadic);
         if parsed.rest {
-            element_types.push(parsed.element_type);
             element_optional.push(false);
             tuple_fixed_length = Some(element_types.len() - 1);
         } else {
-            element_types.push(parsed.element_type);
             element_optional.push(parsed.optional);
             if !parsed.optional {
                 min_length += 1;
@@ -4108,6 +4111,8 @@ fn get_type_from_tuple_type_node(
         tuple_fixed_length,
         tuple_min_length,
         Some(element_optional),
+        Some(element_rest),
+        Some(element_variadic),
     )
 }
 
@@ -4115,6 +4120,7 @@ struct ParsedTupleElement {
     element_type: TypeId,
     optional: bool,
     rest: bool,
+    variadic: bool,
 }
 
 // Resolves one tuple element node to its element type and flags.
@@ -4127,11 +4133,15 @@ fn parse_tuple_element_type(
 ) -> ParsedTupleElement {
     let arena = program.arena();
     match arena.data(node) {
-        NodeData::RestType(d) => ParsedTupleElement {
-            element_type: get_rest_tuple_element_type(checker, program, d.type_node, globals),
-            optional: false,
-            rest: true,
-        },
+        NodeData::RestType(d) => {
+            let is_array_rest = program.arena().kind(d.type_node) == Kind::ArrayType;
+            ParsedTupleElement {
+                element_type: get_rest_tuple_element_type(checker, program, d.type_node, globals),
+                optional: false,
+                rest: is_array_rest,
+                variadic: !is_array_rest,
+            }
+        }
         NodeData::OptionalType(d) => {
             let element_type =
                 get_type_from_type_node(checker, program, d.type_node, globals);
@@ -4141,11 +4151,15 @@ fn parse_tuple_element_type(
                 element_type: widened,
                 optional: true,
                 rest: false,
+                variadic: false,
             }
         }
         NodeData::NamedTupleMember(d) => {
             let element_type = get_type_from_type_node(checker, program, d.type_node, globals);
             let optional = d.question_token.is_some();
+            let is_array_rest = d.dot_dot_dot_token.is_some()
+                && program.arena().kind(d.type_node) == Kind::ArrayType;
+            let is_variadic = d.dot_dot_dot_token.is_some() && !is_array_rest;
             let widened = if optional {
                 checker.get_union_type(&[element_type, checker.undefined_type()])
             } else {
@@ -4154,13 +4168,15 @@ fn parse_tuple_element_type(
             ParsedTupleElement {
                 element_type: widened,
                 optional,
-                rest: false,
+                rest: is_array_rest,
+                variadic: is_variadic,
             }
         }
         _ => ParsedTupleElement {
             element_type: get_type_from_type_node(checker, program, node, globals),
             optional: false,
             rest: false,
+            variadic: false,
         },
     }
 }

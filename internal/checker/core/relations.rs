@@ -1251,7 +1251,7 @@ impl Checker {
         let source_rest = !source_is_tuple;
         let target_elements = self.tuple_element_types(target);
         let target_arity = target_elements.len();
-        let target_has_rest = self.tuple_has_rest_element(target);
+        let target_has_variable = self.tuple_has_variable_element(target);
         let target_min_length = self.tuple_min_length(target);
         let source_arity = if source_is_tuple {
             self.tuple_element_types(source).len()
@@ -1262,10 +1262,10 @@ impl Checker {
         if !source_rest && source_min_length < target_min_length {
             return false;
         }
-        if !target_has_rest && target_arity < source_min_length {
+        if !target_has_variable && target_arity < source_min_length {
             return false;
         }
-        if !target_has_rest && (source_rest || target_arity < source_arity) {
+        if !target_has_variable && (source_rest || target_arity < source_arity) {
             return false;
         }
         if source_is_tuple {
@@ -1279,7 +1279,7 @@ impl Checker {
         })
     }
 
-    // Relates a tuple source to a tuple target, including rest-tuple targets.
+    // Relates a tuple source to a tuple target, including rest/variadic targets.
     // Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple element loop)
     fn tuple_to_tuple_types_related_to(
         &mut self,
@@ -1288,30 +1288,130 @@ impl Checker {
         target: TypeId,
         relation: RelationKind,
     ) -> bool {
-        let source_elements = self.tuple_element_types(source);
-        let target_elements = self.tuple_element_types(target);
-        let target_fixed = self.tuple_fixed_length(target).unwrap_or(target_elements.len());
-        if self.tuple_has_rest_element(target) {
-            let rest_type = target_elements[target_fixed];
-            for (index, &source_type) in source_elements.iter().enumerate() {
-                let (target_position, target_type) = if index < target_fixed {
-                    (index, target_elements[index])
-                } else {
-                    (target_fixed, rest_type)
-                };
-                if self.tuple_element_is_required(target, target_position)
-                    && self.tuple_element_is_optional(source, index)
-                {
-                    return false;
-                }
-                if !self.is_type_related_to(program, source_type, target_type, relation) {
-                    return false;
-                }
+        if self.tuple_has_variable_element(target) || self.tuple_has_variable_element(source) {
+            if !self.tuple_positions_related_to(program, source, target, relation, None) {
+                return false;
             }
         } else if !self.tuple_elements_related_to(program, source, target, relation) {
             return false;
         }
         !self.readonly_blocks_mutable_assignability(source, target, relation)
+    }
+
+    // Maps a source tuple position to its target position and compare types for
+    // tuple targets with rest/variadic elements (Go's `propertiesRelatedTo` loop).
+    fn tuple_positions_related_to(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+        mut reporter: Option<&mut ChainReporter>,
+    ) -> bool {
+        let source_elements = self.tuple_element_types(source);
+        let target_elements = self.tuple_element_types(target);
+        let source_arity = source_elements.len();
+        let target_arity = target_elements.len();
+        let target_start = self.tuple_start_element_count(target);
+        let target_end = self.tuple_end_element_count(target);
+        let target_has_variable = self.tuple_has_variable_element(target);
+        for source_position in 0..source_arity {
+            let source_variadic = self.tuple_element_is_variadic(source, source_position);
+            let source_position_from_end = source_arity - 1 - source_position;
+            let target_position = if target_has_variable && source_position >= target_start {
+                target_arity - 1 - source_position_from_end.min(target_end)
+            } else {
+                source_position
+            };
+            let target_variadic = self.tuple_element_is_variadic(target, target_position);
+            let target_rest = self.tuple_element_is_rest(target, target_position)
+                || (self.tuple_has_rest_element(target)
+                    && target_position
+                        >= self
+                            .tuple_fixed_length(target)
+                            .unwrap_or(target_arity));
+            let target_variable = target_variadic || target_rest;
+            if target_variadic && !source_variadic {
+                if let Some(r) = reporter.as_mut() {
+                    r.report(
+                        &tsgo_diagnostics::SOURCE_PROVIDES_NO_MATCH_FOR_VARIADIC_ELEMENT_AT_POSITION_0_IN_TARGET,
+                        vec![target_position.to_string()],
+                    );
+                }
+                return false;
+            }
+            if source_variadic && !target_variable {
+                if let Some(r) = reporter.as_mut() {
+                    r.report(
+                        &tsgo_diagnostics::VARIADIC_ELEMENT_AT_POSITION_0_IN_SOURCE_DOES_NOT_MATCH_ELEMENT_AT_POSITION_1_IN_TARGET,
+                        vec![
+                            source_position.to_string(),
+                            target_position.to_string(),
+                        ],
+                    );
+                }
+                return false;
+            }
+            if self.tuple_element_is_required(target, target_position)
+                && self.tuple_element_is_optional(source, source_position)
+            {
+                if let Some(r) = reporter.as_mut() {
+                    r.report(
+                        &tsgo_diagnostics::SOURCE_PROVIDES_NO_MATCH_FOR_REQUIRED_ELEMENT_AT_POSITION_0_IN_TARGET,
+                        vec![target_position.to_string()],
+                    );
+                }
+                return false;
+            }
+            let source_type = source_elements[source_position];
+            let target_type = target_elements.get(target_position).copied().unwrap_or_else(|| self.any_type());
+            let target_check_type = if source_variadic && target_rest {
+                self.create_array_type(target_type)
+            } else {
+                target_type
+            };
+            let related = if let Some(r) = reporter.as_mut() {
+                self.report_is_related_to(
+                    program,
+                    source_type,
+                    target_check_type,
+                    relation,
+                    r,
+                )
+            } else {
+                self.is_type_related_to(program, source_type, target_check_type, relation)
+            };
+            if !related {
+                if let Some(r) = reporter.as_mut() {
+                    if target_arity > 1 || source_arity > 1 {
+                        if target_has_variable
+                            && source_position >= target_start
+                            && source_position_from_end >= target_end
+                            && target_start != source_arity - target_end - 1
+                        {
+                            r.report(
+                                &tsgo_diagnostics::TYPE_AT_POSITIONS_0_THROUGH_1_IN_SOURCE_IS_NOT_COMPATIBLE_WITH_TYPE_AT_POSITION_2_IN_TARGET,
+                                vec![
+                                    target_start.to_string(),
+                                    (source_arity - target_end - 1).to_string(),
+                                    target_position.to_string(),
+                                ],
+                            );
+                        } else {
+                            r.report(
+                                &tsgo_diagnostics::TYPE_AT_POSITION_0_IN_SOURCE_IS_NOT_COMPATIBLE_WITH_TYPE_AT_POSITION_1_IN_TARGET,
+                                vec![
+                                    source_position.to_string(),
+                                    target_position.to_string(),
+                                ],
+                            );
+                        }
+                    }
+                }
+                return false;
+            }
+        }
+        true
     }
 
     // Reporting twin of [`array_or_tuple_to_tuple_types_related_to`].
@@ -1333,7 +1433,7 @@ impl Checker {
             1
         };
         let source_min_length = if source_is_tuple { source_arity } else { 0 };
-        let target_has_rest = self.tuple_has_rest_element(target);
+        let target_has_variable = self.tuple_has_variable_element(target);
         let target_min_length = self.tuple_min_length(target);
         if !source_rest && source_min_length < target_min_length {
             reporter.report(
@@ -1342,14 +1442,14 @@ impl Checker {
             );
             return false;
         }
-        if !target_has_rest && target_arity < source_min_length {
+        if !target_has_variable && target_arity < source_min_length {
             reporter.report(
                 &tsgo_diagnostics::SOURCE_HAS_0_ELEMENT_S_BUT_TARGET_ALLOWS_ONLY_1,
                 vec![source_min_length.to_string(), target_arity.to_string()],
             );
             return false;
         }
-        if !target_has_rest && (source_rest || target_arity < source_arity) {
+        if !target_has_variable && (source_rest || target_arity < source_arity) {
             if source_min_length < target_min_length {
                 reporter.report(
                     &tsgo_diagnostics::TARGET_REQUIRES_0_ELEMENT_S_BUT_SOURCE_MAY_HAVE_FEWER,
@@ -1401,42 +1501,14 @@ impl Checker {
         relation: RelationKind,
         reporter: &mut ChainReporter,
     ) -> bool {
-        let source_elements = self.tuple_element_types(source);
-        let target_elements = self.tuple_element_types(target);
-        let target_fixed = self.tuple_fixed_length(target).unwrap_or(target_elements.len());
-        if self.tuple_has_rest_element(target) {
-            let rest_type = target_elements[target_fixed];
-            for (source_position, &source_type) in source_elements.iter().enumerate() {
-                let (target_position, target_type) = if source_position < target_fixed {
-                    (source_position, target_elements[source_position])
-                } else {
-                    (target_fixed, rest_type)
-                };
-                if self.tuple_element_is_required(target, target_position)
-                    && self.tuple_element_is_optional(source, source_position)
-                {
-                    reporter.report(
-                        &tsgo_diagnostics::SOURCE_PROVIDES_NO_MATCH_FOR_REQUIRED_ELEMENT_AT_POSITION_0_IN_TARGET,
-                        vec![target_position.to_string()],
-                    );
-                    return false;
-                }
-                if !self.report_is_related_to(program, source_type, target_type, relation, reporter)
-                {
-                    if source_elements.len() > 1 || target_elements.len() > 1 {
-                        reporter.report(
-                            &tsgo_diagnostics::TYPE_AT_POSITION_0_IN_SOURCE_IS_NOT_COMPATIBLE_WITH_TYPE_AT_POSITION_1_IN_TARGET,
-                            vec![
-                                source_position.to_string(),
-                                target_position.to_string(),
-                            ],
-                        );
-                    }
-                    return false;
-                }
+        if self.tuple_has_variable_element(target) || self.tuple_has_variable_element(source) {
+            if !self.tuple_positions_related_to(program, source, target, relation, Some(reporter)) {
+                return false;
             }
             return !self.readonly_blocks_mutable_assignability(source, target, relation);
         }
+        let source_elements = self.tuple_element_types(source);
+        let target_elements = self.tuple_element_types(target);
         if source_elements.len() != target_elements.len() {
             if source_elements.len() < target_elements.len() {
                 reporter.report(
