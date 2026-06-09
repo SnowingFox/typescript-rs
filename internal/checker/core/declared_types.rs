@@ -370,11 +370,16 @@ fn get_declared_type_of_class_or_interface(
     // Allocate with own members first and cache it, so cyclic `extends`
     // resolution terminates.
     let properties: Vec<SymbolId> = own_members.values().copied().collect();
+    let call_signatures = signatures_of_member(checker, program, symbol, INTERNAL_SYMBOL_NAME_CALL);
+    let construct_signatures =
+        signatures_of_member(checker, program, symbol, INTERNAL_SYMBOL_NAME_NEW);
     let object = ObjectType {
         members: own_members.clone(),
         properties,
         type_parameters,
         this_type: Some(this_type),
+        call_signatures,
+        construct_signatures,
         ..Default::default()
     };
     let t = checker.new_object_type(kind, Some(symbol), object);
@@ -401,10 +406,32 @@ fn get_declared_type_of_class_or_interface(
         for (name, &member) in own_members.iter() {
             merged.insert(name.clone(), member);
         }
+        let own_call = checker
+            .get_type(t)
+            .as_object()
+            .map(|o| o.call_signatures.clone())
+            .unwrap_or_default();
+        let own_construct = checker
+            .get_type(t)
+            .as_object()
+            .map(|o| o.construct_signatures.clone())
+            .unwrap_or_default();
+        let mut merged_call = Vec::new();
+        let mut merged_construct = Vec::new();
+        for &base in &base_types {
+            if let Some(base_obj) = checker.get_type(base).as_object() {
+                merged_call.extend(base_obj.call_signatures.iter().copied());
+                merged_construct.extend(base_obj.construct_signatures.iter().copied());
+            }
+        }
+        merged_call.extend(own_call);
+        merged_construct.extend(own_construct);
         if let Some(obj) = checker.types.get_mut(t).as_object_mut() {
             obj.properties = merged.values().copied().collect();
             obj.members = merged;
             obj.base_types = base_types.clone();
+            obj.call_signatures = merged_call;
+            obj.construct_signatures = merged_construct;
         }
     }
 
@@ -2246,6 +2273,8 @@ fn get_signatures_of_symbol(
             Kind::FunctionDeclaration
                 | Kind::MethodSignature
                 | Kind::MethodDeclaration
+                | Kind::CallSignature
+                | Kind::ConstructSignature
                 | Kind::FunctionType
                 | Kind::ConstructorType
                 | Kind::Constructor
@@ -2360,6 +2389,9 @@ fn get_signature_from_declaration(
         // type the same way (4ah), so `[Symbol.iterator]()`/`next()` resolve.
         NodeData::MethodSignature(d) => (d.parameters.nodes.clone(), d.type_node),
         NodeData::MethodDeclaration(d) => (d.parameters.nodes.clone(), d.type_node),
+        NodeData::CallSignature(d) | NodeData::ConstructSignature(d) => {
+            (d.parameters.nodes.clone(), d.type_node)
+        }
         // A function/constructor type node (`(x: number) => void`) contributes
         // its parameters and (return) type the same way (4bj), so a contextual
         // function type's call signature exposes its parameter types.
@@ -3247,6 +3279,7 @@ pub fn get_type_from_type_node(
             get_type_from_template_type_node(checker, program, node, globals)
         }
         Kind::MappedType => get_type_from_mapped_type_node(checker, program, node),
+        Kind::TypeQuery => get_type_from_type_query_node(checker, program, node),
         Kind::InferType => get_type_from_infer_type_node(checker, program, node),
         Kind::UnionType => get_type_from_union_type_node(checker, program, node, globals),
         Kind::IntersectionType => {
@@ -3525,6 +3558,23 @@ fn get_type_from_template_type_node(
         texts.push(program.arena().text(literal).to_string());
     }
     get_template_literal_type(checker, &texts, &types)
+}
+
+// Resolves a `typeof x` type query to the widened regular type of the operand
+// expression (Go's `getTypeFromTypeQueryNode`).
+// Go: internal/checker/checker.go:Checker.getTypeFromTypeQueryNode(23963)
+fn get_type_from_type_query_node(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> TypeId {
+    let expr_name = match program.arena().data(node) {
+        NodeData::TypeQuery(d) => d.expr_name,
+        _ => return checker.error_type(),
+    };
+    let expr_type = checker.check_expression(program, expr_name);
+    let widened = checker.get_widened_type(expr_type);
+    checker.regular_type_of_literal_type(widened)
 }
 
 // Resolves a `MappedType` node (`{ [K in C]: V }`) to a mapped-type object

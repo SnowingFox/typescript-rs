@@ -661,10 +661,7 @@ impl Checker {
         };
         match keyword {
             Kind::NewKeyword => self.check_new_target_meta_property(program, node),
-            Kind::ImportKeyword => {
-                // `import.meta` / `import.defer` — type is deferred.
-                self.error_type
-            }
+            Kind::ImportKeyword => self.check_import_meta_property(program, node),
             _ => self.error_type,
         }
     }
@@ -689,6 +686,92 @@ impl Checker {
         }
         // Full type resolution (`getTypeOfSymbol(symbol)`) deferred.
         self.error_type
+    }
+
+    /// Checks `import.meta`. Reports TS1343 when `--module` does not support
+    /// import meta (Go's `checkImportMetaProperty`, module-kind subset).
+    // Go: internal/checker/checker.go:Checker.checkImportMetaProperty(10741)
+    fn check_import_meta_property(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
+        use tsgo_core::compileroptions::ModuleKind;
+        let module_kind = self.compiler_options().module;
+        let mk = module_kind as i32;
+        let es2020 = ModuleKind::Es2020 as i32;
+        if mk < es2020 && module_kind != ModuleKind::System {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::THE_IMPORT_META_META_PROPERTY_IS_ONLY_ALLOWED_WHEN_THE_MODULE_OPTION_IS_ES2020_ES2022_ESNEXT_SYSTEM_NODE16_NODE18_NODE20_OR_NODENEXT,
+                &[],
+            );
+        }
+        // Full `ImportMeta` type resolution is deferred.
+        self.error_type
+    }
+
+    /// Checks that an `async` function's explicit return type is `Promise<T>`
+    /// (Go's `checkAsyncFunctionReturnType`, TS1064).
+    // Go: internal/checker/checker.go:Checker.checkAsyncFunctionReturnType(2764)
+    fn check_async_function_return_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        return_type_node: NodeId,
+    ) {
+        let return_type =
+            get_type_from_type_node(self, program, return_type_node, program.globals());
+        if return_type == self.error_type() {
+            return;
+        }
+        let Some(promise_type) = self.get_global_promise_type() else {
+            return;
+        };
+        if self.is_reference_to_type(return_type, promise_type) {
+            return;
+        }
+        let inner = match program.arena().kind(return_type_node) {
+            Kind::NumberKeyword => "number".to_string(),
+            Kind::StringKeyword => "string".to_string(),
+            Kind::BooleanKeyword => "boolean".to_string(),
+            Kind::BigIntKeyword => "bigint".to_string(),
+            Kind::SymbolKeyword => "symbol".to_string(),
+            Kind::AnyKeyword => "any".to_string(),
+            Kind::UnknownKeyword => "unknown".to_string(),
+            Kind::VoidKeyword => "void".to_string(),
+            Kind::UndefinedKeyword => "undefined".to_string(),
+            Kind::NeverKeyword => "never".to_string(),
+            Kind::ObjectKeyword => "object".to_string(),
+            _ => {
+                let inner_type = self.get_awaited_type_no_alias(program, return_type);
+                let inner_type = if inner_type == self.never_type() {
+                    self.void_type()
+                } else {
+                    inner_type
+                };
+                super::nodebuilder::type_to_string(self, program, inner_type)
+            }
+        };
+        self.error(
+            program,
+            return_type_node,
+            &tsgo_diagnostics::THE_RETURN_TYPE_OF_AN_ASYNC_FUNCTION_OR_METHOD_MUST_BE_THE_GLOBAL_PROMISE_T_TYPE_DID_YOU_MEAN_TO_WRITE_PROMISE_0,
+            &[inner.as_str()],
+        );
+    }
+
+    /// Unwraps a generator function's annotated return type to the yield operand
+    /// type (`Generator<T, ...>` -> `T`, bare `T` -> `T`).
+    fn unwrap_generator_yield_type(&self, return_type: TypeId) -> TypeId {
+        if let Some(obj) = self.get_type(return_type).as_object() {
+            if let Some(&yield_type) = obj.resolved_type_arguments.first() {
+                if !obj.resolved_type_arguments.is_empty() {
+                    return yield_type;
+                }
+            }
+        }
+        return_type
     }
 
     // Types an object literal `{ a: 1, b: "x" }` as a fresh anonymous object
@@ -4932,11 +5015,12 @@ impl Checker {
                         return_type_node,
                         program.globals(),
                     );
-                    if !self.is_type_assignable_to(program, expr_type, return_type) {
+                    let yield_type = self.unwrap_generator_yield_type(return_type);
+                    if !self.is_type_assignable_to(program, expr_type, yield_type) {
                         self.check_type_assignable_to_and_optionally_elaborate(
                             program,
                             expr_type,
-                            return_type,
+                            yield_type,
                             expr,
                             Some(expr),
                         );
@@ -6413,8 +6497,81 @@ impl Checker {
                     self.check_type_node(program, d.type_node);
                 }
             }
+            Kind::MappedType => self.check_mapped_type_node(program, node),
+            Kind::IndexedAccessType => self.check_indexed_access_type_node(program, node),
+            Kind::TypeQuery => {
+                let _ = get_type_from_type_node(self, program, node, program.globals());
+            }
             _ => {}
         }
+    }
+
+    // Validates a mapped type's constraint is assignable to `string | number |
+    // symbol` (Go's `checkMappedType`).
+    // Go: internal/checker/checker.go:Checker.checkMappedType(3365)
+    fn check_mapped_type_node(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let (type_parameter, value_type, name_type) = match program.arena().data(node) {
+            NodeData::MappedType(d) => (d.type_parameter, d.type_node, d.name_type),
+            _ => return,
+        };
+        self.check_type_node(program, type_parameter);
+        if let Some(name_type) = name_type {
+            self.check_type_node(program, name_type);
+        } else if let NodeData::TypeParameterDeclaration(d) = program.arena().data(type_parameter)
+        {
+            if let Some(constraint) = d.constraint {
+                self.check_type_node(program, constraint);
+                // `keyof T` and other type-parameter constraints are valid mapped-type
+                // shapes; only concrete constraints like `boolean` are checked here.
+                if program.arena().kind(constraint) != Kind::TypeOperator {
+                    let constraint_type =
+                        get_type_from_type_node(self, program, constraint, program.globals());
+                    let string_number_symbol = self.get_union_type(&[
+                        self.string_type(),
+                        self.number_type(),
+                        self.es_symbol_type(),
+                    ]);
+                    if !self.is_type_assignable_to(program, constraint_type, string_number_symbol)
+                    {
+                        self.report_type_not_assignable(
+                            program,
+                            constraint,
+                            constraint_type,
+                            string_number_symbol,
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(value_type) = value_type {
+            self.check_type_node(program, value_type);
+        }
+        let _ = get_type_from_type_node(self, program, node, program.globals());
+    }
+
+    // Validates an indexed-access type's index and reports `2538` when the index
+    // type cannot index the object type (Go's `checkIndexedAccessType` /
+    // `checkIndexedAccessIndexType`).
+    // Go: internal/checker/checker.go:Checker.checkIndexedAccessType(3360)
+    fn check_indexed_access_type_node(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let (object_node, index_node) = match program.arena().data(node) {
+            NodeData::IndexedAccessType(d) => (d.object_type, d.index_type),
+            _ => return,
+        };
+        self.check_type_node(program, object_node);
+        self.check_type_node(program, index_node);
+        let object_type = get_type_from_type_node(self, program, object_node, program.globals());
+        let index_type = get_type_from_type_node(self, program, index_node, program.globals());
+        if get_indexed_access_type(self, program, object_type, index_type).is_none() {
+            let index_str = super::nodebuilder::type_to_string(self, program, index_type);
+            self.error(
+                program,
+                index_node,
+                &tsgo_diagnostics::TYPE_0_CANNOT_BE_USED_AS_AN_INDEX_TYPE,
+                &[index_str.as_str()],
+            );
+        }
+        let _ = get_type_from_type_node(self, program, node, program.globals());
     }
 
     // Validates a type-reference node's type arguments against the referenced
@@ -8816,6 +8973,12 @@ impl Checker {
         node: NodeId,
     ) -> TypeId {
         self.check_grammar_function_like_declaration(program, node);
+        if let Some(return_type_node) = get_effective_return_type_node(program, node) {
+            let flags = modifier_flags_of(program.arena(), node);
+            if flags.contains(ModifierFlags::ASYNC) && !is_generator_function(program, node) {
+                self.check_async_function_return_type(program, return_type_node);
+            }
+        }
         self.contextually_check_function_expression(program, node);
         let params = function_like_parameters(program, node);
         for (index, &param) in params.iter().enumerate() {
@@ -9090,10 +9253,35 @@ impl Checker {
         let Some(return_type) = self.enclosing_explicit_return_type(program, node) else {
             return;
         };
-        if !self.is_type_assignable_to(program, expression_type, return_type) {
-            let generalized = self.generalized_source_for_error(expression_type, return_type);
+        let Some(container) = get_containing_function(program, node) else {
+            return;
+        };
+        let is_async =
+            modifier_flags_of(program.arena(), container).contains(ModifierFlags::ASYNC);
+        let unwrapped_return_type = if is_async {
+            self.get_awaited_type_no_alias(program, return_type)
+        } else {
+            return_type
+        };
+        let expression_type_to_check = if is_async {
+            match self.check_awaited_type(
+                program,
+                expression_type,
+                node,
+                &tsgo_diagnostics::THE_RETURN_TYPE_OF_AN_ASYNC_FUNCTION_MUST_EITHER_BE_A_VALID_PROMISE_OR_MUST_NOT_CONTAIN_A_CALLABLE_THEN_MEMBER,
+            ) {
+                Some(awaited) => awaited,
+                None => return,
+            }
+        } else {
+            expression_type
+        };
+        if !self.is_type_assignable_to(program, expression_type_to_check, unwrapped_return_type) {
+            let generalized =
+                self.generalized_source_for_error(expression_type_to_check, unwrapped_return_type);
             let source_str = super::nodebuilder::type_to_string(self, program, generalized);
-            let target_str = super::nodebuilder::type_to_string(self, program, return_type);
+            let target_str =
+                super::nodebuilder::type_to_string(self, program, unwrapped_return_type);
             self.error(
                 program,
                 node,
@@ -9918,6 +10106,12 @@ impl Checker {
         self.check_grammar_function_like_declaration(program, node);
         self.check_function_or_method_declaration(program, node);
         self.check_return_type_predicate(program, &params, return_type);
+        if let Some(return_type_node) = return_type {
+            let flags = modifier_flags_of(program.arena(), node);
+            if flags.contains(ModifierFlags::ASYNC) && !is_generator_function(program, node) {
+                self.check_async_function_return_type(program, return_type_node);
+            }
+        }
         for (index, &param) in params.iter().enumerate() {
             self.check_parameter_declaration(program, node, index, param);
         }
@@ -12936,14 +13130,29 @@ impl Checker {
         if let Some(type_node) = type_node {
             self.check_type_node(program, type_node);
         }
-        // DEFER(phase-4-checker-4m+): binding patterns (destructuring).
-        // blocked-by: binding-element checking.
-        if program.arena().kind(name) != Kind::Identifier {
-            return;
-        }
         let Some(initializer) = initializer else {
             return;
         };
+        let kind = program.arena().kind(name);
+        if matches!(kind, Kind::ObjectBindingPattern | Kind::ArrayBindingPattern) {
+            let Some(type_node) = type_node else {
+                return;
+            };
+            let declared =
+                get_type_from_type_node(self, program, type_node, program.globals());
+            let initializer_type = self.check_expression(program, initializer);
+            self.check_initializer_assignable_to_declared_type(
+                program,
+                node,
+                initializer,
+                initializer_type,
+                declared,
+            );
+            return;
+        }
+        if kind != Kind::Identifier {
+            return;
+        }
         let Some(symbol) = program.symbol_of_node(node) else {
             return;
         };
@@ -12968,18 +13177,26 @@ impl Checker {
             return;
         }
         let initializer_type = self.check_expression(program, initializer);
-        // Go's `checkTypeAssignableToAndOptionallyElaborate(initializerType, t,
-        // node, initializer, ...)`. Go folds excess-property checking into the
-        // relation (`hasExcessProperties` inside `recursiveTypeRelatedToWorker`);
-        // the port models it as a separate call here, so the ordering mirrors
-        // Go's three steps:
-        //   (A) relation holds: the only remaining failure Go's relation would
-        //       have raised is excess properties, so run that check.
-        //   (B) relation failed: `elaborateError` first. A reported element
-        //       suppresses BOTH the excess message and the generic chain (Go
-        //       never reaches `checkTypeRelatedToEx` once `elaborateError`
-        //       reports), e.g. `{ a: "x", b: 1 }` reports only the `a` mismatch.
-        //   (C) no element reported: the excess message, then the generic chain.
+        self.check_initializer_assignable_to_declared_type(
+            program,
+            node,
+            initializer,
+            initializer_type,
+            declared,
+        );
+    }
+
+    // Checks `initializer_type` assignable to `declared` for a variable-like
+    // declaration (identifier or binding pattern).
+    // Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration (assignability)
+    fn check_initializer_assignable_to_declared_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        initializer: NodeId,
+        initializer_type: TypeId,
+        declared: TypeId,
+    ) {
         if self.is_type_assignable_to(program, initializer_type, declared) {
             self.check_object_literal_excess_properties(
                 program,
@@ -15849,6 +16066,31 @@ fn is_require_call(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
     }
 }
 
+// Returns a display name for a return-type annotation node (for TS1064 suggestions).
+fn type_annotation_display_name(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+    resolved: TypeId,
+) -> String {
+    match program.arena().kind(node) {
+        Kind::NumberKeyword => "number".to_string(),
+        Kind::StringKeyword => "string".to_string(),
+        Kind::BooleanKeyword => "boolean".to_string(),
+        Kind::BigIntKeyword => "bigint".to_string(),
+        Kind::SymbolKeyword => "symbol".to_string(),
+        Kind::VoidKeyword => "void".to_string(),
+        Kind::UndefinedKeyword => "undefined".to_string(),
+        Kind::NullKeyword => "null".to_string(),
+        Kind::NeverKeyword => "never".to_string(),
+        Kind::AnyKeyword => "any".to_string(),
+        Kind::UnknownKeyword => "unknown".to_string(),
+        Kind::ObjectKeyword => "object".to_string(),
+        Kind::ThisType => "this".to_string(),
+        _ => super::nodebuilder::type_to_string(checker, program, resolved),
+    }
+}
+
 // Returns the source text of `node` (including quotes on string literals), or
 // falls back to `NodeArena::text` when no file text is available.
 fn node_source_text(program: &dyn BoundProgram, node: NodeId) -> String {
@@ -15977,6 +16219,10 @@ fn modifier_flags_of(arena: &tsgo_ast::NodeArena, node: NodeId) -> tsgo_ast::Mod
         NodeData::IndexSignatureDeclaration(d) => d.modifiers.as_ref(),
         NodeData::EnumDeclaration(d) => d.modifiers.as_ref(),
         NodeData::ModuleDeclaration(d) => d.modifiers.as_ref(),
+        NodeData::FunctionDeclaration(d) | NodeData::FunctionExpression(d) => {
+            d.modifiers.as_ref()
+        }
+        NodeData::ArrowFunction(d) => d.modifiers.as_ref(),
         _ => None,
     };
     modifiers

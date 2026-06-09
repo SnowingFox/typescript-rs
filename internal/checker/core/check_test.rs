@@ -19727,3 +19727,370 @@ fn module_augmentation_export_assignment_reports_2666() {
         "Exports and export assignments are not permitted in module augmentations."
     );
 }
+
+// ---- T1-E batch 101: async/generator returns, call signatures, mapped/indexed/typequery, destructuring ----
+
+// Go: internal/checker/checker.go:Checker.getReturnTypeFromAnnotation
+#[test]
+fn async_function_return_type_annotation_node_is_number_keyword() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         async function f(): number { return 1; }",
+    );
+    let arena = p.arena();
+    let fn_decl = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes[1],
+        _ => panic!("function decl"),
+    };
+    let type_node = get_effective_return_type_node(&p, fn_decl).expect("return type node");
+    assert_eq!(
+        arena.kind(type_node),
+        Kind::NumberKeyword,
+        "async return annotation should be NumberKeyword, got {:?}",
+        arena.kind(type_node)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAsyncFunctionReturnType (1064)
+#[test]
+fn async_function_non_promise_return_type_annotation_reports_1064() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         async function f(): number { return 1; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1064, got {diags:?}");
+    assert_eq!(diags[0].code, 1064);
+    assert_eq!(
+        diags[0].message,
+        "The return type of an async function or method must be the global Promise<T> type. Did you mean to write 'Promise<number>'?"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkReturnExpression (async Promise unwrap)
+#[test]
+fn async_function_return_not_assignable_to_promised_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         async function f(): Promise<number> { return \"s\"; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkReturnExpression (async Promise unwrap)
+#[test]
+fn async_function_return_assignable_to_promised_type_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         async function f(): Promise<number> { return 1; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkReturnExpression (async concise body)
+#[test]
+fn async_arrow_return_value_assignable_to_promised_return_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         const f = async (): Promise<number> => 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2322),
+        "async arrow concise body must assign to promised return type; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkYieldExpression (valid yield)
+#[test]
+fn generator_yield_assignable_to_annotated_yield_type_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function* g(): number {\n  yield 1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getIterationTypeOfGeneratorFunctionReturnType (yield)
+#[test]
+fn generator_yield_not_assignable_to_generator_yield_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Generator<T, TReturn, TNext> { next(): { value: T }; }\n\
+         function* g(): Generator<number, void, unknown> { yield \"s\"; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkCallExpression (interface call signature)
+#[test]
+fn interface_call_signature_invocation_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { (): void; }\ndeclare const i: I;\ni();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveCallExpression (interface call return type)
+#[test]
+fn interface_call_signature_invocation_assigns_return_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { (x: number): string; }\ndeclare const i: I;\nconst s: string = i(1);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveCallExpression (argument assignability)
+#[test]
+fn interface_call_signature_wrong_argument_reports_2345() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { (x: number): string; }\ndeclare const i: I;\ni(\"s\");",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+    assert_eq!(
+        diags[0].message,
+        "Argument of type 'string' is not assignable to parameter of type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.resolveCallExpression -> invocationError (2349)
+#[test]
+fn interface_without_call_signature_invocation_reports_2349() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { x: number; }\ndeclare const i: I;\ni();",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2349, got {diags:?}");
+    assert_eq!(diags[0].code, 2349);
+    assert_eq!(diags[0].message, "This expression is not callable.");
+}
+
+// Go: internal/checker/checker.go:Checker.checkMappedType
+#[test]
+fn mapped_type_invalid_constraint_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type M = { [K in boolean]: number };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert!(
+        diags[0].message.contains("not assignable to type 'string | number | symbol'"),
+        "expected mapped constraint 2322, got {:?}",
+        diags[0].message
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIndexedAccessIndexType (2538)
+#[test]
+fn indexed_access_type_boolean_index_reports_2538() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> { [n: number]: T; length: number; }\n\
+         type IB = Array<number>[boolean];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2538, got {diags:?}");
+    assert_eq!(diags[0].code, 2538);
+    assert!(
+        diags[0].message.contains("cannot be used as an index type"),
+        "expected 2538 index-type message, got {:?}",
+        diags[0].message
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromTypeQueryNode
+#[test]
+fn type_query_on_declared_value_resolves_without_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: number;\ntype T = typeof x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromTypeQueryNode / checkExpression
+#[test]
+fn type_query_on_undeclared_identifier_reports_2304() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "type T = typeof missing;"));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2304, got {diags:?}");
+    assert_eq!(diags[0].code, 2304);
+    assert_eq!(diags[0].message, "Cannot find name 'missing'.");
+}
+
+// Go: internal/checker/checker.go:Checker.checkImportMetaProperty (supported module)
+#[test]
+fn import_meta_esnext_module_reports_no_1343() {
+    use tsgo_core::compileroptions::ModuleKind;
+    let options = CompilerOptions {
+        module: ModuleKind::EsNext,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "import.meta;",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 1343),
+        "import.meta with module ESNext must not report 1343; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkImportMetaProperty (1343)
+#[test]
+fn import_meta_with_commonjs_module_reports_1343() {
+    use tsgo_core::compileroptions::ModuleKind;
+    let options = CompilerOptions {
+        module: ModuleKind::CommonJs,
+        ..CompilerOptions::default()
+    };
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "import.meta;",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1343, got {diags:?}");
+    assert_eq!(diags[0].code, 1343);
+    assert_eq!(
+        diags[0].message,
+        "The 'import.meta' meta-property is only allowed when the '--module' option is 'es2020', 'es2022', 'esnext', 'system', 'node16', 'node18', 'node20', or 'nodenext'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration (binding pattern)
+#[test]
+fn object_destructuring_pattern_initializer_not_assignable_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const { a }: { a: number } = { a: \"s\" };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration (rest in destructuring)
+#[test]
+fn object_destructuring_rest_excess_property_reports_2353() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const { a, ...rest }: { a: number } = { a: 1, b: 2 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2353, got {diags:?}");
+    assert_eq!(diags[0].code, 2353);
+    assert_eq!(
+        diags[0].message,
+        "Object literal may only specify known properties, and 'b' does not exist in type '{ a: number; }'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration (array binding pattern)
+#[test]
+fn array_destructuring_pattern_initializer_not_assignable_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: [string];\nconst [a]: [number] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message_chain[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkClassLikeDeclaration (implements call signature)
+#[test]
+fn class_missing_interface_call_signature_reports_2420() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface I { (): void; }\nclass C implements I { }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2420, got {diags:?}");
+    assert_eq!(diags[0].code, 2420);
+    assert_eq!(
+        diags[0].message,
+        "Class 'C' incorrectly implements interface 'I'."
+    );
+}
+
