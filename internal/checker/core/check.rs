@@ -3160,10 +3160,37 @@ impl Checker {
             return t;
         }
         if let Some(info) = get_applicable_index_info_for_name(self, program, apparent, &name) {
+            self.error_if_writing_to_readonly_index(program, node, apparent, info);
             return self.index_info(info).value_type;
         }
         self.report_nonexistent_property(program, name_node, object_type, node, is_super);
         self.error_type
+    }
+
+    // Reports TS2542 when `access_node` writes through a readonly index signature.
+    // Go: internal/checker/checker.go:Checker.errorIfWritingToReadonlyIndex
+    fn error_if_writing_to_readonly_index(
+        &mut self,
+        program: &dyn BoundProgram,
+        access_node: NodeId,
+        object_type: TypeId,
+        index_info: IndexInfoId,
+    ) {
+        if !self.index_info(index_info).is_readonly {
+            return;
+        }
+        let assignment_kind =
+            tsgo_ast::utilities::get_assignment_target_kind(program.arena(), access_node);
+        if assignment_kind == tsgo_ast::utilities::AssignmentKind::None {
+            return;
+        }
+        let type_str = super::nodebuilder::type_to_string(self, program, object_type);
+        self.error(
+            program,
+            access_node,
+            &tsgo_diagnostics::INDEX_SIGNATURE_IN_TYPE_0_ONLY_PERMITS_READING,
+            &[type_str.as_str()],
+        );
     }
 
     // Reports a missing property on `containing_type`, suggesting a close
@@ -3554,6 +3581,12 @@ impl Checker {
         if let Some(t) =
             super::declared_types::get_indexed_access_type(self, program, object_type, index_type)
         {
+            let apparent = get_apparent_type(self, object_type);
+            if let Some(info) =
+                super::declared_types::get_applicable_index_info(self, program, apparent, index_type)
+            {
+                self.error_if_writing_to_readonly_index(program, node, apparent, info);
+            }
             return t;
         }
         // Go's `getPropertyTypeForIndexType` ends on `Type_0_cannot_be_used_as_an
@@ -15520,9 +15553,8 @@ fn has_abstract_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
 }
 
 // Reports whether `expr` assigns to a readonly entity (`symbol` or a namespace
-// import receiver). Constructor-local `this.x` writes to readonly properties
-// are deferred (blocked-by: control-flow container + constructor property
-// assignment rules).
+// import receiver). Constructor-local `this.x` writes to readonly properties of
+// the enclosing class are allowed.
 // Go: internal/checker/checker.go:Checker.isAssignmentToReadonlyEntity
 fn is_assignment_to_readonly_entity(
     checker: &Checker,
@@ -15561,6 +15593,51 @@ fn is_assignment_to_readonly_entity(
         }
     }
     if is_readonly_symbol(checker, program, symbol) {
+        if checker
+            .resolved_symbol_flags(program, symbol)
+            .intersects(SymbolFlags::PROPERTY)
+            && is_access_expression(program.arena().kind(expr))
+        {
+            let object = skip_parentheses(program, {
+                match program.arena().data(expr) {
+                    NodeData::PropertyAccessExpression(d) => d.expression,
+                    NodeData::ElementAccessExpression(d) => d.expression,
+                    _ => return true,
+                }
+            });
+            if program.arena().kind(object) == Kind::ThisKeyword {
+                let Some(ctor) = get_control_flow_container(program, expr) else {
+                    return true;
+                };
+                if program.arena().kind(ctor) != Kind::Constructor {
+                    return true;
+                }
+                let sym = program.symbol(symbol);
+                if let Some(value_decl) = sym.value_declaration {
+                    let arena = program.arena();
+                    let is_assignment_declaration =
+                        arena.kind(value_decl) == Kind::BinaryExpression;
+                    let is_local_property_declaration =
+                        arena.parent(ctor) == arena.parent(value_decl);
+                    let is_local_parameter_property = Some(ctor) == arena.parent(value_decl);
+                    let parent_value_decl = sym
+                        .parent
+                        .and_then(|p| program.symbol(p).value_declaration);
+                    let is_local_this_property_assignment = is_assignment_declaration
+                        && parent_value_decl
+                            .is_some_and(|vd| arena.parent(ctor) == arena.parent(vd));
+                    let is_local_this_property_assignment_constructor_function =
+                        is_assignment_declaration
+                            && parent_value_decl
+                                .is_some_and(|vd| Some(ctor) == arena.parent(vd));
+                    let is_writable_symbol = is_local_property_declaration
+                        || is_local_parameter_property
+                        || is_local_this_property_assignment
+                        || is_local_this_property_assignment_constructor_function;
+                    return !is_writable_symbol;
+                }
+            }
+        }
         return true;
     }
     if is_access_expression(program.arena().kind(expr)) {
@@ -15708,6 +15785,29 @@ fn override_member_error_node(program: &dyn BoundProgram, symbol: SymbolId) -> N
         return program.root();
     };
     super::symbols_query::name_of_declaration(program.arena(), decl).unwrap_or(decl)
+}
+
+// Returns the nearest control-flow container of `node` (function-like, module
+// block, source file, or property declaration). Used for constructor-local
+// readonly-write exceptions.
+// Go: internal/checker/checker.go:Checker.getControlFlowContainer
+fn get_control_flow_container(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    let arena = program.arena();
+    let mut current = arena.parent(node);
+    while let Some(n) = current {
+        let kind = arena.kind(n);
+        if kind == Kind::PropertyDeclaration {
+            return Some(n);
+        }
+        if matches!(kind, Kind::SourceFile | Kind::ModuleBlock) {
+            return Some(n);
+        }
+        if is_function_like_kind(kind) {
+            return Some(n);
+        }
+        current = arena.parent(n);
+    }
+    None
 }
 
 // Returns the nearest enclosing (non-arrow) function-like container of `node`

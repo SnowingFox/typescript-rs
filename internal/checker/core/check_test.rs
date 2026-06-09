@@ -18790,3 +18790,91 @@ fn assign_to_readonly_class_property_outside_constructor_reports_2540() {
         "Cannot assign to 'x' because it is a read-only property."
     );
 }
+
+// ---- T1-E batch 95: constructor readonly exception, index signature 2542, namespace import writes ----
+
+// Go: internal/checker/checker.go:Checker.isAssignmentToReadonlyEntity (constructor exception)
+#[test]
+fn assign_to_readonly_class_property_in_constructor_is_allowed() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { readonly x = 1; constructor() { this.x = 2; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "constructor may assign readonly property; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isAssignmentToReadonlyEntity (uninitialized readonly)
+#[test]
+fn assign_to_uninitialized_readonly_property_in_constructor_is_allowed() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { readonly x: number; constructor() { this.x = 1; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "constructor may assign uninitialized readonly property; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPropertyAccessExpressionOrQualifiedName (2542)
+#[test]
+fn assign_to_readonly_index_signature_via_property_access_reports_2542() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O { readonly [x: string]: number; }\ndeclare const o: O;\no.foo = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2542, got {diags:?}");
+    assert_eq!(diags[0].code, 2542);
+    assert_eq!(
+        diags[0].message,
+        "Index signature in type 'O' only permits reading."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIndexedAccess (2542)
+#[test]
+fn assign_to_readonly_index_signature_via_element_access_reports_2542() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O { readonly [x: string]: number; }\ndeclare const o: O;\no[\"foo\"] = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2542, got {diags:?}");
+    assert_eq!(diags[0].code, 2542);
+    assert_eq!(
+        diags[0].message,
+        "Index signature in type 'O' only permits reading."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isAssignmentToReadonlyEntity (namespace import receiver)
+#[test]
+fn assign_to_namespace_import_property_reports_2540() {
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/a.ts", "export const x = 1;"),
+        ("/b.ts", "import * as ns from \"./a\";\nns.x = 2;"),
+    ]));
+    let index = p.source_files()[1];
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(index);
+    assert_eq!(diags.len(), 1, "expected one 2540, got {diags:?}");
+    assert_eq!(diags[0].code, 2540);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'x' because it is a read-only property."
+    );
+}
