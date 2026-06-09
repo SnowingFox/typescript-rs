@@ -18368,3 +18368,125 @@ fn assignability_rest_tuple_element_mismatch_reports_2626() {
     );
 }
 
+// ---- T1-E batch 91: labeled optional 2623, 5085, optional-tuple 2620, void ++ ----
+
+// Go: internal/checker/checker.go:Checker.checkNamedTupleMember (5085)
+#[test]
+fn named_tuple_both_optional_and_rest_reports_5085() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = [...label?: number[]];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 5085, got {diags:?}");
+    assert_eq!(diags[0].code, 5085);
+    assert_eq!(
+        diags[0].message,
+        "A tuple member cannot be both optional and rest."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (2623, labeled tuple)
+#[test]
+fn assignability_chain_labeled_optional_to_required_reports_2623() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: [a: number, b?: string];\n\
+         const o: [a: number, b: string] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2623);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Source provides no match for required element at position 1 in target."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (tuple arm, 2620, optional target)
+#[test]
+fn assignability_chain_array_to_optional_tuple_target_reports_2620() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{BATCH_89_ARRAY_STUBS}declare const src: number[];\n\
+             const o: [number, number?] = src;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2620);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Target requires 1 element(s) but source may have fewer."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (2623, optional first element)
+#[test]
+fn assignability_chain_optional_first_element_reports_2623() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: [number?];\nconst o: [number] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2623);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Source provides no match for required element at position 0 in target."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to enum, 2628)
+#[test]
+fn assign_to_enum_identifier_reports_2628() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A }\nE = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2628, got {diags:?}");
+    assert_eq!(diags[0].code, 2628);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'E' because it is an enum."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to class, 2629)
+#[test]
+fn assign_to_class_identifier_reports_2629() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\nC = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2629, got {diags:?}");
+    assert_eq!(diags[0].code, 2629);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'C' because it is a class."
+    );
+}

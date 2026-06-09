@@ -2476,7 +2476,33 @@ impl Checker {
                 // phantom `ExportValue` local carries no real declaration flags,
                 // so its type/declarations must be read from the linked
                 // `export_symbol` (the real exported enum/class/function/const).
+                let original_symbol = symbol;
                 let symbol = get_export_symbol_of_value_symbol_if_exported(program, symbol);
+                let assignment_kind =
+                    tsgo_ast::utilities::get_assignment_target_kind(program.arena(), node);
+                if assignment_kind != tsgo_ast::utilities::AssignmentKind::None {
+                    let flags = self.resolved_symbol_flags(program, symbol);
+                    let js_value_module_ok = is_in_js_file(program.arena(), node)
+                        && flags.intersects(SymbolFlags::VALUE_MODULE);
+                    if !flags.intersects(SymbolFlags::VARIABLE) && !js_value_module_ok {
+                        let name = super::nodebuilder::symbol_to_string(
+                            self,
+                            program,
+                            original_symbol,
+                        );
+                        let message = if flags.intersects(SymbolFlags::ENUM) {
+                            Some(&tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_AN_ENUM)
+                        } else if flags.intersects(SymbolFlags::CLASS) {
+                            Some(&tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_CLASS)
+                        } else {
+                            None
+                        };
+                        if let Some(message) = message {
+                            self.error(program, node, message, &[name.as_str()]);
+                            return self.error_type;
+                        }
+                    }
+                }
                 // Go: `markLinkedReferences(node, ReferenceHintIdentifier)` ->
                 // accumulates `referenceKinds` for unused checking. The reachable
                 // subset marks every successfully-resolved identifier as a
@@ -4441,6 +4467,9 @@ impl Checker {
         // A reference target is an identifier or an access expression (Go's
         // `checkReferenceExpression`); other targets are skipped here.
         if !is_reference_expression(program, left) {
+            return;
+        }
+        if left_type == self.error_type {
             return;
         }
         // Go's `checkTypeAssignableToAndOptionallyElaborate(rightType, leftType,

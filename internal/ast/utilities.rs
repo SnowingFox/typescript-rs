@@ -4,7 +4,7 @@
 //! helper used by deep clone plus a representative spread of kind predicates.
 //! More are pulled in by upstream phases as their callers land.
 
-use crate::{Kind, ModifierFlags, NodeArena, NodeId};
+use crate::{Kind, ModifierFlags, NodeArena, NodeData, NodeId};
 
 /// Maps a modifier keyword `kind` to its [`ModifierFlags`] bit (empty if `kind`
 /// is not a modifier keyword).
@@ -196,6 +196,138 @@ pub fn is_class_member_modifier(kind: Kind) -> bool {
     is_parameter_property_modifier(kind)
         || kind == Kind::StaticKeyword
         || kind == Kind::AccessorKeyword
+}
+
+/// Whether an identifier/expression is used as an assignment target.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:IsAssignmentTarget
+pub fn is_assignment_target(arena: &NodeArena, node: NodeId) -> bool {
+    get_assignment_target(arena, node).is_some()
+}
+
+/// Returns the assignment expression whose left-hand side is `node`, if any.
+///
+/// Side effects: none (pure).
+// Go: internal/ast/utilities.go:GetAssignmentTarget
+pub fn get_assignment_target(arena: &NodeArena, mut node: NodeId) -> Option<NodeId> {
+    loop {
+        let parent = arena.parent(node)?;
+        match arena.kind(parent) {
+            Kind::BinaryExpression => {
+                let NodeData::BinaryExpression(d) = arena.data(parent) else {
+                    return None;
+                };
+                if is_assignment_operator(arena.kind(d.operator_token)) && d.left == node {
+                    return Some(parent);
+                }
+                return None;
+            }
+            Kind::PrefixUnaryExpression => {
+                let NodeData::PrefixUnaryExpression(d) = arena.data(parent) else {
+                    return None;
+                };
+                if matches!(d.operator, Kind::PlusPlusToken | Kind::MinusMinusToken) {
+                    return Some(parent);
+                }
+                return None;
+            }
+            Kind::PostfixUnaryExpression => {
+                let NodeData::PostfixUnaryExpression(d) = arena.data(parent) else {
+                    return None;
+                };
+                if matches!(d.operator, Kind::PlusPlusToken | Kind::MinusMinusToken) {
+                    return Some(parent);
+                }
+                return None;
+            }
+            Kind::ForInStatement | Kind::ForOfStatement => {
+                let NodeData::ForInOrOfStatement(d) = arena.data(parent) else {
+                    return None;
+                };
+                if d.initializer == node {
+                    return Some(parent);
+                }
+                return None;
+            }
+            Kind::ParenthesizedExpression
+            | Kind::ArrayLiteralExpression
+            | Kind::SpreadElement
+            | Kind::NonNullExpression => {
+                node = parent;
+            }
+            Kind::SpreadAssignment => {
+                node = arena.parent(parent)?;
+            }
+            Kind::ShorthandPropertyAssignment => {
+                let NodeData::ShorthandPropertyAssignment(d) = arena.data(parent) else {
+                    return None;
+                };
+                if d.name != node {
+                    return None;
+                }
+                node = arena.parent(parent)?;
+            }
+            Kind::PropertyAssignment => {
+                let NodeData::PropertyAssignment(d) = arena.data(parent) else {
+                    return None;
+                };
+                if d.name == node {
+                    return None;
+                }
+                node = arena.parent(parent)?;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Kind of assignment a reference participates in.
+// Go: internal/checker/utilities.go:AssignmentKind
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssignmentKind {
+    None,
+    Definite,
+    Compound,
+}
+
+/// Classifies how `node` is used as an assignment target.
+///
+/// Side effects: none (pure).
+// Go: internal/checker/utilities.go:getAssignmentTargetKind
+pub fn get_assignment_target_kind(arena: &NodeArena, node: NodeId) -> AssignmentKind {
+    let Some(target) = get_assignment_target(arena, node) else {
+        return AssignmentKind::None;
+    };
+    match arena.kind(target) {
+        Kind::BinaryExpression => {
+            let NodeData::BinaryExpression(d) = arena.data(target) else {
+                return AssignmentKind::None;
+            };
+            let operator = arena.kind(d.operator_token);
+            if operator == Kind::EqualsToken
+                || is_logical_or_coalescing_assignment_operator(operator)
+            {
+                AssignmentKind::Definite
+            } else {
+                AssignmentKind::Compound
+            }
+        }
+        Kind::PrefixUnaryExpression | Kind::PostfixUnaryExpression => AssignmentKind::Compound,
+        Kind::ForInStatement | Kind::ForOfStatement => AssignmentKind::Definite,
+        _ => AssignmentKind::None,
+    }
+}
+
+/// Reports whether `kind` is `&&=`, `||=`, or `??=`.
+// Go: internal/ast/ast_generated.go:IsLogicalOrCoalescingAssignmentOperator
+pub fn is_logical_or_coalescing_assignment_operator(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::AmpersandAmpersandEqualsToken
+            | Kind::BarBarEqualsToken
+            | Kind::QuestionQuestionEqualsToken
+    )
 }
 
 /// Reports whether `kind` is an assignment operator token.
