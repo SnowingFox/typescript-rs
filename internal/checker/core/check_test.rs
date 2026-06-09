@@ -18263,3 +18263,108 @@ fn assignability_rest_tuple_accepts_matching_source() {
     );
 }
 
+// ---- T1-E batch 90: named tuple grammar, optional-tuple 2623, void operands ----
+
+// Go: internal/checker/checker.go:Checker.checkNamedTupleMember (5086)
+#[test]
+fn named_tuple_optional_after_type_reports_5086() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = [label: string?];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 5086, got {diags:?}");
+    assert_eq!(diags[0].code, 5086);
+    assert_eq!(
+        diags[0].message,
+        "A labeled tuple element is declared as optional with a question mark after the name and before the colon, rather than after the type."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkNamedTupleMember (5087)
+#[test]
+fn named_tuple_rest_after_colon_reports_5087() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type T = [label: ...number[]];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 5087, got {diags:?}");
+    assert_eq!(diags[0].code, 5087);
+    assert_eq!(
+        diags[0].message,
+        "A labeled tuple element is declared as rest with a '...' before the name, rather than before the type."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (2623)
+#[test]
+fn assignability_chain_optional_source_to_required_target_reports_2623() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: [number, string?];\nconst o: [number, string] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2623);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Source provides no match for required element at position 1 in target."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkArithmeticOperandType (void left, 2362)
+#[test]
+fn bitwise_and_void_left_operand_reports_2362() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nf() & 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2362, got {diags:?}");
+    assert_eq!(diags[0].code, 2362);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (rest tuple element mismatch)
+#[test]
+fn assignability_rest_tuple_element_mismatch_reports_2626() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const src: [string, string, string];\n\
+         const o: [string, ...number[]] = src;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(d.message_chain.len(), 1);
+    assert_eq!(d.message_chain[0].code, 2626);
+    assert_eq!(
+        d.message_chain[0].message,
+        "Type at position 1 in source is not compatible with type at position 1 in target."
+    );
+    assert_eq!(d.message_chain[0].next.len(), 1);
+    assert_eq!(d.message_chain[0].next[0].code, 2322);
+    assert_eq!(
+        d.message_chain[0].next[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+

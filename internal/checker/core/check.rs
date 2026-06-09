@@ -5967,6 +5967,39 @@ impl Checker {
     // DEFER(phase-4-checker-C-C): type-literal member type nodes, mapped /
     // conditional / indexed-access / function type-node bodies, and `import()`
     // types. blocked-by: those type constructors + their member walks.
+    // Validates labeled tuple element modifier placement (Go's `checkNamedTupleMember`).
+    // Go: internal/checker/checker.go:Checker.checkNamedTupleMember
+    fn check_named_tuple_member(&mut self, program: &dyn BoundProgram, node: NodeId) {
+        let NodeData::NamedTupleMember(d) = program.arena().data(node) else {
+            return;
+        };
+        if d.dot_dot_dot_token.is_some() && d.question_token.is_some() {
+            self.grammar_error_on_node(
+                program,
+                node,
+                &tsgo_diagnostics::A_TUPLE_MEMBER_CANNOT_BE_BOTH_OPTIONAL_AND_REST,
+                &[],
+            );
+        }
+        if program.arena().kind(d.type_node) == Kind::OptionalType {
+            self.grammar_error_on_node(
+                program,
+                d.type_node,
+                &tsgo_diagnostics::A_LABELED_TUPLE_ELEMENT_IS_DECLARED_AS_OPTIONAL_WITH_A_QUESTION_MARK_AFTER_THE_NAME_AND_BEFORE_THE_COLON_RATHER_THAN_AFTER_THE_TYPE,
+                &[],
+            );
+        }
+        if program.arena().kind(d.type_node) == Kind::RestType {
+            self.grammar_error_on_node(
+                program,
+                d.type_node,
+                &tsgo_diagnostics::A_LABELED_TUPLE_ELEMENT_IS_DECLARED_AS_REST_WITH_A_BEFORE_THE_NAME_RATHER_THAN_BEFORE_THE_TYPE,
+                &[],
+            );
+        }
+        self.check_type_node(program, d.type_node);
+    }
+
     // Go: internal/checker/checker.go:Checker.checkSourceElement (type-node arms)
     fn check_type_node(&mut self, program: &dyn BoundProgram, node: NodeId) {
         match program.arena().kind(node) {
@@ -6018,6 +6051,19 @@ impl Checker {
                 if let NodeData::TypeOperator(d) = program.arena().data(node) {
                     let operand = d.type_node;
                     self.check_type_node(program, operand);
+                }
+            }
+            Kind::NamedTupleMember => {
+                self.check_named_tuple_member(program, node);
+            }
+            Kind::OptionalType => {
+                if let NodeData::OptionalType(d) = program.arena().data(node) {
+                    self.check_type_node(program, d.type_node);
+                }
+            }
+            Kind::RestType => {
+                if let NodeData::RestType(d) = program.arena().data(node) {
+                    self.check_type_node(program, d.type_node);
                 }
             }
             _ => {}
@@ -14623,6 +14669,29 @@ impl Checker {
         obj.tuple_min_length.unwrap_or_else(|| {
             self.tuple_fixed_length(t).unwrap_or(0)
         })
+    }
+
+    // Whether tuple position `index` is optional (Go's `ElementFlagsOptional`).
+    pub(crate) fn tuple_element_is_optional(&self, t: TypeId, index: usize) -> bool {
+        let Some(obj) = self.get_type(t).as_object() else {
+            return false;
+        };
+        obj.tuple_element_optional
+            .as_ref()
+            .and_then(|flags| flags.get(index))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    // Whether tuple position `index` is required (Go's `ElementFlagsRequired`).
+    pub(crate) fn tuple_element_is_required(&self, t: TypeId, index: usize) -> bool {
+        if self.tuple_has_rest_element(t) {
+            let fixed = self.tuple_fixed_length(t).unwrap_or(0);
+            if index >= fixed {
+                return false;
+            }
+        }
+        !self.tuple_element_is_optional(t, index)
     }
 
     /// Performs assignability checking with optional elaboration (Go's

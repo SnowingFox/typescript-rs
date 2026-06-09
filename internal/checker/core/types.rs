@@ -745,6 +745,10 @@ pub struct ObjectType {
     /// Minimum required element count for tuple assignability (Go's `minLength`).
     /// `None` defaults to the fixed length / full arity for fixed-arity tuples.
     pub tuple_min_length: Option<usize>,
+    /// Per-element optional flags for tuple assignability (Go's
+    /// `TupleElementInfo.flags & ElementFlagsOptional`). When `None`, every
+    /// fixed element is treated as required.
+    pub tuple_element_optional: Option<Vec<bool>>,
 }
 
 /// The payload of a union type (`A | B`), holding its constituents by id.

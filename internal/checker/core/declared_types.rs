@@ -4079,15 +4079,18 @@ fn get_type_from_tuple_type_node(
         _ => return checker.error_type(),
     };
     let mut element_types = Vec::with_capacity(element_nodes.len());
+    let mut element_optional = Vec::with_capacity(element_nodes.len());
     let mut min_length = 0usize;
     let mut tuple_fixed_length = None;
     for &element_node in &element_nodes {
         let parsed = parse_tuple_element_type(checker, program, element_node, globals);
         if parsed.rest {
             element_types.push(parsed.element_type);
+            element_optional.push(false);
             tuple_fixed_length = Some(element_types.len() - 1);
         } else {
             element_types.push(parsed.element_type);
+            element_optional.push(parsed.optional);
             if !parsed.optional {
                 min_length += 1;
             }
@@ -4104,6 +4107,7 @@ fn get_type_from_tuple_type_node(
         readonly,
         tuple_fixed_length,
         tuple_min_length,
+        Some(element_optional),
     )
 }
 

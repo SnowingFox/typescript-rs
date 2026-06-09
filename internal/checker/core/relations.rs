@@ -1294,11 +1294,16 @@ impl Checker {
         if self.tuple_has_rest_element(target) {
             let rest_type = target_elements[target_fixed];
             for (index, &source_type) in source_elements.iter().enumerate() {
-                let target_type = if index < target_fixed {
-                    target_elements[index]
+                let (target_position, target_type) = if index < target_fixed {
+                    (index, target_elements[index])
                 } else {
-                    rest_type
+                    (target_fixed, rest_type)
                 };
+                if self.tuple_element_is_required(target, target_position)
+                    && self.tuple_element_is_optional(source, index)
+                {
+                    return false;
+                }
                 if !self.is_type_related_to(program, source_type, target_type, relation) {
                     return false;
                 }
@@ -1407,6 +1412,15 @@ impl Checker {
                 } else {
                     (target_fixed, rest_type)
                 };
+                if self.tuple_element_is_required(target, target_position)
+                    && self.tuple_element_is_optional(source, source_position)
+                {
+                    reporter.report(
+                        &tsgo_diagnostics::SOURCE_PROVIDES_NO_MATCH_FOR_REQUIRED_ELEMENT_AT_POSITION_0_IN_TARGET,
+                        vec![target_position.to_string()],
+                    );
+                    return false;
+                }
                 if !self.report_is_related_to(program, source_type, target_type, relation, reporter)
                 {
                     if source_elements.len() > 1 || target_elements.len() > 1 {
@@ -1448,6 +1462,15 @@ impl Checker {
             .zip(target_elements.iter())
             .enumerate()
         {
+            if self.tuple_element_is_required(target, source_position)
+                && self.tuple_element_is_optional(source, source_position)
+            {
+                reporter.report(
+                    &tsgo_diagnostics::SOURCE_PROVIDES_NO_MATCH_FOR_REQUIRED_ELEMENT_AT_POSITION_0_IN_TARGET,
+                    vec![source_position.to_string()],
+                );
+                return false;
+            }
             if !self.report_is_related_to(program, source_type, target_type, relation, reporter) {
                 if source_elements.len() > 1 || target_elements.len() > 1 {
                     reporter.report(
@@ -2460,11 +2483,18 @@ impl Checker {
         let source_elements = self.tuple_element_types(source);
         let target_elements = self.tuple_element_types(target);
         source_elements.len() == target_elements.len()
-            && source_elements.iter().zip(target_elements.iter()).all(
-                |(&source_type, &target_type)| {
+            && source_elements
+                .iter()
+                .zip(target_elements.iter())
+                .enumerate()
+                .all(|(index, (&source_type, &target_type))| {
+                    if self.tuple_element_is_required(target, index)
+                        && self.tuple_element_is_optional(source, index)
+                    {
+                        return false;
+                    }
                     self.is_type_related_to(program, source_type, target_type, relation)
-                },
-            )
+                })
     }
 
     // Reporting twin: emits `4104` when a readonly array/tuple source cannot be
