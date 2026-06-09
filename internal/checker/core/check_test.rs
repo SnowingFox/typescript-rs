@@ -20541,3 +20541,186 @@ fn named_tuple_optional_mark_after_name_reports_5086() {
     assert_eq!(diags[0].code, 5086);
 }
 
+// ---- T1-E batch 104: typeof/truthiness/switch/assignment flow, void, prefix +bigint, intersection excess ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeof
+#[test]
+fn typeof_bigint_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: bigint | string;\nif (typeof x === \"bigint\") {\n  const b: bigint = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypeof
+#[test]
+fn typeof_boolean_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: boolean | number;\nif (typeof x === \"boolean\") {\n  const b: boolean = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality (nullable branch)
+#[test]
+fn null_equality_guard_narrows_else_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | null;\nif (x === null) {\n  const n: null = x;\n} else {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality (nullable branch)
+#[test]
+fn undefined_inequality_guard_narrows_else_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nif (x !== undefined) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtSwitchClause
+#[test]
+fn switch_literal_case_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: \"a\" | \"b\";\nswitch (x) {\n  case \"a\": {\n    const s: \"a\" = x;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment
+#[test]
+fn assignment_flow_narrows_union_variable_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string | number;\nx = \"s\";\nconst y: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkConditionalExpression / checkTruthinessOfType (1345)
+#[test]
+fn void_function_result_in_conditional_reports_1345() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(): void;\nconst x = f() ? 1 : 2;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1345, got {diags:?}");
+    assert_eq!(diags[0].code, 1345);
+    assert_eq!(
+        diags[0].message,
+        "An expression of type 'void' cannot be tested for truthiness."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkConditionalExpression / checkTruthinessOfType (2872)
+#[test]
+fn always_truthy_array_literal_in_conditional_reports_2872() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = [] ? 1 : 2;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2872, got {diags:?}");
+    assert_eq!(diags[0].code, 2872);
+    assert_eq!(
+        diags[0].message,
+        "This kind of expression is always truthy."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkConditionalExpression / checkTruthinessOfType (2873)
+#[test]
+fn always_falsy_empty_string_in_conditional_reports_2873() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = \"\" ? 1 : 2;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2873, got {diags:?}");
+    assert_eq!(diags[0].code, 2873);
+    assert_eq!(
+        diags[0].message,
+        "This kind of expression is always falsy."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkVoidExpression
+#[test]
+fn void_expression_yields_undefined_assignable() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: number;\nconst u: undefined = void x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "void expr should be undefined; got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (2736)
+#[test]
+fn prefix_plus_on_bigint_literal_reports_2736() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "+1n;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2736, got {diags:?}");
+    assert_eq!(diags[0].code, 2736);
+    assert_eq!(
+        diags[0].message,
+        "Operator '+' cannot be applied to type 'bigint'."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.hasExcessProperties (intersection target)
+#[test]
+fn call_intersection_parameter_excess_property_reports_2353() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(x: { a: number } & { b: string }): void;\nf({ a: 1, b: \"s\", c: 2 });",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2353, got {diags:?}");
+    assert_eq!(diags[0].code, 2353);
+    assert_eq!(
+        diags[0].message,
+        "Object literal may only specify known properties, and 'c' does not exist in type '{ a: number; } & { b: string; }'."
+    );
+}
+
