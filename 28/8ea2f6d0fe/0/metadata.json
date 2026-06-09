@@ -1,0 +1,52 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "288ea2f6d0fe",
+  "session_id": "44fd81ae-d320-4036-b320-e8ebd028f6d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-09T07:46:34.69651Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "internal/ast/utilities.rs",
+    "internal/checker/core/check_test.rs"
+  ],
+  "agent": "Cursor",
+  "model": "composer-2.5",
+  "turn_id": "e8018bcad498",
+  "checkpoint_transcript_start": 2222,
+  "transcript_lines_at_start": 2222,
+  "session_metrics": {
+    "turn_count": 13,
+    "context_tokens": 181158,
+    "context_window_size": 200000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-09T07:46:34.592625Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 82,
+    "human_modified": 11,
+    "human_removed": 0,
+    "total_committed": 82,
+    "total_lines_changed": 97,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 904,
+      "user_lines_removed": 11,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "internal/ast/utilities.rs": 168,
+        "internal/checker/core/check_test.rs": 736
+      },
+      "user_removed_per_file": {
+        "internal/ast/utilities.rs": 1,
+        "internal/checker/core/check_test.rs": 10
+      }
+    }
+  ]
+}
