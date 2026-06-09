@@ -1,0 +1,23 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "fa41d67036d2",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "internal/checker/core/check.rs",
+    "internal/checker/core/check_test.rs",
+    "internal/checker/core/declared_types.rs",
+    "internal/checker/core/mod.rs",
+    "internal/checker/core/relations.rs",
+    "internal/checker/core/types.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fa/41d67036d2/0/metadata.json",
+      "transcript": "/fa/41d67036d2/0/full.jsonl",
+      "content_hash": "/fa/41d67036d2/0/content_hash.txt",
+      "prompt": "/fa/41d67036d2/0/prompt.txt"
+    }
+  ]
+}
