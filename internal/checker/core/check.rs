@@ -497,7 +497,9 @@ impl Checker {
             Kind::ClassExpression => self.check_class_expression(program, node),
             Kind::ArrowFunction => self.check_arrow_function(program, node),
             Kind::NonNullExpression => self.check_non_null_assertion(program, node),
-            Kind::AsExpression => self.check_assertion(program, node),
+            Kind::AsExpression | Kind::TypeAssertionExpression => {
+                self.check_assertion(program, node)
+            }
             Kind::SatisfiesExpression => self.check_satisfies_expression(program, node),
             Kind::MetaProperty => self.check_meta_property(program, node),
             Kind::SuperKeyword => self.check_super_expression(program, node),
@@ -529,25 +531,61 @@ impl Checker {
     //
     // A non-const assertion takes the asserted type as its result.
     //
-    // DEFER(phase-4-checker-4be+): the `<T>expr` type-assertion form
-    // (`TypeAssertionExpression`), the `isValidConstAssertionArgument` diagnostic
-    // for an invalid `as const` argument, the deferred `2352` comparability check
-    // (`checkAssertionDeferred` / `checkSourceElement` on the type node), and the
-    // `erasableSyntaxOnly` grammar diagnostic. blocked-by: assertion
-    // comparability (`isTypeComparableTo`) + deferred-node checking +
-    // erasable-syntax option.
+    // DEFER(phase-4-checker-4be+): the `erasableSyntaxOnly` grammar diagnostic
+    // for `<T>expr` in erasable-syntax-only mode. blocked-by: erasable-syntax
+    // option wiring.
     // Go: internal/checker/checker.go:Checker.checkAssertion(12238)
     fn check_assertion(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let (expr, type_node) = match program.arena().data(node) {
             NodeData::AsExpression(d) => (d.expression, d.type_node),
+            NodeData::TypeAssertionExpression(d) => (d.expression, d.type_node),
             _ => return self.error_type,
         };
         let expr_type = self.check_expression(program, expr);
         if is_const_type_reference(program.arena(), type_node) {
+            if !is_valid_const_assertion_argument(self, program, expr) {
+                self.error(
+                    program,
+                    expr,
+                    &tsgo_diagnostics::A_CONST_ASSERTION_CAN_ONLY_BE_APPLIED_TO_REFERENCES_TO_ENUM_MEMBERS_OR_STRING_NUMBER_BOOLEAN_ARRAY_OR_OBJECT_LITERALS,
+                    &[],
+                );
+            }
             return self.regular_type_of_literal_type(expr_type);
         }
         let globals = program.globals();
-        super::declared_types::get_type_from_type_node(self, program, type_node, globals)
+        let target_type =
+            super::declared_types::get_type_from_type_node(self, program, type_node, globals);
+        self.check_assertion_comparability(program, node, expr_type, target_type);
+        target_type
+    }
+
+    // Reports `2352` when a non-const assertion's operand type is not comparable
+    // to the asserted type (Go's `checkAssertionDeferred`).
+    // Go: internal/checker/checker.go:Checker.checkAssertionDeferred(12259)
+    fn check_assertion_comparability(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        expr_type: TypeId,
+        target_type: TypeId,
+    ) {
+        if target_type == self.error_type {
+            return;
+        }
+        let base = self.get_base_type_of_literal_type(expr_type);
+        let widened = self.get_widened_type(base);
+        if self.is_type_comparable_to(program, target_type, widened) {
+            return;
+        }
+        let source_str = super::nodebuilder::type_to_string(self, program, expr_type);
+        let target_str = super::nodebuilder::type_to_string(self, program, target_type);
+        self.error(
+            program,
+            node,
+            &tsgo_diagnostics::CONVERSION_OF_TYPE_0_TO_TYPE_1_MAY_BE_A_MISTAKE_BECAUSE_NEITHER_TYPE_SUFFICIENTLY_OVERLAPS_WITH_THE_OTHER_IF_THIS_WAS_INTENTIONAL_CONVERT_THE_EXPRESSION_TO_UNKNOWN_FIRST,
+            &[source_str.as_str(), target_str.as_str()],
+        );
     }
 
     /// Checks a dynamic `import()` call expression.
@@ -16070,6 +16108,76 @@ fn is_entity_name_expression(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool 
     }
     // DEFER(phase-4-checker-4az+): the `allowJS` forms (`this`, element-access
     // entity names). blocked-by: JS-file entity-name parity.
+}
+
+// Reports whether `node` is a valid `as const` / `<const>` operand (Go's
+// `isValidConstAssertionArgument`).
+// Go: internal/checker/checker.go:Checker.isValidConstAssertionArgument(13537)
+fn is_valid_const_assertion_argument(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> bool {
+    let arena = program.arena();
+    match arena.kind(node) {
+        Kind::StringLiteral
+        | Kind::NoSubstitutionTemplateLiteral
+        | Kind::NumericLiteral
+        | Kind::BigIntLiteral
+        | Kind::TrueKeyword
+        | Kind::FalseKeyword
+        | Kind::ArrayLiteralExpression
+        | Kind::ObjectLiteralExpression
+        | Kind::TemplateExpression => true,
+        Kind::ParenthesizedExpression => {
+            let inner = match arena.data(node) {
+                NodeData::ParenthesizedExpression(d) => d.expression,
+                _ => return false,
+            };
+            is_valid_const_assertion_argument(checker, program, inner)
+        }
+        Kind::PrefixUnaryExpression => {
+            let (operator, operand) = match arena.data(node) {
+                NodeData::PrefixUnaryExpression(d) => (d.operator, d.operand),
+                _ => return false,
+            };
+            if operator == Kind::MinusToken {
+                matches!(
+                    arena.kind(operand),
+                    Kind::NumericLiteral | Kind::BigIntLiteral
+                )
+            } else if operator == Kind::PlusToken {
+                arena.kind(operand) == Kind::NumericLiteral
+            } else {
+                false
+            }
+        }
+        Kind::PropertyAccessExpression | Kind::ElementAccessExpression => {
+            let expr = match arena.data(node) {
+                NodeData::PropertyAccessExpression(d) => d.expression,
+                NodeData::ElementAccessExpression(d) => d.expression,
+                _ => return false,
+            };
+            let expr = skip_outer_expressions(program, expr);
+            if !is_entity_name_expression(arena, expr) {
+                return false;
+            }
+            let symbol = checker.resolve_entity_name(
+                program,
+                expr,
+                SymbolFlags::VALUE,
+                true,
+                false,
+                None,
+            );
+            symbol.is_some_and(|sym| {
+                checker
+                    .resolved_symbol_flags(program, sym)
+                    .intersects(SymbolFlags::ENUM)
+            })
+        }
+        _ => false,
+    }
 }
 
 // Reports whether `node` is a `const` assertion (`expr as const` or

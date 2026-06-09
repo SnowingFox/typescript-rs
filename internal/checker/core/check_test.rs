@@ -18989,3 +18989,119 @@ fn delete_required_property_with_strict_null_checks_reports_2790() {
         "The operand of a 'delete' operator must be optional."
     );
 }
+
+// ---- T1-E batch 97: assertion comparability, invalid as const, angle bracket ----
+
+// Go: internal/checker/checker.go:Checker.checkAssertionDeferred (2352)
+#[test]
+fn type_assertion_incompatible_types_reports_2352() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const n: number;\nconst x = n as string;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2352, got {diags:?}");
+    assert_eq!(diags[0].code, 2352);
+    assert_eq!(
+        diags[0].message,
+        "Conversion of type 'number' to type 'string' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAssertionDeferred (comparable -> ok)
+#[test]
+fn type_assertion_compatible_types_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const n: number;\nconst x = n as number;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkAssertion (1355)
+#[test]
+fn const_assertion_on_variable_reports_1355() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const v: number;\nconst x = v as const;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1355, got {diags:?}");
+    assert_eq!(diags[0].code, 1355);
+    assert_eq!(
+        diags[0].message,
+        "A 'const' assertion can only be applied to references to enum members, or string, number, boolean, array, or object literals."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isValidConstAssertionArgument
+#[test]
+fn const_assertion_on_enum_member_is_allowed() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A }\nconst x = E.A as const;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkAssertion (TypeAssertionExpression)
+#[test]
+fn angle_bracket_type_assertion_takes_asserted_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x = <string>1;\nconst y: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let d = diags
+        .iter()
+        .find(|d| d.code == 2322)
+        .expect("expected TS2322 from asserted string assigned to number");
+    assert_eq!(
+        d.message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAssertionDeferred (2352)
+#[test]
+fn angle_bracket_type_assertion_incompatible_reports_2352() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const n: number;\nconst x = <string>n;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2352, got {diags:?}");
+    assert_eq!(diags[0].code, 2352);
+}
+
+// Go: internal/checker/checker.go:Checker.checkIdentifier (compound assignment to namespace, 2631)
+#[test]
+fn compound_assignment_to_namespace_identifier_reports_2631() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "namespace N {}\nN += 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2631, got {diags:?}");
+    assert_eq!(diags[0].code, 2631);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'N' because it is a namespace."
+    );
+}
