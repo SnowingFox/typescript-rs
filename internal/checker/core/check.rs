@@ -33,8 +33,8 @@ use tsgo_diagnostics::{Category, Message};
 
 use super::contextual::ContextFlags;
 use super::declared_types::{
-    fill_missing_type_arguments, get_apparent_type, get_applicable_index_info,
-    get_applicable_index_info_for_name, get_applicable_index_infos,
+    combined_node_flags, fill_missing_type_arguments, get_apparent_type,
+    get_applicable_index_info, get_applicable_index_info_for_name, get_applicable_index_infos,
     get_class_construct_signatures, get_constraint_of_type_parameter,
     get_declaration_of_alias_symbol, get_declared_type_of_symbol, get_default_from_type_parameter,
     has_base_type, get_index_info_of_type, get_index_infos_of_type,
@@ -2408,6 +2408,15 @@ impl Checker {
                         alias,
                         SymbolFlags::VALUE | SymbolFlags::EXPORT_VALUE,
                     );
+                    let assignment_kind =
+                        tsgo_ast::utilities::get_assignment_target_kind(program.arena(), node);
+                    if assignment_kind != tsgo_ast::utilities::AssignmentKind::None
+                        && self
+                            .check_assignment_target_symbol(program, node, alias, alias)
+                            .is_err()
+                    {
+                        return self.error_type;
+                    }
                     let resolves_to_value = match resolve_alias(self, program, alias) {
                         Some(target) => self
                             .resolved_symbol_flags(program, target)
@@ -2480,32 +2489,17 @@ impl Checker {
                 let symbol = get_export_symbol_of_value_symbol_if_exported(program, symbol);
                 let assignment_kind =
                     tsgo_ast::utilities::get_assignment_target_kind(program.arena(), node);
-                if assignment_kind != tsgo_ast::utilities::AssignmentKind::None {
-                    let flags = self.resolved_symbol_flags(program, symbol);
-                    let js_value_module_ok = is_in_js_file(program.arena(), node)
-                        && flags.intersects(SymbolFlags::VALUE_MODULE);
-                    if !flags.intersects(SymbolFlags::VARIABLE) && !js_value_module_ok {
-                        let name = super::nodebuilder::symbol_to_string(
-                            self,
+                if assignment_kind != tsgo_ast::utilities::AssignmentKind::None
+                    && self
+                        .check_assignment_target_symbol(
                             program,
+                            node,
                             original_symbol,
-                        );
-                        let message = if flags.intersects(SymbolFlags::ENUM) {
-                            Some(&tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_AN_ENUM)
-                        } else if flags.intersects(SymbolFlags::CLASS) {
-                            Some(&tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_CLASS)
-                        } else if flags.intersects(SymbolFlags::MODULE) {
-                            Some(&tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_NAMESPACE)
-                        } else if flags.intersects(SymbolFlags::FUNCTION) {
-                            Some(&tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_FUNCTION)
-                        } else {
-                            None
-                        };
-                        if let Some(message) = message {
-                            self.error(program, node, message, &[name.as_str()]);
-                            return self.error_type;
-                        }
-                    }
+                            symbol,
+                        )
+                        .is_err()
+                {
+                    return self.error_type;
                 }
                 // Go: `markLinkedReferences(node, ReferenceHintIdentifier)` ->
                 // accumulates `referenceKinds` for unused checking. The reachable
@@ -2517,6 +2511,50 @@ impl Checker {
                 self.get_flow_type_of_reference(program, node, declared)
             }
         }
+    }
+
+    // Validates that `symbol` may be written to when `node` is an assignment
+    // target (definite, compound, or `for`-`in`/`of` initializer).
+    // Go: internal/checker/checker.go:Checker.checkIdentifier (assignment guards)
+    fn check_assignment_target_symbol(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        display_symbol: SymbolId,
+        symbol: SymbolId,
+    ) -> Result<(), ()> {
+        let flags = self.resolved_symbol_flags(program, symbol);
+        let js_value_module_ok = is_in_js_file(program.arena(), node)
+            && flags.intersects(SymbolFlags::VALUE_MODULE);
+        let name =
+            super::nodebuilder::symbol_to_string(self, program, display_symbol);
+        if !flags.intersects(SymbolFlags::VARIABLE) && !js_value_module_ok {
+            let message = if flags.intersects(SymbolFlags::ENUM) {
+                &tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_AN_ENUM
+            } else if flags.intersects(SymbolFlags::CLASS) {
+                &tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_CLASS
+            } else if flags.intersects(SymbolFlags::MODULE) {
+                &tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_NAMESPACE
+            } else if flags.intersects(SymbolFlags::FUNCTION) {
+                &tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_FUNCTION
+            } else if flags.intersects(SymbolFlags::ALIAS) {
+                &tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_AN_IMPORT
+            } else {
+                &tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_NOT_A_VARIABLE
+            };
+            self.error(program, node, message, &[name.as_str()]);
+            return Err(());
+        }
+        if is_readonly_symbol(self, program, symbol) {
+            let message = if flags.intersects(SymbolFlags::VARIABLE) {
+                &tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_CONSTANT
+            } else {
+                &tsgo_diagnostics::CANNOT_ASSIGN_TO_0_BECAUSE_IT_IS_A_READ_ONLY_PROPERTY
+            };
+            self.error(program, node, message, &[name.as_str()]);
+            return Err(());
+        }
+        Ok(())
     }
 
     // Returns the specialized "cannot find name" diagnostic for an unresolved
@@ -15464,6 +15502,37 @@ fn has_abstract_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
 }
 
 // Go: internal/checker/checker.go:Checker.isReadonlySymbol
+fn is_readonly_symbol(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> bool {
+    if super::is_synthesized_symbol(symbol) {
+        return checker
+            .synthesized_symbol_check_flags(symbol)
+            .contains(CheckFlags::READONLY);
+    }
+    let flags = checker.resolved_symbol_flags(program, symbol);
+    if flags.intersects(SymbolFlags::PROPERTY)
+        && is_readonly_property_symbol(checker, program, symbol)
+    {
+        return true;
+    }
+    if flags.intersects(SymbolFlags::VARIABLE) {
+        let sym = program.symbol(symbol);
+        if sym.value_declaration.is_some_and(|decl| {
+            combined_node_flags(program, decl).intersects(NodeFlags::CONSTANT)
+        }) {
+            return true;
+        }
+    }
+    if flags.intersects(SymbolFlags::ACCESSOR) && !flags.intersects(SymbolFlags::SET_ACCESSOR) {
+        return true;
+    }
+    flags.intersects(SymbolFlags::ENUM_MEMBER)
+}
+
+// Go: internal/checker/checker.go:Checker.isReadonlySymbol (property arm)
 fn is_readonly_property_symbol(
     checker: &Checker,
     program: &dyn BoundProgram,

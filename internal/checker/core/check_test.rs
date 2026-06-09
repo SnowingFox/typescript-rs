@@ -877,7 +877,7 @@ fn variable_declaration_2322_span_is_the_name() {
 // length 1 — narrowing applies to declarations, not to a bare assignment LHS.
 #[test]
 fn assignment_2322_span_is_the_lhs_identifier() {
-    let src = "declare const n: number;\nn = \"s\";";
+    let src = "declare let n: number;\nn = \"s\";";
     let p = std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", src));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -1135,7 +1135,7 @@ fn optional_source_property_not_assignable_to_required_target() {
 fn assignment_expression_not_assignable_reports_diagnostic() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        "interface A {\n  x: number;\n}\ninterface B {\n  x: string;\n}\ndeclare const a: A;\ndeclare const b: B;\na = b;",
+        "interface A {\n  x: number;\n}\ninterface B {\n  x: string;\n}\ndeclare let a: A;\ndeclare const b: B;\na = b;",
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -1153,7 +1153,7 @@ fn assignment_expression_not_assignable_reports_diagnostic() {
 fn assignment_expression_literal_generalizes_to_base_type() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        "declare const n: number;\nn = \"s\";",
+        "declare let n: number;\nn = \"s\";",
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -1173,7 +1173,7 @@ fn assignment_expression_literal_generalizes_to_base_type() {
 fn assignment_expression_assignable_reports_no_diagnostic() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        "interface A {\n  x: number;\n}\ndeclare const a: A;\ndeclare const a2: A;\na = a2;",
+        "interface A {\n  x: number;\n}\ndeclare let a: A;\ndeclare const a2: A;\na = a2;",
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -2015,7 +2015,7 @@ fn parenthesized_nullish_coalesce_with_logical_or_reports_nothing() {
 fn compound_arithmetic_assignment_checks_operand() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        "declare const s: string;\ns *= 1;",
+        "declare let s: string;\ns *= 1;",
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -2035,7 +2035,7 @@ fn compound_arithmetic_assignment_checks_operand() {
 fn plus_equals_assignment_not_assignable_reports_diagnostic() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        "declare const n: number;\nn += \"s\";",
+        "declare let n: number;\nn += \"s\";",
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -2055,7 +2055,7 @@ fn plus_equals_assignment_not_assignable_reports_diagnostic() {
 fn logical_and_equals_assignment_not_assignable_reports_diagnostic() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        "declare const n: number;\nn &&= \"s\";",
+        "declare let n: number;\nn &&= \"s\";",
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -2075,7 +2075,7 @@ fn logical_and_equals_assignment_not_assignable_reports_diagnostic() {
 fn plus_equals_assignment_assignable_reports_no_diagnostic() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        "declare const n: number;\nn += 1;",
+        "declare let n: number;\nn += 1;",
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -2122,7 +2122,7 @@ fn labeled_statement_body_is_checked() {
 fn logical_or_equals_assignment_not_assignable_reports_diagnostic() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        "declare const n: number;\nn ||= \"s\";",
+        "declare let n: number;\nn ||= \"s\";",
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -2142,7 +2142,7 @@ fn logical_or_equals_assignment_not_assignable_reports_diagnostic() {
 fn nullish_coalesce_equals_assignment_not_assignable_reports_diagnostic() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        "declare const n: number;\nn ??= \"s\";",
+        "declare let n: number;\nn ??= \"s\";",
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -18620,5 +18620,81 @@ fn prefix_increment_on_void_operand_reports_2356() {
     assert!(
         codes.contains(&2356),
         "expected TS2356 on ++void; got {codes:?}"
+    );
+}
+
+// ---- T1-E batch 93: import/const assignment, enum increment, void decrement ----
+
+// Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to import, 2632)
+#[test]
+fn assign_to_named_import_binding_reports_2632() {
+    let p = std::rc::Rc::new(MultiFileProgram::build(&[
+        ("/a.ts", "export let x = 1;"),
+        ("/b.ts", "import { x } from \"./a\";\nx = 2;"),
+    ]));
+    let index = p.source_files()[1];
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(index);
+    assert_eq!(diags.len(), 1, "expected one 2632, got {diags:?}");
+    assert_eq!(diags[0].code, 2632);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'x' because it is an import."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIdentifier (assignment to const, 2588)
+#[test]
+fn assign_to_const_identifier_reports_2588() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "const x = 1;\nx = 2;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2588, got {diags:?}");
+    assert_eq!(diags[0].code, 2588);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'x' because it is a constant."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIdentifier (compound assignment to enum, 2628)
+#[test]
+fn prefix_increment_on_enum_identifier_reports_2628() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { A }\n++E;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2628, got {diags:?}");
+    assert_eq!(diags[0].code, 2628);
+    assert_eq!(
+        diags[0].message,
+        "Cannot assign to 'E' because it is an enum."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPostfixUnaryExpression (2356)
+#[test]
+fn postfix_decrement_on_void_operand_reports_2356() {
+    let codes = diag_codes("declare function f(): void;\nf()--;");
+    assert!(
+        codes.contains(&2356),
+        "expected TS2356 on void--; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkPrefixUnaryExpression (2356)
+#[test]
+fn prefix_decrement_on_void_operand_reports_2356() {
+    let codes = diag_codes("declare function f(): void;\n--f();");
+    assert!(
+        codes.contains(&2356),
+        "expected TS2356 on --void; got {codes:?}"
     );
 }
