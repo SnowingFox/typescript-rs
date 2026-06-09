@@ -2137,6 +2137,7 @@ impl Checker {
         let candidates: Vec<SymbolId> = get_properties_of_type(self, apparent)
             .into_iter()
             .map(|(_, sym)| sym)
+            .filter(|sym| !super::is_synthesized_symbol(*sym))
             .collect();
         super::name_resolution::get_spelling_suggestion_for_name(
             program,
@@ -2144,7 +2145,7 @@ impl Checker {
             &candidates,
             SymbolFlags::VALUE,
         )
-        .map(|sym| program.symbol(sym).name.clone())
+        .map(|sym| self.property_symbol_name(program, sym))
     }
 
     // Widens an inferred declaration type (the reachable subset of Go's
@@ -3238,7 +3239,13 @@ impl Checker {
             if let Some(prop) = get_property_of_type(self, apparent, &name)
                 .or_else(|| get_property_of_union_or_intersection_type(self, apparent, &name))
             {
-                if program.symbol(prop).flags.intersects(SymbolFlags::ACCESSOR) {
+                let is_accessor = if super::is_synthesized_symbol(prop) {
+                    self.synthesized_symbol_flags(prop)
+                        .intersects(SymbolFlags::GET_ACCESSOR | SymbolFlags::SET_ACCESSOR)
+                } else {
+                    program.symbol(prop).flags.intersects(SymbolFlags::ACCESSOR)
+                };
+                if is_accessor {
                     if !self.check_property_accessibility(
                         program,
                         node,
@@ -6558,18 +6565,28 @@ impl Checker {
                 if program.arena().kind(constraint) != Kind::TypeOperator {
                     let constraint_type =
                         get_type_from_type_node(self, program, constraint, program.globals());
-                    let string_number_symbol = self.get_union_type(&[
-                        self.string_type(),
-                        self.number_type(),
-                        self.es_symbol_type(),
-                    ]);
-                    if !self.is_type_assignable_to(program, constraint_type, string_number_symbol) {
-                        self.report_type_not_assignable(
-                            program,
-                            constraint,
-                            constraint_type,
-                            string_number_symbol,
-                        );
+                    // Homomorphic and utility mapped types (`[P in K]`, `Pick`, `Record`)
+                    // use a type-parameter reference as the constraint; only validate
+                    // concrete constraints like `boolean` (Go skips non-literal shapes).
+                    if !self
+                        .get_type(constraint_type)
+                        .flags()
+                        .contains(TypeFlags::TYPE_PARAMETER)
+                    {
+                        let string_number_symbol = self.get_union_type(&[
+                            self.string_type(),
+                            self.number_type(),
+                            self.es_symbol_type(),
+                        ]);
+                        if !self.is_type_assignable_to(program, constraint_type, string_number_symbol)
+                        {
+                            self.report_type_not_assignable(
+                                program,
+                                constraint,
+                                constraint_type,
+                                string_number_symbol,
+                            );
+                        }
                     }
                 }
             }
@@ -10148,12 +10165,7 @@ impl Checker {
             name,
             &tsgo_diagnostics::TYPE_ALIAS_NAME_CANNOT_BE_0,
         );
-        self.check_grammar_type_parameter_defaults(program, type_parameters.clone());
-        if let Some(ref tps) = type_parameters {
-            for tp in &tps.nodes {
-                self.check_type_parameter_declaration(program, *tp);
-            }
-        }
+        self.check_type_parameters(program, type_parameters.clone());
         self.check_type_node(program, type_node);
         self.register_for_unused_identifiers_check(node);
     }
@@ -10423,6 +10435,7 @@ impl Checker {
         };
         let (params, return_type, body) = (d.parameters.nodes.clone(), d.type_node, d.body);
         self.check_grammar_function_like_declaration(program, node);
+        self.check_grammar_type_parameter_defaults(program, d.type_parameters.clone());
         self.check_function_or_method_declaration(program, node);
         self.check_return_type_predicate(program, &params, return_type);
         if let Some(return_type_node) = return_type {
@@ -10635,6 +10648,104 @@ impl Checker {
             }
         }
     }
+    // Grammar-checks a type-parameter list: per-parameter validation, default
+    // forward-reference rules (`2744`), and required-after-optional (`2706`).
+    // Go: internal/checker/checker.go:Checker.checkTypeParameters
+    fn check_type_parameters(
+        &mut self,
+        program: &dyn BoundProgram,
+        type_parameters: Option<tsgo_ast::NodeList>,
+    ) {
+        let Some(list) = type_parameters else {
+            return;
+        };
+        let nodes = list.nodes;
+        let mut seen_default = false;
+        for (index, &node) in nodes.iter().enumerate() {
+            self.check_type_parameter_declaration(program, node);
+            let default_type = match program.arena().data(node) {
+                NodeData::TypeParameterDeclaration(d) => d.default_type,
+                _ => None,
+            };
+            if let Some(default_type) = default_type {
+                seen_default = true;
+                self.check_type_parameters_not_referenced(program, default_type, &nodes, index);
+            } else if seen_default {
+                self.error(
+                    program,
+                    node,
+                    &tsgo_diagnostics::REQUIRED_TYPE_PARAMETERS_MAY_NOT_FOLLOW_OPTIONAL_TYPE_PARAMETERS,
+                    &[],
+                );
+            }
+            let name = match program.arena().data(node) {
+                NodeData::TypeParameterDeclaration(d) => d.name,
+                _ => continue,
+            };
+            let sym = program.symbol_of_node(node);
+            for &prior in &nodes[..index] {
+                if program.symbol_of_node(prior) == sym {
+                    self.error(
+                        program,
+                        name,
+                        &tsgo_diagnostics::DUPLICATE_IDENTIFIER_0,
+                        &[program.arena().text(name)],
+                    );
+                }
+            }
+        }
+    }
+
+    // Reports `2744` when a type-parameter default references a later parameter.
+    // Go: internal/checker/checker.go:Checker.checkTypeParametersNotReferenced
+    fn check_type_parameters_not_referenced(
+        &mut self,
+        program: &dyn BoundProgram,
+        root: NodeId,
+        type_parameter_nodes: &[NodeId],
+        index: usize,
+    ) {
+        self.visit_type_parameter_default_references(program, root, type_parameter_nodes, index);
+    }
+
+    fn visit_type_parameter_default_references(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        type_parameter_nodes: &[NodeId],
+        index: usize,
+    ) {
+        if program.arena().kind(node) == Kind::TypeReference {
+            let ty = self.get_type_from_type_node(program, node, program.globals());
+            if self.get_type(ty).flags().contains(TypeFlags::TYPE_PARAMETER) {
+                let Some(param_sym) = self.get_type(ty).as_type_parameter().and_then(|d| d.symbol)
+                else {
+                    return;
+                };
+                for &later in &type_parameter_nodes[index..] {
+                    if program.symbol_of_node(later) == Some(param_sym) {
+                        self.error(
+                            program,
+                            node,
+                            &tsgo_diagnostics::TYPE_PARAMETER_DEFAULTS_CAN_ONLY_REFERENCE_PREVIOUSLY_DECLARED_TYPE_PARAMETERS,
+                            &[],
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        program.arena().for_each_child(node, &mut |child| {
+            self.visit_type_parameter_default_references(
+                program,
+                child,
+                type_parameter_nodes,
+                index,
+            );
+            true
+        });
+    }
+
     fn check_type_parameter_declaration(&mut self, program: &dyn BoundProgram, node: NodeId) {
         let NodeData::TypeParameterDeclaration(d) = program.arena().data(node) else {
             return;

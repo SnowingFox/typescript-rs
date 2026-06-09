@@ -21948,3 +21948,438 @@ fn overload_with_rest_parameter_resolves_no_diagnostics() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 112: utility mapped types, generic defaults, conditional assignability ----
+
+const UTILITY_TYPES: &str = "\
+type Pick<T, K extends keyof T> = { [P in K]: T[P] };\n\
+type Omit<T, K extends keyof T> = { [P in keyof T as P extends K ? never : P]: T[P] };\n\
+type Partial<T> = { [P in keyof T]?: T[P] };\n\
+type Required<T> = { [P in keyof T]-?: T[P] };\n\
+type Readonly<T> = { readonly [P in keyof T]: T[P] };\n\
+type Record<K extends string | number | symbol, T> = { [P in K]: T };\n";
+
+// Go: internal/checker/checker.go:Checker.instantiateMappedType (Pick)
+#[test]
+fn pick_type_selects_keys_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{UTILITY_TYPES}\
+             type Src = {{ a: number; b: string }};\n\
+             type P = Pick<Src, \"a\">;\n\
+             const p: P = {{ a: 1 }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.instantiateMappedType (Pick excess)
+#[test]
+fn pick_type_excess_property_reports_2353() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{UTILITY_TYPES}\
+             type Src = {{ a: number; b: string }};\n\
+             type P = Pick<Src, \"a\">;\n\
+             const p: P = {{ a: 1, b: \"x\" }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2353, got {diags:?}");
+    assert_eq!(diags[0].code, 2353);
+}
+
+// Go: internal/checker/checker.go:Checker.instantiateMappedType (Omit)
+#[test]
+fn omit_type_excludes_keys_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{UTILITY_TYPES}\
+             type Src = {{ a: number; b: string }};\n\
+             type O = Omit<Src, \"b\">;\n\
+             const o: O = {{ a: 1 }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeOfPropertyOfType (Omit / as-never)
+#[test]
+fn omit_type_omitted_property_access_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{UTILITY_TYPES}\
+             type Src = {{ a: number; b: string }};\n\
+             type O = Omit<Src, \"b\">;\n\
+             declare const o: O;\n\
+             const x = o.b;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (Partial)
+#[test]
+fn partial_type_makes_properties_optional_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{UTILITY_TYPES}\
+             type Src = {{ a: number; b: string }};\n\
+             type P = Partial<Src>;\n\
+             const p: P = {{ a: 1 }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (Partial assignability)
+#[test]
+fn partial_type_wrong_property_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{UTILITY_TYPES}\
+             type Src = {{ a: number }};\n\
+             type P = Partial<Src>;\n\
+             const p: P = {{ a: \"s\" }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (Required -?)
+#[test]
+fn required_type_strips_optional_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{UTILITY_TYPES}\
+             type Src = {{ a?: number }};\n\
+             type R = Required<Src>;\n\
+             const r: R = {{ a: 1 }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (Required missing)
+#[test]
+fn required_type_missing_property_reports_2741() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{UTILITY_TYPES}\
+             type Src = {{ a?: number }};\n\
+             type R = Required<Src>;\n\
+             const r: R = {{ }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2741, got {diags:?}");
+    assert_eq!(diags[0].code, 2741);
+}
+
+// Go: internal/checker/checker.go:Checker.resolveMappedTypeMembers (Readonly)
+#[test]
+fn readonly_type_property_write_reports_2540() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{UTILITY_TYPES}\
+             type Src = {{ a: number }};\n\
+             type R = Readonly<Src>;\n\
+             declare let r: R;\n\
+             r.a = 2;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2540, got {diags:?}");
+    assert_eq!(diags[0].code, 2540);
+}
+
+// Go: internal/checker/checker.go:Checker.instantiateMappedType (Record)
+#[test]
+fn record_type_maps_keys_to_value_type_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{UTILITY_TYPES}\
+             type R = Record<\"a\" | \"b\", number>;\n\
+             const r: R = {{ a: 1, b: 2 }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.instantiateMappedType (Record wrong value)
+#[test]
+fn record_type_wrong_value_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{UTILITY_TYPES}\
+             type R = Record<\"a\", number>;\n\
+             const r: R = {{ a: \"s\" }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.resolveCall (inferred type from first argument)
+#[test]
+fn generic_call_second_argument_mismatch_reports_2345() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T = number>(x: T, y: T): void {}\nf(1, \"oops\");",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+}
+
+// Go: internal/checker/checker.go:Checker.getDefaultFromTypeParameter
+#[test]
+fn generic_call_with_matching_default_type_argument_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T = number>(x: T): T { return x; }\nconst n: number = f(1);",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypeParameters (2706)
+#[test]
+fn required_type_parameter_after_default_reports_2706() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f<T = number, U>(x: T, y: U): void {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2706, got {diags:?}");
+    assert_eq!(diags[0].code, 2706);
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypeParametersNotReferenced (2744)
+#[test]
+fn type_parameter_default_references_later_parameter_reports_2744() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type F<T = U, U = number> = T;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2744, got {diags:?}");
+    assert_eq!(diags[0].code, 2744);
+}
+
+// Go: internal/checker/checker.go:Checker.getDefaultFromTypeParameter (alias instantiation)
+#[test]
+fn type_alias_default_type_parameter_applied_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Box<T = number> = { value: T };\ntype B = Box;\nconst b: B = { value: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getDefaultFromTypeParameter (alias mismatch)
+#[test]
+fn type_alias_default_type_parameter_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Box<T = number> = { value: T };\ntype B = Box;\nconst b: B = { value: \"s\" };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromConditionalTypeNode (true branch)
+#[test]
+fn conditional_type_true_branch_resolves_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type IsStr<T> = T extends string ? \"yes\" : \"no\";\n\
+         type A = IsStr<string>;\n\
+         const a: A = \"yes\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromConditionalTypeNode (false branch)
+#[test]
+fn conditional_type_false_branch_resolves_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type IsStr<T> = T extends string ? \"yes\" : \"no\";\n\
+         type A = IsStr<number>;\n\
+         const a: A = \"no\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromConditionalTypeNode (mismatch)
+#[test]
+fn conditional_type_resolved_branch_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type IsStr<T> = T extends string ? \"yes\" : \"no\";\n\
+         type A = IsStr<string>;\n\
+         const a: A = \"no\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.distributeConditionalType (union check type)
+#[test]
+fn conditional_type_distributes_over_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type F<T> = T extends string ? T : never;\n\
+         type A = F<string | number>;\n\
+         const a: A = \"s\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.distributeConditionalType (union mismatch)
+#[test]
+fn conditional_type_distributed_union_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type F<T> = T extends string ? T : never;\n\
+         type A = F<string | number>;\n\
+         const a: A = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromConditionalTypeNode (infer)
+#[test]
+fn conditional_type_with_infer_resolves_element_type_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Element<T> = T extends (infer U)[] ? U : never;\n\
+         type E = Element<string[]>;\n\
+         const e: E = \"s\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromConditionalTypeNode (infer mismatch)
+#[test]
+fn conditional_type_with_infer_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Element<T> = T extends (infer U)[] ? U : never;\n\
+         type E = Element<string[]>;\n\
+         const e: E = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromConditionalTypeNode (nested)
+#[test]
+fn nested_conditional_type_resolves_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Outer<T> = T extends string ? (T extends \"a\" ? 1 : 2) : 3;\n\
+         type A = Outer<\"a\">;\n\
+         const a: A = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromConditionalTypeNode (never branch)
+#[test]
+fn conditional_type_never_branch_is_uninhabited_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type F<T> = T extends string ? T : never;\n\
+         type A = F<number>;\n\
+         const a: A = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}

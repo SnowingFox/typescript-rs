@@ -14,7 +14,7 @@ use super::declared_types::{
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
 use super::type_facts::TypeFacts;
-use super::types::{MappedTypeModifiers, ObjectFlags, TypeFlags, TypeId};
+use super::types::{LiteralValue, MappedTypeModifiers, ObjectFlags, TypeFlags, TypeId};
 use super::Checker;
 
 /// Resolves a `MappedType` AST node to a mapped-type object.
@@ -190,11 +190,32 @@ pub(crate) fn resolve_mapped_type_members_lazy(
     }
     let template_modifiers = mapped_type_modifiers(program, declaration);
     let type_parameter = type_parameter_from_declaration(checker, program, declaration);
+    let name_type_node = match program.arena().data(declaration) {
+        NodeData::MappedType(d) => d.name_type,
+        _ => None,
+    };
+    let mapper = checker.mapped_type_mapper(mapped_type);
+    let globals = program.globals().cloned();
     let props = get_properties_of_type(checker, modifiers_type);
     let mut members = SymbolTable::default();
     let mut properties = Vec::with_capacity(props.len());
     for (name, modifiers_prop) in props {
         let key_type = checker.get_string_literal_type(&name);
+        let prop_name = match name_type_node {
+            Some(nt) => {
+                let name_mapper = match mapper.as_ref() {
+                    Some(m) => TypeMapper::append_mapping(Some(m.clone()), type_parameter, key_type),
+                    None => TypeMapper::append_mapping(None, type_parameter, key_type),
+                };
+                let base = get_type_from_type_node(checker, program, nt, globals.as_ref());
+                let remapped = checker.instantiate_type(base, &name_mapper);
+                match property_name_from_remapped_type(checker, remapped) {
+                    Some(n) => n,
+                    None => continue,
+                }
+            }
+            None => name.clone(),
+        };
         let prop_optional = checker
             .resolved_symbol_flags(program, modifiers_prop)
             .contains(SymbolFlags::OPTIONAL);
@@ -216,12 +237,11 @@ pub(crate) fn resolve_mapped_type_members_lazy(
         if checker.strict_null_checks() && !is_optional && prop_optional {
             check_flags |= CheckFlags::STRIP_OPTIONAL;
         }
-        let prop = checker.new_synthesized_property(&name, flags, check_flags, mapped_type);
+        let prop = checker.new_synthesized_property(&prop_name, flags, check_flags, mapped_type);
         checker.value_symbol_links.get(prop).containing_type = Some(mapped_type);
         checker.mapped_symbol_links.get(prop).key_type = Some(key_type);
-        members.insert(name.clone(), prop);
+        members.insert(prop_name.clone(), prop);
         properties.push(prop);
-        let _ = type_parameter;
     }
     if let Some(obj) = checker.types.get_mut(mapped_type).as_object_mut() {
         obj.members = members;
@@ -357,6 +377,13 @@ fn is_keyof_mapped_type(program: &dyn BoundProgram, declaration: tsgo_ast::NodeI
             NodeData::TypeOperator(d) if d.operator == Kind::KeyOfKeyword
         ),
         None => false,
+    }
+}
+
+fn property_name_from_remapped_type(checker: &Checker, t: TypeId) -> Option<String> {
+    match checker.get_type(t).literal_value() {
+        Some(LiteralValue::String(s)) => Some(s.clone()),
+        _ => None,
     }
 }
 

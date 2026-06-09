@@ -3663,9 +3663,26 @@ pub fn instantiate_mapped_type(
         Some(own) => TypeMapper::merge(own, mapper.clone()),
         None => mapper.clone(),
     };
-    // The reachable subset only resolves homomorphic `{ [K in keyof T]: V }`
-    // mapped types; a non-keyof (`Record`-style) constraint stays deferred.
     if !is_mapped_type_with_keyof_constraint(program, declaration) {
+        let constraint_type =
+            super::mapped_types::get_constraint_type_from_mapped_type(checker, program, t);
+        let constraint_type = checker.instantiate_type(constraint_type, &combined);
+        if is_concrete_key_constraint_type(checker, constraint_type) {
+            let modifiers_type = super::mapped_types::modifiers_type_from_declaration(
+                checker,
+                program,
+                declaration,
+                Some(&combined),
+            );
+            return resolve_mapped_type_members_from_key_constraint(
+                checker,
+                program,
+                declaration,
+                constraint_type,
+                modifiers_type,
+                &combined,
+            );
+        }
         return checker.new_mapped_type(declaration, Some(combined));
     }
     let modifiers_type = super::mapped_types::modifiers_type_from_declaration(
@@ -3684,6 +3701,133 @@ pub fn instantiate_mapped_type(
         return checker.new_mapped_type(declaration, Some(combined));
     }
     resolve_mapped_type_members_eager(checker, program, declaration, modifiers_type, &combined)
+}
+
+// Reports whether `t` is a concrete key type (string/number literal or union of
+// them) suitable for eager non-keyof mapped-type member resolution.
+fn is_concrete_key_constraint_type(checker: &Checker, t: TypeId) -> bool {
+    let flags = checker.get_type(t).flags();
+    if flags.intersects(TypeFlags::STRING_LITERAL | TypeFlags::NUMBER_LITERAL) {
+        return true;
+    }
+    if flags.contains(TypeFlags::UNION) {
+        return checker
+            .get_type(t)
+            .union_types()
+            .map(|types| {
+                types
+                    .iter()
+                    .all(|&member| is_concrete_key_constraint_type(checker, member))
+            })
+            .unwrap_or(false);
+    }
+    false
+}
+
+// Eagerly resolves a non-keyof mapped type `{ [P in C]: V }` when `C` is a
+// concrete literal-key type (or union of literals). Mirrors Go's
+// `resolveMappedTypeMembers` non-homomorphic branch.
+fn resolve_mapped_type_members_from_key_constraint(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    declaration: NodeId,
+    constraint_type: TypeId,
+    modifiers_type: TypeId,
+    combined: &TypeMapper,
+) -> TypeId {
+    let template_modifiers = get_mapped_type_modifiers(program, declaration);
+    let type_parameter = get_type_parameter_from_mapped_type(checker, program, declaration);
+    let template_node = match program.arena().data(declaration) {
+        NodeData::MappedType(d) => d.type_node,
+        _ => None,
+    };
+    let name_type_node = match program.arena().data(declaration) {
+        NodeData::MappedType(d) => d.name_type,
+        _ => None,
+    };
+    let globals = program.globals().cloned();
+    let mut members = SymbolTable::default();
+    let mut properties: Vec<SymbolId> = Vec::new();
+    let key_types = checker.distributed_types(constraint_type);
+    for key_type in key_types {
+        let prop_name = match name_type_node {
+            Some(nt) => {
+                let name_mapper =
+                    TypeMapper::append_mapping(Some(combined.clone()), type_parameter, key_type);
+                let base = get_type_from_type_node(checker, program, nt, globals.as_ref());
+                let remapped = checker.instantiate_type(base, &name_mapper);
+                match property_name_from_remapped_type(checker, remapped) {
+                    Some(n) => n,
+                    None => continue,
+                }
+            }
+            None => match checker.get_type(key_type).literal_value() {
+                Some(LiteralValue::String(s)) => s.clone(),
+                Some(LiteralValue::Number(n)) => n.to_string(),
+                _ => continue,
+            },
+        };
+        let modifiers_prop = if is_type_usable_as_property_name(checker, key_type) {
+            get_property_of_type(checker, modifiers_type, &prop_name)
+        } else {
+            None
+        };
+        let prop_optional = modifiers_prop
+            .map(|p| {
+                checker
+                    .resolved_symbol_flags(program, p)
+                    .contains(SymbolFlags::OPTIONAL)
+            })
+            .unwrap_or(false);
+        let prop_readonly = modifiers_prop
+            .map(|p| is_readonly_source_symbol(checker, p))
+            .unwrap_or(false);
+        let is_optional = template_modifiers.contains(MappedTypeModifiers::INCLUDE_OPTIONAL)
+            || (!template_modifiers.contains(MappedTypeModifiers::EXCLUDE_OPTIONAL) && prop_optional);
+        let is_readonly = template_modifiers.contains(MappedTypeModifiers::INCLUDE_READONLY)
+            || (!template_modifiers.contains(MappedTypeModifiers::EXCLUDE_READONLY)
+                && prop_readonly);
+        let prop_type = match template_node {
+            Some(tn) => {
+                let template_mapper =
+                    TypeMapper::append_mapping(Some(combined.clone()), type_parameter, key_type);
+                let base = get_type_from_type_node(checker, program, tn, globals.as_ref());
+                checker.instantiate_type(base, &template_mapper)
+            }
+            None => checker.error_type(),
+        };
+        let strip_optional = checker.strict_null_checks() && !is_optional && prop_optional;
+        let prop_type = if strip_optional {
+            checker.get_type_with_facts(prop_type, super::type_facts::TypeFacts::NE_UNDEFINED)
+        } else {
+            prop_type
+        };
+        let mut flags = SymbolFlags::PROPERTY;
+        if is_optional {
+            flags |= SymbolFlags::OPTIONAL;
+        }
+        let check_flags = if is_readonly {
+            CheckFlags::READONLY
+        } else {
+            CheckFlags::empty()
+        };
+        let prop = checker.new_object_literal_property(&prop_name, flags, check_flags, prop_type);
+        members.insert(prop_name.clone(), prop);
+        properties.push(prop);
+    }
+    let object = ObjectType {
+        members,
+        properties,
+        ..Default::default()
+    };
+    checker.new_object_type(ObjectFlags::ANONYMOUS, None, object)
+}
+
+fn is_type_usable_as_property_name(checker: &Checker, t: TypeId) -> bool {
+    checker
+        .get_type(t)
+        .flags()
+        .intersects(TypeFlags::STRING_LITERAL | TypeFlags::NUMBER_LITERAL)
 }
 
 // Eagerly resolves a homomorphic mapped type's members over a concrete
@@ -4460,7 +4604,7 @@ fn get_type_from_type_reference(
             let filled =
                 fill_missing_type_arguments(checker, program, &provided_args, &type_parameters);
             let mapper = TypeMapper::new(&type_parameters, &filled);
-            return checker.instantiate_type(target, &mapper);
+            return checker.instantiate_param_type(program, target, &mapper);
         }
     }
     // `Foo<A, B>` (a non-generic-target or alias) with explicit arguments forms a
