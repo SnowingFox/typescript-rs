@@ -2429,6 +2429,7 @@ fn get_signature_from_declaration(
     // body-based inference and yields `any`. A class constructor's return type
     // is the instance type of the declaring class (Go's
     // `getReturnTypeFromAnnotation` for `ConstructorDeclaration`).
+    let mut resolved_type_predicate = None;
     let resolved_return_type = if program.arena().kind(declaration) == Kind::Constructor {
         program
             .arena()
@@ -2438,6 +2439,11 @@ fn get_signature_from_declaration(
             .unwrap_or(checker.error_type())
     } else {
         match return_type_node {
+            Some(node) if program.arena().kind(node) == Kind::TypePredicate => {
+                resolved_type_predicate =
+                    create_type_predicate_from_type_predicate_node(checker, program, node, &parameters);
+                checker.boolean_type()
+            }
             Some(node) => get_type_from_type_node(checker, program, node, None),
             None => checker.any_type(),
         }
@@ -2475,7 +2481,36 @@ fn get_signature_from_declaration(
     signature.this_parameter = this_parameter;
     signature.min_argument_count = min_argument_count;
     signature.resolved_return_type = Some(resolved_return_type);
+    signature.resolved_type_predicate = resolved_type_predicate;
     checker.new_signature(signature)
+}
+
+// Builds a [`TypePredicateInfo`] from a `parameter is Type` annotation on a
+// function signature (Go's `createTypePredicateFromTypePredicateNode`).
+// Go: internal/checker/relater.go:Checker.createTypePredicateFromTypePredicateNode(2081)
+fn create_type_predicate_from_type_predicate_node(
+    checker: &mut Checker,
+    program: &dyn BoundProgram,
+    node: NodeId,
+    parameters: &[SymbolId],
+) -> Option<super::flow::TypePredicateInfo> {
+    let NodeData::TypePredicate(d) = program.arena().data(node) else {
+        return None;
+    };
+    if program.arena().kind(d.parameter_name) == Kind::ThisType {
+        return None;
+    }
+    let predicate_name = program.arena().text(d.parameter_name).to_string();
+    let parameter_index = parameters.iter().position(|&sym| {
+        program.symbol(sym).name == predicate_name
+    })? as i32;
+    let predicate_type = d
+        .type_node
+        .map(|type_node| get_type_from_type_node(checker, program, type_node, None));
+    Some(super::flow::TypePredicateInfo {
+        parameter_index,
+        predicate_type,
+    })
 }
 
 // Collects the type-parameter types declared by a function-like declaration's

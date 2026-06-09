@@ -20867,3 +20867,166 @@ fn loose_null_inequality_guard_narrows_else_branch_no_diagnostics() {
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
+// ---- T1-E batch 106: in 2638, negated in, switch typeof number, loose == null, type predicate flow ----
+
+// Go: internal/checker/checker.go:Checker.checkInExpression (hasEmptyObjectIntersection, 2638)
+#[test]
+fn in_expression_unknown_narrowed_right_reports_2638() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const k: string;\n\
+         declare const y: unknown;\n\
+         if (y) {\n  k in y;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2638, got {diags:?}");
+    assert_eq!(diags[0].code, 2638);
+    assert_eq!(
+        diags[0].message,
+        "Type '{}' may represent a primitive value, which is not permitted as the right operand of the 'in' operator."
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (negated `in`)
+#[test]
+fn negated_in_guard_narrows_else_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         declare const v: A | B;\n\
+         if (!(\"a\" in v)) {\n  const s: string = v.b;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnTypeOf
+#[test]
+fn switch_typeof_number_case_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: number | string;\n\
+         switch (typeof x) {\n  case \"number\": {\n    const n: number = x;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality (loose `== null`)
+#[test]
+fn loose_null_equality_guard_narrows_branches_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | null | undefined;\n\
+         if (x == null) {\n  const n: null | undefined = x;\n} else {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate
+#[test]
+fn type_predicate_call_narrows_union_in_then_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         declare function isString(v: unknown): v is string;\n\
+         if (isString(x)) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminantProperty
+#[test]
+fn discriminant_property_switch_case_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         switch (v.kind) {\n  case \"a\": {\n    const n: number = v.a;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkBinaryLikeExpression (`||` nullable left)
+#[test]
+fn logical_or_nullable_left_yields_union_with_right() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const a: string | null;\ndeclare const b: number;\na || b;",
+    );
+    let root = p.root();
+    let mut c = Checker::new();
+    let or = match p.arena().data(root) {
+        NodeData::SourceFile(d) => match p.arena().data(d.statements.nodes[2]) {
+            NodeData::ExpressionStatement(d) => d.expression,
+            _ => panic!("expression statement"),
+        },
+        _ => panic!("source file"),
+    };
+    let t = c.check_expression(&p, or);
+    assert_eq!(
+        c.type_to_string(t),
+        "string | number",
+        "nullable string || number should union truthy string with number"
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByEquality (strict `=== undefined`)
+#[test]
+fn strict_undefined_equality_guard_narrows_then_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\nif (x === undefined) {\n  const u: undefined = x;\n} else {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (`"prop" in ref` reversed operand order)
+#[test]
+fn in_guard_reversed_operand_order_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         declare const v: A | B;\n\
+         if (v && \"a\" in v) {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeFromLiteralTypeNode (negative bigint literal type)
+#[test]
+fn negative_bigint_literal_type_assignable_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type N = -1n;\nconst x: N = -1n;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+

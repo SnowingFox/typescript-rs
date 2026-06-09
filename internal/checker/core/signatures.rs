@@ -11,6 +11,8 @@
 
 use tsgo_ast::{NodeId, SymbolId};
 
+use super::flow::TypePredicateInfo;
+
 use super::types::TypeId;
 
 bitflags::bitflags! {
@@ -99,6 +101,8 @@ pub struct Signature {
     pub this_parameter: Option<SymbolId>,
     /// The resolved return type, once computed.
     pub resolved_return_type: Option<TypeId>,
+    /// The resolved type predicate for a `parameter is Type` return annotation.
+    pub resolved_type_predicate: Option<TypePredicateInfo>,
     /// The signature this was instantiated from, if any.
     pub target: Option<SignatureId>,
     /// For an instantiated signature, the type mapper applied to its parameter

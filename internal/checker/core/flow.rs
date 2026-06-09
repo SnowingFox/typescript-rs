@@ -124,7 +124,25 @@ impl Checker {
         } else {
             super::type_facts::TypeFacts::FALSY
         };
-        self.get_type_with_facts(t, facts)
+        let narrowed = self.get_type_with_facts(t, facts);
+        if !assume_true {
+            return narrowed;
+        }
+        // Truthy-narrowed `unknown` becomes the `{}` representative used for
+        // `in`-operand checking (Go's `getAdjustedTypeWithFacts` / `unknownUnionType`
+        // recombination subset).
+        let members: Vec<TypeId> = self
+            .distributed_types(narrowed)
+            .into_iter()
+            .map(|m| {
+                if self.get_type(m).flags().contains(TypeFlags::UNKNOWN) {
+                    self.unknown_empty_object_type()
+                } else {
+                    m
+                }
+            })
+            .collect();
+        self.get_union_type(&members)
     }
 
     /// Narrows `t` by an equality guard (`x === value` / `x !== value`).
@@ -421,9 +439,92 @@ impl Checker {
                 }
                 t
             }
+            Kind::CallExpression => {
+                self.narrow_type_by_call_expression(program, reference, t, expr, assume_true)
+            }
             // DEFER(phase-4-checker-4g): `&&`/`||` flow.
             _ => t,
         }
+    }
+
+    // Narrows by a type-predicate call used as a condition (`if (isT(x))`).
+    // Go: internal/checker/flow.go:Checker.narrowTypeByCallExpression(437)
+    fn narrow_type_by_call_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        t: TypeId,
+        call_expression: NodeId,
+        assume_true: bool,
+    ) -> TypeId {
+        if !self.has_matching_argument(program, reference, call_expression) {
+            return t;
+        }
+        let Some(signature) = self.get_effects_signature(program, call_expression) else {
+            return t;
+        };
+        let Some(predicate) = self
+            .get_type_predicate_of_signature(signature)
+            .cloned()
+        else {
+            return t;
+        };
+        self.narrow_type_by_type_predicate(
+            program,
+            reference,
+            t,
+            &predicate,
+            call_expression,
+            assume_true,
+        )
+    }
+
+    // Reports whether `reference` matches any argument of `call_expression`.
+    // Go: internal/checker/flow.go:Checker.hasMatchingArgument
+    fn has_matching_argument(
+        &self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        call_expression: NodeId,
+    ) -> bool {
+        let NodeData::CallExpression(d) = program.arena().data(call_expression) else {
+            return false;
+        };
+        d.arguments
+            .nodes
+            .iter()
+            .any(|&arg| self.is_matching_reference(program, reference, arg))
+    }
+
+    // Returns the call signature whose type-predicate effects apply to `call`.
+    // Go: internal/checker/flow.go:Checker.getEffectsSignature(2024)
+    fn get_effects_signature(
+        &mut self,
+        program: &dyn BoundProgram,
+        call_expression: NodeId,
+    ) -> Option<super::signatures::SignatureId> {
+        let NodeData::CallExpression(d) = program.arena().data(call_expression) else {
+            return None;
+        };
+        let func_type = self.check_non_null_expression(program, d.expression);
+        let signatures = self.get_signatures_of_type(func_type);
+        let signature = *signatures.first()?;
+        if self.get_type_predicate_of_signature(signature).is_some() {
+            Some(signature)
+        } else {
+            None
+        }
+    }
+
+    // Returns the resolved type predicate of `signature`, if any.
+    // Go: internal/checker/relater.go:Checker.getTypePredicateOfSignature(2013)
+    pub(crate) fn get_type_predicate_of_signature(
+        &self,
+        signature: super::signatures::SignatureId,
+    ) -> Option<&TypePredicateInfo> {
+        self.signature(signature)
+            .resolved_type_predicate
+            .as_ref()
     }
 
     // Narrows by a binary condition; 4f handles `typeof x === "<name>"`.
@@ -754,10 +855,61 @@ impl Checker {
                 return self.narrow_type_by_switch_on_typeof(program, t, switch_stmt, &data);
             }
         }
-        // DEFER(phase-4-checker-4u): `switch (true)` and discriminant-property
-        // `switch (x.kind)`. blocked-by: `narrowType` on case expressions and
-        // discriminant-property access matching.
+        if let Some(access) = self.get_discriminant_property_access(program, reference, expr, t) {
+            return self.narrow_type_by_switch_on_discriminant_property(program, t, access, &data);
+        }
+        // DEFER(phase-4-checker-4u): `switch (true)` and optional-chain
+        // containment. blocked-by: optional-chain reference matching.
         t
+    }
+
+    // Narrows a union `t` at a `switch (ref.prop)` clause by narrowing the
+    // discriminant property with the case-clause types, then filtering union
+    // constituents (Go's `narrowTypeBySwitchOnDiscriminantProperty` fallback).
+    // Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantProperty(1203)
+    fn narrow_type_by_switch_on_discriminant_property(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        access: NodeId,
+        data: &FlowSwitchClauseData,
+    ) -> TypeId {
+        let prop_name = match self.get_accessed_property_name(program, access) {
+            Some(n) => n,
+            None => return t,
+        };
+        let prop_type = match crate::core::declared_types::get_type_of_property_of_type(
+            self, program, t, &prop_name,
+        ) {
+            Some(pt) => pt,
+            None => return t,
+        };
+        let narrowed_prop_type =
+            self.narrow_type_by_switch_on_discriminant(program, prop_type, data);
+        let narrowed_is_never = self
+            .get_type(narrowed_prop_type)
+            .flags()
+            .contains(TypeFlags::NEVER);
+        let unknown = self.unknown_type();
+        let members = self.distributed_types(t);
+        let mut kept: Vec<TypeId> = Vec::new();
+        for m in members {
+            let discriminant = crate::core::declared_types::get_type_of_property_of_type(
+                self, program, m, &prop_name,
+            )
+            .unwrap_or(unknown);
+            let discriminant_never = self
+                .get_type(discriminant)
+                .flags()
+                .contains(TypeFlags::NEVER);
+            if !discriminant_never
+                && !narrowed_is_never
+                && self.are_types_comparable(program, narrowed_prop_type, discriminant)
+            {
+                kept.push(m);
+            }
+        }
+        self.get_union_type(&kept)
     }
 
     // Narrows `t` at a `switch (typeof ref)` clause. Non-default clauses union
