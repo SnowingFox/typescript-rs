@@ -517,6 +517,9 @@ impl Checker {
             Kind::TypeOfExpression => self.check_typeof_expression(program, node),
             Kind::VoidExpression => self.check_void_expression(program, node),
             Kind::DeleteExpression => self.check_delete_expression(program, node),
+            Kind::AwaitExpression => self.check_await_expression(program, node),
+            Kind::YieldExpression => self.check_yield_expression(program, node),
+            Kind::ConditionalExpression => self.check_conditional_expression(program, node),
             // DEFER(phase-4-checker-4h+): remaining expression kinds are added in
             // later 4g slices / sub-phases.
             _ => self.error_type,
@@ -2730,10 +2733,17 @@ impl Checker {
         node: NodeId,
     ) -> TypeId {
         if let Some(container) = get_this_container(program, node) {
+            if has_static_modifier(program.arena(), container) {
+                self.error(
+                    program,
+                    node,
+                    &tsgo_diagnostics::A_THIS_TYPE_IS_AVAILABLE_ONLY_IN_A_NON_STATIC_MEMBER_OF_A_CLASS_OR_INTERFACE,
+                    &[],
+                );
+                return self.error_type;
+            }
             if let Some(parent) = program.arena().parent(container) {
-                if is_class_like(program.arena(), parent)
-                    && !has_static_modifier(program.arena(), container)
-                {
+                if is_class_like(program.arena(), parent) {
                     if let Some(symbol) = program.symbol_of_node(parent) {
                         let globals = program.globals();
                         return get_declared_type_of_symbol(self, program, symbol, globals);
@@ -4810,6 +4820,141 @@ impl Checker {
         self.get_awaited_type_no_alias_impl(program, t, &mut Vec::new())
     }
 
+    // Validates and unwraps the awaited type of `t`, reporting `diagnostic` at
+    // `error_node` when the operand is an invalid thenable (Go's
+    // `checkAwaitedType` / `getAwaitedTypeNoAliasEx`).
+    // Go: internal/checker/checker.go:Checker.checkAwaitedType(30907)
+    fn check_awaited_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        error_node: NodeId,
+        diagnostic: &'static Message,
+    ) -> Option<TypeId> {
+        if self.get_type(t).flags().intersects(TypeFlags::ANY) {
+            return Some(t);
+        }
+        if let Some(promised) = self.get_promised_type_of_promise(program, t) {
+            if promised == t {
+                return None;
+            }
+            let awaited = self.get_awaited_type_no_alias_impl(program, promised, &mut Vec::new());
+            return Some(awaited);
+        }
+        if self.is_thenable_type(program, t) {
+            self.error(program, error_node, diagnostic, &[]);
+            return None;
+        }
+        Some(t)
+    }
+
+    // Reports whether `t` has a callable `then` member but is not a valid promise
+    // (Go's `isThenableType`).
+    // Go: internal/checker/checker.go:Checker.isThenableType(31124)
+    fn is_thenable_type(&mut self, program: &dyn BoundProgram, t: TypeId) -> bool {
+        let base = self.get_base_constraint_or_type(program, t);
+        if self.all_types_assignable_to_kind(base, TypeFlags::PRIMITIVE | TypeFlags::NEVER) {
+            return false;
+        }
+        let then_type = match self.get_type_of_property_of_type(program, t, "then") {
+            Some(ty) => ty,
+            None => return false,
+        };
+        let then_type =
+            self.get_type_with_facts(then_type, TypeFacts::NE_UNDEFINED_OR_NULL);
+        !self.get_signatures_of_type(then_type).is_empty()
+    }
+
+    // Checks an `await expr` expression (Go's `checkAwaitExpression`).
+    // Go: internal/checker/checker.go:Checker.checkAwaitExpression(10804)
+    fn check_await_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let operand = match program.arena().data(node) {
+            NodeData::AwaitExpression(d) => d.expression,
+            _ => return self.error_type,
+        };
+        let operand_type = self.check_expression(program, operand);
+        match self.check_awaited_type(
+            program,
+            operand_type,
+            node,
+            &tsgo_diagnostics::TYPE_OF_AWAIT_OPERAND_MUST_EITHER_BE_A_VALID_PROMISE_OR_MUST_NOT_CONTAIN_A_CALLABLE_THEN_MEMBER,
+        ) {
+            Some(awaited) => awaited,
+            None => self.error_type,
+        }
+    }
+
+    // Checks a `cond ? whenTrue : whenFalse` expression (Go's
+    // `checkConditionalExpression`).
+    // Go: internal/checker/checker.go:Checker.checkConditionalExpression(10893)
+    fn check_conditional_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> TypeId {
+        let NodeData::ConditionalExpression(d) = program.arena().data(node) else {
+            return self.error_type;
+        };
+        let cond_type = self.check_expression(program, d.condition);
+        self.check_truthiness_of_type(program, cond_type, d.condition);
+        let when_true = self.check_expression(program, d.when_true);
+        let when_false = self.check_expression(program, d.when_false);
+        self.get_union_type(&[when_true, when_false])
+    }
+
+    // Checks a `yield` / `yield*` expression (Go's `checkYieldExpression`
+    // reachable subset).
+    // Go: internal/checker/checker.go:Checker.checkYieldExpression(10911)
+    fn check_yield_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
+        let (expression, asterisk_token) = match program.arena().data(node) {
+            NodeData::YieldExpression(d) => (d.expression, d.asterisk_token),
+            _ => return self.error_type,
+        };
+        let container = get_containing_function(program, node);
+        let is_generator =
+            container.is_some_and(|f| is_generator_function(program, f));
+        if !is_generator {
+            self.error(
+                program,
+                node,
+                &tsgo_diagnostics::A_YIELD_EXPRESSION_IS_ONLY_ALLOWED_IN_A_GENERATOR_BODY,
+                &[],
+            );
+            return self.error_type;
+        }
+        if let Some(expr) = expression {
+            let expr_type = self.check_expression(program, expr);
+            if let Some(fn_node) = container {
+                if let Some(return_type_node) = get_effective_return_type_node(program, fn_node)
+                {
+                    let return_type = self.get_type_from_type_node(
+                        program,
+                        return_type_node,
+                        program.globals(),
+                    );
+                    if !self.is_type_assignable_to(program, expr_type, return_type) {
+                        self.check_type_assignable_to_and_optionally_elaborate(
+                            program,
+                            expr_type,
+                            return_type,
+                            expr,
+                            Some(expr),
+                        );
+                    }
+                }
+            }
+            if asterisk_token.is_some() {
+                let _ = self.check_iterated_type_or_element_type(
+                    program,
+                    expr_type,
+                    expression,
+                    self.iterables_resolvable_via_protocol(),
+                );
+            }
+        }
+        self.any_type
+    }
+
     fn get_awaited_type_no_alias_impl(
         &mut self,
         program: &dyn BoundProgram,
@@ -6640,12 +6785,32 @@ impl Checker {
         for (i, &arg) in args.iter().enumerate().take(count) {
             let arg_type = self.check_expression(program, arg);
             let param_type = self.get_type_at_position(program, signature, i);
-            if !self.is_type_assignable_to(program, arg_type, param_type) {
-                self.report_argument_not_assignable(program, arg, arg_type, param_type);
-                // Go's `isSignatureApplicable` returns at the first failure, so
-                // only one `2345` is reported per call.
+            if self.is_type_assignable_to(program, arg_type, param_type) {
+                if program.arena().kind(arg) == Kind::ObjectLiteralExpression
+                    && self.check_object_literal_excess_properties(
+                        program,
+                        arg,
+                        arg_type,
+                        param_type,
+                    )
+                {
+                    return;
+                }
+                continue;
+            }
+            if self.elaborate_error(
+                program,
+                arg,
+                arg_type,
+                param_type,
+                RelationKind::Assignable,
+            ) {
                 return;
             }
+            self.report_argument_not_assignable(program, arg, arg_type, param_type);
+            // Go's `isSignatureApplicable` returns at the first failure, so
+            // only one `2345` is reported per call.
+            return;
         }
     }
 
@@ -9695,6 +9860,15 @@ impl Checker {
                             &tsgo_diagnostics::A_NAMESPACE_DECLARATION_CANNOT_BE_LOCATED_PRIOR_TO_A_CLASS_OR_FUNCTION_WITH_WHICH_IT_IS_MERGED,
                             &[],
                         );
+                    }
+                }
+            }
+        }
+        if is_external_module_augmentation(program, node) {
+            if let Some(body) = body {
+                if let NodeData::ModuleBlock(d) = program.arena().data(body) {
+                    for &stmt in &d.statements.nodes {
+                        self.check_module_augmentation_element(program, stmt);
                     }
                 }
             }
@@ -13032,7 +13206,31 @@ impl Checker {
         if program.arena().kind(initializer) == Kind::VariableDeclarationList {
             self.check_variable_declaration_list(program, initializer);
         } else {
-            self.check_expression(program, initializer);
+            let var_expr = initializer;
+            let var_kind = program.arena().kind(var_expr);
+            if matches!(
+                var_kind,
+                Kind::ArrayLiteralExpression | Kind::ObjectLiteralExpression
+            ) {
+                self.check_expression(program, var_expr);
+            } else {
+                let left_type = self.check_expression(program, var_expr);
+                self.check_reference_expression(
+                    program,
+                    var_expr,
+                    &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_OF_STATEMENT_MUST_BE_A_VARIABLE_OR_A_PROPERTY_ACCESS,
+                    &tsgo_diagnostics::THE_LEFT_HAND_SIDE_OF_A_FOR_OF_STATEMENT_MAY_NOT_BE_AN_OPTIONAL_PROPERTY_ACCESS,
+                );
+                if let Some(element_type) = element_type {
+                    self.check_type_assignable_to_and_optionally_elaborate(
+                        program,
+                        element_type,
+                        left_type,
+                        var_expr,
+                        Some(expression),
+                    );
+                }
+            }
         }
         self.check_statement(program, statement);
         if program.locals(node).is_some() {
@@ -15129,7 +15327,6 @@ impl Checker {
     /// Performs assignability checking with optional elaboration (Go's
     /// `checkTypeAssignableToAndOptionallyElaborate`).
     // Go: internal/checker/checker.go:Checker.checkTypeAssignableToAndOptionallyElaborate(12568)
-    #[allow(dead_code)]
     pub(crate) fn check_type_assignable_to_and_optionally_elaborate(
         &mut self,
         program: &dyn BoundProgram,
@@ -15723,6 +15920,15 @@ fn get_suggested_lib_for_non_existent_name(name: &str) -> &'static str {
 // reachable subset of Go's `ast.GetContainingFunction`). For a parameter node,
 // the parent is the function-like declaration.
 // Go: internal/ast/utilities.go:GetContainingFunction
+fn is_generator_function(program: &dyn BoundProgram, node: NodeId) -> bool {
+    match program.arena().data(node) {
+        NodeData::FunctionDeclaration(d)
+        | NodeData::FunctionExpression(d) => d.asterisk_token.is_some(),
+        NodeData::MethodDeclaration(d) => d.asterisk_token.is_some(),
+        _ => false,
+    }
+}
+
 fn get_containing_function(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
     let arena = program.arena();
     let mut current = arena.parent(node);

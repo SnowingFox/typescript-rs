@@ -19434,3 +19434,296 @@ fn array_literal_spread_non_array_reports_2495() {
         "Type '{ a: number; }' is not an array type or a string type."
     );
 }
+
+// ---- T1-E batch 100: for-of LHS, await/yield/conditional, null access, super/static, enum/module aug ----
+
+// Go: internal/checker/checker.go:Checker.checkForOfStatement (expression LHS assignability)
+#[test]
+fn for_of_expression_lhs_not_assignable_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\n\
+         declare let x: string;\ndeclare const a: number[];\nfor (x of a) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'number' is not assignable to type 'string'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkForOfStatement (optional property access LHS, 2781)
+#[test]
+fn for_of_optional_property_access_lhs_reports_2781() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const o: { x?: number };\nfor (o?.x of [1]) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2781, got {diags:?}");
+    assert_eq!(diags[0].code, 2781);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of a 'for...of' statement may not be an optional property access."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkForOfStatement (valid expression LHS)
+#[test]
+fn for_of_expression_lhs_assignable_reports_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Array<T> {\n  [n: number]: T;\n  length: number;\n}\n\
+         declare let x: number;\ndeclare const a: number[];\nfor (x of a) {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkAwaitExpression (1320)
+#[test]
+fn await_invalid_thenable_operand_reports_1320() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "async function f() {\n  await { then(): void {} };\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1320, got {diags:?}");
+    assert_eq!(diags[0].code, 1320);
+    assert_eq!(
+        diags[0].message,
+        "Type of 'await' operand must either be a valid promise or must not contain a callable 'then' member."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAwaitExpression (Promise unwrap)
+#[test]
+fn await_promise_operand_resolves_without_1320() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n\
+         async function f(p: Promise<number>) {\n  await p;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 1320),
+        "valid Promise await must not report 1320; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkYieldExpression (1163)
+#[test]
+fn yield_outside_generator_reports_1163() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() { yield 1; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1163, got {diags:?}");
+    assert_eq!(diags[0].code, 1163);
+    assert_eq!(
+        diags[0].message,
+        "A 'yield' expression is only allowed in a generator body."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkYieldExpression (annotated return assignability)
+#[test]
+fn yield_value_not_assignable_to_generator_return_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function* g(): number {\n  yield \"s\";\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type 'string' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkConditionalExpression
+#[test]
+fn conditional_expression_yields_union_of_branch_types() {
+    use crate::core::nodebuilder::type_to_string;
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const b: boolean;\n(b ? 1 : \"s\");",
+    );
+    let expr = expr_stmt_expression(&p, 1);
+    let mut c = Checker::new();
+    let ty = c.check_expression(&p, expr);
+    let printed = type_to_string(&mut c, &p, ty);
+    assert!(
+        printed.contains('|') && printed.contains('1') && printed.contains("\"s\""),
+        "expected literal union of branch types, got {printed}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkConditionalExpression (assignability via variable decl)
+#[test]
+fn conditional_expression_branch_not_assignable_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const b: boolean;\nconst x: number = b ? 1 : \"s\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(
+        diags[0].message,
+        "Type '1 | \"s\"' is not assignable to type 'number'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkTaggedTemplateExpression (first-arg assignability)
+#[test]
+fn tagged_template_first_parameter_not_assignable_reports_2345() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function tag(l: never): void {}\ntag`hello`;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+    assert_eq!(
+        diags[0].message,
+        "Argument of type 'any' is not assignable to parameter of type 'never'."
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.hasExcessProperties (call argument object literal)
+#[test]
+fn call_object_literal_excess_property_reports_2353() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function f(x: { a: number }): void;\nf({ a: 1, b: 2 });",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2353, got {diags:?}");
+    assert_eq!(diags[0].code, 2353);
+    assert_eq!(
+        diags[0].message,
+        "Object literal may only specify known properties, and 'b' does not exist in type '{ a: number; }'."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkAssignmentOperator (2779)
+#[test]
+fn assignment_to_optional_property_access_reports_2779() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const o: { x?: number };\no?.x = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2779, got {diags:?}");
+    assert_eq!(diags[0].code, 2779);
+    assert_eq!(
+        diags[0].message,
+        "The left-hand side of an assignment expression may not be an optional property access."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIndexedAccess / checkNonNullType (18047)
+#[test]
+fn element_access_on_possibly_null_reports_18047() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: { a: number } | null;\nx[\"a\"];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 18047, got {diags:?}");
+    assert_eq!(diags[0].code, 18047);
+    assert_eq!(diags[0].message, "'x' is possibly 'null'.");
+}
+
+// Go: internal/checker/checker.go:Checker.checkSuperExpression (2337 in static method)
+#[test]
+fn super_call_in_static_method_reports_2337() {
+    let codes = diag_codes("class B {}\nclass D extends B { static m() { super(); } }");
+    assert!(
+        codes.contains(&2337),
+        "expected TS2337 super() in static method; got {codes:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getThisType (2526)
+#[test]
+fn this_type_in_static_method_reports_2526() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { static m(): this { return this; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2526, got {diags:?}");
+    assert_eq!(diags[0].code, 2526);
+    assert_eq!(
+        diags[0].message,
+        "A 'this' type is available only in a non-static member of a class or interface."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.computeEnumMemberValues (1164)
+#[test]
+fn enum_computed_member_name_reports_1164() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "enum E { [\"a\" + \"b\"] = 1 }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1164, got {diags:?}");
+    assert_eq!(diags[0].code, 1164);
+    assert_eq!(
+        diags[0].message,
+        "Computed property names are not allowed in enums."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkModuleAugmentationElement
+#[test]
+fn module_augmentation_export_assignment_reports_2666() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "export {};\ndeclare module \"m\" { export = 1; }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2666, got {diags:?}");
+    assert_eq!(diags[0].code, 2666);
+    assert_eq!(
+        diags[0].message,
+        "Exports and export assignments are not permitted in module augmentations."
+    );
+}

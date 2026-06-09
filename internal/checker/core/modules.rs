@@ -525,8 +525,7 @@ impl Checker {
 
     /// Validates statements inside a module-augmentation body.
     // Go: internal/checker/checker.go:Checker.checkModuleAugmentationElement
-    // DEFER(phase-4-checker): wire from `checkModuleDeclaration` augmentation path.
-    #[allow(dead_code)]
+    // Go: internal/checker/checker.go:Checker.checkModuleAugmentationElement
     pub(crate) fn check_module_augmentation_element(
         &mut self,
         program: &dyn BoundProgram,
