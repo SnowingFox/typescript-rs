@@ -787,7 +787,40 @@ impl Binder<'_> {
                 SymbolFlags::PARAMETER_EXCLUDES,
             );
         }
-        // Parameter-property declaration into the containing class is deferred.
+        // If this is a property-parameter, also declare the property symbol into
+        // the containing class.
+        // Go: internal/binder/binder.go:bindParameter (1220-1224)
+        let Some(constructor) = self.arena.parent(node) else {
+            return;
+        };
+        if self.arena.kind(constructor) != Kind::Constructor
+            || !q::has_syntactic_modifier(
+                self.arena,
+                node,
+                ModifierFlags::PARAMETER_PROPERTY_MODIFIER,
+            )
+        {
+            return;
+        }
+        let Some(class_declaration) = self.arena.parent(constructor) else {
+            return;
+        };
+        let Some(class_symbol) = self.symbol_of(class_declaration) else {
+            return;
+        };
+        let mut flags = SymbolFlags::PROPERTY;
+        if let NodeData::ParameterDeclaration(d) = self.arena.data(node) {
+            if d.question_token.is_some() {
+                flags |= SymbolFlags::OPTIONAL;
+            }
+        }
+        self.declare_symbol(
+            TableLoc::Members(class_symbol),
+            Some(class_symbol),
+            node,
+            flags,
+            SymbolFlags::PROPERTY_EXCLUDES,
+        );
     }
 
     fn parameter_index(&self, node: NodeId) -> usize {

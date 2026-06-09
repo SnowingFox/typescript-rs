@@ -18878,3 +18878,114 @@ fn assign_to_namespace_import_property_reports_2540() {
         "Cannot assign to 'x' because it is a read-only property."
     );
 }
+
+// ---- T1-E batch 96: delete readonly, parameter-property ctor, delete optional ----
+
+// Go: internal/checker/checker.go:Checker.checkDeleteExpression (2704)
+#[test]
+fn delete_readonly_property_reports_2704() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O { readonly x: number; }\ndeclare const o: O;\ndelete o.x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2704, got {diags:?}");
+    assert_eq!(diags[0].code, 2704);
+    assert_eq!(
+        diags[0].message,
+        "The operand of a 'delete' operator cannot be a read-only property."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.errorIfWritingToReadonlyIndex (2542, delete)
+#[test]
+fn delete_readonly_index_signature_via_property_access_reports_2542() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O { readonly [x: string]: number; }\ndeclare const o: O;\ndelete o.foo;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2542, got {diags:?}");
+    assert_eq!(diags[0].code, 2542);
+    assert_eq!(
+        diags[0].message,
+        "Index signature in type 'O' only permits reading."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.errorIfWritingToReadonlyIndex (2542, delete)
+#[test]
+fn delete_readonly_index_signature_via_element_access_reports_2542() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface O { readonly [x: string]: number; }\ndeclare const o: O;\ndelete o[\"foo\"];",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2542, got {diags:?}");
+    assert_eq!(diags[0].code, 2542);
+    assert_eq!(
+        diags[0].message,
+        "Index signature in type 'O' only permits reading."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isAssignmentToReadonlyEntity (parameter property)
+#[test]
+fn assign_to_readonly_parameter_property_in_constructor_is_allowed() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { constructor(public readonly x: number) { this.x = 1; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "constructor may assign readonly parameter property; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkDeleteExpression (18011)
+#[test]
+fn delete_private_identifier_operand_reports_18011() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C { #x = 1; m() { delete this.#x; } }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 18011, got {diags:?}");
+    assert_eq!(diags[0].code, 18011);
+    assert_eq!(
+        diags[0].message,
+        "The operand of a 'delete' operator cannot be a private identifier."
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkDeleteExpressionMustBeOptional (2790)
+#[test]
+fn delete_required_property_with_strict_null_checks_reports_2790() {
+    let mut options = CompilerOptions::default();
+    options.strict_null_checks = Tristate::True;
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind_with_options(
+        "/a.ts",
+        "interface O { x: number; }\ndeclare const o: O;\ndelete o.x;",
+        options,
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2790, got {diags:?}");
+    assert_eq!(diags[0].code, 2790);
+    assert_eq!(
+        diags[0].message,
+        "The operand of a 'delete' operator must be optional."
+    );
+}

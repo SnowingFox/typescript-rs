@@ -3179,9 +3179,11 @@ impl Checker {
         if !self.index_info(index_info).is_readonly {
             return;
         }
-        let assignment_kind =
-            tsgo_ast::utilities::get_assignment_target_kind(program.arena(), access_node);
-        if assignment_kind == tsgo_ast::utilities::AssignmentKind::None {
+        let arena = program.arena();
+        let assignment_kind = tsgo_ast::utilities::get_assignment_target_kind(arena, access_node);
+        if assignment_kind == tsgo_ast::utilities::AssignmentKind::None
+            && !tsgo_ast::utilities::is_delete_target(arena, access_node)
+        {
             return;
         }
         let type_str = super::nodebuilder::type_to_string(self, program, object_type);
@@ -9033,8 +9035,62 @@ impl Checker {
                 &tsgo_diagnostics::THE_OPERAND_OF_A_DELETE_OPERATOR_MUST_BE_A_PROPERTY_REFERENCE,
                 &[],
             );
+            return self.boolean_type;
+        }
+        if let NodeData::PropertyAccessExpression(d) = program.arena().data(expr) {
+            if is_private_identifier_name_node(program.arena(), d.name) {
+                self.error(
+                    program,
+                    expr,
+                    &tsgo_diagnostics::THE_OPERAND_OF_A_DELETE_OPERATOR_CANNOT_BE_A_PRIVATE_IDENTIFIER,
+                    &[],
+                );
+            }
+        }
+        if let Some(symbol) =
+            super::symbols_query::get_symbol_at_location(self, program, expr, program.globals())
+        {
+            let symbol = get_export_symbol_of_value_symbol_if_exported(program, symbol);
+            if is_readonly_symbol(self, program, symbol) {
+                self.error(
+                    program,
+                    expr,
+                    &tsgo_diagnostics::THE_OPERAND_OF_A_DELETE_OPERATOR_CANNOT_BE_A_READ_ONLY_PROPERTY,
+                    &[],
+                );
+            } else {
+                self.check_delete_expression_must_be_optional(program, expr, symbol);
+            }
         }
         self.boolean_type
+    }
+
+    // Go: internal/checker/checker.go:Checker.checkDeleteExpressionMustBeOptional(10784)
+    fn check_delete_expression_must_be_optional(
+        &mut self,
+        program: &dyn BoundProgram,
+        expr: NodeId,
+        symbol: SymbolId,
+    ) {
+        if !self.strict_null_checks() {
+            return;
+        }
+        let t = get_type_of_symbol(self, program, symbol, program.globals());
+        let flags = self.get_type(t).flags();
+        if flags.intersects(TypeFlags::ANY_OR_UNKNOWN | TypeFlags::NEVER) {
+            return;
+        }
+        // DEFER(phase-4-checker): `exactOptionalPropertyTypes` uses
+        // `SymbolFlags::OPTIONAL` instead of `has_type_facts(IS_UNDEFINED)`.
+        let is_optional = self.has_type_facts(t, TypeFacts::IS_UNDEFINED);
+        if !is_optional {
+            self.error(
+                program,
+                expr,
+                &tsgo_diagnostics::THE_OPERAND_OF_A_DELETE_OPERATOR_MUST_BE_OPTIONAL,
+                &[],
+            );
+        }
     }
 
     // Checks a class-like declaration's heritage relations (the reachable

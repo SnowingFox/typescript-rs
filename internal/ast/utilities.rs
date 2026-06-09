@@ -206,6 +206,41 @@ pub fn is_assignment_target(arena: &NodeArena, node: NodeId) -> bool {
     get_assignment_target(arena, node).is_some()
 }
 
+/// Whether `node` is the operand of a `delete` expression.
+///
+/// Side effects: none (pure).
+// Go: internal/checker/utilities.go:isDeleteTarget
+pub fn is_delete_target(arena: &NodeArena, node: NodeId) -> bool {
+    if !is_access_expression_kind(arena.kind(node)) {
+        return false;
+    }
+    let Some(mut parent) = arena.parent(node) else {
+        return false;
+    };
+    loop {
+        match arena.kind(parent) {
+            Kind::ParenthesizedExpression => {
+                parent = match arena.parent(parent) {
+                    Some(p) => p,
+                    None => return false,
+                };
+            }
+            Kind::DeleteExpression => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Reports whether `kind` is an access expression (`PropertyAccessExpression`
+/// or `ElementAccessExpression`).
+// Go: internal/ast/utilities.go:IsAccessExpression
+fn is_access_expression_kind(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::PropertyAccessExpression | Kind::ElementAccessExpression
+    )
+}
+
 /// Returns the assignment expression whose left-hand side is `node`, if any.
 ///
 /// Side effects: none (pure).
