@@ -18,7 +18,7 @@ use tsgo_ast::{Kind, NodeData, NodeId, SymbolFlags};
 use super::program::BoundProgram;
 use super::symbols::resolve_name;
 use super::type_facts::TypeFacts;
-use super::types::{TypeFlags, TypeId};
+use super::types::{LiteralValue, TypeFlags, TypeId};
 use super::Checker;
 
 /// Metadata for a user-defined type predicate used during flow narrowing (Go's
@@ -173,11 +173,43 @@ impl Checker {
         assume_true: bool,
     ) -> TypeId {
         let members = self.distributed_types(t);
-        let kept: Vec<TypeId> = members
+        let filtered: Vec<TypeId> = members
             .into_iter()
             .filter(|&m| self.equality_overlap(program, m, value_type) == assume_true)
             .collect();
+        let kept: Vec<TypeId> = filtered
+            .into_iter()
+            .map(|m| self.refine_equality_narrowed_member(m, value_type, assume_true))
+            .collect();
         self.get_union_type(&kept)
+    }
+
+    // After filtering by comparability, replace a widened primitive with the
+    // compared literal (Go's `replacePrimitivesWithLiterals` + boolean literals,
+    // which are stored as a `false | true` union rather than a `BOOLEAN` flag).
+    // Go: internal/checker/flow.go:Checker.replacePrimitivesWithLiterals(1884)
+    fn refine_equality_narrowed_member(
+        &self,
+        member: TypeId,
+        value_type: TypeId,
+        assume_true: bool,
+    ) -> TypeId {
+        if !assume_true {
+            return member;
+        }
+        let value = self.get_type(value_type);
+        if value.flags().contains(TypeFlags::BOOLEAN_LITERAL) {
+            if let Some(LiteralValue::Boolean(v)) = value.literal_value() {
+                if member == self.boolean_type() {
+                    return if *v {
+                        self.regular_true_type()
+                    } else {
+                        self.regular_false_type()
+                    };
+                }
+            }
+        }
+        member
     }
 
     // The nullable-value branch of Go's `narrowTypeByEquality` (4az): when the
@@ -633,7 +665,44 @@ impl Checker {
             return self
                 .narrow_type_by_discriminant_property(program, t, access, value_type, effective);
         }
+        if is_boolean_literal(program, right) && !is_access_expression(program, left) {
+            return self.narrow_type_by_boolean_comparison(
+                program, reference, t, left, right, op, assume_true,
+            );
+        }
+        if is_boolean_literal(program, left) && !is_access_expression(program, right) {
+            return self.narrow_type_by_boolean_comparison(
+                program, reference, t, right, left, op, assume_true,
+            );
+        }
         t
+    }
+
+    // Narrows by `expr === true` / `expr !== false` style comparisons (Go routes
+    // these through truthiness rather than literal equality when the boolean
+    // literal is not paired with a direct reference match).
+    // Go: internal/checker/flow.go:Checker.narrowTypeByBooleanComparison(786)
+    fn narrow_type_by_boolean_comparison(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        t: TypeId,
+        expr: NodeId,
+        bool_value: NodeId,
+        operator: Kind,
+        assume_true: bool,
+    ) -> TypeId {
+        let bool_is_true = program.arena().kind(bool_value) == Kind::TrueKeyword;
+        let is_inequality = matches!(
+            operator,
+            Kind::ExclamationEqualsEqualsToken | Kind::ExclamationEqualsToken
+        );
+        let effective = (assume_true != bool_is_true) != !is_inequality;
+        if self.is_matching_reference(program, reference, expr) {
+            self.narrow_type_by_truthiness(t, effective)
+        } else {
+            t
+        }
     }
 
     // Returns the property-access node `ref.prop` (`left`/`right` of an equality)
@@ -1460,6 +1529,22 @@ fn is_string_literal_like(program: &dyn BoundProgram, node: NodeId) -> bool {
     matches!(
         program.arena().kind(node),
         Kind::StringLiteral | Kind::NoSubstitutionTemplateLiteral
+    )
+}
+
+fn is_boolean_literal(program: &dyn BoundProgram, node: NodeId) -> bool {
+    matches!(
+        program.arena().kind(node),
+        Kind::TrueKeyword | Kind::FalseKeyword
+    )
+}
+
+fn is_access_expression(program: &dyn BoundProgram, node: NodeId) -> bool {
+    matches!(
+        program.arena().kind(node),
+        Kind::PropertyAccessExpression
+            | Kind::ElementAccessExpression
+            | Kind::NonNullExpression
     )
 }
 
