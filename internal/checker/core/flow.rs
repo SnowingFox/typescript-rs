@@ -12,7 +12,7 @@
 //! optional-chain handling are deferred to later sub-phases.
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tsgo_ast::flow::{FlowFlags, FlowNodeId, FlowSwitchClauseData};
+use tsgo_ast::flow::{FlowFlags, FlowListId, FlowNodeId, FlowSwitchClauseData};
 use tsgo_ast::{CheckFlags, Kind, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId};
 
 use super::program::BoundProgram;
@@ -420,6 +420,9 @@ impl Checker {
         match program.flow_node_of(reference) {
             None => declared_type,
             Some(flow) => {
+                self.flow_loop_cache.clear();
+                self.flow_loop_stack.clear();
+                self.flow_reduce_labels.clear();
                 let mut cache: FxHashMap<FlowNodeId, TypeId> = FxHashMap::default();
                 self.get_type_at_flow_node(program, reference, declared_type, flow, &mut cache)
             }
@@ -481,10 +484,40 @@ impl Checker {
                 }
                 None => ante_type,
             }
+        } else if fnode.flags.contains(FlowFlags::REDUCE_LABEL) {
+            if let Some(data) = program.flow_reduce_label_data(flow) {
+                self.flow_reduce_labels.push(data);
+                let result = match fnode.antecedent {
+                    Some(a) => {
+                        self.get_type_at_flow_node(program, reference, declared, a, cache)
+                    }
+                    None => declared,
+                };
+                self.flow_reduce_labels.pop();
+                result
+            } else {
+                match fnode.antecedent {
+                    Some(a) => self.get_type_at_flow_node(program, reference, declared, a, cache),
+                    None => declared,
+                }
+            }
         } else if fnode.flags.contains(FlowFlags::LOOP_LABEL) {
             self.get_type_at_flow_loop_label(program, reference, declared, flow, cache)
         } else if fnode.flags.contains(FlowFlags::BRANCH_LABEL) {
-            self.get_type_at_flow_branch_label(program, reference, declared, flow, cache)
+            let antecedents = self.get_branch_label_antecedents(program, flow);
+            if let Some(list_id) = antecedents {
+                let cell = program.flow_list(list_id);
+                if cell.next.is_none() {
+                    if let Some(a) = cell.flow {
+                        return self.get_type_at_flow_node(program, reference, declared, a, cache);
+                    }
+                }
+                self.get_type_at_flow_branch_label(
+                    program, reference, declared, list_id, cache,
+                )
+            } else {
+                declared
+            }
         } else if fnode.flags.contains(FlowFlags::CALL) {
             self.get_type_at_flow_call(program, reference, declared, flow, cache)
         } else {
@@ -498,6 +531,25 @@ impl Checker {
         result
     }
 
+    // Returns the antecedent list for a branch label, honoring active
+    // try/finally reduce-label overrides (Go's `getBranchLabelAntecedents`).
+    // Go: internal/checker/flow.go:getBranchLabelAntecedents(208)
+    fn get_branch_label_antecedents(
+        &self,
+        program: &dyn BoundProgram,
+        flow: FlowNodeId,
+    ) -> Option<FlowListId> {
+        let fnode = program.flow_node(flow);
+        let mut list = fnode.antecedents;
+        for data in self.flow_reduce_labels.iter().rev() {
+            if data.target == Some(flow) {
+                list = data.antecedents;
+                break;
+            }
+        }
+        list
+    }
+
     // Unions the types along each antecedent of a non-looping junction.
     // Go: internal/checker/flow.go:Checker.getTypeAtFlowBranchLabel(1225) (subset)
     fn get_type_at_flow_branch_label(
@@ -505,12 +557,11 @@ impl Checker {
         program: &dyn BoundProgram,
         reference: NodeId,
         declared: TypeId,
-        flow: FlowNodeId,
+        antecedents: FlowListId,
         cache: &mut FxHashMap<FlowNodeId, TypeId>,
     ) -> TypeId {
-        let fnode = program.flow_node(flow);
         let mut types: Vec<TypeId> = Vec::new();
-        let mut list = fnode.antecedents;
+        let mut list = Some(antecedents);
         while let Some(lid) = list {
             let cell = program.flow_list(lid);
             if let Some(a) = cell.flow {

@@ -13,7 +13,9 @@
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use tsgo_ast::flow::{FlowList, FlowListId, FlowNode, FlowNodeId, FlowSwitchClauseData};
+use tsgo_ast::flow::{
+    FlowList, FlowListId, FlowNode, FlowNodeId, FlowReduceLabelData, FlowSwitchClauseData,
+};
 use tsgo_ast::{NodeArena, NodeId, Symbol, SymbolId, SymbolTable};
 use tsgo_core::compileroptions::CompilerOptions;
 
@@ -131,6 +133,16 @@ pub trait BoundProgram {
     /// The default returns `None` for programs that do not track switch flow;
     /// the bound stub overrides it. Side effects: none.
     fn flow_switch_clause_data(&self, id: FlowNodeId) -> Option<FlowSwitchClauseData> {
+        let _ = id;
+        None
+    }
+
+    /// The synthetic reduce-label data for a `REDUCE_LABEL` flow node `id`, if
+    /// the binder recorded one (Go's `flow.Node.AsFlowReduceLabelData()`).
+    ///
+    /// The default returns `None` for programs that do not track try/finally
+    /// reduce labels; the bound stub overrides it. Side effects: none.
+    fn flow_reduce_label_data(&self, id: FlowNodeId) -> Option<FlowReduceLabelData> {
         let _ = id;
         None
     }

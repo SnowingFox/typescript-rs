@@ -436,6 +436,10 @@ pub struct Checker {
     /// In-progress loop-junction analysis stack (Go's `flowLoopStack`).
     // Go: internal/checker/checker.go:Checker.flowLoopStack
     flow_loop_stack: Vec<flow::FlowLoopStackEntry>,
+    /// Active try/finally reduce-label overrides during a single
+    /// `get_flow_type_of_reference` walk (Go's `FlowState.reduceLabels`).
+    // Go: internal/checker/flow.go:FlowState.reduceLabels
+    flow_reduce_labels: Vec<tsgo_ast::flow::FlowReduceLabelData>,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -695,6 +699,7 @@ impl Checker {
             flow_inline_level: 0,
             flow_loop_cache: FxHashMap::default(),
             flow_loop_stack: Vec::new(),
+            flow_reduce_labels: Vec::new(),
             any_type,
             auto_type,
             error_type,

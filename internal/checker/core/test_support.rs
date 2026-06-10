@@ -10,7 +10,9 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 
 use rustc_hash::FxHashMap;
-use tsgo_ast::flow::{FlowList, FlowListId, FlowNode, FlowNodeId, FlowSwitchClauseData};
+use tsgo_ast::flow::{
+    FlowList, FlowListId, FlowNode, FlowNodeId, FlowReduceLabelData, FlowSwitchClauseData,
+};
 use tsgo_ast::{NodeArena, NodeId, Symbol, SymbolId, SymbolTable};
 use tsgo_binder::{bind_source_file, BindResult};
 use tsgo_core::compileroptions::CompilerOptions;
@@ -158,6 +160,10 @@ impl BoundProgram for StubProgram {
         self.bind.flow_switch_data.get(&id).copied()
     }
 
+    fn flow_reduce_label_data(&self, id: FlowNodeId) -> Option<FlowReduceLabelData> {
+        self.bind.flow_reduce_data.get(&id).copied()
+    }
+
     fn compiler_options(&self) -> &CompilerOptions {
         &self.options
     }
@@ -205,6 +211,7 @@ pub(crate) struct FileView {
     flow_nodes: Rc<Vec<FlowNode>>,
     flow_lists: Rc<Vec<FlowList>>,
     flow_switch: Rc<FxHashMap<FlowNodeId, FlowSwitchClauseData>>,
+    flow_reduce: Rc<FxHashMap<FlowNodeId, FlowReduceLabelData>>,
     /// Every file view in a multi-file program (filled after all views are built).
     all_views: Rc<OnceLock<Rc<Vec<Rc<FileView>>>>>,
     /// Merged-symbol id ranges per file (parallel to `all_views`), for
@@ -255,6 +262,10 @@ impl BoundProgram for FileView {
 
     fn flow_switch_clause_data(&self, id: FlowNodeId) -> Option<FlowSwitchClauseData> {
         self.flow_switch.get(&id).copied()
+    }
+
+    fn flow_reduce_label_data(&self, id: FlowNodeId) -> Option<FlowReduceLabelData> {
+        self.flow_reduce.get(&id).copied()
     }
 
     fn resolve_module_symbol(&self, _importing_file: NodeId, specifier: &str) -> Option<SymbolId> {
@@ -429,6 +440,7 @@ impl MultiFileProgram {
                 flow_nodes: Rc::new(bind.flow_nodes),
                 flow_lists: Rc::new(bind.flow_lists),
                 flow_switch: Rc::new(bind.flow_switch_data),
+                flow_reduce: Rc::new(bind.flow_reduce_data),
                 all_views: Rc::clone(&all_views_slot),
                 symbol_ranges: Rc::new(symbol_range_vec.clone()),
             }));

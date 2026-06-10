@@ -27659,3 +27659,250 @@ fn loop_while_typeof_exit_narrows_complement_no_diagnostic() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 132: try/finally reduce-label flow narrowing ----
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_assignment_in_try_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n  x = 1;\n} finally {\n}\n\
+         const n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_assignment_in_finally_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n} finally {\n  x = 1;\n}\n\
+         const n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_typeof_in_try_body_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n  if (typeof x === \"string\") {\n    const s: string = x;\n  }\n} finally {\n}\n\
+         const y: string | number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_guard_assign_number_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n  if (typeof x !== \"string\") {\n    x = 1;\n  }\n} finally {\n}\n\
+         const y: string | number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_labeled_break_assign_number_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         outer: while (true) {\n  try {\n    x = 1;\n    break outer;\n  } finally {\n  }\n}\n\
+         const n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_after_try_assign_wrong_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n} finally {\n}\n\
+         const n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_catch_finally_catch_assignment_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n  x = \"a\";\n} catch {\n  x = 1;\n} finally {\n}\n\
+         const y: string | number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_nested_try_assignment_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n  try {\n    x = 1;\n  } finally {\n  }\n} finally {\n}\n\
+         const n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_discriminant_narrowing_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare let v: A | B;\n\
+         try {\n  if (v.kind === \"a\") {\n    const n: number = v.a;\n  }\n} finally {\n}\n\
+         const y: A | B = v;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_finally_reassignment_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n  x = \"a\";\n} finally {\n  x = 1;\n}\n\
+         const n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_loop_in_try_assignment_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n  while (true) {\n    x = 1;\n    break;\n  }\n} finally {\n}\n\
+         const n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_finally_wrong_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n} finally {\n  x = \"a\";\n}\n\
+         const n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_typeof_after_try_normal_exit_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n  if (typeof x !== \"string\") {\n    x = 1;\n  }\n} finally {\n}\n\
+         if (typeof x === \"number\") {\n  const n: number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_instanceof_in_try_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string;\n\
+         try {\n  if (x instanceof C) {\n    const c: C = x;\n  }\n} finally {\n}\n\
+         const y: C | string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_truthiness_in_try_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | null;\n\
+         try {\n  if (x) {\n    const s: string = x;\n  }\n} finally {\n}\n\
+         const y: string | null = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (FlowFlagsReduceLabel)
+#[test]
+fn try_finally_try_only_assign_string_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         try {\n  x = \"a\";\n} finally {\n}\n\
+         const s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
