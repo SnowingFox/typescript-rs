@@ -829,6 +829,14 @@ impl Checker {
         let Some(contextual_type) = contextual_type else {
             return false;
         };
+        if super::substitution_types::is_no_infer_type(self, contextual_type) {
+            let base = self
+                .get_type(contextual_type)
+                .as_substitution()
+                .expect("substitution")
+                .base_type;
+            return self.is_literal_of_contextual_type(candidate_type, Some(base));
+        }
         // A union/intersection contextual type is a literal context if any
         // constituent is (Go distributes via `core.Some(contextualType.Types())`).
         if self

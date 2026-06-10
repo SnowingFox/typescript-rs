@@ -18,6 +18,9 @@ use super::declared_types::{
     get_constraint_of_type_parameter, get_default_from_type_parameter, get_properties_of_type,
     get_property_of_type, get_type_of_symbol,
 };
+use super::substitution_types::{
+    get_actual_type_variable, is_no_infer_type,
+};
 use super::mapper::TypeMapper;
 use super::program::BoundProgram;
 use super::signatures::SignatureId;
@@ -225,6 +228,19 @@ impl Checker {
         target: TypeId,
         priority: InferencePriority,
     ) {
+        if is_no_infer_type(self, target) {
+            return;
+        }
+        if self.get_type(target).flags().intersects(TypeFlags::INDEXED_ACCESS | TypeFlags::SUBSTITUTION)
+        {
+            let actual = get_actual_type_variable(self, target);
+            if actual != target {
+                self.infer_from_types(
+                    program, inferences, visited, source, actual, priority,
+                );
+                return;
+            }
+        }
         // Target is a type parameter in our inference set: add a candidate,
         // honoring the priority lattice (the reachable subset: a stronger
         // priority clears weaker candidates).

@@ -4623,6 +4623,9 @@ fn get_type_from_type_reference(
             if name == "Awaited" {
                 return checker.get_awaited_type_for_type_alias(program, provided_args[0]);
             }
+            if name == "NoInfer" {
+                return super::substitution_types::get_no_infer_type(checker, provided_args[0]);
+            }
             if let Some(kind) = StringMappingKind::from_name(&name) {
                 return get_string_mapping_type(checker, kind, provided_args[0]);
             }

@@ -15,6 +15,7 @@ use tsgo_diagnostics::{Category, Message};
 
 use super::check::DiagnosticMessageChain;
 use super::conditional_types::get_template_literal_type;
+use super::substitution_types::{get_substitution_intersection, is_no_infer_type};
 use super::declared_types::{
     get_apparent_type, get_applicable_index_info_for_name, get_index_type_of_type,
     get_properties_of_type, get_property_of_type,
@@ -428,8 +429,20 @@ impl Checker {
         target: TypeId,
         relation: RelationKind,
     ) -> bool {
-        let source = self.regular_literal_type(source);
-        let target = self.regular_literal_type(target);
+        let mut source = self.regular_literal_type(source);
+        let mut target = self.regular_literal_type(target);
+        if self.get_type(target).flags().contains(TypeFlags::SUBSTITUTION) {
+            target = get_substitution_intersection(self, target);
+        }
+        if self.get_type(source).flags().contains(TypeFlags::SUBSTITUTION)
+            && is_no_infer_type(self, source)
+        {
+            source = self
+                .get_type(source)
+                .as_substitution()
+                .expect("substitution")
+                .base_type;
+        }
         // Go interns literal types by value (`getStringLiteralType` /
         // `getNumberLiteralType`), so two occurrences of `"a"` are the same
         // `*Type` and identity already relates them. As of 4bc the port interns
@@ -1778,6 +1791,14 @@ impl Checker {
                 .iter()
                 .all(|&m| self.is_excess_property_check_target(m));
         }
+        if flags.contains(TypeFlags::SUBSTITUTION) {
+            let base = self
+                .get_type(target)
+                .as_substitution()
+                .expect("substitution")
+                .base_type;
+            return self.is_excess_property_check_target(base);
+        }
         false
     }
 
@@ -1815,6 +1836,14 @@ impl Checker {
                     return true;
                 }
             }
+        }
+        if flags.contains(TypeFlags::SUBSTITUTION) {
+            let base = self
+                .get_type(target)
+                .as_substitution()
+                .expect("substitution")
+                .base_type;
+            return self.is_known_property(program, base, name);
         }
         false
     }
@@ -2106,8 +2135,20 @@ impl Checker {
         relation: RelationKind,
         reporter: &mut ChainReporter,
     ) -> bool {
-        let source = self.regular_literal_type(source);
-        let target = self.regular_literal_type(target);
+        let mut source = self.regular_literal_type(source);
+        let mut target = self.regular_literal_type(target);
+        if self.get_type(target).flags().contains(TypeFlags::SUBSTITUTION) {
+            target = get_substitution_intersection(self, target);
+        }
+        if self.get_type(source).flags().contains(TypeFlags::SUBSTITUTION)
+            && is_no_infer_type(self, source)
+        {
+            source = self
+                .get_type(source)
+                .as_substitution()
+                .expect("substitution")
+                .base_type;
+        }
         if source == target {
             return true;
         }

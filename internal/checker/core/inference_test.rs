@@ -435,3 +435,34 @@ fn could_contain_type_variables_index_and_indexed_access() {
     let access = c.new_indexed_access_type(tp, key, AccessFlags::NONE); // T[keyof T]
     assert!(c.could_contain_type_variables(access));
 }
+
+// Go: internal/checker/checker.go:Checker.getNoInferType (param type for inference)
+#[test]
+fn no_infer_parameter_type_blocks_second_argument_inference() {
+    use crate::core::substitution_types::is_no_infer_type;
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type NoInfer<T> = T;\n\
+         declare function foo<T extends string>(a: T, b: NoInfer<T>): void;",
+    ));
+    let mut c = Checker::new_checker(p.clone());
+    let foo_sym = sym(&p, "foo");
+    let foo_type = get_type_of_symbol(&mut c, p.as_ref(), foo_sym, None);
+    let sigs = c.get_signatures_of_type(foo_type);
+    assert_eq!(sigs.len(), 1);
+    let param1 = c.get_type_at_position(p.as_ref(), sigs[0], 1);
+    assert!(
+        is_no_infer_type(&c, param1),
+        "second parameter should be NoInfer<T>, got {:?}",
+        c.type_to_string(param1)
+    );
+    let foo_lit = c.get_string_literal_type("foo");
+    let bar_lit = c.get_string_literal_type("bar");
+    let tp = c.signature(sigs[0]).type_parameters[0];
+    let inferred = c.infer_type_arguments(p.as_ref(), &[tp], &[foo_lit, bar_lit], &[tp, param1]);
+    assert_eq!(
+        inferred,
+        vec![foo_lit],
+        "T should be inferred only from the first argument"
+    );
+}

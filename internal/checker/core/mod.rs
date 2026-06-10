@@ -25,6 +25,7 @@ pub mod program;
 pub mod reachability;
 pub mod relations;
 pub mod signatures;
+pub mod substitution_types;
 pub mod symbols;
 pub mod symbols_query;
 pub mod type_facts;
@@ -54,8 +55,9 @@ use symbols::{
 };
 use types::{
     ConditionalRoot, ConditionalType, IntersectionType, IntrinsicType, LiteralType, LiteralValue,
-    ObjectFlags, ObjectType, StringMappingKind, StringMappingType, TemplateLiteralType, Type,
-    TypeArena, TypeData, TypeFlags, TypeId, TypeParameter, UnionType, UniqueESSymbolType,
+    ObjectFlags, ObjectType, StringMappingKind, StringMappingType, SubstitutionType,
+    TemplateLiteralType, Type, TypeArena, TypeData, TypeFlags, TypeId, TypeParameter, UnionType,
+    UniqueESSymbolType,
 };
 
 /// The bound program a checker retains (Go's `c.program` pointer field).
@@ -380,6 +382,9 @@ pub struct Checker {
     /// Interned deferred string-mapping types, keyed by `(kind, target)` (Go's
     /// `stringMappingTypes` keyed by `StringMappingKey{symbol, type}`).
     string_mapping_types: FxHashMap<(StringMappingKind, TypeId), TypeId>,
+    /// Interned substitution types, keyed by `(base, constraint)` (Go's
+    /// `substitutionTypes` keyed by `SubstitutionTypeKey`).
+    substitution_types: FxHashMap<(TypeId, TypeId), TypeId>,
     /// The `MappedTypeNode` declaration of each mapped-type object (Go stores
     /// this on the `MappedType` payload; the port keeps it in a side table so
     /// the mapped type reuses the value-comparable [`ObjectType`] payload).
@@ -621,6 +626,7 @@ impl Checker {
             conditional_instantiations: FxHashMap::default(),
             template_literal_types: FxHashMap::default(),
             string_mapping_types: FxHashMap::default(),
+            substitution_types: FxHashMap::default(),
             mapped_type_declarations: FxHashMap::default(),
             mapped_type_mappers: FxHashMap::default(),
             mapped_type_links: FxHashMap::default(),
@@ -1191,6 +1197,21 @@ impl Checker {
                     self.type_to_string(d.target)
                 )
             }
+            TypeData::Substitution(d) => {
+                if self
+                    .get_type(d.constraint)
+                    .flags()
+                    .contains(TypeFlags::UNKNOWN)
+                {
+                    format!("NoInfer<{}>", self.type_to_string(d.base_type))
+                } else {
+                    format!(
+                        "{} & {}",
+                        self.type_to_string(d.base_type),
+                        self.type_to_string(d.constraint)
+                    )
+                }
+            }
         }
     }
 
@@ -1476,6 +1497,51 @@ impl Checker {
             TypeData::StringMapping(StringMappingType { kind, target }),
         );
         self.string_mapping_types.insert(key, id);
+        id
+    }
+
+    /// Returns a substitution type `base & constraint`, interned by pair.
+    ///
+    /// Side effects: may allocate substitution types.
+    // Go: internal/checker/checker.go:Checker.getOrCreateSubstitutionType
+    pub(crate) fn get_or_create_substitution_type(
+        &mut self,
+        base_type: TypeId,
+        constraint: TypeId,
+    ) -> TypeId {
+        let base_flags = self.get_type(base_type).flags();
+        let constraint_flags = self.get_type(constraint).flags();
+        if constraint_flags.intersects(TypeFlags::ANY)
+            || constraint == base_type
+            || base_flags.contains(TypeFlags::ANY)
+        {
+            return base_type;
+        }
+        self.get_or_create_substitution_type_unchecked(base_type, constraint)
+    }
+
+    /// Allocates a substitution type without `getSubstitutionType` collapsing
+    /// (used by `NoInfer<T>` with an `unknown` constraint).
+    // Go: internal/checker/checker.go:Checker.getOrCreateSubstitutionType
+    pub(crate) fn get_or_create_substitution_type_unchecked(
+        &mut self,
+        base_type: TypeId,
+        constraint: TypeId,
+    ) -> TypeId {
+        let key = (base_type, constraint);
+        if let Some(&cached) = self.substitution_types.get(&key) {
+            return cached;
+        }
+        let id = self.types.alloc(
+            TypeFlags::SUBSTITUTION,
+            ObjectFlags::empty(),
+            None,
+            TypeData::Substitution(SubstitutionType {
+                base_type,
+                constraint,
+            }),
+        );
+        self.substitution_types.insert(key, id);
         id
     }
 

@@ -23976,3 +23976,322 @@ fn this_parameter_type_of_typeof_method_valid_no_diagnostics() {
         c.get_diagnostics(root)
     );
 }
+
+// ---- T1-E batch 117: NoInfer<T> utility type (erasure, inference blocking) ----
+
+const NO_INFER_ALIAS: &str = "type NoInfer<T> = T;\n";
+
+// Go: internal/checker/checker.go:Checker.getNoInferType (primitive erasure)
+#[test]
+fn no_infer_primitive_erases_to_identity_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             type T = NoInfer<string>;\n\
+             const ok: T = \"s\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getNoInferType (primitive mismatch)
+#[test]
+fn no_infer_primitive_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             type T = NoInfer<string>;\n\
+             const bad: T = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getNoInferType (object preserved)
+#[test]
+fn no_infer_object_type_preserved_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             type T = NoInfer<{{ x: string }}>;\n\
+             const ok: T = {{ x: \"s\" }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getNoInferType (object mismatch)
+#[test]
+fn no_infer_object_type_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             type T = NoInfer<{{ x: string }}>;\n\
+             const bad: T = {{ x: 1 }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/inference.go:Checker.inferFromTypes (NoInfer with explicit type args)
+#[test]
+fn no_infer_generic_function_explicit_type_args_same_literals_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             declare function foo<T extends string>(a: T, b: NoInfer<T>): void;\n\
+             foo<\"foo\">(\"foo\", \"foo\");"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.inferFromTypes (NoInfer second arg)
+#[test]
+fn no_infer_generic_function_second_arg_mismatch_reports_2345() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             declare function foo<T extends string>(a: T, b: NoInfer<T>): void;\n\
+             foo(\"foo\", \"bar\");"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+}
+
+// Go: internal/checker/inference.go:Checker.inferFromTypes (NoInfer inside object)
+#[test]
+fn no_infer_wrapper_object_property_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             declare function foo<T extends string>(a: T, b: {{ x: NoInfer<T> }}): void;\n\
+             foo(\"foo\", {{ x: \"bar\" }});"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/inference.go:Checker.inferFromTypes (NoInfer outer object)
+#[test]
+fn no_infer_outer_object_type_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             declare function foo<T extends string>(a: T, b: NoInfer<{{ x: T }}>): void;\n\
+             foo(\"foo\", {{ x: \"bar\" }});"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getNoInferType (nested NoInfer erasure)
+#[test]
+fn nested_no_infer_erases_to_identity_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             type T20<T> = NoInfer<NoInfer<T>>;\n\
+             type T = T20<string>;\n\
+             const ok: T = \"s\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.inferFromTypes (covariant default callback)
+#[test]
+fn no_infer_covariant_default_callback_animal_to_animal_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             declare class Animal {{ move(): void }}\n\
+             declare function doSomething<T>(value: T, getDefault: () => NoInfer<T>): void;\n\
+             doSomething(new Animal(), () => new Animal());"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.inferFromTypes (doWork ok case)
+#[test]
+fn no_infer_do_work_with_required_props_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             type Component<Props> = {{ props: Props }};\n\
+             declare function doWork<Props>(component: Component<Props>, props: NoInfer<Props>): void;\n\
+             declare const comp: Component<{{ foo: number }}>;\n\
+             doWork(comp, {{ foo: 42 }});"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.inferFromTypes (assertEqual expected mismatch)
+#[test]
+fn no_infer_assert_equal_expected_missing_property_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             declare function assertEqual<T>(actual: T, expected: NoInfer<T>): boolean;\n\
+             const g = {{ x: 3, y: 2 }};\n\
+             assertEqual(g, {{ x: 3 }});"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/inference.go:Checker.inferFromTypes (invoke excess property)
+#[test]
+fn no_infer_invoke_excess_property_reports_2353() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             declare function invoke<T, R>(func: (value: T) => R, value: NoInfer<T>): R;\n\
+             declare function test(value: {{ x: number }}): number;\n\
+             invoke(test, {{ x: 1, y: 2 }});"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2353, got {diags:?}");
+    assert_eq!(diags[0].code, 2353);
+}
+
+// Go: internal/checker/checker.go:Checker.getNoInferType (primitive union erasure)
+#[test]
+fn no_infer_primitive_union_erases_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             type T = NoInfer<string | number | boolean>;\n\
+             const s: T = \"a\";\n\
+             const n: T = 1;\n\
+             const b: T = true;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getNoInferType (erased nested union)
+#[test]
+fn no_infer_nested_union_inside_object_erases_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             type T = NoInfer<{{ a: string | number }}>;\n\
+             const ok: T = {{ a: \"s\" }};\n\
+             const ok2: T = {{ a: 1 }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.inferFromTypes (doWork props)
+#[test]
+fn no_infer_do_work_missing_required_prop_reports_2345() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{NO_INFER_ALIAS}\
+             type Component<Props> = {{ props: Props }};\n\
+             declare function doWork<Props>(component: Component<Props>, props: NoInfer<Props>): void;\n\
+             declare const comp: Component<{{ foo: number }}>;\n\
+             doWork(comp, {{}});"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+}

@@ -7071,8 +7071,14 @@ impl Checker {
     ) {
         let count = self.get_parameter_count(signature).min(args.len());
         for (i, &arg) in args.iter().enumerate().take(count) {
-            let arg_type = self.check_expression(program, arg);
             let param_type = self.get_type_at_position(program, signature, i);
+            let arg_type = if super::substitution_types::is_no_infer_type(self, param_type) {
+                let base =
+                    super::substitution_types::get_substitution_intersection(self, param_type);
+                self.check_expression_with_contextual_type(program, arg, base, None)
+            } else {
+                self.check_expression(program, arg)
+            };
             if self.is_type_assignable_to(program, arg_type, param_type) {
                 if program.arena().kind(arg) == Kind::ObjectLiteralExpression
                     && self

@@ -1060,6 +1060,23 @@ pub enum TypeData {
     TemplateLiteral(TemplateLiteralType),
     /// A deferred intrinsic string-mapping type (`Uppercase<S>`).
     StringMapping(StringMappingType),
+    /// A substitution type `Base & Constraint` (also used for `NoInfer<T>`).
+    Substitution(SubstitutionType),
+}
+
+/// The payload of a substitution type (`TypeFlags::SUBSTITUTION`).
+///
+/// `NoInfer<T>` is represented as a substitution with `constraint = unknown`.
+/// Other substitution types intersect `base_type` with `constraint`.
+///
+/// Side effects: none (pure value type).
+// Go: internal/checker/types.go:SubstitutionType
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubstitutionType {
+    /// The substituted type (`T` in `NoInfer<T>`).
+    pub base_type: TypeId,
+    /// The constraint (`unknown` for `NoInfer<T>`).
+    pub constraint: TypeId,
 }
 
 /// A checker type: the common header (Go's `Type` struct fields) plus its
@@ -1280,6 +1297,17 @@ impl Type {
     pub fn as_string_mapping(&self) -> Option<&StringMappingType> {
         match &self.data {
             TypeData::StringMapping(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Returns the substitution payload, if this is a substitution type.
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/types.go:Type.AsSubstitutionType
+    pub fn as_substitution(&self) -> Option<&SubstitutionType> {
+        match &self.data {
+            TypeData::Substitution(d) => Some(d),
             _ => None,
         }
     }

@@ -490,8 +490,19 @@ impl Checker {
             }
             return super::conditional_types::get_string_mapping_type(self, d.kind, new_target);
         }
-        // DEFER(phase-4-checker-C-C3): substitution-type instantiation.
-        // blocked-by: substitution types land later.
+        if flags.contains(TypeFlags::SUBSTITUTION) {
+            let d = self
+                .get_type(t)
+                .as_substitution()
+                .expect("substitution type")
+                .clone();
+            let new_base = self.instantiate_type(d.base_type, mapper);
+            let new_constraint = self.instantiate_type(d.constraint, mapper);
+            if new_base == d.base_type && new_constraint == d.constraint {
+                return t;
+            }
+            return self.get_or_create_substitution_type_unchecked(new_base, new_constraint);
+        }
         t
     }
 
