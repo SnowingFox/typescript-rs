@@ -4617,6 +4617,12 @@ fn get_type_from_type_reference(
         // alias *name* (a same-named user alias is also intercepted; documented
         // divergence).
         if provided_args.len() == 1 {
+            // Global `Awaited<T>`: unwrap promises/thenables via the awaited-type
+            // machinery rather than the stub alias body (Go's `getGlobalAwaitedSymbol`
+            // path in `getTypeAliasInstantiation`).
+            if name == "Awaited" {
+                return checker.get_awaited_type_for_type_alias(program, provided_args[0]);
+            }
             if let Some(kind) = StringMappingKind::from_name(&name) {
                 return get_string_mapping_type(checker, kind, provided_args[0]);
             }

@@ -23311,3 +23311,345 @@ fn function_type_rest_element_type_mismatch_reports_2345() {
     assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
     assert_eq!(diags[0].code, 2345);
 }
+
+// ---- T1-E batch 115: Awaited<T> utility type (promise unwrap, union, thenable) ----
+
+const AWAITED_PROMISE_LIB: &str = "\
+interface Promise<T> { then(onfulfilled: (value: T) => void): void; }\n";
+
+// DIVERGENCE(port): lib `Awaited` is a conditional type; the port dispatches by
+// alias name to `getAwaitedTypeNoAlias` (same as Go's global `Awaited` symbol).
+const AWAITED_ALIAS: &str = "type Awaited<T> = T;\n";
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (Promise<number>)
+#[test]
+fn awaited_promise_number_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_PROMISE_LIB}{AWAITED_ALIAS}\
+             type R = Awaited<Promise<number>>;\n\
+             const ok: R = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (Promise<number> mismatch)
+#[test]
+fn awaited_promise_number_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_PROMISE_LIB}{AWAITED_ALIAS}\
+             type R = Awaited<Promise<number>>;\n\
+             const bad: R = \"x\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (nested Promise)
+#[test]
+fn awaited_nested_promise_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_PROMISE_LIB}{AWAITED_ALIAS}\
+             type R = Awaited<Promise<Promise<number>>>;\n\
+             const ok: R = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (non-promise primitive)
+#[test]
+fn awaited_primitive_identity_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_ALIAS}\
+             type R = Awaited<number>;\n\
+             const ok: R = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (primitive mismatch)
+#[test]
+fn awaited_primitive_identity_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_ALIAS}\
+             type R = Awaited<number>;\n\
+             const bad: R = \"x\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (null preserved)
+#[test]
+fn awaited_null_preserved_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_ALIAS}\
+             type R = Awaited<null>;\n\
+             const ok: R = null;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (undefined preserved)
+#[test]
+fn awaited_undefined_preserved_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_ALIAS}\
+             type R = Awaited<undefined>;\n\
+             let ok: R = undefined;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (union distribution)
+#[test]
+fn awaited_union_of_promises_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_PROMISE_LIB}{AWAITED_ALIAS}\
+             type R = Awaited<Promise<number> | Promise<string>>;\n\
+             const n: R = 1;\n\
+             const s: R = \"x\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (union member mismatch)
+#[test]
+fn awaited_union_of_promises_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_PROMISE_LIB}{AWAITED_ALIAS}\
+             type R = Awaited<Promise<number> | Promise<string>>;\n\
+             const bad: R = true;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getPromisedTypeOfPromiseEx (Thenable)
+#[test]
+fn awaited_thenable_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "interface Thenable<T> {{ then(onfulfilled: (value: T) => void): void; }}\n\
+             {AWAITED_ALIAS}\
+             type R = Awaited<Thenable<number>>;\n\
+             const ok: R = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getPromisedTypeOfPromiseEx (Thenable mismatch)
+#[test]
+fn awaited_thenable_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "interface Thenable<T> {{ then(onfulfilled: (value: T) => void): void; }}\n\
+             {AWAITED_ALIAS}\
+             type R = Awaited<Thenable<number>>;\n\
+             const bad: R = \"x\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (Promise<string>)
+#[test]
+fn awaited_promise_string_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_PROMISE_LIB}{AWAITED_ALIAS}\
+             type R = Awaited<Promise<string>>;\n\
+             const ok: R = \"hi\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (Promise<string> mismatch)
+#[test]
+fn awaited_promise_string_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_PROMISE_LIB}{AWAITED_ALIAS}\
+             type R = Awaited<Promise<string>>;\n\
+             const bad: R = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (variable reference)
+#[test]
+fn awaited_promise_variable_reference_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_PROMISE_LIB}{AWAITED_ALIAS}\
+             declare const p: Promise<number>;\n\
+             type R = Awaited<typeof p>;\n\
+             const ok: R = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (mixed union primitive + promise)
+#[test]
+fn awaited_union_primitive_and_promise_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_PROMISE_LIB}{AWAITED_ALIAS}\
+             type R = Awaited<number | Promise<string>>;\n\
+             const n: R = 1;\n\
+             const s: R = \"x\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (nested promise mismatch)
+#[test]
+fn awaited_nested_promise_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_PROMISE_LIB}{AWAITED_ALIAS}\
+             type R = Awaited<Promise<Promise<number>>>;\n\
+             const bad: R = \"x\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias (string literal identity)
+#[test]
+fn awaited_string_literal_identity_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{AWAITED_ALIAS}\
+             type R = Awaited<\"ok\">;\n\
+             const ok: R = \"ok\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}

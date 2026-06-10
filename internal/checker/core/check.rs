@@ -4936,6 +4936,19 @@ impl Checker {
         self.get_awaited_type_no_alias_impl(program, t, &mut Vec::new())
     }
 
+    /// Resolves `Awaited<T>` for a type-alias reference (Go's global `Awaited`
+    /// symbol dispatch in `getTypeAliasInstantiation`).
+    ///
+    /// Side effects: may build promised/union types via [`get_awaited_type_no_alias`].
+    // Go: internal/checker/checker.go:Checker.getAwaitedTypeNoAlias
+    pub(crate) fn get_awaited_type_for_type_alias(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> TypeId {
+        self.get_awaited_type_no_alias(program, t)
+    }
+
     // Validates and unwraps the awaited type of `t`, reporting `diagnostic` at
     // `error_node` when the operand is an invalid thenable (Go's
     // `checkAwaitedType` / `getAwaitedTypeNoAliasEx`).
