@@ -25053,3 +25053,207 @@ fn negated_constructor_guard_then_branch_property_access_reports_2339() {
     assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
     assert_eq!(diags[0].code, 2339);
 }
+
+// ---- T1-E batch 121: private identifier `in` flow narrowing (`#field in ref`) ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression
+#[test]
+fn private_in_guard_narrows_class_union_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  #x: number;\n  m(o: C | { z: number }) {\n    if (#x in o) {\n      const c: C = o;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (negated)
+#[test]
+fn negated_private_in_guard_narrows_else_branch_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  #x: number;\n  m(o: C | { z: number }) {\n    if (!(#x in o)) {\n      const other: { z: number } = o;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (property access)
+#[test]
+fn private_in_guard_allows_instance_field_access_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  #x: number;\n  m(o: C | { z: number }) {\n    if (#x in o) {\n      const n: number = o.#x;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (then branch mismatch)
+#[test]
+fn private_in_guard_then_branch_wrong_assign_reports_2741() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  #x: number;\n  m(o: C | { z: number }) {\n    if (#x in o) {\n      const other: { z: number } = o;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2741, got {diags:?}");
+    assert_eq!(diags[0].code, 2741);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (negated then branch)
+#[test]
+fn negated_private_in_guard_then_branch_wrong_member_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  #x: number;\n  m(o: C | { z: number }) {\n    if (!(#x in o)) {\n      o.#x;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (derived class own field)
+#[test]
+fn private_in_guard_narrows_derived_class_union_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class Base {}\n\
+         class Derived extends Base {\n  #x: number;\n  m(o: Derived | { z: number }) {\n    if (#x in o) {\n      const d: Derived = o;\n      const n: number = o.#x;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (static field)
+#[test]
+fn static_private_in_guard_narrows_constructor_type_union_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  static #s: number;\n  m(o: typeof C | { z: number }) {\n    if (#s in o) {\n      const t: typeof C = o;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (static negated)
+#[test]
+fn negated_static_private_in_guard_narrows_else_branch_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  static #s: number;\n  m(o: typeof C | { z: number }) {\n    if (!(#s in o)) {\n      const other: { z: number } = o;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (`any` operand)
+#[test]
+fn private_in_guard_narrows_any_to_declaring_class_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  #x: number;\n  m(o: any) {\n    if (#x in o) {\n      const c: C = o;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (two-class union)
+#[test]
+fn private_in_guard_narrows_two_class_union_to_owner_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C1 {\n  #x: number;\n  m(o: C1 | C2) {\n    if (#x in o) {\n      const c: C1 = o;\n    }\n  }\n}\n\
+         class C2 {\n  #y: string;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (other class field)
+#[test]
+fn other_class_private_in_guard_narrows_to_that_class_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C1 {\n  #x: number;\n}\n\
+         class C2 {\n  #y: string;\n  m(o: C1 | C2) {\n    if (#y in o) {\n      const c: C2 = o;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (`&&` chain)
+#[test]
+fn private_in_guard_and_truthiness_chain_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  #x: number;\n  m(o: C | { z: number } | null) {\n    if (o && #x in o) {\n      const c: C = o;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (else branch assign)
+#[test]
+fn private_in_guard_else_branch_assigns_narrowed_type_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  #x: number;\n  m(o: C | { z: number }) {\n    if (#x in o) {\n      const c: C = o;\n    } else {\n      const other: { z: number } = o;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (non-matching reference)
+#[test]
+fn private_in_guard_non_matching_reference_does_not_narrow_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  #x: number;\n  m(o: { z: number }, p: { z: number }) {\n    if (#x in p) {\n      const c: C = o;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2739, got {diags:?}");
+    assert_eq!(diags[0].code, 2739);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression (subclass own field)
+#[test]
+fn subclass_private_in_guard_narrows_subclass_union_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class Base {}\n\
+         class Sub extends Base {\n  #x: number;\n  m(o: Sub | { z: number }) {\n    if (#x in o) {\n      const s: Sub = o;\n    }\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

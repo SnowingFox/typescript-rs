@@ -16797,7 +16797,7 @@ fn modifier_flags_of(arena: &tsgo_ast::NodeArena, node: NodeId) -> tsgo_ast::Mod
 
 // Reports whether `node` carries the `static` modifier (Go's `ast.IsStatic`,
 // class-element subset).
-fn has_static_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+pub(crate) fn has_static_modifier(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
     modifier_flags_of(arena, node).contains(tsgo_ast::ModifierFlags::STATIC)
 }
 
@@ -18203,6 +18203,18 @@ fn get_symbol_name_for_private_identifier(class_symbol: SymbolId, description: &
         class_symbol.0,
         description
     )
+}
+
+// Resolves the declaration symbol for a private-identifier expression.
+// Go: internal/checker/checker.go:Checker.getSymbolForPrivateIdentifierExpression(7814)
+pub(crate) fn get_symbol_for_private_identifier_expression(
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Option<SymbolId> {
+    if program.arena().kind(node) != Kind::PrivateIdentifier {
+        return None;
+    }
+    lookup_symbol_for_private_identifier_declaration(program, program.arena().text(node), node)
 }
 
 // Walks enclosing classes from `location` to resolve a private identifier

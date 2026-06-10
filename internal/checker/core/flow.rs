@@ -753,6 +753,11 @@ impl Checker {
         };
         let op = arena.kind(op_token);
         if op == Kind::InKeyword {
+            if arena.kind(left) == Kind::PrivateIdentifier {
+                return self.narrow_type_by_private_identifier_in_in_expression(
+                    program, reference, t, expr, assume_true,
+                );
+            }
             if let NodeData::BinaryExpression(d) = arena.data(expr) {
                 let target = d.right;
                 if self.is_matching_reference(program, reference, target) {
@@ -2015,6 +2020,43 @@ impl Checker {
             }
         }
         self.get_union_type(&kept)
+    }
+
+    // Narrows by `#field in ref` when the private field belongs to an enclosing class.
+    // Go: internal/checker/flow.go:Checker.narrowTypeByPrivateIdentifierInInExpression(962)
+    fn narrow_type_by_private_identifier_in_in_expression(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        t: TypeId,
+        expr: NodeId,
+        assume_true: bool,
+    ) -> TypeId {
+        let arena = program.arena();
+        let (left, right) = match arena.data(expr) {
+            NodeData::BinaryExpression(d) => (d.left, d.right),
+            _ => return t,
+        };
+        if !self.is_matching_reference(program, reference, right) {
+            return t;
+        }
+        let Some(symbol) = super::check::get_symbol_for_private_identifier_expression(program, left)
+        else {
+            return t;
+        };
+        let Some(class_symbol) = program.symbol(symbol).parent else {
+            return t;
+        };
+        let target_type = if program
+            .symbol(symbol)
+            .value_declaration
+            .is_some_and(|decl| super::check::has_static_modifier(arena, decl))
+        {
+            super::declared_types::get_type_of_symbol(self, program, class_symbol, None)
+        } else {
+            super::declared_types::get_declared_type_of_symbol(self, program, class_symbol, None)
+        };
+        self.get_narrowed_type_derived(program, t, target_type, assume_true)
     }
 
     // Narrows by an `instanceof` guard (`x instanceof Ctor`).
