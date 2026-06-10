@@ -1507,6 +1507,17 @@ impl Checker {
             if self.is_matching_reference(program, reference, d.expression) {
                 return self.narrow_type_by_switch_on_typeof(program, t, switch_stmt, &data);
             }
+            if let Some(access) =
+                self.get_discriminant_property_access(program, reference, d.expression, t)
+            {
+                return self.narrow_type_by_switch_on_discriminant_property_typeof(
+                    program,
+                    t,
+                    access,
+                    switch_stmt,
+                    &data,
+                );
+            }
         }
         if let Some(access) = self.get_discriminant_property_access(program, reference, expr, t) {
             return self.narrow_type_by_switch_on_discriminant_property(program, t, access, &data);
@@ -1586,6 +1597,34 @@ impl Checker {
             }
         }
         self.get_union_type(&types)
+    }
+
+    // Narrows a union `t` at a `switch (typeof ref.prop)` clause by narrowing
+    // the discriminant property with the `typeof` witnesses, then filtering
+    // union constituents (Go's `getTypeAtSwitchClause` default branch with a
+    // `typeof` discriminant-property access).
+    // Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantProperty(1203)
+    fn narrow_type_by_switch_on_discriminant_property_typeof(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        access: NodeId,
+        switch_stmt: NodeId,
+        data: &FlowSwitchClauseData,
+    ) -> TypeId {
+        let prop_name = match self.get_accessed_property_name(program, access) {
+            Some(n) => n,
+            None => return t,
+        };
+        let prop_type = match crate::core::declared_types::get_type_of_property_of_type(
+            self, program, t, &prop_name,
+        ) {
+            Some(pt) => pt,
+            None => return t,
+        };
+        let narrowed_prop_type =
+            self.narrow_type_by_switch_on_typeof(program, prop_type, switch_stmt, data);
+        self.narrow_type_by_discriminant_filter(program, t, access, narrowed_prop_type)
     }
 
     // Narrows a union `t` at a `switch (ref.prop)` clause by narrowing the
