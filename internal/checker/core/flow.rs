@@ -483,6 +483,11 @@ impl Checker {
         assume_true: bool,
     ) -> TypeId {
         let expr = skip_parentheses(program, expr);
+        if is_expression_of_optional_chain_root(program, expr)
+            || is_nullish_coalesce_operand(program, expr)
+        {
+            return self.narrow_type_by_optionality(program, reference, t, expr, assume_true);
+        }
         match program.arena().kind(expr) {
             Kind::Identifier => {
                 if !self.is_matching_reference(program, reference, expr)
@@ -526,11 +531,10 @@ impl Checker {
                         }
                     }
                 }
-                if self.is_matching_reference(program, reference, expr) {
-                    self.narrow_type_by_truthiness(t, assume_true)
-                } else {
-                    t
-                }
+                self.narrow_type_by_truthiness_for_expr(program, reference, t, expr, assume_true)
+            }
+            Kind::PropertyAccessExpression | Kind::ElementAccessExpression | Kind::ThisKeyword => {
+                self.narrow_type_by_truthiness_for_expr(program, reference, t, expr, assume_true)
             }
             Kind::BinaryExpression => {
                 self.narrow_type_by_binary(program, reference, t, expr, assume_true)
@@ -742,7 +746,7 @@ impl Checker {
         &mut self,
         program: &dyn BoundProgram,
         reference: NodeId,
-        t: TypeId,
+        mut t: TypeId,
         expr: NodeId,
         assume_true: bool,
     ) -> TypeId {
@@ -778,6 +782,9 @@ impl Checker {
                 }
             }
             return t;
+        }
+        if op == Kind::QuestionQuestionToken {
+            return self.narrow_type_by_optionality(program, reference, t, left, assume_true);
         }
         if op == Kind::CommaToken {
             return self.narrow_type_at_condition(program, reference, t, right, assume_true);
@@ -851,6 +858,17 @@ impl Checker {
                 return narrowed;
             }
             return self.narrow_type_by_equality(program, t, value_type, effective);
+        }
+        if self.strict_null_checks() {
+            if self.optional_chain_contains_reference(program, left, reference) {
+                t = self.narrow_type_by_optional_chain_containment(
+                    program, t, op, right, assume_true,
+                );
+            } else if self.optional_chain_contains_reference(program, right, reference) {
+                t = self.narrow_type_by_optional_chain_containment(
+                    program, t, op, left, assume_true,
+                );
+            }
         }
         // Discriminated-union narrowing (`obj.kind === "a"`): neither side
         // matches the reference directly, but one side is a property access
@@ -1838,6 +1856,113 @@ impl Checker {
         }
     }
 
+    // Narrows when the condition is an optional-chain root or `??` left operand
+    // (Go's `narrowTypeByOptionality`).
+    // Go: internal/checker/flow.go:Checker.narrowTypeByOptionality(408)
+    fn narrow_type_by_optionality(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        t: TypeId,
+        expr: NodeId,
+        assume_present: bool,
+    ) -> TypeId {
+        if self.is_matching_reference(program, reference, expr) {
+            if assume_present {
+                return self.get_non_null_type(t);
+            }
+            return self.get_type_with_facts(t, TypeFacts::EQ_UNDEFINED_OR_NULL);
+        }
+        t
+    }
+
+    // Narrows `reference` when a condition contains it inside an optional chain
+    // (`obj?.foo === value`, etc.).
+    // Go: internal/checker/flow.go:Checker.narrowTypeByOptionalChainContainment(1012)
+    fn narrow_type_by_optional_chain_containment(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        operator: Kind,
+        value: NodeId,
+        assume_true: bool,
+    ) -> TypeId {
+        let equals_operator = matches!(
+            operator,
+            Kind::EqualsEqualsToken | Kind::EqualsEqualsEqualsToken
+        );
+        let nullable_flags = if matches!(
+            operator,
+            Kind::EqualsEqualsToken | Kind::ExclamationEqualsToken
+        ) {
+            TypeFlags::NULLABLE
+        } else {
+            TypeFlags::UNDEFINED
+        };
+        let value_type = self.check_expression(program, value);
+        let members = self.distributed_types(value_type);
+        let value_only_nullable = !members.is_empty()
+            && members.iter().all(|&m| self.get_type(m).flags().intersects(nullable_flags));
+        let value_excludes_nullable = !members.is_empty()
+            && members.iter().all(|&m| {
+                !self
+                    .get_type(m)
+                    .flags()
+                    .intersects(TypeFlags::ANY_OR_UNKNOWN | nullable_flags)
+            });
+        let remove_nullable = (equals_operator != assume_true && value_only_nullable)
+            || (equals_operator == assume_true && value_excludes_nullable);
+        if remove_nullable {
+            return self.get_non_null_type(t);
+        }
+        t
+    }
+
+    // Truthiness narrowing for a condition expression relative to `reference`,
+    // including optional-chain containment on the true branch.
+    // Go: internal/checker/flow.go:Checker.narrowTypeByTruthiness(421)
+    fn narrow_type_by_truthiness_for_expr(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        t: TypeId,
+        expr: NodeId,
+        assume_true: bool,
+    ) -> TypeId {
+        if self.is_matching_reference(program, reference, expr) {
+            return self.narrow_type_by_truthiness(t, assume_true);
+        }
+        if self.strict_null_checks()
+            && assume_true
+            && self.optional_chain_contains_reference(program, expr, reference)
+        {
+            return self.get_non_null_type(t);
+        }
+        t
+    }
+
+    // Reports whether `target` appears as the root of an optional chain inside
+    // `source` (`obj?.foo` contains reference `obj`).
+    // Go: internal/checker/flow.go:Checker.optionalChainContainsReference(1828)
+    fn optional_chain_contains_reference(
+        &self,
+        program: &dyn BoundProgram,
+        source: NodeId,
+        target: NodeId,
+    ) -> bool {
+        let mut source = source;
+        while is_optional_chain(program.arena(), source) {
+            let Some(operand) = optional_chain_operand(program, source) else {
+                break;
+            };
+            source = operand;
+            if self.is_matching_reference(program, source, target) {
+                return true;
+            }
+        }
+        false
+    }
+
     // Reports whether two reference nodes denote the same declaration (4f: only
     // identifiers, compared by resolved value symbol).
     // Go: internal/checker/flow.go:Checker.isMatchingReference (subset)
@@ -2311,6 +2436,44 @@ fn is_access_expression(program: &dyn BoundProgram, node: NodeId) -> bool {
         program.arena().kind(node),
         Kind::PropertyAccessExpression | Kind::ElementAccessExpression | Kind::NonNullExpression
     )
+}
+
+// Go: internal/ast/utilities.go:IsOptionalChain
+fn is_optional_chain(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    arena.flags(node).contains(NodeFlags::OPTIONAL_CHAIN)
+        && matches!(
+            arena.kind(node),
+            Kind::PropertyAccessExpression
+                | Kind::ElementAccessExpression
+                | Kind::CallExpression
+                | Kind::NonNullExpression
+        )
+}
+
+// Go: internal/ast/utilities.go:IsExpressionOfOptionalChainRoot (approximate)
+fn is_expression_of_optional_chain_root(program: &dyn BoundProgram, node: NodeId) -> bool {
+    program.arena().parent(node).is_some_and(|parent| {
+        is_optional_chain(program.arena(), parent)
+            && optional_chain_operand(program, parent) == Some(node)
+    })
+}
+
+fn is_nullish_coalesce_operand(program: &dyn BoundProgram, node: NodeId) -> bool {
+    program.arena().parent(node).is_some_and(|parent| {
+        matches!(program.arena().data(parent), NodeData::BinaryExpression(d)
+            if program.arena().kind(d.operator_token) == Kind::QuestionQuestionToken
+                && d.left == node)
+    })
+}
+
+fn optional_chain_operand(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    match program.arena().data(node) {
+        NodeData::PropertyAccessExpression(d) => Some(d.expression),
+        NodeData::ElementAccessExpression(d) => Some(d.expression),
+        NodeData::CallExpression(d) => Some(d.expression),
+        NodeData::NonNullExpression(d) => Some(d.expression),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

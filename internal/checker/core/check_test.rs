@@ -25257,3 +25257,189 @@ fn subclass_private_in_guard_narrows_subclass_union_no_diagnostic() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 122: optional-chain flow narrowing (`obj?.prop`, `??`, containment) ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTruthiness (optional-chain containment)
+#[test]
+fn optional_chain_truthiness_guard_narrows_object_union_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj?.foo) {\n  obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionalChainContainment (`===` non-undefined)
+#[test]
+fn optional_chain_strict_equality_narrows_object_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj?.foo === 1) {\n  const x: { foo: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionalChainContainment (`!== undefined`)
+#[test]
+fn optional_chain_strict_inequality_undefined_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj?.foo !== undefined) {\n  const x: { foo: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionalChainContainment (reversed operands)
+#[test]
+fn reversed_optional_chain_equality_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (1 === obj?.foo) {\n  const x: { foo: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionalChainContainment (`=== undefined`, true branch)
+#[test]
+fn optional_chain_equality_undefined_true_branch_wrong_assign_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj?.foo === undefined) {\n  const x: { foo: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionalChainContainment (`=== undefined`, else branch)
+#[test]
+fn optional_chain_equality_undefined_else_branch_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj?.foo === undefined) {\n} else {\n  const x: { foo: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionalChainContainment (loose `!= null`)
+#[test]
+fn optional_chain_loose_inequality_null_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj?.foo != null) {\n  const x: { foo: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionality (`??` truthiness)
+#[test]
+fn nullish_coalesce_truthiness_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj ?? false) {\n  obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionalChainContainment (wrong assign in else branch)
+#[test]
+fn optional_chain_equality_else_branch_wrong_assign_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj?.foo === undefined) {\n} else {\n  const x: { foo: number } = obj;\n  const y: null = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionalChainContainment (property read after narrow)
+#[test]
+fn optional_chain_equality_allows_property_access_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj?.foo === 1) {\n  const n: number = obj.foo;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionalChainContainment (`&&` chain)
+#[test]
+fn optional_chain_equality_and_reference_chain_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj?.foo === 1 && obj) {\n  const x: { foo: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionalChainContainment (loose `==`)
+#[test]
+fn optional_chain_loose_equality_number_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj?.foo == 1) {\n  const x: { foo: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByOptionality (`??` else branch)
+#[test]
+fn nullish_coalesce_else_branch_keeps_nullish_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj ?? false) {\n} else {\n  const y: null | undefined = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

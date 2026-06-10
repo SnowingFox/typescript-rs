@@ -497,3 +497,25 @@ fn narrow_type_by_type_predicate_narrows_matching_reference() {
     let narrowed = c.narrow_type_by_type_predicate(&p, x_ref, union, &predicate, call, true);
     assert_eq!(narrowed, c.string_type());
 }
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTruthiness (optional-chain containment)
+#[test]
+fn flow_optional_chain_truthiness_narrows_object() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { foo: number } | null | undefined;\n\
+         if (obj?.foo) {\n  obj;\n}",
+    );
+    let usage = first_then_block_usage(&p, 1);
+    let mut c = Checker::new();
+    let declared = get_declared_type_of_symbol(&mut c, &p, sym(&p, "obj"), None);
+    let narrowed = c.get_flow_type_of_reference(&p, usage, declared);
+    assert!(
+        !c.get_type(narrowed)
+            .flags()
+            .intersects(crate::core::types::TypeFlags::NULLABLE),
+        "expected non-nullish obj type, got {:?}",
+        narrowed
+    );
+}
+

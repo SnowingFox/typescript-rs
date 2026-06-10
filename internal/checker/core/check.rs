@@ -3235,10 +3235,21 @@ impl Checker {
             NodeData::PropertyAccessExpression(d) => (d.expression, d.name),
             _ => return self.error_type,
         };
-        // Go's `checkPropertyAccessExpression` types the object via
-        // `checkNonNullExpression`, reporting possibly-`null`/`undefined` and
-        // narrowing the object to its non-null type before the member lookup.
-        let object_type = self.check_non_null_expression(program, expr);
+        let is_optional_chain = program.arena().flags(node).contains(NodeFlags::OPTIONAL_CHAIN);
+        let (object_type, optional_chain_was_short_circuited) = if is_optional_chain {
+            let left_type = self.check_expression(program, expr);
+            let non_optional_type = self.get_optional_expression_type(program, left_type, expr);
+            let was_optional = non_optional_type != left_type;
+            (
+                self.check_non_null_type(program, non_optional_type, expr),
+                was_optional,
+            )
+        } else {
+            // Go's `checkPropertyAccessExpression` types the object via
+            // `checkNonNullExpression`, reporting possibly-`null`/`undefined` and
+            // narrowing the object to its non-null type before the member lookup.
+            (self.check_non_null_expression(program, expr), false)
+        };
         // Go's `checkPropertyAccessExpressionOrQualifiedName` short-circuits an
         // any-like receiver (`isTypeAny(apparentType)`): accessing any member of
         // `any` — or of the `error` type (which also carries the `Any` flag) —
@@ -3250,7 +3261,12 @@ impl Checker {
             .flags()
             .intersects(TypeFlags::ANY)
         {
-            return object_type;
+            return self.finish_optional_property_access(
+                program,
+                node,
+                optional_chain_was_short_circuited,
+                object_type,
+            );
         }
         let is_super = program.arena().kind(expr) == Kind::SuperKeyword;
         let apparent = get_apparent_type(self, object_type);
@@ -3310,7 +3326,12 @@ impl Checker {
                             prop_type = self.instantiate_type(prop_type, &mapper);
                         }
                     }
-                    return prop_type;
+                    return self.finish_optional_property_access(
+                        program,
+                        node,
+                        optional_chain_was_short_circuited,
+                        prop_type,
+                    );
                 }
             }
         }
@@ -3338,21 +3359,105 @@ impl Checker {
                     return self.error_type;
                 }
             }
-            return t;
+            return self.finish_optional_property_access(
+                program,
+                node,
+                optional_chain_was_short_circuited,
+                t,
+            );
         }
         if let Some(info) = get_applicable_index_info_for_name(self, program, apparent, &name) {
             self.error_if_writing_to_readonly_index(program, node, apparent, info);
-            return self.index_info(info).value_type;
+            let t = self.index_info(info).value_type;
+            return self.finish_optional_property_access(
+                program,
+                node,
+                optional_chain_was_short_circuited,
+                t,
+            );
         }
         // `Object.prototype.constructor` — all object/non-primitive values expose
         // it; primitives are boxed for the lookup (Go: lib.es5 `Object.constructor`).
         if name == "constructor" && self.type_exposes_constructor_property(apparent) {
-            return self
+            let t = self
                 .get_global_type("Function")
                 .unwrap_or_else(|| self.any_type());
+            return self.finish_optional_property_access(
+                program,
+                node,
+                optional_chain_was_short_circuited,
+                t,
+            );
         }
         self.report_nonexistent_property(program, name_node, object_type, node, is_super);
         self.error_type
+    }
+
+    // Strips optional-chain nullability from an operand type (Go's
+    // `getOptionalExpressionType`).
+    // Go: internal/checker/checker.go:Checker.getOptionalExpressionType(28740)
+    fn get_optional_expression_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        expr_type: TypeId,
+        expression: NodeId,
+    ) -> TypeId {
+        if is_expression_of_optional_chain_root(program, expression) {
+            return self.get_non_null_type(expr_type);
+        }
+        if is_optional_chain_expression(program, expression) {
+            return self.remove_optional_type_marker(expr_type);
+        }
+        expr_type
+    }
+
+    // Removes the `undefined` marker from an optional-chain intermediate type.
+    // Go: internal/checker/checker.go:Checker.removeOptionalTypeMarker(28751)
+    fn remove_optional_type_marker(&mut self, t: TypeId) -> TypeId {
+        if self.strict_null_checks() {
+            return self.get_type_with_facts(t, super::type_facts::TypeFacts::NE_UNDEFINED);
+        }
+        t
+    }
+
+    // Adds `| undefined` for optional-chain results (Go's `propagateOptionalTypeMarker`).
+    // Go: internal/checker/checker.go:Checker.propagateOptionalTypeMarker(28758)
+    fn propagate_optional_type_marker(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        node: NodeId,
+        was_optional: bool,
+    ) -> TypeId {
+        if !was_optional {
+            return t;
+        }
+        if is_outermost_optional_chain(program.arena(), node) {
+            return self.get_optional_type(t, false);
+        }
+        self.add_optional_type_marker(t)
+    }
+
+    // Go: internal/checker/checker.go:Checker.addOptionalTypeMarker(20463)
+    fn add_optional_type_marker(&mut self, t: TypeId) -> TypeId {
+        if self.strict_null_checks() {
+            return self.get_union_type(&[t, self.undefined_type()]);
+        }
+        t
+    }
+
+    fn finish_optional_property_access(
+        &mut self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+        was_short_circuited: bool,
+        t: TypeId,
+    ) -> TypeId {
+        if was_short_circuited {
+            self.propagate_optional_type_marker(program, t, node, true)
+        } else {
+            t
+        }
     }
 
     // Reports TS2542 when `access_node` writes through a readonly index signature.
@@ -17220,6 +17325,63 @@ fn collect_return_expressions_into(
         // DEFER(phase-4-checker-C-C): loops/try/switch and nested-block return
         // aggregation. blocked-by: full control-flow return analysis.
         _ => {}
+    }
+}
+
+// Go: internal/ast/utilities.go:IsOptionalChain
+fn is_optional_chain_expression(program: &dyn BoundProgram, node: NodeId) -> bool {
+    let arena = program.arena();
+    arena.flags(node).contains(NodeFlags::OPTIONAL_CHAIN)
+        && matches!(
+            arena.kind(node),
+            Kind::PropertyAccessExpression
+                | Kind::ElementAccessExpression
+                | Kind::CallExpression
+                | Kind::NonNullExpression
+        )
+}
+
+// Go: internal/ast/utilities.go:IsExpressionOfOptionalChainRoot (approximate)
+fn is_expression_of_optional_chain_root(program: &dyn BoundProgram, node: NodeId) -> bool {
+    program.arena().parent(node).is_some_and(|parent| {
+        is_optional_chain_expression(program, parent)
+            && optional_chain_operand(program, parent) == Some(node)
+    })
+}
+
+// Go: internal/ast/utilities.go:IsOutermostOptionalChain
+fn is_outermost_optional_chain(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    if !is_optional_chain_node(arena, node) {
+        return false;
+    }
+    match arena.parent(node) {
+        Some(p) => !is_optional_chain_node(arena, p) || optional_chain_operand_node(arena, p) != Some(node),
+        None => true,
+    }
+}
+
+fn is_optional_chain_node(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    arena.flags(node).contains(NodeFlags::OPTIONAL_CHAIN)
+        && matches!(
+            arena.kind(node),
+            Kind::PropertyAccessExpression
+                | Kind::ElementAccessExpression
+                | Kind::CallExpression
+                | Kind::NonNullExpression
+        )
+}
+
+fn optional_chain_operand(program: &dyn BoundProgram, node: NodeId) -> Option<NodeId> {
+    optional_chain_operand_node(program.arena(), node)
+}
+
+fn optional_chain_operand_node(arena: &tsgo_ast::NodeArena, node: NodeId) -> Option<NodeId> {
+    match arena.data(node) {
+        NodeData::PropertyAccessExpression(d) => Some(d.expression),
+        NodeData::ElementAccessExpression(d) => Some(d.expression),
+        NodeData::CallExpression(d) => Some(d.expression),
+        NodeData::NonNullExpression(d) => Some(d.expression),
+        _ => None,
     }
 }
 
