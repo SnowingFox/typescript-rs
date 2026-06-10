@@ -106,8 +106,8 @@ fn narrow_in_object_union() {
     let b_ty = get_declared_type_of_symbol(&mut c, &p, sym(&p, "B"), None);
     let union = c.get_union_type(&[a_ty, b_ty]);
     // `"a" in x` keeps the constituent that has property `a`.
-    assert_eq!(c.narrow_type_by_in(union, "a", true), a_ty);
-    assert_eq!(c.narrow_type_by_in(union, "a", false), b_ty);
+    assert_eq!(c.narrow_type_by_in(&p, union, "a", true), a_ty);
+    assert_eq!(c.narrow_type_by_in(&p, union, "a", false), b_ty);
 }
 
 // Walks SourceFile -> if-statement -> then-block -> expression statement to the

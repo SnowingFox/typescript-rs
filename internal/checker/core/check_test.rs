@@ -25443,3 +25443,258 @@ fn nullish_coalesce_else_branch_keeps_nullish_no_diagnostic() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 123: `in` keyword flow narrowing — index signatures, optional members, unions ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (three-way union filter)
+#[test]
+fn in_guard_narrows_three_way_union_to_matching_member_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         type C = { c: boolean };\n\
+         declare const v: A | B | C;\n\
+         if (\"a\" in v) {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (negated three-way union)
+#[test]
+fn negated_in_guard_narrows_three_way_union_else_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         type C = { c: boolean };\n\
+         declare const v: A | B | C;\n\
+         if (!(\"a\" in v)) {\n  const u: B | C = v;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.isTypePresencePossible (optional property)
+#[test]
+fn in_guard_narrows_union_with_optional_property_member_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a?: number };\n\
+         type B = { b: string };\n\
+         declare const v: A | B;\n\
+         if (\"a\" in v) {\n  const x: A = v;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.isTypePresencePossible (index signature constituent)
+#[test]
+fn in_guard_narrows_to_index_signature_member_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface WithIndex {\n  [key: string]: number;\n}\n\
+         interface WithB {\n  b: string;\n}\n\
+         declare const v: WithIndex | WithB;\n\
+         if (\"x\" in v) {\n  const n: number = v.x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (index signature + property both match)
+#[test]
+fn in_guard_known_property_filters_unrelated_union_member_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface WithIndex {\n  [key: string]: number;\n}\n\
+         interface WithA {\n  a: number;\n}\n\
+         interface WithC {\n  c: boolean;\n}\n\
+         declare const v: WithIndex | WithA | WithC;\n\
+         if (\"a\" in v) {\n  const x: WithC = v;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one assignability error, got {diags:?}");
+    assert!(
+        diags[0].code == 2322 || diags[0].code == 2741,
+        "expected 2322 or 2741, got {:?}",
+        diags[0]
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (nullable union member)
+#[test]
+fn in_guard_filters_nullable_union_member_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         declare const v: A | B | null;\n\
+         if (v !== null && \"a\" in v) {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (wrong property after narrow)
+#[test]
+fn in_guard_narrowed_branch_rejects_other_member_property_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         declare const v: A | B;\n\
+         if (\"a\" in v) {\n  v.b;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (wrong assign after narrow)
+#[test]
+fn in_guard_narrowed_branch_wrong_assign_reports_2741() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         declare const v: A | B;\n\
+         if (\"a\" in v) {\n  const x: B = v;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2741, got {diags:?}");
+    assert_eq!(diags[0].code, 2741);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (negated else wrong assign)
+#[test]
+fn negated_in_guard_else_branch_wrong_assign_reports_2741() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         declare const v: A | B;\n\
+         if (!(\"a\" in v)) {\n  const x: A = v;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2741, got {diags:?}");
+    assert_eq!(diags[0].code, 2741);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (`&&` chain)
+#[test]
+fn in_guard_and_truthiness_chain_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         declare const v: A | B | null;\n\
+         if (v && \"a\" in v) {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (if-else-if chain)
+#[test]
+fn in_guard_if_else_if_chain_narrows_both_branches_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         type C = { c: boolean };\n\
+         declare const v: A | B | C;\n\
+         if (\"a\" in v) {\n  const n: number = v.a;\n} else if (\"b\" in v) {\n  const s: string = v.b;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnTrue (`in` case)
+#[test]
+fn switch_true_in_guard_three_way_union_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         type C = { c: boolean };\n\
+         declare const v: A | B | C;\n\
+         switch (true) {\n  case \"c\" in v: {\n    const ok: boolean = v.c;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (numeric index signature)
+#[test]
+fn in_guard_narrows_to_numeric_index_signature_member_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface WithIndex {\n  [key: number]: string;\n}\n\
+         interface WithA {\n  a: number;\n}\n\
+         declare const v: WithIndex | WithA;\n\
+         if (0 in v) {\n  const s: string = v[0];\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (partial/checkFlags member)
+#[test]
+fn in_guard_narrows_union_with_partial_member_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b?: string };\n\
+         declare const v: A | B;\n\
+         if (!(\"a\" in v)) {\n  const x: B = v;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword (reversed `in` with nullable)
+#[test]
+fn in_guard_reversed_operand_nullable_union_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         declare const v: A | B | undefined;\n\
+         if (v !== undefined && \"b\" in v) {\n  const s: string = v.b;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

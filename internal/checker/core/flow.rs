@@ -13,7 +13,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use tsgo_ast::flow::{FlowFlags, FlowNodeId, FlowSwitchClauseData};
-use tsgo_ast::{Kind, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId};
+use tsgo_ast::{CheckFlags, Kind, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId};
 
 use super::program::BoundProgram;
 use super::symbols::resolve_name;
@@ -316,13 +316,14 @@ impl Checker {
     /// let mut c = Checker::new();
     /// // A primitive has no own properties, so `in` keeps nothing on the true side.
     /// let s = c.string_type();
-    /// assert_eq!(c.narrow_type_by_in(s, "x", true), c.never_type());
+    /// assert_eq!(c.narrow_type_by_in(&p, s, "x", true), c.never_type());
     /// ```
     ///
     /// Side effects: may allocate a union.
     // Go: internal/checker/flow.go:Checker.narrowTypeByInKeyword
     pub fn narrow_type_by_in(
         &mut self,
+        program: &dyn BoundProgram,
         t: TypeId,
         property_name: &str,
         assume_true: bool,
@@ -330,13 +331,39 @@ impl Checker {
         let members = self.distributed_types(t);
         let kept: Vec<TypeId> = members
             .into_iter()
-            .filter(|&m| {
-                let has = crate::core::declared_types::get_property_of_type(self, m, property_name)
-                    .is_some();
-                has == assume_true
-            })
+            .filter(|&m| self.is_type_presence_possible(program, m, property_name, assume_true))
             .collect();
         self.get_union_type(&kept)
+    }
+
+    // Reports whether `prop_name` may be present on `t` when the `in` guard is
+    // assumed true/false (optional/partial members and index signatures count as
+    // possibly present).
+    // Go: internal/checker/flow.go:Checker.isTypePresencePossible(1004)
+    fn is_type_presence_possible(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        prop_name: &str,
+        assume_true: bool,
+    ) -> bool {
+        if let Some(prop_sym) =
+            crate::core::declared_types::get_property_of_type(self, t, prop_name)
+        {
+            let flags = self.resolved_symbol_flags(program, prop_sym);
+            let check_flags = self.resolved_symbol_check_flags(program, prop_sym);
+            return flags.contains(SymbolFlags::OPTIONAL)
+                || check_flags.contains(CheckFlags::PARTIAL)
+                || assume_true;
+        }
+        if crate::core::declared_types::get_applicable_index_info_for_name(
+            self, program, t, prop_name,
+        )
+        .is_some()
+        {
+            return true;
+        }
+        !assume_true
     }
 
     // Reports whether two types can be `===`-equal (4f subset): literals compare
@@ -766,18 +793,12 @@ impl Checker {
                 let target = d.right;
                 if self.is_matching_reference(program, reference, target) {
                     let value_type = self.check_expression(program, d.left);
-                    if self
-                        .get_type(value_type)
-                        .flags()
-                        .contains(TypeFlags::STRING_LITERAL)
-                    {
+                    if super::check::is_type_usable_as_property_name(
+                        self.get_type(value_type).flags(),
+                    ) {
                         let name =
                             super::late_binding::get_property_name_from_type(self, value_type);
-                        return self.narrow_type_by_in(t, &name, assume_true);
-                    }
-                    if arena.kind(d.left) == Kind::StringLiteral {
-                        let name = arena.text(d.left).to_string();
-                        return self.narrow_type_by_in(t, &name, assume_true);
+                        return self.narrow_type_by_in(program, t, &name, assume_true);
                     }
                 }
             }
