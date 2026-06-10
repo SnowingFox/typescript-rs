@@ -26949,3 +26949,252 @@ fn switch_boolean_literal_union_case_narrows_no_diagnostics() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 129: switch(typeof discriminantProperty) flow narrowing ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (default)
+#[test]
+fn switch_typeof_discriminant_property_default_narrows_complement_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         switch (typeof v.kind) {\n  case \"number\": break;\n  default: {\n    const s: string = v.b;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (second case)
+#[test]
+fn switch_typeof_discriminant_property_second_case_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         type C = { kind: true; c: boolean };\n\
+         declare const v: A | B | C;\n\
+         switch (typeof v.kind) {\n  case \"number\": break;\n  case \"string\": {\n    const s: string = v.b;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (three-way)
+#[test]
+fn switch_typeof_discriminant_property_three_way_case_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         type C = { kind: true; c: boolean };\n\
+         declare const v: A | B | C;\n\
+         switch (typeof v.kind) {\n  case \"number\": break;\n  case \"string\": break;\n  case \"boolean\": {\n    const c: boolean = v.c;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (wrong member)
+#[test]
+fn switch_typeof_discriminant_property_case_wrong_member_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         switch (typeof v.kind) {\n  case \"number\": {\n    const s: string = v.b;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (bigint witness)
+#[test]
+fn switch_typeof_discriminant_property_bigint_case_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0n; a: bigint };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         switch (typeof v.kind) {\n  case \"bigint\": {\n    const n: bigint = v.a;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (undefined witness)
+#[test]
+fn switch_typeof_discriminant_property_undefined_kind_case_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: undefined; a: void };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         switch (typeof v.kind) {\n  case \"undefined\": {\n    const a: void = v.a;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (element access)
+#[test]
+fn switch_typeof_element_access_discriminant_narrows_parent_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         switch (typeof v[\"kind\"]) {\n  case \"number\": {\n    const n: number = v.a;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (boolean witness)
+#[test]
+fn switch_typeof_discriminant_property_boolean_witness_case_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: true; b: boolean };\n\
+         declare const v: A | B;\n\
+         switch (typeof v.kind) {\n  case \"boolean\": {\n    const b: boolean = v.b;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (bigint default)
+#[test]
+fn switch_typeof_discriminant_property_bigint_default_narrows_complement_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0n; a: bigint };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         switch (typeof v.kind) {\n  case \"bigint\": break;\n  default: {\n    const s: string = v.b;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (string branch)
+#[test]
+fn switch_typeof_discriminant_property_string_branch_narrows_b_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         switch (typeof v.kind) {\n  case \"string\": {\n    const s: string = v.b;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (symbol witness)
+#[test]
+fn switch_typeof_discriminant_property_symbol_case_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const sym: unique symbol;\n\
+         type A = { kind: typeof sym; a: symbol };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         switch (typeof v.kind) {\n  case \"symbol\": {\n    const s: symbol = v.a;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (mixed default)
+#[test]
+fn switch_typeof_discriminant_property_default_excludes_handled_witnesses_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: string };\n\
+         type B = { kind: 0; b: number };\n\
+         type C = { kind: true; c: boolean };\n\
+         declare const v: A | B | C;\n\
+         switch (typeof v.kind) {\n  case \"string\": break;\n  case \"number\": break;\n  default: {\n    const c: boolean = v.c;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (element-access default)
+#[test]
+fn switch_typeof_element_access_discriminant_default_narrows_complement_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         switch (typeof v[\"kind\"]) {\n  case \"number\": break;\n  default: {\n    const s: string = v.b;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (wrong branch)
+#[test]
+fn switch_typeof_discriminant_property_string_branch_wrong_member_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         switch (typeof v.kind) {\n  case \"string\": {\n    const n: number = v.a;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnDiscriminantPropertyTypeOf (numeric three-way default)
+#[test]
+fn switch_typeof_discriminant_property_three_way_default_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         type C = { kind: true; c: boolean };\n\
+         declare const v: A | B | C;\n\
+         switch (typeof v.kind) {\n  case \"number\": break;\n  case \"string\": break;\n  default: {\n    const c: boolean = v.c;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
