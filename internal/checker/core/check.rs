@@ -432,7 +432,7 @@ impl Checker {
     // Returns the `this` type declared by a signature's leading `this` parameter,
     // or `None` when the signature has no explicit `this` type.
     // Go: internal/checker/relater.go:Checker.getThisTypeOfSignature(1911)
-    fn get_this_type_of_signature(
+    pub(crate) fn get_this_type_of_signature(
         &mut self,
         program: &dyn BoundProgram,
         signature: SignatureId,

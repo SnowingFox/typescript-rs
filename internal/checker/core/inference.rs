@@ -435,6 +435,19 @@ impl Checker {
         } else {
             source_count.min(target_non_rest_count)
         };
+        // `this` parameters (Go's `applyToParameterTypes` leading callback).
+        if let Some(source_this) = self.get_this_type_of_signature(program, source) {
+            if let Some(target_this) = self.get_this_type_of_signature(program, target) {
+                self.infer_from_types(
+                    program,
+                    inferences,
+                    visited,
+                    source_this,
+                    target_this,
+                    priority,
+                );
+            }
+        }
         for i in 0..param_count {
             let s = self.get_type_at_position(program, source, i);
             let t = self.get_type_at_position(program, target, i);

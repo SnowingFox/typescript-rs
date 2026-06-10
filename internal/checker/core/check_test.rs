@@ -23653,3 +23653,326 @@ fn awaited_string_literal_identity_valid_no_diagnostics() {
         c.get_diagnostics(root)
     );
 }
+
+// ---- T1-E batch 116: ThisParameterType / OmitThisParameter conditional infer ----
+
+const THIS_UTILITIES: &str = "\
+type ThisParameterType<T> = T extends (this: infer U, ...args: any[]) => any ? U : unknown;\n\
+type OmitThisParameter<T> = T extends (this: any, ...args: infer P) => infer R ? (...args: P) => R : T;\n";
+
+// Go: internal/checker/inference.go:Checker.applyToParameterTypes (this infer)
+#[test]
+fn this_parameter_type_extracts_this_type_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = (this: {{ x: number }}, n: number) => void;\n\
+             type T = ThisParameterType<F>;\n\
+             const ok: T = {{ x: 1 }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.applyToParameterTypes (this infer mismatch)
+#[test]
+fn this_parameter_type_extracts_this_type_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = (this: {{ x: number }}, n: number) => void;\n\
+             type T = ThisParameterType<F>;\n\
+             const bad: T = {{ x: \"s\" }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (no this param -> unknown)
+#[test]
+fn this_parameter_type_on_plain_function_yields_unknown_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = (n: number) => void;\n\
+             type T = ThisParameterType<F>;\n\
+             const ok: T = 1;\n\
+             const ok2: T = \"s\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.applyToParameterTypes (class method this)
+#[test]
+fn this_parameter_type_on_class_method_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             class C {{ x = 1; m(this: C, n: number) {{}} }}\n\
+             type T = ThisParameterType<typeof C.prototype.m>;\n\
+             declare const c: C;\n\
+             const ok: T = c;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.applyToParameterTypes (primitive this mismatch)
+#[test]
+fn this_parameter_type_primitive_this_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = (this: string, n: number) => void;\n\
+             type T = ThisParameterType<F>;\n\
+             const bad: T = 1;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (OmitThisParameter infer P/R)
+#[test]
+fn omit_this_parameter_strips_this_and_preserves_args_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = (this: {{ x: number }}, n: number) => string;\n\
+             type G = OmitThisParameter<F>;\n\
+             declare const g: G;\n\
+             const r: string = g(1);"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (OmitThisParameter multi-arg)
+#[test]
+fn omit_this_parameter_strips_this_multi_arg_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = (this: {{ a: number }}, x: number, y: string) => number;\n\
+             type G = OmitThisParameter<F>;\n\
+             declare const g: G;\n\
+             const r: number = g(1, \"s\");"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (OmitThisParameter return mismatch)
+#[test]
+fn omit_this_parameter_return_type_preserved_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = (this: {{ x: number }}, n: number) => string;\n\
+             type G = OmitThisParameter<F>;\n\
+             declare const g: G;\n\
+             const bad: number = g(1);"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (OmitThisParameter identity)
+#[test]
+fn omit_this_parameter_on_plain_function_is_identity_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = (n: number) => string;\n\
+             type G = OmitThisParameter<F>;\n\
+             declare const g: G;\n\
+             const r: string = g(1);"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.applyToParameterTypes (this + rest infer)
+#[test]
+fn this_parameter_type_with_rest_args_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = (this: {{ a: boolean }}, x: number, ...rest: string[]) => void;\n\
+             type T = ThisParameterType<F>;\n\
+             const ok: T = {{ a: true }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (OmitThisParameter zero-arg after this)
+#[test]
+fn omit_this_parameter_only_this_param_becomes_zero_arg_callable_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = (this: {{ x: number }}) => string;\n\
+             type G = OmitThisParameter<F>;\n\
+             declare const g: G;\n\
+             const r: string = g();"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.applyToReturnTypes (infer R in OmitThisParameter)
+#[test]
+fn omit_this_parameter_infers_void_return_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = (this: {{ x: number }}, n: number) => void;\n\
+             type G = OmitThisParameter<F>;\n\
+             declare const g: G;\n\
+             const r: void = g(1);"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.applyToParameterTypes (this infer on union callable)
+#[test]
+fn this_parameter_type_on_union_of_this_functions_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = ((this: {{ a: number }}) => void) | ((this: {{ b: string }}) => void);\n\
+             type T = ThisParameterType<F>;\n\
+             const t1: T = {{ a: 1 }};\n\
+             const t2: T = {{ b: \"s\" }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/inference.go:Checker.applyToParameterTypes (this infer union mismatch)
+#[test]
+fn this_parameter_type_on_union_of_this_functions_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             type F = ((this: {{ a: number }}) => void) | ((this: {{ b: string }}) => void);\n\
+             type T = ThisParameterType<F>;\n\
+             const bad: T = {{ a: \"s\" }};"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getConditionalType (typeof + ThisParameterType)
+#[test]
+fn this_parameter_type_of_typeof_method_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{THIS_UTILITIES}\
+             class C {{ x = 1; m(this: C) {{ return this.x; }} }}\n\
+             declare const c: C;\n\
+             type T = ThisParameterType<typeof c.m>;\n\
+             const ok: T = c;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
