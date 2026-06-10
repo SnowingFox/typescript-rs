@@ -692,10 +692,19 @@ impl Checker {
         let NodeData::CallExpression(d) = program.arena().data(call_expression) else {
             return false;
         };
-        d.arguments
+        if d
+            .arguments
             .nodes
             .iter()
             .any(|&arg| self.is_matching_reference(program, reference, arg))
+        {
+            return true;
+        }
+        let invoked = skip_parentheses(program, d.expression);
+        if let NodeData::PropertyAccessExpression(access) = program.arena().data(invoked) {
+            return self.is_matching_reference(program, reference, access.expression);
+        }
+        false
     }
 
     // Returns the call signature whose type-predicate effects apply to `call`.
@@ -1712,20 +1721,31 @@ impl Checker {
     pub fn get_type_predicate_argument(
         &self,
         program: &dyn BoundProgram,
-        parameter_index: i32,
+        predicate: &TypePredicateInfo,
         call_expression: NodeId,
     ) -> Option<NodeId> {
         let NodeData::CallExpression(d) = program.arena().data(call_expression) else {
             return None;
         };
-        if parameter_index >= 0 {
-            return d.arguments.nodes.get(parameter_index as usize).copied();
+        match predicate.kind {
+            TypePredicateKind::Identifier | TypePredicateKind::AssertsIdentifier => {
+                if predicate.parameter_index >= 0 {
+                    return d.arguments
+                        .nodes
+                        .get(predicate.parameter_index as usize)
+                        .copied();
+                }
+            }
+            TypePredicateKind::This | TypePredicateKind::AssertsThis => {
+                let invoked = skip_parentheses(program, d.expression);
+                return match program.arena().data(invoked) {
+                    NodeData::PropertyAccessExpression(access) => Some(access.expression),
+                    NodeData::ElementAccessExpression(access) => Some(access.expression),
+                    _ => None,
+                };
+            }
         }
-        match program.arena().data(d.expression) {
-            NodeData::PropertyAccessExpression(access) => Some(access.expression),
-            NodeData::ElementAccessExpression(access) => Some(access.expression),
-            _ => None,
-        }
+        None
     }
 
     /// Narrows `t` when a type-predicate call matches `reference` (partial port
@@ -1749,15 +1769,79 @@ impl Checker {
         let Some(predicate_type) = predicate.predicate_type else {
             return t;
         };
-        let Some(argument) =
-            self.get_type_predicate_argument(program, predicate.parameter_index, call_expression)
-        else {
+        let skip_any_object_or_function = self.get_type(t).flags().intersects(TypeFlags::ANY)
+            && (self.get_global_type("Object") == Some(predicate_type)
+                || self.get_global_type("Function") == Some(predicate_type));
+        if skip_any_object_or_function {
+            return t;
+        }
+        let Some(argument) = self.get_type_predicate_argument(program, predicate, call_expression) else {
             return t;
         };
         if self.is_matching_reference(program, reference, argument) {
             return self.get_narrowed_type_simple(t, predicate_type, assume_true);
         }
+        if let Some(access) =
+            self.get_discriminant_property_access(program, reference, argument, t)
+        {
+            return self.narrow_type_by_discriminant_type_predicate(
+                program,
+                t,
+                access,
+                predicate_type,
+                assume_true,
+            );
+        }
         t
+    }
+
+    // Narrows a discriminated union when a type-predicate call guards a
+    // discriminant property access (Go's `narrowTypeByDiscriminant` callback).
+    // Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminant(706)
+    fn narrow_type_by_discriminant_type_predicate(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        access: NodeId,
+        predicate_type: TypeId,
+        assume_true: bool,
+    ) -> TypeId {
+        let prop_name = match self.get_accessed_property_name(program, access) {
+            Some(n) => n,
+            None => return t,
+        };
+        let prop_type = match crate::core::declared_types::get_type_of_property_of_type(
+            self, program, t, &prop_name,
+        ) {
+            Some(pt) => pt,
+            None => return t,
+        };
+        let narrowed_prop_type =
+            self.get_narrowed_type_simple(prop_type, predicate_type, assume_true);
+        let narrowed_is_never = self
+            .get_type(narrowed_prop_type)
+            .flags()
+            .contains(TypeFlags::NEVER);
+        let unknown = self.unknown_type();
+        let members = self.distributed_types(t);
+        let mut kept: Vec<TypeId> = Vec::new();
+        for m in members {
+            let discriminant = crate::core::declared_types::get_type_of_property_of_type(
+                self, program, m, &prop_name,
+            )
+            .unwrap_or(unknown);
+            let discriminant_never = self
+                .get_type(discriminant)
+                .flags()
+                .contains(TypeFlags::NEVER);
+            if !discriminant_never
+                && !narrowed_is_never
+                && self.are_types_comparable(program, predicate_type, discriminant)
+            {
+                kept.push(m);
+            }
+        }
+        self.get_union_type(&kept)
     }
 
     // Narrows by an `instanceof` guard (`x instanceof Ctor`).

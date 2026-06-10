@@ -24558,3 +24558,256 @@ fn assertion_call_narrowed_wrong_assignment_reports_2322() {
     assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
     assert_eq!(diags[0].code, 2322);
 }
+
+// ---- T1-E batch 119: user-defined type guards (`x is T`) — extended flow narrowing ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate (unknown)
+#[test]
+fn type_guard_narrows_unknown_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare let x: unknown;\n\
+         if (isString(x)) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate (via local alias)
+#[test]
+fn type_guard_on_property_access_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare const obj: { p: string | number };\n\
+         const p = obj.p;\n\
+         if (isString(p)) {\n  const s: string = p;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByCallExpression (`this is T`)
+#[test]
+fn this_type_guard_in_method_narrows_this_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n\
+           isC(): this is C { return true; }\n\
+           m(this: C) {\n\
+             if (this.isC()) {\n\
+               const c: C = this;\n\
+             }\n\
+           }\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.hasMatchingArgument (method receiver)
+#[test]
+fn object_method_type_guard_narrows_receiver_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "interface Box { value: string | number; isStringBox(): this is { value: string }; }\n\
+         declare const box: Box;\n\
+         if (box.isStringBox()) {\n  const s: string = box.value;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate (while loop)
+#[test]
+fn type_guard_in_while_loop_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare let x: string | number;\n\
+         while (isString(x)) {\n  const s: string = x;\n  break;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowType (parenthesized call)
+#[test]
+fn type_guard_parenthesized_call_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare let x: string | number;\n\
+         if ((isString(x))) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate (negated, wrong assign)
+#[test]
+fn type_guard_then_branch_wrong_assignment_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare let x: string | number;\n\
+         if (isString(x)) {\n  const n: number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate (non-matching argument)
+#[test]
+fn type_guard_on_other_variable_does_not_narrow_target() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare let a: string | number;\n\
+         declare let b: string | number;\n\
+         if (isString(a)) {\n  const n: number = b;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate (chained guards)
+#[test]
+fn chained_type_guards_narrow_union_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare function isNumber(v: unknown): v is number;\n\
+         declare let x: string | number | boolean;\n\
+         if (isString(x)) {\n  const s: string = x;\n} else if (isNumber(x)) {\n  const n: number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate (ternary guard)
+#[test]
+fn type_guard_in_ternary_narrows_branches_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare let x: string | number;\n\
+         const s: string = isString(x) ? x : \"fallback\";\n\
+         const n: number = isString(x) ? 0 : x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminant + type predicate
+#[test]
+fn type_guard_on_discriminated_union_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare function isA(v: unknown): v is A;\n\
+         declare let v: A | B;\n\
+         if (isA(v)) {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate (`any` to predicate)
+#[test]
+fn type_guard_narrows_any_to_predicate_type_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare let x: any;\n\
+         if (isString(x)) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (`this is T` declaration)
+#[test]
+fn this_type_predicate_declaration_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  isC(): this is C { return true; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnTrue + type predicate
+#[test]
+fn switch_true_type_guard_case_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare let x: string | number;\n\
+         switch (true) {\n  case isString(x): {\n    const s: string = x;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate (nullable union)
+#[test]
+fn type_guard_narrows_nullable_union_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare let x: string | null | undefined;\n\
+         if (isString(x)) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByTypePredicate (negated else branch)
+#[test]
+fn negated_type_guard_else_branch_keeps_other_member_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function isString(v: unknown): v is string;\n\
+         declare let x: string | number;\n\
+         if (!isString(x)) {\n  const n: number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

@@ -456,8 +456,13 @@ fn get_type_predicate_argument_returns_indexed_parameter() {
         _ => panic!("source file"),
     };
     let c = Checker::new();
+    let predicate = crate::core::flow::TypePredicateInfo {
+        kind: crate::core::flow::TypePredicateKind::Identifier,
+        parameter_index: 0,
+        predicate_type: None,
+    };
     let arg = c
-        .get_type_predicate_argument(&p, 0, call)
+        .get_type_predicate_argument(&p, &predicate, call)
         .expect("first argument");
     assert_eq!(p.arena().text(arg), "v");
 }
