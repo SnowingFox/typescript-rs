@@ -27906,3 +27906,209 @@ fn try_finally_try_only_assign_string_no_diagnostic() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 133: for-in non-null assignment flow narrowing ----
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_object_body_non_null_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { [key: string]: number } | null;\n\
+         for (const _ in obj) {\n  const o: { [key: string]: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_union_object_body_non_null_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { a: number };\n\
+         type B = { b: string };\n\
+         declare let obj: A | B | null;\n\
+         for (const _ in obj) {\n  const o: A | B = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_undefined_object_body_non_null_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { x: number } | undefined;\n\
+         for (const _ in obj) {\n  const o: { x: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_property_access_in_body_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number } | null;\n\
+         for (const _ in obj) {\n  const n: number = obj.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_typeof_in_body_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { [key: string]: number } | null;\n\
+         for (const _ in obj) {\n  if (typeof obj === \"object\") {\n    const o: { [key: string]: number } = obj;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_truthiness_in_body_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number } | null;\n\
+         for (const _ in obj) {\n  if (obj) {\n    const o: { a: number } = obj;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_after_loop_stays_nullable_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { [key: string]: number } | null;\n\
+         for (const _ in obj) {\n}\n\
+         const o: { [key: string]: number } = obj;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_non_nullable_object_body_ok() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const obj: { [key: string]: number };\n\
+         for (const _ in obj) {\n  const o: { [key: string]: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_nested_loop_body_non_null_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let outer: { [key: string]: { [key: string]: number } } | null;\n\
+         for (const _ in outer) {\n  for (const __ in outer) {\n    const o: { [key: string]: { [key: string]: number } } = outer;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_discriminant_access_in_body_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare let obj: A | B | null;\n\
+         for (const _ in obj) {\n  if (obj.kind === \"a\") {\n    const n: number = obj.a;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_instanceof_in_body_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let obj: C | null;\n\
+         for (const _ in obj) {\n  if (obj instanceof C) {\n    const c: C = obj;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_void_union_body_non_null_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { x: number } | void;\n\
+         for (const _ in obj) {\n  const o: { x: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_null_and_undefined_body_non_null_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { x: number } | null | undefined;\n\
+         for (const _ in obj) {\n  const o: { x: number } = obj;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn for_in_nullable_wrong_member_in_body_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number } | null;\n\
+         for (const _ in obj) {\n  const s: string = obj.b;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}

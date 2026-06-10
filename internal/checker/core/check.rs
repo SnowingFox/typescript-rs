@@ -13929,7 +13929,9 @@ impl Checker {
         self.check_grammar_for_in_or_for_of_statement(program, node);
         let (initializer, expression, statement) = (d.initializer, d.expression, d.statement);
         let expression_type = self.check_expression(program, expression);
-        let right_type = self.check_non_null_type(program, expression_type, expression);
+        // Go silently strips null/undefined from the iterated type
+        // (`getNonNullableTypeIfNeeded`), without a possibly-null diagnostic.
+        let right_type = self.get_non_null_type(expression_type);
         if program.arena().kind(initializer) == Kind::VariableDeclarationList {
             let declarations = match program.arena().data(initializer) {
                 NodeData::VariableDeclarationList(l) => l.declarations.nodes.clone(),

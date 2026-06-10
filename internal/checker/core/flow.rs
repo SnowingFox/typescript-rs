@@ -466,7 +466,14 @@ impl Checker {
                 None => ante_type,
             }
         } else if fnode.flags.contains(FlowFlags::ASSIGNMENT) {
-            match self.get_type_at_flow_assignment(program, reference, declared, fnode.node) {
+            match self.get_type_at_flow_assignment(
+                program,
+                reference,
+                declared,
+                fnode.node,
+                fnode.antecedent,
+                cache,
+            ) {
                 Some(t) => t,
                 None => match fnode.antecedent {
                     Some(a) => self.get_type_at_flow_node(program, reference, declared, a, cache),
@@ -2148,6 +2155,8 @@ impl Checker {
         reference: NodeId,
         declared: TypeId,
         node: Option<NodeId>,
+        antecedent: Option<FlowNodeId>,
+        cache: &mut FxHashMap<FlowNodeId, TypeId>,
     ) -> Option<TypeId> {
         let node = node?;
         if self.is_matching_reference(program, reference, node) {
@@ -2161,11 +2170,80 @@ impl Checker {
             }
             return Some(t);
         }
+        // `for (const _ in ref)` acts as a non-null on `ref` (Go's
+        // `getTypeAtFlowAssignment` for-in arm).
+        if let Some(for_in) = self.enclosing_for_in_statement(program, node) {
+            let expr = match program.arena().data(for_in) {
+                NodeData::ForInOrOfStatement(d) => d.expression,
+                _ => return None,
+            };
+            if self.is_matching_reference(program, reference, expr)
+                || self.optional_chain_contains_reference(program, expr, reference)
+            {
+                let ante_type = match antecedent {
+                    Some(a) => {
+                        self.get_type_at_flow_node(program, reference, declared, a, cache)
+                    }
+                    None => declared,
+                };
+                return Some(self.get_non_null_type(ante_type));
+            }
+        }
         // DEFER(phase-4-checker-4u): `containsMatchingReference` for a dotted-name
-        // left-hand part (`x.y` assignment seen while narrowing `x.y.z`) and the
-        // `for (const _ in ref)` non-null effect. blocked-by: property/element
-        // access reference matching.
+        // left-hand part (`x.y` assignment seen while narrowing `x.y.z`).
+        // blocked-by: property/element access reference matching.
         None
+    }
+
+    // Returns the enclosing `for-in` when `node` is its loop-variable declaration.
+    // Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in parent walk)
+    fn enclosing_for_in_statement(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> Option<NodeId> {
+        let arena = program.arena();
+        if matches!(arena.data(node), NodeData::VariableDeclaration(_)) {
+            let parent = arena.parent(node)?;
+            let grandparent = arena.parent(parent)?;
+            if arena.kind(grandparent) == Kind::ForInStatement {
+                return Some(grandparent);
+            }
+        }
+        if matches!(arena.data(node), NodeData::BindingElement(_)) {
+            let mut cur = arena.parent(node);
+            while let Some(n) = cur {
+                if arena.kind(n) == Kind::ForInStatement {
+                    let init = match arena.data(n) {
+                        NodeData::ForInOrOfStatement(d) => d.initializer,
+                        _ => return None,
+                    };
+                    if self.is_ancestor_of(arena, init, node) {
+                        return Some(n);
+                    }
+                    return None;
+                }
+                cur = arena.parent(n);
+            }
+        }
+        None
+    }
+
+    // Reports whether `ancestor` is on the parent chain of `descendant`.
+    fn is_ancestor_of(
+        &self,
+        arena: &tsgo_ast::NodeArena,
+        ancestor: NodeId,
+        descendant: NodeId,
+    ) -> bool {
+        let mut cur = Some(descendant);
+        while let Some(n) = cur {
+            if n == ancestor {
+                return true;
+            }
+            cur = arena.parent(n);
+        }
+        false
     }
 
     // Returns the type assigned to `node` (an assignment target). 4t subset:

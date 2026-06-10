@@ -498,6 +498,63 @@ fn narrow_type_by_type_predicate_narrows_matching_reference() {
     assert_eq!(narrowed, c.string_type());
 }
 
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (for-in non-null)
+#[test]
+fn flow_for_in_non_null_narrows_nullable_object() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { [key: string]: number } | null;\n\
+         for (const _ in obj) {\n  const o: { [key: string]: number } = obj;\n}",
+    );
+    let arena = p.arena();
+    let for_stmt = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes[1],
+        _ => panic!("source file"),
+    };
+    let body = match arena.data(for_stmt) {
+        NodeData::ForInOrOfStatement(d) => d.statement,
+        _ => panic!("for-in"),
+    };
+    let body_stmt = match arena.data(body) {
+        NodeData::Block(d) => d.list.nodes[0],
+        _ => panic!("block"),
+    };
+    let init = match arena.data(body_stmt) {
+        NodeData::VariableStatement(d) => {
+            let list = d.declaration_list;
+            let decl = match arena.data(list) {
+                NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+                _ => panic!("vdl"),
+            };
+            match arena.data(decl) {
+                NodeData::VariableDeclaration(d) => d.initializer.expect("init"),
+                _ => panic!("decl"),
+            }
+        }
+        _ => panic!("var stmt"),
+    };
+    let usage = match arena.data(init) {
+        NodeData::Identifier(_) => init,
+        _ => panic!("obj id"),
+    };
+    assert!(
+        p.flow_node_of(usage).is_some(),
+        "for-in body reference should have a flow node"
+    );
+    let p = std::rc::Rc::new(p);
+    let view = std::rc::Rc::clone(&p);
+    let mut c = Checker::new_checker(p);
+    let declared = get_declared_type_of_symbol(&mut c, view.as_ref(), sym(view.as_ref(), "obj"), None);
+    let narrowed = c.get_flow_type_of_reference(view.as_ref(), usage, declared);
+    assert!(
+        !c.get_type(narrowed)
+            .flags()
+            .intersects(crate::core::types::TypeFlags::NULLABLE),
+        "expected non-null obj in for-in body, got {:?}",
+        narrowed
+    );
+}
+
 // Go: internal/checker/flow.go:Checker.narrowTypeByTruthiness (optional-chain containment)
 #[test]
 fn flow_optional_chain_truthiness_narrows_object() {
