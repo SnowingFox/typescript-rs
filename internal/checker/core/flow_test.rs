@@ -555,6 +555,46 @@ fn flow_for_in_non_null_narrows_nullable_object() {
     );
 }
 
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn flow_parent_assignment_resets_child_property() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | string };\n\
+         if (typeof obj.a === \"number\") {\n\
+           obj = { a: \"hello\" };\n\
+           obj.a;\n\
+         }",
+    );
+    let arena = p.arena();
+    let if_stmt = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes[1],
+        _ => panic!("source file"),
+    };
+    let then_stmt = match arena.data(if_stmt) {
+        NodeData::IfStatement(d) => d.then_statement,
+        _ => panic!("if"),
+    };
+    let block_stmts = match arena.data(then_stmt) {
+        NodeData::Block(d) => d.list.nodes.clone(),
+        _ => panic!("block"),
+    };
+    let usage = match arena.data(block_stmts[1]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expr stmt"),
+    };
+    let mut c = Checker::new();
+    let number = c.number_type();
+    let string = c.string_type();
+    let declared = c.get_union_type(&[number, string]);
+    let narrowed = c.get_flow_type_of_reference(&p, usage, declared);
+    assert_eq!(
+        narrowed, declared,
+        "parent assignment must reset child property to declared union, got {:?}",
+        narrowed
+    );
+}
+
 // Go: internal/checker/flow.go:Checker.narrowTypeByTruthiness (optional-chain containment)
 #[test]
 fn flow_optional_chain_truthiness_narrows_object() {

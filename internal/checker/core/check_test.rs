@@ -28112,3 +28112,252 @@ fn for_in_nullable_wrong_member_in_body_reports_2339() {
     assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
     assert_eq!(diags[0].code, 2339);
 }
+
+// ---- T1-E batch 134: dotted-name partial assignment flow (containsMatchingReference) ----
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn parent_object_assignment_prevents_stale_guard_narrow_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | string };\n\
+         if (typeof obj.a === \"number\") {\n\
+           obj = { a: \"hello\" };\n\
+           const n: number = obj.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn parent_object_assignment_stale_string_guard_number_assign_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | string };\n\
+         if (typeof obj.a === \"string\") {\n\
+           obj = { a: 42 };\n\
+           const s: string = obj.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn parent_object_assignment_child_union_target_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | string };\n\
+         if (typeof obj.a === \"number\") {\n\
+           obj = { a: \"hello\" };\n\
+           const v: number | string = obj.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (direct match contrast)
+#[test]
+fn direct_property_assignment_still_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | string };\n\
+         obj.a = \"hello\";\n\
+         const s: string = obj.a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn parent_property_assignment_grandchild_stale_narrow_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Inner = { b: number };\n\
+         type Other = { c: string };\n\
+         declare let obj: { a: Inner | Other };\n\
+         if (\"b\" in obj.a) {\n\
+           obj.a = { b: 1 };\n\
+           const s: string = obj.a.b;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn parent_assignment_does_not_affect_unrelated_property_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | string; b: number };\n\
+         obj = { a: \"hello\", b: 1 };\n\
+         const n: number = obj.b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn parent_object_assignment_class_union_child_stale_narrow_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class A { a = 1; }\n\
+         class B { a = \"s\"; }\n\
+         declare let obj: A | B;\n\
+         if (obj instanceof A) {\n\
+           obj = new B();\n\
+           const n: number = obj.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn parent_object_assignment_after_equality_guard_child_stale_narrow_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare let obj: A | B;\n\
+         if (obj.kind === \"a\") {\n\
+           obj = { kind: \"b\", b: \"s\" };\n\
+           const n: number = obj.b;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn parent_object_assignment_triple_nested_stale_narrow_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: { b: { c: number | string } } };\n\
+         if (typeof obj.a.b.c === \"number\") {\n\
+           obj.a = { b: { c: \"s\" } };\n\
+           const n: number = obj.a.b.c;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn parent_property_assignment_direct_child_still_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Inner = { b: number };\n\
+         type Other = { c: string };\n\
+         declare let obj: { a: Inner | Other };\n\
+         obj.a = { b: 1 };\n\
+         const n: number = obj.a.b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn sequential_parent_then_direct_property_assignment_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | string };\n\
+         if (typeof obj.a === \"number\") {\n\
+           obj = { a: \"hello\" };\n\
+           obj.a = \"world\";\n\
+           const s: string = obj.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn parent_assignment_nullable_child_union_target_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | null } | null;\n\
+         if (obj !== null && obj.a !== null) {\n\
+           obj = { a: 1 };\n\
+           const v: number | null = obj.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn parent_assignment_outside_guard_child_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | string };\n\
+         if (typeof obj.a === \"number\") {\n\
+           obj = { a: \"hello\" };\n\
+         }\n\
+         const n: number = obj.a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn direct_property_assignment_wrong_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | string };\n\
+         obj.a = \"hello\";\n\
+         const n: number = obj.a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}

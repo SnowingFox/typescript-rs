@@ -2189,10 +2189,43 @@ impl Checker {
                 return Some(self.get_non_null_type(ante_type));
             }
         }
-        // DEFER(phase-4-checker-4u): `containsMatchingReference` for a dotted-name
-        // left-hand part (`x.y` assignment seen while narrowing `x.y.z`).
-        // blocked-by: property/element access reference matching.
+        // A dotted-name assignment to a prefix of `reference` (e.g. `obj.a = …`
+        // while narrowing `obj.a.b`) must not apply assignment narrowing to the
+        // longer reference — return the declared type instead.
+        // Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+        if self.contains_matching_reference(program, reference, node) {
+            // DEFER(phase-4-checker-4u): unreachable assignments yield `never`.
+            // blocked-by: `unreachableNeverType`.
+            return Some(declared);
+        }
         None
+    }
+
+    // Reports whether `target` is a prefix access chain of `source` (e.g.
+    // `source` = `obj.a.b`, `target` = `obj.a`).
+    // Go: internal/checker/flow.go:Checker.containsMatchingReference
+    fn contains_matching_reference(
+        &self,
+        program: &dyn BoundProgram,
+        source: NodeId,
+        target: NodeId,
+    ) -> bool {
+        let arena = program.arena();
+        let mut source = source;
+        while matches!(
+            arena.kind(source),
+            Kind::PropertyAccessExpression | Kind::ElementAccessExpression
+        ) {
+            source = match arena.data(source) {
+                NodeData::PropertyAccessExpression(d) => d.expression,
+                NodeData::ElementAccessExpression(d) => d.expression,
+                _ => break,
+            };
+            if self.is_matching_reference(program, source, target) {
+                return true;
+            }
+        }
+        false
     }
 
     // Returns the enclosing `for-in` when `node` is its loop-variable declaration.
