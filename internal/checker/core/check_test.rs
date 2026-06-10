@@ -27420,3 +27420,242 @@ fn switch_optional_chain_discriminant_circle_case_wrong_member_reports_2339() {
     assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
     assert_eq!(diags[0].code, 2339);
 }
+
+// ---- T1-E batch 131: loop flow fixpoint narrowing ----
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (while typeof body)
+#[test]
+fn loop_while_typeof_string_body_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         while (typeof x === \"string\") {\n  const s: string = x;\n  break;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (reassignment exit)
+#[test]
+fn loop_while_typeof_reassignment_exit_narrows_to_number_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         while (typeof x === \"string\") {\n  x = 1;\n}\n\
+         const n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (wrong body assign)
+#[test]
+fn loop_while_typeof_body_wrong_assign_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         while (typeof x === \"string\") {\n  const n: number = x;\n  break;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (while false)
+#[test]
+fn loop_while_false_preserves_pre_loop_type_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         x = \"s\";\n\
+         while (false) {\n  x = 1;\n}\n\
+         const s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (do-while typeof)
+#[test]
+fn loop_do_while_typeof_body_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         do {\n  if (typeof x === \"string\") {\n    const s: string = x;\n  }\n  break;\n} while (typeof x === \"number\");",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (for condition)
+#[test]
+fn loop_for_typeof_condition_body_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         for (; typeof x === \"string\"; ) {\n  const s: string = x;\n  break;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (truthiness nullable)
+#[test]
+fn loop_while_truthiness_narrows_nullable_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | null;\n\
+         while (x) {\n  const s: string = x;\n  break;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (exit wrong type)
+#[test]
+fn loop_while_typeof_exit_wrong_assign_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         while (typeof x === \"string\") {\n  x = 1;\n}\n\
+         const s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (assignment inside loop)
+#[test]
+fn loop_while_assignment_narrowing_inside_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         while (true) {\n  x = \"a\";\n  const s: string = x;\n  break;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (nested while)
+#[test]
+fn loop_nested_while_typeof_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         while (true) {\n  while (typeof x === \"string\") {\n    const s: string = x;\n    break;\n  }\n  break;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (instanceof in loop)
+#[test]
+fn loop_while_instanceof_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string;\n\
+         while (x instanceof C) {\n  const c: C = x;\n  break;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (discriminant in loop)
+#[test]
+fn loop_while_discriminant_property_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare let v: A | B;\n\
+         while (v.kind === \"a\") {\n  const n: number = v.a;\n  break;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (continue path)
+#[test]
+fn loop_while_continue_preserves_narrowing_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         declare const skip: boolean;\n\
+         while (typeof x === \"string\") {\n  if (skip) {\n    continue;\n  }\n  const s: string = x;\n  break;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (for-of not loop label)
+#[test]
+fn loop_for_increment_typeof_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         for (let i = 0; typeof x === \"string\"; i++) {\n  const s: string = x;\n  break;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (union after single iteration)
+#[test]
+fn loop_while_single_iteration_union_after_exit_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         x = \"a\";\n\
+         while (typeof x === \"string\") {\n  x = 1;\n  break;\n}\n\
+         const y: string | number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel (negated typeof after loop)
+#[test]
+fn loop_while_typeof_exit_narrows_complement_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\n\
+         while (typeof x === \"string\") {\n  x = 1;\n}\n\
+         const n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

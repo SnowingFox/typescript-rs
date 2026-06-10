@@ -22,6 +22,15 @@ use super::type_facts::TypeFacts;
 use super::types::{LiteralValue, ObjectFlags, TypeFlags, TypeId};
 use super::Checker;
 
+/// In-progress loop-junction analysis entry (Go's `FlowLoopInfo`).
+// Go: internal/checker/checker.go:FlowLoopInfo
+#[derive(Debug)]
+pub(crate) struct FlowLoopStackEntry {
+    pub flow: FlowNodeId,
+    pub reference: NodeId,
+    pub types: Vec<TypeId>,
+}
+
 /// Metadata for a user-defined type predicate used during flow narrowing (Go's
 /// `TypePredicate` subset).
 ///
@@ -472,21 +481,10 @@ impl Checker {
                 }
                 None => ante_type,
             }
-        } else if fnode.flags.intersects(FlowFlags::LABEL) {
-            let mut types: Vec<TypeId> = Vec::new();
-            let mut list = fnode.antecedents;
-            while let Some(lid) = list {
-                let cell = program.flow_list(lid);
-                if let Some(a) = cell.flow {
-                    types.push(self.get_type_at_flow_node(program, reference, declared, a, cache));
-                }
-                list = cell.next;
-            }
-            if types.is_empty() {
-                declared
-            } else {
-                self.get_union_type(&types)
-            }
+        } else if fnode.flags.contains(FlowFlags::LOOP_LABEL) {
+            self.get_type_at_flow_loop_label(program, reference, declared, flow, cache)
+        } else if fnode.flags.contains(FlowFlags::BRANCH_LABEL) {
+            self.get_type_at_flow_branch_label(program, reference, declared, flow, cache)
         } else if fnode.flags.contains(FlowFlags::CALL) {
             self.get_type_at_flow_call(program, reference, declared, flow, cache)
         } else {
@@ -497,6 +495,124 @@ impl Checker {
             }
         };
         cache.insert(flow, result);
+        result
+    }
+
+    // Unions the types along each antecedent of a non-looping junction.
+    // Go: internal/checker/flow.go:Checker.getTypeAtFlowBranchLabel(1225) (subset)
+    fn get_type_at_flow_branch_label(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        declared: TypeId,
+        flow: FlowNodeId,
+        cache: &mut FxHashMap<FlowNodeId, TypeId>,
+    ) -> TypeId {
+        let fnode = program.flow_node(flow);
+        let mut types: Vec<TypeId> = Vec::new();
+        let mut list = fnode.antecedents;
+        while let Some(lid) = list {
+            let cell = program.flow_list(lid);
+            if let Some(a) = cell.flow {
+                let t = self.get_type_at_flow_node(program, reference, declared, a, cache);
+                if t == declared {
+                    return declared;
+                }
+                if !types.contains(&t) {
+                    types.push(t);
+                }
+            }
+            list = cell.next;
+        }
+        if types.is_empty() {
+            declared
+        } else {
+            self.get_union_type(&types)
+        }
+    }
+
+    // Fixpoint analysis at a loop junction (while/do/for back edges).
+    // Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel(1297)
+    fn get_type_at_flow_loop_label(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        declared: TypeId,
+        flow: FlowNodeId,
+        cache: &mut FxHashMap<FlowNodeId, TypeId>,
+    ) -> TypeId {
+        let fnode = program.flow_node(flow);
+        let mut antecedent_count = 0u32;
+        let mut single_antecedent = None;
+        let mut list = fnode.antecedents;
+        while let Some(lid) = list {
+            let cell = program.flow_list(lid);
+            if cell.flow.is_some() {
+                antecedent_count += 1;
+                single_antecedent = cell.flow;
+            }
+            list = cell.next;
+        }
+        if antecedent_count <= 1 {
+            return match single_antecedent {
+                Some(a) => self.get_type_at_flow_node(program, reference, declared, a, cache),
+                None => declared,
+            };
+        }
+
+        let key = (flow, reference);
+        if let Some(&cached) = self.flow_loop_cache.get(&key) {
+            return cached;
+        }
+        if let Some(types) = self
+            .flow_loop_stack
+            .iter()
+            .find(|entry| entry.flow == flow && entry.reference == reference && !entry.types.is_empty())
+            .map(|entry| entry.types.clone())
+        {
+            return self.get_union_type(&types);
+        }
+
+        let mut antecedent_types: Vec<TypeId> = Vec::new();
+        let mut first = true;
+        list = fnode.antecedents;
+        while let Some(lid) = list {
+            let cell = program.flow_list(lid);
+            if let Some(a) = cell.flow {
+                let flow_type = if first {
+                    first = false;
+                    self.get_type_at_flow_node(program, reference, declared, a, cache)
+                } else {
+                    self.flow_loop_stack.push(FlowLoopStackEntry {
+                        flow,
+                        reference,
+                        types: antecedent_types.clone(),
+                    });
+                    let t = self.get_type_at_flow_node(program, reference, declared, a, cache);
+                    self.flow_loop_stack.pop();
+                    if let Some(&cached) = self.flow_loop_cache.get(&key) {
+                        return cached;
+                    }
+                    t
+                };
+                if flow_type == declared {
+                    return declared;
+                }
+                if !antecedent_types.contains(&flow_type) {
+                    antecedent_types.push(flow_type);
+                }
+            }
+            list = cell.next;
+        }
+
+        let result = if antecedent_types.is_empty() {
+            declared
+        } else if antecedent_types.len() == 1 {
+            antecedent_types[0]
+        } else {
+            self.get_union_type(&antecedent_types)
+        };
+        self.flow_loop_cache.insert(key, result);
         result
     }
 

@@ -39,6 +39,7 @@ use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use tsgo_ast::flow::FlowNodeId;
 use tsgo_ast::{CheckFlags, NodeId, Symbol, SymbolId, SymbolTable};
 use tsgo_core::compileroptions::CompilerOptions;
 use tsgo_core::tristate::Tristate;
@@ -428,6 +429,13 @@ pub struct Checker {
     /// (Go's `inlineLevel`; capped at 5).
     // Go: internal/checker/checker.go:Checker.inlineLevel
     flow_inline_level: u8,
+    /// Cached loop-junction flow types keyed by `(flow_node, reference)` (Go's
+    /// `flowLoopCache`).
+    // Go: internal/checker/checker.go:Checker.flowLoopCache
+    flow_loop_cache: FxHashMap<(FlowNodeId, NodeId), TypeId>,
+    /// In-progress loop-junction analysis stack (Go's `flowLoopStack`).
+    // Go: internal/checker/checker.go:Checker.flowLoopStack
+    flow_loop_stack: Vec<flow::FlowLoopStackEntry>,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -685,6 +693,8 @@ impl Checker {
             accessors_write_type_resolving: FxHashSet::default(),
             accessor_write_type_resolution_cyclic: false,
             flow_inline_level: 0,
+            flow_loop_cache: FxHashMap::default(),
+            flow_loop_stack: Vec::new(),
             any_type,
             auto_type,
             error_type,
