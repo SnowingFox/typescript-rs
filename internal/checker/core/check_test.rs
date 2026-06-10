@@ -25698,3 +25698,254 @@ fn in_guard_reversed_operand_nullable_union_narrows_no_diagnostics() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 124: extended instanceof flow narrowing ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (any -> instance)
+#[test]
+fn instanceof_guard_narrows_any_to_class_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: any;\n\
+         if (x instanceof C) {\n  const c: C = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (unknown -> instance)
+#[test]
+fn instanceof_guard_narrows_unknown_to_class_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: unknown;\n\
+         if (x instanceof C) {\n  const c: C = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (optional-chain LHS)
+#[test]
+fn instanceof_optional_chain_lhs_narrows_inner_value_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let wrapper: { val: C | string } | null;\n\
+         if (wrapper?.val instanceof C) {\n  const c: C = wrapper.val;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (negated, property access)
+#[test]
+fn negated_instanceof_property_access_narrows_to_string_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let wrapper: { val: C | string };\n\
+         if (!(wrapper.val instanceof C)) {\n  const s: string = wrapper.val;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getReferenceCandidate (comma operand)
+#[test]
+fn comma_operand_instanceof_guard_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string;\n\
+         let n = 0;\n\
+         if ((n = 1, x) instanceof C) {\n  const c: C = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (negated filters derived)
+#[test]
+fn negated_instanceof_guard_filters_subclass_leaves_primitives_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class A {}\n\
+         class B extends A {}\n\
+         declare let x: B | string;\n\
+         if (!(x instanceof A)) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (if-else-if object union)
+#[test]
+fn instanceof_if_else_if_object_union_narrows_both_branches_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class A {}\n\
+         class B {}\n\
+         class D {}\n\
+         declare let x: A | B | D;\n\
+         if (x instanceof A) {\n  const a: A = x;\n} else if (x instanceof B) {\n  const b: B = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (any + global Object)
+#[test]
+fn any_instanceof_object_does_not_narrow_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare class Object {}\n\
+         declare let x: any;\n\
+         if (x instanceof Object) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOnTrue (negated instanceof)
+#[test]
+fn switch_true_negated_instanceof_narrows_else_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string;\n\
+         switch (true) {\n  case !(x instanceof C): {\n    const s: string = x;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (nullable + truthiness chain)
+#[test]
+fn instanceof_nullable_union_with_truthiness_chain_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string | null;\n\
+         if (x && x instanceof C) {\n  const c: C = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (negated, wrong assign)
+#[test]
+fn negated_instanceof_guard_else_wrong_assign_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string;\n\
+         if (!(x instanceof C)) {\n  const c: C = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (then branch wrong assign)
+#[test]
+fn instanceof_guard_then_wrong_assign_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string;\n\
+         if (x instanceof C) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (parenthesized)
+#[test]
+fn parenthesized_instanceof_guard_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string;\n\
+         if ((x instanceof C)) {\n  const c: C = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (nullable union)
+#[test]
+fn instanceof_guard_with_nullable_union_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string | null;\n\
+         if (x !== null && x instanceof C) {\n  const c: C = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (const alias)
+#[test]
+fn const_alias_instanceof_guard_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let x: C | string;\n\
+         const isC = x instanceof C;\n\
+         if (isC) {\n  const c: C = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByInstanceof (non-matching variable)
+#[test]
+fn instanceof_guard_on_other_variable_does_not_narrow_target() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare let a: C | string;\n\
+         declare let b: C | string;\n\
+         if (a instanceof C) {\n  const s: string = b;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}

@@ -3359,11 +3359,12 @@ impl Checker {
                     return self.error_type;
                 }
             }
+            let flow_type = self.get_flow_type_of_reference(program, node, t);
             return self.finish_optional_property_access(
                 program,
                 node,
                 optional_chain_was_short_circuited,
-                t,
+                flow_type,
             );
         }
         if let Some(info) = get_applicable_index_info_for_name(self, program, apparent, &name) {

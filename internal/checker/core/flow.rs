@@ -1984,20 +1984,87 @@ impl Checker {
         false
     }
 
-    // Reports whether two reference nodes denote the same declaration (4f: only
-    // identifiers, compared by resolved value symbol).
-    // Go: internal/checker/flow.go:Checker.isMatchingReference (subset)
-    fn is_matching_reference(&self, program: &dyn BoundProgram, a: NodeId, b: NodeId) -> bool {
+    // Reports whether two reference nodes denote the same declaration.
+    // Go: internal/checker/flow.go:Checker.isMatchingReference
+    fn is_matching_reference(&self, program: &dyn BoundProgram, source: NodeId, target: NodeId) -> bool {
         let arena = program.arena();
-        if arena.kind(a) != Kind::Identifier || arena.kind(b) != Kind::Identifier {
-            return false;
+        match arena.kind(target) {
+            Kind::ParenthesizedExpression | Kind::NonNullExpression => {
+                let expr = match arena.data(target) {
+                    NodeData::ParenthesizedExpression(d) => d.expression,
+                    NodeData::NonNullExpression(d) => d.expression,
+                    _ => return false,
+                };
+                return self.is_matching_reference(program, source, expr);
+            }
+            Kind::BinaryExpression => {
+                let NodeData::BinaryExpression(d) = arena.data(target) else {
+                    return false;
+                };
+                let op = arena.kind(d.operator_token);
+                if matches!(
+                    op,
+                    Kind::EqualsToken
+                        | Kind::BarBarEqualsToken
+                        | Kind::AmpersandAmpersandEqualsToken
+                        | Kind::QuestionQuestionEqualsToken
+                ) {
+                    return self.is_matching_reference(program, source, d.left);
+                }
+                if op == Kind::CommaToken {
+                    return self.is_matching_reference(program, source, d.right);
+                }
+            }
+            _ => {}
         }
-        if arena.text(a) != arena.text(b) {
-            return false;
+        match arena.kind(source) {
+            Kind::Identifier => {
+                if arena.kind(target) != Kind::Identifier {
+                    return false;
+                }
+                if arena.text(source) != arena.text(target) {
+                    return false;
+                }
+                let sa = resolve_name(program, source, arena.text(source), SymbolFlags::VALUE, false, None);
+                let sb = resolve_name(program, target, arena.text(target), SymbolFlags::VALUE, false, None);
+                sa.is_some() && sa == sb
+            }
+            Kind::PropertyAccessExpression | Kind::ElementAccessExpression => {
+                let Some(source_name) = self.get_accessed_property_name(program, source) else {
+                    return false;
+                };
+                if is_access_expression(program, target) {
+                    let Some(target_name) = self.get_accessed_property_name(program, target) else {
+                        return false;
+                    };
+                    if target_name != source_name {
+                        return false;
+                    }
+                    let source_obj = match arena.data(source) {
+                        NodeData::PropertyAccessExpression(d) => d.expression,
+                        NodeData::ElementAccessExpression(d) => d.expression,
+                        _ => return false,
+                    };
+                    let target_obj = match arena.data(target) {
+                        NodeData::PropertyAccessExpression(d) => d.expression,
+                        NodeData::ElementAccessExpression(d) => d.expression,
+                        _ => return false,
+                    };
+                    return self.is_matching_reference(program, source_obj, target_obj);
+                }
+                false
+            }
+            Kind::BinaryExpression => {
+                let NodeData::BinaryExpression(d) = arena.data(source) else {
+                    return false;
+                };
+                if arena.kind(d.operator_token) == Kind::CommaToken {
+                    return self.is_matching_reference(program, d.right, target);
+                }
+                false
+            }
+            _ => false,
         }
-        let sa = resolve_name(program, a, arena.text(a), SymbolFlags::VALUE, false, None);
-        let sb = resolve_name(program, b, arena.text(b), SymbolFlags::VALUE, false, None);
-        sa.is_some() && sa == sb
     }
 
     /// Returns the internal member name a well-known `Symbol.<name>` computed
@@ -2216,11 +2283,18 @@ impl Checker {
         assume_true: bool,
     ) -> TypeId {
         let arena = program.arena();
-        let (left, right) = match arena.data(expr) {
+        let (left_raw, right) = match arena.data(expr) {
             NodeData::BinaryExpression(d) => (d.left, d.right),
             _ => return t,
         };
+        let left = get_reference_candidate(program, left_raw);
         if !self.is_matching_reference(program, reference, left) {
+            if assume_true
+                && self.strict_null_checks()
+                && self.optional_chain_contains_reference(program, left, reference)
+            {
+                return self.get_non_null_type(t);
+            }
             return t;
         }
         let right_type = self.check_expression(program, right);
@@ -2231,6 +2305,13 @@ impl Checker {
             return t;
         }
         let instance_type = self.get_instance_type(program, right_type);
+        if self.get_type(t).flags().intersects(TypeFlags::ANY) {
+            if self.get_global_type("Object") == Some(instance_type)
+                || self.get_global_type("Function") == Some(instance_type)
+            {
+                return t;
+            }
+        }
         self.get_narrowed_type_derived(program, t, instance_type, assume_true)
     }
 
@@ -2421,6 +2502,36 @@ impl Checker {
             vec![t]
         }
     }
+}
+
+// Unwraps parenthesized/assignment/comma forms to the reference-bearing node.
+// Go: internal/checker/flow.go:Checker.getReferenceCandidate
+fn get_reference_candidate(program: &dyn BoundProgram, mut node: NodeId) -> NodeId {
+    loop {
+        match program.arena().kind(node) {
+            Kind::ParenthesizedExpression => {
+                node = match program.arena().data(node) {
+                    NodeData::ParenthesizedExpression(d) => d.expression,
+                    _ => break,
+                };
+            }
+            Kind::BinaryExpression => {
+                let NodeData::BinaryExpression(d) = program.arena().data(node) else {
+                    break;
+                };
+                match program.arena().kind(d.operator_token) {
+                    Kind::EqualsToken
+                    | Kind::BarBarEqualsToken
+                    | Kind::AmpersandAmpersandEqualsToken
+                    | Kind::QuestionQuestionEqualsToken => node = d.left,
+                    Kind::CommaToken => node = d.right,
+                    _ => break,
+                }
+            }
+            _ => break,
+        }
+    }
+    node
 }
 
 // Strips outer parenthesized wrappers from `node` (Go's `SkipParentheses` subset).
