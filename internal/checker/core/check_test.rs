@@ -27198,3 +27198,225 @@ fn switch_typeof_discriminant_property_three_way_default_narrows_no_diagnostics(
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 130: switch optional-chain containment flow narrowing ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (`o?.foo`)
+#[test]
+fn switch_optional_chain_string_case_narrows_object_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let o: { foo: string | number | undefined } | undefined;\n\
+         switch (o?.foo) {\n  case \"abc\": { o.foo; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (numeric case)
+#[test]
+fn switch_optional_chain_number_case_narrows_object_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let o: { foo: string | number | undefined } | undefined;\n\
+         switch (o?.foo) {\n  case 42: { o.foo; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (`undefined` case)
+#[test]
+fn switch_optional_chain_undefined_case_reports_18048() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let o: { foo: string | number | undefined } | undefined;\n\
+         switch (o?.foo) {\n  case undefined: { o.foo; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 18048, got {diags:?}");
+    assert_eq!(diags[0].code, 18048);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (default)
+#[test]
+fn switch_optional_chain_default_case_reports_18048() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let o: { foo: string | number | undefined } | undefined;\n\
+         switch (o?.foo) {\n  case \"abc\": break;\n  default: { o.foo; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 18048, got {diags:?}");
+    assert_eq!(diags[0].code, 18048);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (`typeof o?.foo`)
+#[test]
+fn switch_typeof_optional_chain_string_case_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let o: { foo: string | number | undefined } | undefined;\n\
+         switch (typeof o?.foo) {\n  case \"string\": { o.foo; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (`typeof` number case)
+#[test]
+fn switch_typeof_optional_chain_number_case_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let o: { foo: string | number | undefined } | undefined;\n\
+         switch (typeof o?.foo) {\n  case \"number\": { o.foo; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (`typeof` `"undefined"` witness)
+#[test]
+fn switch_typeof_optional_chain_undefined_witness_reports_18048() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let o: { foo: string | number | undefined } | undefined;\n\
+         switch (typeof o?.foo) {\n  case \"undefined\": { o.foo; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 18048, got {diags:?}");
+    assert_eq!(diags[0].code, 18048);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (`typeof` default)
+#[test]
+fn switch_typeof_optional_chain_default_reports_18048() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let o: { foo: string | number | undefined } | undefined;\n\
+         switch (typeof o?.foo) {\n  case \"string\": break;\n  default: { o.foo; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 18048, got {diags:?}");
+    assert_eq!(diags[0].code, 18048);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment + discriminant property
+#[test]
+fn switch_optional_chain_discriminant_circle_case_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Shape = { type: \"rectangle\"; width: number; height: number } | { type: \"circle\"; radius: number };\n\
+         declare let shape: Shape | undefined;\n\
+         switch (shape?.type) {\n  case \"circle\": { const r: number = shape.radius; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment + discriminant property
+#[test]
+fn switch_optional_chain_discriminant_rectangle_case_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Shape = { type: \"rectangle\"; width: number; height: number } | { type: \"circle\"; radius: number };\n\
+         declare let shape: Shape | undefined;\n\
+         switch (shape?.type) {\n  case \"rectangle\": { const w: number = shape.width; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (object assign)
+#[test]
+fn switch_optional_chain_string_case_assign_object_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let o: { foo: string | number | undefined } | undefined;\n\
+         switch (o?.foo) {\n  case \"abc\": {\n    const x: { foo: string | number | undefined } = o;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (fall-through cases)
+#[test]
+fn switch_optional_chain_fallthrough_cases_narrow_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let o: { foo: string | number | undefined } | undefined;\n\
+         switch (o?.foo) {\n  case \"a\":\n  case \"b\": { o.foo; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (wrong assign in narrowed branch)
+#[test]
+fn switch_optional_chain_string_case_wrong_assign_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let o: { foo: string | number | undefined } | undefined;\n\
+         switch (o?.foo) {\n  case \"abc\": {\n    const x: null = o;\n    break;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (discriminant default)
+#[test]
+fn switch_optional_chain_discriminant_default_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Shape = { type: \"rectangle\"; width: number; height: number } | { type: \"circle\"; radius: number };\n\
+         declare let shape: Shape | undefined;\n\
+         switch (shape?.type) {\n  case \"circle\": break;\n  case \"rectangle\": break;\n  default: { shape; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment (discriminant wrong member)
+#[test]
+fn switch_optional_chain_discriminant_circle_case_wrong_member_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Shape = { type: \"rectangle\"; width: number; height: number } | { type: \"circle\"; radius: number };\n\
+         declare let shape: Shape | undefined;\n\
+         switch (shape?.type) {\n  case \"circle\": { const w: number = shape.width; break; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}

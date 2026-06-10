@@ -1518,16 +1518,94 @@ impl Checker {
                     &data,
                 );
             }
+        } else {
+            let expr_skipped = skip_parentheses(program, expr);
+            if program.arena().kind(expr_skipped) == Kind::TrueKeyword {
+                return self.narrow_type_by_switch_on_true(program, reference, t, &data);
+            }
         }
-        if let Some(access) = self.get_discriminant_property_access(program, reference, expr, t) {
-            return self.narrow_type_by_switch_on_discriminant_property(program, t, access, &data);
+        let mut narrowed = t;
+        if self.strict_null_checks() {
+            if self.optional_chain_contains_reference(program, expr, reference) {
+                narrowed = self.narrow_type_by_switch_optional_chain_containment(
+                    program,
+                    narrowed,
+                    &data,
+                    |this, ct| {
+                        !this
+                            .get_type(ct)
+                            .flags()
+                            .intersects(TypeFlags::UNDEFINED | TypeFlags::NEVER)
+                    },
+                );
+            } else if program.arena().kind(expr) == Kind::TypeOfExpression {
+                let NodeData::TypeOfExpression(d) = program.arena().data(expr) else {
+                    return narrowed;
+                };
+                if self.optional_chain_contains_reference(program, d.expression, reference) {
+                    narrowed = self.narrow_type_by_switch_optional_chain_containment(
+                        program,
+                        narrowed,
+                        &data,
+                        |this, ct| {
+                            let flags = this.get_type(ct).flags();
+                            if flags.contains(TypeFlags::NEVER) {
+                                return false;
+                            }
+                            if flags.contains(TypeFlags::STRING_LITERAL) {
+                                if let Some(LiteralValue::String(s)) =
+                                    this.get_type(ct).literal_value()
+                                {
+                                    if s == "undefined" {
+                                        return false;
+                                    }
+                                }
+                            }
+                            true
+                        },
+                    );
+                }
+            }
         }
-        let expr = skip_parentheses(program, expr);
-        if program.arena().kind(expr) == Kind::TrueKeyword {
-            return self.narrow_type_by_switch_on_true(program, reference, t, &data);
+        if let Some(access) =
+            self.get_discriminant_property_access(program, reference, expr, narrowed)
+        {
+            return self.narrow_type_by_switch_on_discriminant_property(
+                program,
+                narrowed,
+                access,
+                &data,
+            );
         }
-        // DEFER(phase-4-checker-4u): optional-chain containment in switch.
-        // blocked-by: optional-chain reference matching.
+        narrowed
+    }
+
+    // Narrows `t` at a `switch (obj?.prop)` clause when every case expression in
+    // the current clause range satisfies `clause_check` (Go's
+    // `narrowTypeBySwitchOptionalChainContainment`).
+    // Go: internal/checker/flow.go:Checker.narrowTypeBySwitchOptionalChainContainment(1195)
+    fn narrow_type_by_switch_optional_chain_containment(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        data: &FlowSwitchClauseData,
+        clause_check: impl Fn(&mut Checker, TypeId) -> bool,
+    ) -> TypeId {
+        let start = data.clause_start.max(0) as usize;
+        let end = data.clause_end.max(0) as usize;
+        if start == end {
+            return t;
+        }
+        let clause_types = self.get_switch_clause_types(program, data.switch_statement);
+        if end > clause_types.len() {
+            return t;
+        }
+        let every = clause_types[start..end]
+            .iter()
+            .all(|&ct| clause_check(self, ct));
+        if every {
+            return self.get_non_null_type(t);
+        }
         t
     }
 
