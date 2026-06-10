@@ -354,6 +354,57 @@ pub fn get_assignment_target_kind(arena: &NodeArena, node: NodeId) -> Assignment
     }
 }
 
+/// Reports whether `kind` is `+`, `-`, `*`, `/`, `%`, `**`, or a shift operator.
+// Go: internal/checker/utilities.go:isShiftOperatorOrHigher
+pub fn is_shift_operator_or_higher(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::LessThanLessThanToken
+            | Kind::GreaterThanGreaterThanToken
+            | Kind::GreaterThanGreaterThanGreaterThanToken
+            | Kind::PlusToken
+            | Kind::MinusToken
+            | Kind::AsteriskToken
+            | Kind::SlashToken
+            | Kind::PercentToken
+            | Kind::AsteriskAsteriskToken
+    )
+}
+
+/// Reports whether `assignment` is `target = (expr <shift-or-higher-op> expr)`.
+// Go: internal/checker/utilities.go:isCompoundLikeAssignment
+fn is_compound_like_assignment(arena: &NodeArena, assignment: NodeId) -> bool {
+    let NodeData::BinaryExpression(d) = arena.data(assignment) else {
+        return false;
+    };
+    let mut right = d.right;
+    while arena.kind(right) == Kind::ParenthesizedExpression {
+        let NodeData::ParenthesizedExpression(pd) = arena.data(right) else {
+            break;
+        };
+        right = pd.expression;
+    }
+    let NodeData::BinaryExpression(rd) = arena.data(right) else {
+        return false;
+    };
+    is_shift_operator_or_higher(arena.kind(rd.operator_token))
+}
+
+/// Reports whether `node` is the target of a compound-like `=` assignment.
+// Go: internal/checker/utilities.go:isInCompoundLikeAssignment
+pub fn is_in_compound_like_assignment(arena: &NodeArena, node: NodeId) -> bool {
+    let Some(target) = get_assignment_target(arena, node) else {
+        return false;
+    };
+    let NodeData::BinaryExpression(d) = arena.data(target) else {
+        return false;
+    };
+    if arena.kind(d.operator_token) != Kind::EqualsToken {
+        return false;
+    }
+    is_compound_like_assignment(arena, target)
+}
+
 /// Reports whether `kind` is `&&=`, `||=`, or `??=`.
 // Go: internal/ast/ast_generated.go:IsLogicalOrCoalescingAssignmentOperator
 pub fn is_logical_or_coalescing_assignment_operator(kind: Kind) -> bool {

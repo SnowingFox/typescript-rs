@@ -2664,6 +2664,24 @@ impl Checker {
                 // Go: internal/checker/checker.go:Checker.checkIdentifier -> markLinkedReferences
                 self.mark_symbol_referenced(symbol, SymbolFlags::VARIABLE);
                 let declared = get_type_of_symbol(self, program, symbol, globals);
+                // Variables in a definite-assignment position (`=`, `||=`, `for`-`of`)
+                // use the declared type, not the flow-narrowed type (Go only narrows
+                // variables in non-assignment positions, except compound `+=` targets).
+                // Go: internal/checker/checker.go:Checker.checkIdentifier(11063)
+                if program
+                    .symbol(symbol)
+                    .flags
+                    .intersects(SymbolFlags::VARIABLE)
+                    && assignment_kind == tsgo_ast::utilities::AssignmentKind::Definite
+                {
+                    if tsgo_ast::utilities::is_in_compound_like_assignment(
+                        program.arena(),
+                        node,
+                    ) {
+                        return self.get_base_type_of_literal_type(declared);
+                    }
+                    return declared;
+                }
                 self.get_flow_type_of_reference(program, node, declared)
             }
         }

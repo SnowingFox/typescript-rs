@@ -17,6 +17,7 @@ use tsgo_ast::{CheckFlags, Kind, NodeData, NodeFlags, NodeId, SymbolFlags, Symbo
 
 use super::program::BoundProgram;
 use super::symbols::resolve_name;
+use super::symbols_query::get_symbol_of_declaration;
 use super::type_facts::TypeFacts;
 use super::types::{LiteralValue, ObjectFlags, TypeFlags, TypeId};
 use super::Checker;
@@ -1754,10 +1755,24 @@ impl Checker {
     }
 
     // Returns the type assigned to `node` (an assignment target). 4t subset:
-    // the right-hand side of a binary `=` assignment.
-    // Go: internal/checker/flow.go:Checker.getAssignedType
+    // the right-hand side of a binary `=` assignment, or a variable/binding
+    // declaration initializer.
+    // Go: internal/checker/flow.go:Checker.getAssignedType / getInitialType
     fn get_assigned_type(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
         let arena = program.arena();
+        match arena.data(node) {
+            NodeData::VariableDeclaration(d) => {
+                if let Some(init) = d.initializer {
+                    return self.check_expression(program, init);
+                }
+            }
+            NodeData::BindingElement(d) => {
+                if let Some(init) = d.initializer {
+                    return self.check_expression(program, init);
+                }
+            }
+            _ => {}
+        }
         if let Some(parent) = arena.parent(node) {
             if arena.kind(parent) == Kind::BinaryExpression {
                 if let NodeData::BinaryExpression(d) = arena.data(parent) {
@@ -2019,15 +2034,41 @@ impl Checker {
         }
         match arena.kind(source) {
             Kind::Identifier => {
-                if arena.kind(target) != Kind::Identifier {
+                let Some(source_symbol) = resolve_name(
+                    program,
+                    source,
+                    arena.text(source),
+                    SymbolFlags::VALUE | SymbolFlags::EXPORT_VALUE,
+                    false,
+                    program.globals(),
+                ) else {
                     return false;
+                };
+                let source_symbol = export_symbol_of_value_if_exported(program, source_symbol);
+                if arena.kind(target) == Kind::Identifier {
+                    if arena.text(source) != arena.text(target) {
+                        return false;
+                    }
+                    let Some(target_symbol) = resolve_name(
+                        program,
+                        target,
+                        arena.text(target),
+                        SymbolFlags::VALUE | SymbolFlags::EXPORT_VALUE,
+                        false,
+                        program.globals(),
+                    ) else {
+                        return false;
+                    };
+                    return Some(source_symbol) == Some(target_symbol);
                 }
-                if arena.text(source) != arena.text(target) {
-                    return false;
+                if matches!(
+                    arena.kind(target),
+                    Kind::VariableDeclaration | Kind::BindingElement
+                ) {
+                    return get_symbol_of_declaration(program, target)
+                        .is_some_and(|decl_sym| decl_sym == source_symbol);
                 }
-                let sa = resolve_name(program, source, arena.text(source), SymbolFlags::VALUE, false, None);
-                let sb = resolve_name(program, target, arena.text(target), SymbolFlags::VALUE, false, None);
-                sa.is_some() && sa == sb
+                false
             }
             Kind::PropertyAccessExpression | Kind::ElementAccessExpression => {
                 let Some(source_name) = self.get_accessed_property_name(program, source) else {
@@ -2561,6 +2602,20 @@ fn is_boolean_literal(program: &dyn BoundProgram, node: NodeId) -> bool {
         program.arena().kind(node),
         Kind::TrueKeyword | Kind::FalseKeyword
     )
+}
+
+// Go: internal/checker/checker.go:Checker.getExportSymbolOfValueSymbolIfExported
+fn export_symbol_of_value_if_exported(
+    program: &dyn BoundProgram,
+    symbol: SymbolId,
+) -> SymbolId {
+    let s = program.symbol(symbol);
+    if s.flags.contains(SymbolFlags::EXPORT_VALUE) && !s.flags.contains(SymbolFlags::ALIAS) {
+        if let Some(export_symbol) = s.export_symbol {
+            return export_symbol;
+        }
+    }
+    symbol
 }
 
 fn is_access_expression(program: &dyn BoundProgram, node: NodeId) -> bool {

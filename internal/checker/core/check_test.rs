@@ -4582,23 +4582,15 @@ fn let_binding_widened_number_is_assignable_to_number() {
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
-// 4bd slice 3b tracer (genuine RED): an un-annotated `let` binding widens its
-// fresh boolean-literal initializer to `boolean` (the `BooleanLiteral` arm of
-// Go's `getWidenedLiteralType`). With `let b = true`, `b` is `boolean`, NOT
-// assignable to the literal target `true`, so `const c: true = b` reports
-// `2322`. Before the boolean arm landed the fresh `true` was not widened, so
-// `b` stayed assignable to `true`.
-//
-// The widened source `boolean` prints as its `false | true` union here: the
-// `false | true` => `boolean` collapse in `typeToString` (Go's
-// `formatUnionTypes`) is DEFER'd to 4j's printer, mirroring the existing
-// `check_element_access_boolean_index_reports_2538` test.
+// 4bd slice 3b: a `let` binding widened to `boolean` via `as boolean` is not
+// assignable to the literal target `true`. Flow narrowing from `let b = true`
+// alone keeps `b` at literal `true` (Go accepts `const c: true = b`).
 // Go: internal/checker/checker.go:Checker.getWidenedLiteralType(25346)
 #[test]
 fn let_binding_widens_boolean_literal_initializer_to_boolean() {
     let p = std::rc::Rc::new(StubProgram::parse_and_bind(
         "/a.ts",
-        "let b = true;\nconst c: true = b;",
+        "let b = true as boolean;\nconst c: true = b;",
     ));
     let root = p.root();
     let mut c = Checker::new_checker(p);
@@ -25948,4 +25940,221 @@ fn instanceof_guard_on_other_variable_does_not_narrow_target() {
     let diags = c.get_diagnostics(root);
     assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
     assert_eq!(diags[0].code, 2322);
+}
+
+// ---- T1-E batch 125: extended assignment flow narrowing ----
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (number constituent)
+#[test]
+fn assignment_flow_narrows_to_number_constituent_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string | number;\nx = 1;\nconst n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (sequential re-narrow)
+#[test]
+fn sequential_assignment_flow_renarrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string | number;\nx = \"s\";\nx = 1;\nconst n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getAssignmentReducedTypeWorker (class union)
+#[test]
+fn assignment_flow_narrows_class_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class A {}\nclass B {}\nlet x: A | B;\nx = new A();\nconst a: A = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getAssignmentReducedTypeWorker (literal union)
+#[test]
+fn assignment_flow_narrows_literal_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: \"a\" | \"b\";\nx = \"a\";\nconst a: \"a\" = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getAssignmentReducedTypeWorker (wrong constituent)
+#[test]
+fn assignment_flow_wrong_constituent_after_narrow_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string | number;\nx = \"s\";\nconst n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getAssignmentReducedTypeWorker (three-way union)
+#[test]
+fn assignment_flow_three_way_union_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string | number | boolean;\nx = true;\nconst b: boolean = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getAssignmentReducedTypeWorker (nullable union)
+#[test]
+fn assignment_flow_nullable_union_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string | null;\nx = \"s\";\nconst s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getAssignmentReducedTypeWorker (boolean literal union)
+#[test]
+fn assignment_flow_boolean_literal_union_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: true | false;\nx = true;\nconst t: true = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (non-union declared type)
+#[test]
+fn non_union_assignment_flow_keeps_declared_type_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string;\nx = \"hello\";\nconst s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (other variable unaffected)
+#[test]
+fn assignment_flow_does_not_affect_other_variable_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let a: string | number;\nlet b: string | number;\na = \"s\";\nconst n: number = b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (block-scoped assignment)
+#[test]
+fn assignment_flow_in_block_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string | number;\n{\n  x = \"s\";\n}\nconst s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getAssignmentReducedTypeWorker (discriminated union)
+#[test]
+fn assignment_flow_narrows_discriminated_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         let v: A | B;\n\
+         v = { kind: \"a\", a: 1 };\n\
+         const n: number = v.a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getAssignmentReducedTypeWorker (assigned union)
+#[test]
+fn assignment_flow_narrows_with_assigned_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string | number | boolean;\nconst y: string | number = \"s\";\nx = y;\nconst s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getAssignmentReducedTypeWorker (give-up heuristic)
+#[test]
+fn erroneous_assignment_does_not_narrow_union_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string | number;\nx = true as any;\nconst s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (after typeof guard)
+#[test]
+fn assignment_flow_combined_with_typeof_guard_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string | number;\nif (typeof x === \"string\") {\n  x = \"narrow\";\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getAssignmentReducedTypeWorker (null assignment)
+#[test]
+fn assignment_flow_null_assignment_narrows_nullable_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "let x: string | null;\nx = null;\nconst n: null = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
