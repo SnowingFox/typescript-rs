@@ -22914,3 +22914,400 @@ fn indexed_access_on_union_object_mismatch_reports_2322() {
     assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
     assert_eq!(diags[0].code, 2322);
 }
+
+// ---- T1-E batch 114: template literal patterns, generic constraints, intersection + rest ----
+
+const CAPITALIZE_ALIAS: &str = "type Capitalize<S extends string> = string;\n";
+
+// Go: internal/checker/relater.go:Checker.isTypeMatchedByTemplateLiteralType (`${number}`)
+#[test]
+fn template_literal_number_pattern_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type N = `id-${number}`;\nconst ok: N = \"id-42\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/relater.go:Checker.isTypeMatchedByTemplateLiteralType (`${number}` mismatch)
+#[test]
+fn template_literal_number_pattern_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type N = `id-${number}`;\nconst bad: N = \"id-x\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/relater.go:Checker.isTypeMatchedByTemplateLiteralType (`${string}`)
+#[test]
+fn template_literal_string_pattern_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type S = `pre-${string}-suf`;\nconst ok: S = \"pre-mid-suf\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTemplateLiteralType (boolean distribution)
+#[test]
+fn template_literal_boolean_pattern_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type B = `flag-${boolean}`;\nconst t: B = \"flag-true\";\nconst f: B = \"flag-false\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getTemplateLiteralType (boolean distribution mismatch)
+#[test]
+fn template_literal_boolean_pattern_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type B = `flag-${boolean}`;\nconst bad: B = \"flag-maybe\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/relater.go:Checker.inferFromLiteralPartsToTemplateLiteral (union middle)
+#[test]
+fn template_literal_union_middle_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type U = `x${\"a\" | \"b\"}y`;\nconst ok: U = \"xay\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/relater.go:Checker.inferFromLiteralPartsToTemplateLiteral (union middle mismatch)
+#[test]
+fn template_literal_union_middle_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type U = `x${\"a\" | \"b\"}y`;\nconst bad: U = \"xcy\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/relater.go:Checker.inferFromLiteralPartsToTemplateLiteral (multi placeholder)
+#[test]
+fn template_literal_multi_placeholder_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type M = `a${number}b${string}c`;\nconst ok: M = \"a1bxc\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/relater.go:Checker.inferFromLiteralPartsToTemplateLiteral (multi placeholder mismatch)
+#[test]
+fn template_literal_multi_placeholder_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type M = `a${number}b${string}c`;\nconst bad: M = \"a1b\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.getStringMappingType (Capitalize in template literal)
+#[test]
+fn template_literal_capitalize_embedded_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CAPITALIZE_ALIAS}\
+             type Cap = `get${{Capitalize<\"foo\">}}`;\n\
+             const ok: Cap = \"getFoo\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.getStringMappingType (Capitalize in template literal mismatch)
+#[test]
+fn template_literal_capitalize_embedded_invalid_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{CAPITALIZE_ALIAS}\
+             type Cap = `get${{Capitalize<\"foo\">}}`;\n\
+             const bad: Cap = \"getfoo\";"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypeArgumentConstraints (keyof constraint satisfied)
+#[test]
+fn type_alias_keyof_constraint_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type PickKey<T, K extends keyof T> = T[K];\n\
+         type Good = PickKey<{ a: number; b: string }, \"a\">;\n\
+         const g: Good = 1;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypeArgumentConstraints (keyof constraint violated)
+#[test]
+fn type_alias_keyof_constraint_invalid_reports_2344() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type PickKey<T, K extends keyof T> = T[K];\n\
+         type BadKey = PickKey<{ a: number }, \"b\">;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2344, got {diags:?}");
+    assert_eq!(diags[0].code, 2344);
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypeArgumentConstraints (literal type param satisfied)
+#[test]
+fn literal_type_param_constraint_valid_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Lit<T extends \"ok\"> = T;\nconst ok: Lit<\"ok\"> = \"ok\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkVariableLikeDeclaration (literal constraint mismatch)
+#[test]
+fn literal_type_param_constraint_value_mismatch_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Lit<T extends \"ok\"> = T;\nconst bad: Lit<\"ok\"> = \"nope\";",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypeArgumentConstraints (union constraint violated)
+#[test]
+fn union_type_param_constraint_violation_reports_2344() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type D<T extends number | string> = T;\ntype Bad = D<boolean>;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2344, got {diags:?}");
+    assert_eq!(diags[0].code, 2344);
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypeArgumentConstraints (first type parameter)
+#[test]
+fn first_type_parameter_constraint_violation_reports_2344() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Pair<A extends number, B extends string> = [A, B];\ntype Bad = Pair<boolean, \"x\">;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2344, got {diags:?}");
+    assert_eq!(diags[0].code, 2344);
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypeArgumentConstraints (second type parameter)
+#[test]
+fn second_type_parameter_constraint_violation_reports_2344() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Pair<A extends number, B extends string> = [A, B];\ntype Bad = Pair<1, 2>;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2344, got {diags:?}");
+    assert_eq!(diags[0].code, 2344);
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (intersection merge)
+#[test]
+fn intersection_merged_properties_assignable_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type AB = { a: number } & { b: string };\nconst ab: AB = { a: 1, b: \"s\" };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (intersection wrong member type)
+#[test]
+fn intersection_wrong_property_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type AB = { a: number } & { b: string };\nconst bad: AB = { a: 1, b: 2 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/relater.go:Relater.propertiesRelatedTo (intersection missing property)
+#[test]
+fn intersection_missing_required_property_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type AB = { a: number } & { b: string };\nconst bad: AB = { a: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/declared_types.rs:getIntersectionProperty (same property type)
+#[test]
+fn intersection_same_property_type_assignable_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Same = { x: number } & { x: number };\nconst s: Same = { x: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/declared_types.rs:getIntersectionProperty (conflicting property -> never)
+#[test]
+fn intersection_conflicting_property_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type Conflict = { x: number } & { x: string };\nconst bad: Conflict = { x: 1 };",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/relater.go:Checker.compareSignaturesRelated (rest parameters)
+#[test]
+fn function_type_rest_parameters_valid_call_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{ARRAY_LIB}\
+             type Fn = (a: number, ...rest: string[]) => void;\n\
+             declare const f: Fn;\n\
+             f(1, \"a\", \"b\");"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.isSignatureApplicable (rest element mismatch)
+#[test]
+fn function_type_rest_element_type_mismatch_reports_2345() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{ARRAY_LIB}\
+             type Fn = (a: number, ...rest: string[]) => void;\n\
+             declare const f: Fn;\n\
+             f(1, 2);"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
+    assert_eq!(diags[0].code, 2345);
+}

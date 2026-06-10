@@ -14,11 +14,13 @@ use tsgo_ast::{Kind, SymbolFlags, SymbolId};
 use tsgo_diagnostics::{Category, Message};
 
 use super::check::DiagnosticMessageChain;
+use super::conditional_types::get_template_literal_type;
 use super::declared_types::{
     get_apparent_type, get_applicable_index_info_for_name, get_index_type_of_type,
-    get_properties_of_type, get_property_of_type, get_property_type_for_index_type,
-    get_type_of_property_of_type, get_type_of_symbol,
+    get_properties_of_type, get_property_of_type,
+    get_property_type_for_index_type, get_type_of_property_of_type, get_type_of_symbol,
 };
+use super::types::LiteralValue;
 use super::nodebuilder::type_to_string;
 use super::program::BoundProgram;
 use super::signatures::{SignatureFlags, SignatureId};
@@ -743,6 +745,28 @@ impl Checker {
                 return false;
             }
             return true;
+        }
+        if tf.contains(TypeFlags::TEMPLATE_LITERAL) {
+            if relation == RelationKind::Comparable
+                && sf.contains(TypeFlags::TEMPLATE_LITERAL)
+            {
+                let source_data = self
+                    .get_type(source)
+                    .as_template_literal()
+                    .expect("template literal");
+                let target_data = self
+                    .get_type(target)
+                    .as_template_literal()
+                    .expect("template literal");
+                if template_literal_types_definitely_unrelated(source_data, target_data) {
+                    return false;
+                }
+                return true;
+            }
+            if self.is_type_matched_by_template_literal_type(program, source, target, relation)
+            {
+                return true;
+            }
         }
         false
     }
@@ -2696,6 +2720,294 @@ impl Checker {
             _ => vec![t],
         }
     }
+
+    // Go: internal/checker/relater.go:Checker.isTypeMatchedByTemplateLiteralType
+    fn is_type_matched_by_template_literal_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> bool {
+        let Some(inferences) =
+            self.infer_types_from_template_literal_type(program, source, target)
+        else {
+            return false;
+        };
+        let target_types = self
+            .get_type(target)
+            .as_template_literal()
+            .expect("template literal")
+            .types
+            .clone();
+        for (i, inference) in inferences.iter().enumerate() {
+            if !self.is_valid_type_for_template_literal_placeholder(
+                program,
+                *inference,
+                target_types[i],
+                relation,
+            ) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // Go: internal/checker/relater.go:Checker.inferTypesFromTemplateLiteralType
+    fn infer_types_from_template_literal_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+    ) -> Option<Vec<TypeId>> {
+        let sf = self.get_type(source).flags();
+        let target_data = self
+            .get_type(target)
+            .as_template_literal()
+            .expect("template literal")
+            .clone();
+        if sf.contains(TypeFlags::STRING_LITERAL) {
+            let value = get_string_literal_value(self, source)?;
+            return self.infer_from_literal_parts_to_template_literal(
+                &[value],
+                &[],
+                &target_data,
+            );
+        }
+        if sf.contains(TypeFlags::TEMPLATE_LITERAL) {
+            let source_data = self
+                .get_type(source)
+                .as_template_literal()
+                .expect("template literal")
+                .clone();
+            if source_data.texts == target_data.texts {
+                let mut inferences = Vec::with_capacity(source_data.types.len());
+                for (i, &s) in source_data.types.iter().enumerate() {
+                    let s_base = self.get_base_constraint_or_type(program, s);
+                    let t_base = self.get_base_constraint_or_type(program, target_data.types[i]);
+                    if self.is_type_assignable_to(program, s_base, t_base) {
+                        inferences.push(s);
+                    } else {
+                        inferences.push(self.get_string_like_type_for_type(s));
+                    }
+                }
+                return Some(inferences);
+            }
+            return self.infer_from_literal_parts_to_template_literal(
+                &source_data.texts,
+                &source_data.types,
+                &target_data,
+            );
+        }
+        None
+    }
+
+    // Go: internal/checker/relater.go:Checker.inferFromLiteralPartsToTemplateLiteral
+    fn infer_from_literal_parts_to_template_literal(
+        &mut self,
+        source_texts: &[String],
+        source_types: &[TypeId],
+        target: &super::types::TemplateLiteralType,
+    ) -> Option<Vec<TypeId>> {
+        let last_source_index = source_texts.len().saturating_sub(1);
+        let source_start_text = &source_texts[0];
+        let source_end_text = &source_texts[last_source_index];
+        let target_texts = &target.texts;
+        let last_target_index = target_texts.len().saturating_sub(1);
+        let target_start_text = &target_texts[0];
+        let target_end_text = &target_texts[last_target_index];
+        if last_source_index == 0
+            && source_start_text.len() < target_start_text.len() + target_end_text.len()
+            || !source_start_text.starts_with(target_start_text)
+            || !source_end_text.ends_with(target_end_text)
+        {
+            return None;
+        }
+        let remaining_end_text = &source_end_text[..source_end_text.len() - target_end_text.len()];
+        let mut seg = 0usize;
+        let mut pos = target_start_text.len();
+        let mut matches: Vec<TypeId> = Vec::new();
+        let source_text_at = |index: usize| -> &str {
+            if index < last_source_index {
+                &source_texts[index]
+            } else {
+                remaining_end_text
+            }
+        };
+        for i in 1..last_target_index {
+            let delim = &target_texts[i];
+            if !delim.is_empty() {
+                let mut s = seg;
+                let mut p = pos;
+                loop {
+                    if let Some(d) = source_text_at(s)[p..].find(delim) {
+                        p += d;
+                        break;
+                    }
+                    s += 1;
+                    if s == source_texts.len() {
+                        return None;
+                    }
+                    p = 0;
+                }
+                let match_type = if s == seg {
+                    self.get_string_literal_type(&source_text_at(s)[pos..p])
+                } else {
+                    let mut match_texts = vec![String::new(); s - seg + 1];
+                    match_texts[0] = source_texts[seg][pos..].to_string();
+                    for (dst, src) in match_texts[1..].iter_mut().zip(&source_texts[seg + 1..s]) {
+                        *dst = src.clone();
+                    }
+                    match_texts[s - seg] = source_text_at(s)[..p].to_string();
+                    get_template_literal_type(self, &match_texts, &source_types[seg..s])
+                };
+                matches.push(match_type);
+                seg = s;
+                pos = p + delim.len();
+            } else if pos < source_text_at(seg).len() {
+                let size = source_text_at(seg)[pos..]
+                    .chars()
+                    .next()
+                    .map(|ch| ch.len_utf8())
+                    .unwrap_or(0);
+                if size == 0 {
+                    return None;
+                }
+                matches.push(
+                    self.get_string_literal_type(&source_text_at(seg)[pos..pos + size]),
+                );
+                pos += size;
+            } else if seg < last_source_index {
+                let match_type = self.get_string_literal_type(source_text_at(seg + 1));
+                matches.push(match_type);
+                seg += 1;
+                pos = 0;
+            } else {
+                return None;
+            }
+        }
+        let final_p = source_text_at(last_source_index).len();
+        let match_type = if last_source_index == seg {
+            self.get_string_literal_type(&source_text_at(last_source_index)[pos..final_p])
+        } else {
+            let s = last_source_index;
+            let mut match_texts = vec![String::new(); s - seg + 1];
+            match_texts[0] = source_texts[seg][pos..].to_string();
+            for (dst, src) in match_texts[1..].iter_mut().zip(&source_texts[seg + 1..s]) {
+                *dst = src.clone();
+            }
+            match_texts[s - seg] = source_text_at(s)[..final_p].to_string();
+            get_template_literal_type(self, &match_texts, &source_types[seg..s])
+        };
+        matches.push(match_type);
+        Some(matches)
+    }
+
+    // Go: internal/checker/relater.go:Checker.isValidTypeForTemplateLiteralPlaceholder
+    fn is_valid_type_for_template_literal_placeholder(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+        relation: RelationKind,
+    ) -> bool {
+        let tf = self.get_type(target).flags();
+        if tf.contains(TypeFlags::INTERSECTION) {
+            let members = self
+                .get_type(target)
+                .intersection_types()
+                .unwrap_or(&[])
+                .to_vec();
+            return members.iter().all(|&m| {
+                m == self.empty_object_type()
+                    || self.is_valid_type_for_template_literal_placeholder(
+                        program, source, m, relation,
+                    )
+            });
+        }
+        if tf.contains(TypeFlags::STRING)
+            || self.is_type_related_to(program, source, target, relation)
+        {
+            return true;
+        }
+        if self.get_type(source).flags().contains(TypeFlags::STRING_LITERAL) {
+            let Some(value) = get_string_literal_value(self, source) else {
+                return false;
+            };
+            if tf.contains(TypeFlags::NUMBER) && is_valid_number_string(&value, false) {
+                return true;
+            }
+            if tf.contains(TypeFlags::BOOLEAN_LITERAL | TypeFlags::NULL | TypeFlags::UNDEFINED) {
+                if let Some(name) = self.get_type(target).intrinsic_name() {
+                    return value == name;
+                }
+            }
+            if tf.contains(TypeFlags::TEMPLATE_LITERAL)
+                && self.is_type_matched_by_template_literal_type(program, source, target, relation)
+            {
+                return true;
+            }
+        }
+        if self.get_type(source).flags().contains(TypeFlags::TEMPLATE_LITERAL) {
+            let texts = self
+                .get_type(source)
+                .as_template_literal()
+                .expect("template literal")
+                .texts
+                .clone();
+            if texts.len() == 2 && texts[0].is_empty() && texts[1].is_empty() {
+                let inner = self
+                    .get_type(source)
+                    .as_template_literal()
+                    .expect("template literal")
+                    .types[0];
+                return self.is_type_related_to(program, inner, target, relation);
+            }
+        }
+        false
+    }
+
+    // Go: internal/checker/checker.go:Checker.getStringLikeTypeForType
+    fn get_string_like_type_for_type(&mut self, t: TypeId) -> TypeId {
+        let f = self.get_type(t).flags();
+        if f.intersects(TypeFlags::ANY | TypeFlags::STRING_LIKE) {
+            return t;
+        }
+        get_template_literal_type(self, &[String::new(), String::new()], &[t])
+    }
+}
+
+// Go: internal/checker/relater.go:Checker.templateLiteralTypesDefinitelyUnrelated
+fn template_literal_types_definitely_unrelated(
+    source: &super::types::TemplateLiteralType,
+    target: &super::types::TemplateLiteralType,
+) -> bool {
+    let source_start = &source.texts[0];
+    let target_start = &target.texts[0];
+    let source_end = source.texts.last().expect("template literal");
+    let target_end = target.texts.last().expect("template literal");
+    let start_len = source_start.len().min(target_start.len());
+    let end_len = source_end.len().min(target_end.len());
+    source_start[..start_len] != target_start[..start_len]
+        || source_end[source_end.len() - end_len..] != target_end[target_end.len() - end_len..]
+}
+
+fn get_string_literal_value(checker: &Checker, t: TypeId) -> Option<String> {
+    match checker.get_type(t).literal_value() {
+        Some(LiteralValue::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn is_valid_number_string(s: &str, round_trip_only: bool) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let n = tsgo_jsnum::from_string(s);
+    if n.is_nan() || n.is_inf() {
+        return false;
+    }
+    !round_trip_only || n.to_string() == s
 }
 
 // Whether `message` is a conversion or interface-implementation head message,

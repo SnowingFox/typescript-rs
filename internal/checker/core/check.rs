@@ -2909,16 +2909,20 @@ impl Checker {
     // applicability.
     // Go: internal/checker/checker.go:Checker.checkNewExpression / resolveNewExpression
     fn check_new_expression(&mut self, program: &dyn BoundProgram, node: NodeId) -> TypeId {
-        let (callee, args) = match program.arena().data(node) {
-            NodeData::NewExpression(d) => (
-                d.expression,
-                d.arguments
-                    .as_ref()
-                    .map(|l| l.nodes.clone())
-                    .unwrap_or_default(),
-            ),
-            _ => return self.error_type,
-        };
+        let (callee, args, type_argument_nodes, type_arguments_ref) =
+            match program.arena().data(node) {
+                NodeData::NewExpression(d) => (
+                    d.expression,
+                    d.arguments
+                        .as_ref()
+                        .map(|l| l.nodes.clone())
+                        .unwrap_or_default(),
+                    d.type_arguments.as_ref().map(|l| l.nodes.clone()),
+                    d.type_arguments.as_ref(),
+                ),
+                _ => return self.error_type,
+            };
+        self.check_grammar_type_arguments(program, node, type_arguments_ref);
         let callee_type = self.check_expression(program, callee);
         if self
             .get_type(callee_type)
@@ -3025,7 +3029,13 @@ impl Checker {
                 }
             }
         }
-        self.resolve_construct_signatures(program, node, &construct_sigs, &args)
+        self.resolve_construct_signatures(
+            program,
+            node,
+            &construct_sigs,
+            &args,
+            type_argument_nodes.as_ref(),
+        )
     }
 
     // Resolves a `new` expression against its construct-signature candidates
@@ -3037,11 +3047,33 @@ impl Checker {
         node: NodeId,
         signatures: &[SignatureId],
         args: &[NodeId],
+        type_argument_nodes: Option<&Vec<NodeId>>,
     ) -> TypeId {
         if signatures.len() > 1 {
             return self.resolve_overloaded_call(program, node, signatures, args);
         }
         let signature = signatures[0];
+        let signature =
+            if let Some(type_arg_nodes) = type_argument_nodes.filter(|n| !n.is_empty()) {
+                match self.resolve_explicit_type_argument_signature(
+                    program,
+                    node,
+                    signature,
+                    type_arg_nodes,
+                ) {
+                    Some(instantiated) => instantiated,
+                    None => {
+                        for &arg in args {
+                            self.check_expression(program, arg);
+                        }
+                        return self.error_type;
+                    }
+                }
+            } else if !self.signature(signature).type_parameters.is_empty() {
+                self.resolve_inferred_type_argument_signature(program, node, signature, args)
+            } else {
+                signature
+            };
         if self.has_correct_arity(signature, args.len()) {
             self.check_applicable_signature_for_call(program, signature, args);
         } else {
@@ -4778,7 +4810,11 @@ impl Checker {
     // Returns the base constraint of a type parameter, or `t` itself (Go's
     // `getBaseConstraintOrType` reachable subset).
     // Go: internal/checker/checker.go:Checker.getBaseConstraintOrType(27246)
-    fn get_base_constraint_or_type(&mut self, program: &dyn BoundProgram, t: TypeId) -> TypeId {
+    pub(crate) fn get_base_constraint_or_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> TypeId {
         super::declared_types::get_constraint_of_type_parameter(self, program, t).unwrap_or(t)
     }
 
