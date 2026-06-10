@@ -3344,6 +3344,13 @@ impl Checker {
             self.error_if_writing_to_readonly_index(program, node, apparent, info);
             return self.index_info(info).value_type;
         }
+        // `Object.prototype.constructor` — all object/non-primitive values expose
+        // it; primitives are boxed for the lookup (Go: lib.es5 `Object.constructor`).
+        if name == "constructor" && self.type_exposes_constructor_property(apparent) {
+            return self
+                .get_global_type("Function")
+                .unwrap_or_else(|| self.any_type());
+        }
         self.report_nonexistent_property(program, name_node, object_type, node, is_super);
         self.error_type
     }
@@ -3747,6 +3754,11 @@ impl Checker {
         }
         if program.arena().kind(arg) == Kind::StringLiteral {
             let name = program.arena().text(arg).to_string();
+            if name == "constructor" && self.type_exposes_constructor_property(object_type) {
+                return self
+                    .get_global_type("Function")
+                    .unwrap_or_else(|| self.any_type());
+            }
             if let Some(t) = self.get_type_of_property_of_type(program, object_type, &name) {
                 return t;
             }
@@ -10929,7 +10941,7 @@ impl Checker {
     }
 
     // Go: internal/checker/checker.go:Checker.isConstructorType(16872)
-    fn is_constructor_type(&mut self, program: &dyn BoundProgram, t: TypeId) -> bool {
+    pub(crate) fn is_constructor_type(&mut self, program: &dyn BoundProgram, t: TypeId) -> bool {
         if !self
             .collect_construct_signatures_of_type(program, t)
             .is_empty()
@@ -15640,6 +15652,26 @@ impl Checker {
     // Go: internal/checker/checker.go:Checker.isArrayOrTupleType(23366)
     pub fn is_array_or_tuple_type(&self, t: TypeId) -> bool {
         self.is_array_type(t) || self.is_tuple_type(t)
+    }
+
+    /// Whether `t` (or every union constituent) may expose `Object.constructor`.
+    fn type_exposes_constructor_property(&self, t: TypeId) -> bool {
+        // Every value except `null`, `undefined`, and `void` may read
+        // `Object.constructor` (Go: lib.es5 `Object.constructor`).
+        let exposes = |ty: &super::types::Type| {
+            !ty
+                .flags()
+                .intersects(TypeFlags::NULL | TypeFlags::UNDEFINED | TypeFlags::VOID)
+        };
+        let ty = self.get_type(t);
+        if ty.flags().contains(TypeFlags::UNION) {
+            return ty
+                .union_types()
+                .unwrap_or(&[])
+                .iter()
+                .all(|&m| exposes(self.get_type(m)));
+        }
+        exposes(ty)
     }
 
     /// Reports whether `t` is a readonly tuple (`as const` / `readonly [...]`).

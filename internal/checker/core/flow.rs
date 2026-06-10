@@ -18,7 +18,7 @@ use tsgo_ast::{Kind, NodeData, NodeFlags, NodeId, SymbolFlags, SymbolId};
 use super::program::BoundProgram;
 use super::symbols::resolve_name;
 use super::type_facts::TypeFacts;
-use super::types::{LiteralValue, TypeFlags, TypeId};
+use super::types::{LiteralValue, ObjectFlags, TypeFlags, TypeId};
 use super::Checker;
 
 /// Metadata for a user-defined type predicate used during flow narrowing (Go's
@@ -866,6 +866,12 @@ impl Checker {
             return self
                 .narrow_type_by_discriminant_property(program, t, access, value_type, effective);
         }
+        if self.is_matching_constructor_reference(program, reference, left) {
+            return self.narrow_type_by_constructor(program, t, op, right, assume_true);
+        }
+        if self.is_matching_constructor_reference(program, reference, right) {
+            return self.narrow_type_by_constructor(program, t, op, left, assume_true);
+        }
         if is_boolean_literal(program, right) && !is_access_expression(program, left) {
             return self.narrow_type_by_boolean_comparison(
                 program,
@@ -889,6 +895,173 @@ impl Checker {
             );
         }
         t
+    }
+
+    // Reports whether `expr` is `ref.constructor` / `ref["constructor"]`.
+    // Go: internal/checker/flow.go:Checker.isMatchingConstructorReference(731)
+    fn is_matching_constructor_reference(
+        &self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        expr: NodeId,
+    ) -> bool {
+        if let Some(name) = self.get_accessed_property_name(program, expr) {
+            if name == "constructor" {
+                let object = match program.arena().data(expr) {
+                    NodeData::PropertyAccessExpression(d) => d.expression,
+                    NodeData::ElementAccessExpression(d) => d.expression,
+                    _ => return false,
+                };
+                return self.is_matching_reference(program, reference, object);
+            }
+        }
+        false
+    }
+
+    // Narrows by `ref.constructor === Ctor` / `Ctor === ref.constructor`.
+    // Go: internal/checker/flow.go:Checker.narrowTypeByConstructor(740)
+    fn narrow_type_by_constructor(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        operator: Kind,
+        identifier: NodeId,
+        assume_true: bool,
+    ) -> TypeId {
+        let valid = if assume_true {
+            matches!(
+                operator,
+                Kind::EqualsEqualsToken | Kind::EqualsEqualsEqualsToken
+            )
+        } else {
+            matches!(
+                operator,
+                Kind::ExclamationEqualsToken | Kind::ExclamationEqualsEqualsToken
+            )
+        };
+        if !valid {
+            return t;
+        }
+        let identifier_type = self.check_expression(program, identifier);
+        if !self.is_function_type_for_constructor(program, identifier_type)
+            && !self.is_constructor_type(program, identifier_type)
+        {
+            return t;
+        }
+        let Some(candidate) =
+            self.constructor_narrowing_candidate(program, identifier_type)
+        else {
+            return t;
+        };
+        if self.get_type(t).flags().contains(TypeFlags::ANY) {
+            return candidate;
+        }
+        let members: Vec<TypeId> = self
+            .distributed_types(t)
+            .into_iter()
+            .filter(|&m| self.is_constructed_by(program, m, candidate))
+            .collect();
+        self.get_union_type(&members)
+    }
+
+    // Resolves the instance/prototype type compared by a constructor guard.
+    // Go: internal/checker/flow.go:Checker.narrowTypeByConstructor(750) (prototype)
+    fn constructor_narrowing_candidate(
+        &mut self,
+        program: &dyn BoundProgram,
+        identifier_type: TypeId,
+    ) -> Option<TypeId> {
+        if let Some(prototype_type) = super::declared_types::get_type_of_property_of_type(
+            self,
+            program,
+            identifier_type,
+            "prototype",
+        ) {
+            if !self.get_type(prototype_type).flags().contains(TypeFlags::ANY) {
+                let candidate = prototype_type;
+                if self.get_global_type("Object") != Some(candidate)
+                    && self.get_global_type("Function") != Some(candidate)
+                {
+                    return Some(candidate);
+                }
+            }
+        }
+        let sym = self.get_type(identifier_type).symbol?;
+        if self
+            .resolved_symbol_flags(program, sym)
+            .contains(SymbolFlags::CLASS)
+        {
+            return Some(super::declared_types::get_declared_type_of_symbol(
+                self,
+                program,
+                sym,
+                program.globals(),
+            ));
+        }
+        None
+    }
+
+    // Go: internal/checker/checker.go:Checker.isFunctionType(16868)
+    fn is_function_type_for_constructor(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> bool {
+        self.get_type(t).flags().contains(TypeFlags::OBJECT)
+            && !self.get_signatures_of_type(t).is_empty()
+    }
+
+    // Go: internal/checker/flow.go:Checker.isConstructedBy(774)
+    fn is_constructed_by(
+        &mut self,
+        program: &dyn BoundProgram,
+        source: TypeId,
+        target: TypeId,
+    ) -> bool {
+        let source_ty = self.get_type(source);
+        let target_ty = self.get_type(target);
+        if let Some(target_sym) = target_ty.symbol {
+            let target_name = program.symbol(target_sym).name.as_str();
+            let source_flags = source_ty.flags();
+            if matches!(target_name, "String")
+                && source_flags.intersects(TypeFlags::STRING | TypeFlags::STRING_LITERAL)
+            {
+                return true;
+            }
+            if matches!(target_name, "Number")
+                && source_flags.intersects(
+                    TypeFlags::NUMBER | TypeFlags::NUMBER_LITERAL | TypeFlags::ENUM,
+                )
+            {
+                return true;
+            }
+            if matches!(target_name, "Boolean")
+                && source_flags.intersects(TypeFlags::BOOLEAN | TypeFlags::BOOLEAN_LITERAL)
+            {
+                return true;
+            }
+            if matches!(target_name, "Array") && self.is_array_type(source) {
+                return true;
+            }
+            if matches!(target_name, "Symbol")
+                && source_flags.intersects(TypeFlags::ES_SYMBOL | TypeFlags::UNIQUE_ES_SYMBOL)
+            {
+                return true;
+            }
+            if matches!(target_name, "BigInt")
+                && source_flags.intersects(TypeFlags::BIG_INT | TypeFlags::BIG_INT_LITERAL)
+            {
+                return true;
+            }
+        }
+        let source_is_class = source_ty.flags().contains(TypeFlags::OBJECT)
+            && source_ty.object_flags().contains(ObjectFlags::CLASS);
+        let target_is_class = target_ty.flags().contains(TypeFlags::OBJECT)
+            && target_ty.object_flags().contains(ObjectFlags::CLASS);
+        if source_is_class || target_is_class {
+            return source_ty.symbol.is_some() && source_ty.symbol == target_ty.symbol;
+        }
+        self.is_type_subtype_of(program, source, target)
     }
 
     // Narrows by `expr === true` / `expr !== false` style comparisons (Go routes

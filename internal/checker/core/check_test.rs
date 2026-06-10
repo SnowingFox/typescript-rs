@@ -24811,3 +24811,245 @@ fn negated_type_guard_else_branch_keeps_other_member_no_diagnostic() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 120: constructor equality flow narrowing (`x.constructor === Ctor`) ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByConstructor (class union, ===)
+#[test]
+fn constructor_equality_guard_narrows_class_union_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C1 { property1!: string; }\n\
+         class D1 { property2!: number; }\n\
+         declare let x: C1 | D1;\n\
+         if (x.constructor === C1) {\n  const c: C1 = x;\n  const s: string = x.property1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.isMatchingConstructorReference (element access)
+#[test]
+fn constructor_element_access_guard_narrows_class_union_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C1 { property1!: string; }\n\
+         class D1 { property2!: number; }\n\
+         declare let x: C1 | D1;\n\
+         if (x[\"constructor\"] === C1) {\n  const c: C1 = x;\n  const s: string = x.property1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByConstructor (reversed operands)
+#[test]
+fn reversed_constructor_equality_guard_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C1 { property1!: string; }\n\
+         class D1 { property2!: number; }\n\
+         declare let x: C1 | D1;\n\
+         if (C1 === x.constructor) {\n  const c: C1 = x;\n  const s: string = x.property1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByConstructor (loose `==`)
+#[test]
+fn constructor_loose_equality_guard_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C1 { property1!: string; }\n\
+         class D1 { property2!: number; }\n\
+         declare let x: C1 | D1;\n\
+         if (x.constructor == C1) {\n  const c: C1 = x;\n  const s: string = x.property1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByConstructor (negated `!==`, else branch)
+#[test]
+fn negated_constructor_guard_else_branch_narrows_to_class_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C1 { property1!: string; }\n\
+         class D1 { property2!: number; }\n\
+         declare let x: C1 | D1;\n\
+         if (x.constructor !== C1) {\n  const w: C1 | D1 = x;\n} else {\n  const c: C1 = x;\n  const s: string = x.property1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: tests/cases/compiler/typeGuardConstructorNarrowAny.ts
+#[test]
+fn constructor_guard_narrows_any_to_string_primitive_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare class String {}\n\
+         declare let x: any;\n\
+         if (x.constructor === String) {\n  const s: String = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: tests/cases/compiler/typeGuardConstructorNarrowAny.ts
+#[test]
+fn constructor_guard_narrows_any_to_number_primitive_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare class Number {}\n\
+         declare let x: any;\n\
+         if (x.constructor === Number) {\n  const n: Number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: tests/cases/compiler/typeGuardConstructorPrimitiveTypes.ts
+#[test]
+fn constructor_guard_narrows_primitive_union_to_string_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare class String {}\n\
+         declare let x: string | number | boolean;\n\
+         if (x.constructor === String) {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: tests/cases/compiler/typeGuardConstructorPrimitiveTypes.ts
+#[test]
+fn constructor_guard_narrows_primitive_union_to_number_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare class Number {}\n\
+         declare let x: string | number | boolean;\n\
+         if (x.constructor === Number) {\n  const n: number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: tests/cases/compiler/typeGuardConstructorPrimitiveTypes.ts
+#[test]
+fn constructor_guard_narrows_primitive_union_to_boolean_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare class Boolean {}\n\
+         declare let x: string | number | boolean;\n\
+         if (x.constructor === Boolean) {\n  const b: boolean = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: tests/cases/compiler/typeGuardConstructorNarrowPrimitivesInUnion.ts
+#[test]
+fn constructor_guard_narrows_primitive_union_to_array_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare class Array<T> {}\n\
+         declare let x: number[] | string[] | number;\n\
+         if (x.constructor === Array) {\n  const a: number[] | string[] = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: tests/cases/compiler/typeGuardConstructorDerivedClass.ts (base ctor → never)
+#[test]
+fn derived_class_constructor_guard_wrong_base_class_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C1 { property1!: number; }\n\
+         class C2 extends C1 { property2!: number; }\n\
+         class D2 { z!: number; }\n\
+         declare let x: C2 | D2;\n\
+         if (x.constructor === C1) {\n  x.property1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: tests/cases/compiler/typeGuardConstructorDerivedClass.ts
+#[test]
+fn derived_class_constructor_guard_matching_class_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C1 { property1!: number; }\n\
+         class C2 extends C1 { property2!: number; }\n\
+         class D2 { z!: number; }\n\
+         declare let x: C2 | D2;\n\
+         if (x.constructor === C2) {\n  const n: number = x.property1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: tests/cases/compiler/typeGuardConstructorDerivedClass.ts (same structure, different symbol)
+#[test]
+fn structurally_same_class_constructor_guard_wrong_class_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C7 { property1!: number; }\n\
+         class C8 { property1!: number; }\n\
+         class D8 { z!: number; }\n\
+         declare let x: C8 | D8;\n\
+         if (x.constructor === C7) {\n  x.property1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: tests/cases/compiler/typeGuardConstructorClassAndNumber.ts (then branch of `!==`)
+#[test]
+fn negated_constructor_guard_then_branch_property_access_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C1 { property1!: string; }\n\
+         class D1 { property2!: number; }\n\
+         declare let x: C1 | D1;\n\
+         if (x.constructor !== C1) {\n  x.property1;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
