@@ -24295,3 +24295,266 @@ fn no_infer_do_work_missing_required_prop_reports_2345() {
     assert_eq!(diags.len(), 1, "expected one 2345, got {diags:?}");
     assert_eq!(diags[0].code, 2345);
 }
+
+// ---- T1-E batch 118: Assertion functions (`asserts`) — FlowCall narrowing + declaration checks ----
+
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (asserts variant, valid)
+#[test]
+fn asserts_predicate_valid_declaration_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function assertIsString(x: unknown): asserts x is string {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (2677, asserts variant)
+#[test]
+fn asserts_predicate_type_not_assignable_reports_2677() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function assertNum(x: string): asserts x is number {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2677, got {diags:?}");
+    assert_eq!(diags[0].code, 2677);
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (1229, asserts variant)
+#[test]
+fn asserts_predicate_referencing_rest_parameter_reports_1229() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function assertAll(...args: unknown[]): asserts args is unknown[] {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1229, got {diags:?}");
+    assert_eq!(diags[0].code, 1229);
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (asserts, assignable predicate type)
+#[test]
+fn asserts_predicate_type_assignable_to_parameter_no_2677() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function assertStr(x: string | number): asserts x is string {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2677),
+        "valid asserts predicate must not report 2677; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowCall (asserts x is T)
+#[test]
+fn assertion_call_statement_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function assertIsString(x: unknown): asserts x is string;\n\
+         let x: string | number;\n\
+         assertIsString(x);\n\
+         const s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowCall + narrowTypeByAssertion
+#[test]
+fn assertion_call_without_is_narrows_nullable_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function assertDefined<T>(x: T): asserts x;\n\
+         let x: string | undefined;\n\
+         assertDefined(x);\n\
+         const s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowCall (chained statements)
+#[test]
+fn assertion_call_narrowed_use_in_later_statement_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function assertIsNumber(x: unknown): asserts x is number;\n\
+         let a: string | number;\n\
+         let b: string | number;\n\
+         assertIsNumber(a);\n\
+         assertIsNumber(b);\n\
+         const n: number = a + b;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowCall (non-assertion call)
+#[test]
+fn non_assertion_call_statement_does_not_narrow_union() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function log(x: unknown): void;\n\
+         let x: string | number;\n\
+         log(x);\n\
+         const bad: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (asserts this)
+#[test]
+fn asserts_this_predicate_in_method_no_ts1225() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {\n  m(): asserts this is C { return; }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 1225),
+        "asserts this must not report TS1225; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkIfTypePredicateVariableIsDeclaredInBindingPattern (asserts)
+#[test]
+fn asserts_predicate_binding_element_reports_1230_not_1225() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function assertVal({ value }: { value: unknown }): asserts value is string {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    let ts1230: Vec<_> = diags.iter().filter(|d| d.code == 1230).collect();
+    assert_eq!(ts1230.len(), 1, "expected one TS1230, got {diags:?}");
+    assert!(
+        diags.iter().all(|d| d.code != 1225),
+        "binding element must not report TS1225; got {diags:?}"
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowCall (asserts x is T on nullable union)
+#[test]
+fn assertion_call_narrows_nullable_union_to_predicate_type_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function assertIsString(x: unknown): asserts x is string;\n\
+         let x: string | null | undefined;\n\
+         assertIsString(x);\n\
+         const s: string = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByAssertion (`&&` in argument)
+#[test]
+fn assertion_call_with_and_argument_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function assertTruthy(x: unknown): asserts x;\n\
+         let x: string | undefined;\n\
+         let y: string | undefined;\n\
+         assertTruthy(x && y);\n\
+         const s: string = x;\n\
+         const t: string = y;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowCall (declare + use)
+#[test]
+fn declared_assertion_function_used_in_block_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function assertIsNumber(x: unknown): asserts x is number;\n\
+         function f(v: string | number) {\n\
+           assertIsNumber(v);\n\
+           const n: number = v;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    assert!(
+        c.get_diagnostics(root).is_empty(),
+        "expected no diagnostics, got {:?}",
+        c.get_diagnostics(root)
+    );
+}
+
+// Go: internal/checker/checker.go:Checker.checkTypePredicate (1225, asserts variant)
+#[test]
+fn asserts_predicate_unknown_parameter_reports_1225() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function assertVal(_x: unknown): asserts val is string {}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 1225, got {diags:?}");
+    assert_eq!(diags[0].code, 1225);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowCall (wrong type after assert)
+#[test]
+fn assertion_call_narrowed_wrong_assignment_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function assertIsString(x: unknown): asserts x is string;\n\
+         let x: string | number;\n\
+         assertIsString(x);\n\
+         const n: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}

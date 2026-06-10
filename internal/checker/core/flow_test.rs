@@ -485,6 +485,7 @@ fn narrow_type_by_type_predicate_narrows_matching_reference() {
     };
     let union = c.get_union_type(&[c.string_type(), c.number_type()]);
     let predicate = crate::core::flow::TypePredicateInfo {
+        kind: crate::core::flow::TypePredicateKind::Identifier,
         parameter_index: 0,
         predicate_type: Some(c.string_type()),
     };

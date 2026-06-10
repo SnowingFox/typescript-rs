@@ -26,8 +26,9 @@ use super::Checker;
 ///
 /// # Examples
 /// ```
-/// use tsgo_checker::core::flow::TypePredicateInfo;
+/// use tsgo_checker::core::flow::{TypePredicateInfo, TypePredicateKind};
 /// let p = TypePredicateInfo {
+///     kind: TypePredicateKind::Identifier,
 ///     parameter_index: 0,
 ///     predicate_type: None,
 /// };
@@ -35,9 +36,20 @@ use super::Checker;
 /// ```
 ///
 /// Side effects: none (pure value type).
+// Go: internal/checker/types.go:TypePredicateKind
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypePredicateKind {
+    This,
+    Identifier,
+    AssertsThis,
+    AssertsIdentifier,
+}
+
+/// Side effects: none (pure value type).
 // Go: internal/checker/types.go:TypePredicate
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypePredicateInfo {
+    pub kind: TypePredicateKind,
     /// Index of the guarded parameter in the call arguments (`-1` for `this`/method).
     pub parameter_index: i32,
     /// The asserted/predicate type, once resolved.
@@ -447,8 +459,10 @@ impl Checker {
             } else {
                 self.get_union_type(&types)
             }
+        } else if fnode.flags.contains(FlowFlags::CALL) {
+            self.get_type_at_flow_call(program, reference, declared, flow, cache)
         } else {
-            // DEFER(phase-4-checker-4g): assignment/call/array-mutation/switch flow.
+            // DEFER(phase-4-checker-4g): assignment/array-mutation flow.
             match fnode.antecedent {
                 Some(a) => self.get_type_at_flow_node(program, reference, declared, a, cache),
                 None => declared,
@@ -563,6 +577,12 @@ impl Checker {
         let Some(predicate) = self.get_type_predicate_of_signature(signature).cloned() else {
             return t;
         };
+        if !matches!(
+            predicate.kind,
+            TypePredicateKind::This | TypePredicateKind::Identifier
+        ) {
+            return t;
+        }
         self.narrow_type_by_type_predicate(
             program,
             reference,
@@ -571,6 +591,94 @@ impl Checker {
             call_expression,
             assume_true,
         )
+    }
+
+    // Narrows after an assertion-function call statement (Go's `getTypeAtFlowCall`).
+    // Go: internal/checker/flow.go:Checker.getTypeAtFlowCall(281)
+    fn get_type_at_flow_call(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        declared: TypeId,
+        flow: FlowNodeId,
+        cache: &mut FxHashMap<FlowNodeId, TypeId>,
+    ) -> TypeId {
+        let fnode = program.flow_node(flow);
+        let ante_type = match fnode.antecedent {
+            Some(a) => self.get_type_at_flow_node(program, reference, declared, a, cache),
+            None => declared,
+        };
+        let Some(call_expression) = fnode.node else {
+            return ante_type;
+        };
+        let Some(signature) = self.get_effects_signature(program, call_expression) else {
+            return ante_type;
+        };
+        let Some(predicate) = self.get_type_predicate_of_signature(signature).cloned() else {
+            return ante_type;
+        };
+        if !matches!(
+            predicate.kind,
+            TypePredicateKind::AssertsThis | TypePredicateKind::AssertsIdentifier
+        ) {
+            return ante_type;
+        }
+        let narrowed = if let Some(predicate_type) = predicate.predicate_type {
+            self.narrow_type_by_type_predicate(
+                program,
+                reference,
+                ante_type,
+                &predicate,
+                call_expression,
+                true,
+            )
+        } else if predicate.kind == TypePredicateKind::AssertsIdentifier
+            && predicate.parameter_index >= 0
+        {
+            let NodeData::CallExpression(d) = program.arena().data(call_expression) else {
+                return ante_type;
+            };
+            if let Some(&arg) = d.arguments.nodes.get(predicate.parameter_index as usize) {
+                self.narrow_type_by_assertion(program, reference, ante_type, arg)
+            } else {
+                ante_type
+            }
+        } else {
+            ante_type
+        };
+        if narrowed == ante_type {
+            ante_type
+        } else {
+            narrowed
+        }
+    }
+
+    // Narrows by the asserted expression of an `asserts` function (no `is T`).
+    // Go: internal/checker/flow.go:Checker.narrowTypeByAssertion(331)
+    fn narrow_type_by_assertion(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        t: TypeId,
+        expr: NodeId,
+    ) -> TypeId {
+        let expr = skip_parentheses(program, expr);
+        if program.arena().kind(expr) == Kind::FalseKeyword {
+            return self.never_type();
+        }
+        if let NodeData::BinaryExpression(d) = program.arena().data(expr) {
+            let op = program.arena().kind(d.operator_token);
+            if op == Kind::AmpersandAmpersandToken {
+                let left = self.narrow_type_by_assertion(program, reference, t, d.left);
+                return self.narrow_type_by_assertion(program, reference, left, d.right);
+            }
+            if op == Kind::BarBarToken {
+                let left = self.narrow_type_by_assertion(program, reference, t, d.left);
+                let right = self.narrow_type_by_assertion(program, reference, t, d.right);
+                return self.get_union_type(&[left, right]);
+            }
+        }
+        self.narrow_type_at_condition(program, reference, t, expr, true)
     }
 
     // Reports whether `reference` matches any argument of `call_expression`.

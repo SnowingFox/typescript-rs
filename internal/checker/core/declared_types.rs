@@ -2487,8 +2487,19 @@ fn create_type_predicate_from_type_predicate_node(
     let NodeData::TypePredicate(d) = program.arena().data(node) else {
         return None;
     };
+    let is_asserts = d.asserts_modifier.is_some();
     if program.arena().kind(d.parameter_name) == Kind::ThisType {
-        return None;
+        return Some(super::flow::TypePredicateInfo {
+            kind: if is_asserts {
+                super::flow::TypePredicateKind::AssertsThis
+            } else {
+                super::flow::TypePredicateKind::This
+            },
+            parameter_index: 0,
+            predicate_type: d.type_node.map(|type_node| {
+                get_type_from_type_node(checker, program, type_node, None)
+            }),
+        });
     }
     let predicate_name = program.arena().text(d.parameter_name).to_string();
     let parameter_index = parameters
@@ -2499,6 +2510,11 @@ fn create_type_predicate_from_type_predicate_node(
         .type_node
         .map(|type_node| get_type_from_type_node(checker, program, type_node, None));
     Some(super::flow::TypePredicateInfo {
+        kind: if is_asserts {
+            super::flow::TypePredicateKind::AssertsIdentifier
+        } else {
+            super::flow::TypePredicateKind::Identifier
+        },
         parameter_index,
         predicate_type,
     })
