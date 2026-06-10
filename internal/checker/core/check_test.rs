@@ -26158,3 +26158,287 @@ fn assignment_flow_null_assignment_narrows_nullable_union_no_diagnostics() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 126: compound logical (`&&`/`||`) flow narrowing ----
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (BarBarToken, typeof)
+#[test]
+fn typeof_or_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | number | boolean;\n\
+         if (typeof x === \"string\" || typeof x === \"number\") {\n  const v: string | number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (AmpersandAmpersandToken, nullable + typeof)
+#[test]
+fn null_check_and_typeof_guard_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | null;\n\
+         if (x !== null && typeof x === \"string\") {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (AmpersandAmpersandToken, truthiness + typeof)
+#[test]
+fn truthiness_and_typeof_guard_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | undefined;\n\
+         if (x && typeof x === \"string\") {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (AmpersandAmpersandToken, discriminant)
+#[test]
+fn discriminant_and_property_truthiness_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         if (v.kind === \"a\" && v.a) {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (BarBarToken, literal equality)
+#[test]
+fn literal_or_equality_guard_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: \"a\" | \"b\" | \"c\";\n\
+         if (x === \"a\" || x === \"b\") {\n  const ab: \"a\" | \"b\" = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (BarBarToken, discriminant OR)
+#[test]
+fn discriminant_or_guard_keeps_union_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         if (v.kind === \"a\" || v.kind === \"b\") {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (AmpersandAmpersandToken, chained typeof)
+#[test]
+fn chained_typeof_and_literal_guard_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | number;\n\
+         if (typeof x === \"string\" && x === \"hello\") {\n  const s: \"hello\" = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (BarBarToken, negated typeof complement)
+#[test]
+fn double_negated_typeof_or_narrows_boolean_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | number | boolean;\n\
+         if (typeof x !== \"string\" && typeof x !== \"number\") {\n  const b: boolean = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (BarBarToken, loose nullish)
+#[test]
+fn loose_nullish_or_equality_guard_narrows_else_branch_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | null | undefined;\n\
+         if (x == null || x === \"\") {\n} else {\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (AmpersandAmpersandToken, external guard)
+#[test]
+fn external_boolean_and_discriminant_guard_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const ok: boolean;\n\
+         declare const v: A | B;\n\
+         if (ok && v.kind === \"a\") {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (BarBarToken, instanceof OR)
+#[test]
+fn instanceof_or_typeof_guard_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "class C {}\n\
+         declare const x: C | string | number;\n\
+         if (x instanceof C || typeof x === \"string\") {\n  const v: C | string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (AmpersandAmpersandToken, in + discriminant)
+#[test]
+fn in_keyword_and_discriminant_guard_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B | null;\n\
+         if (v !== null && v.kind === \"a\") {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (AmpersandAmpersandToken, nested property)
+#[test]
+fn typeof_on_nested_property_and_truthiness_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const obj: { p: string | number };\n\
+         if (typeof obj.p === \"string\" && obj.p) {\n  const s: string = obj.p;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (BarBarToken, wrong branch)
+#[test]
+fn typeof_or_guard_wrong_assignment_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | number | boolean;\n\
+         if (typeof x === \"string\" || typeof x === \"number\") {\n  const b: boolean = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (else-if typeof chain)
+#[test]
+fn else_if_typeof_chain_narrows_union_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number | boolean;\n\
+         if (typeof x === \"string\") {\n  const s: string = x;\n\
+         } else if (typeof x === \"number\") {\n  const n: number = x;\n\
+         } else {\n  const b: boolean = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (nested truthiness + typeof)
+#[test]
+fn nested_truthiness_and_typeof_guard_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | null | undefined;\n\
+         if (x) {\n  if (typeof x === \"string\") {\n    const s: string = x;\n  }\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminantProperty (element access + &&)
+#[test]
+fn element_access_discriminant_and_guard_narrows_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         if (v[\"kind\"] === \"a\" && v.a) {\n  const n: number = v.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (BarBarToken, false-branch sequential)
+#[test]
+fn logical_or_false_branch_narrows_sequentially_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | null;\n\
+         if (!x || typeof x === \"string\") {\n} else {\n  const u: null = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowType (prefix `!` on typeof)
+#[test]
+fn negated_typeof_guard_narrows_complement_no_diagnostics() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: string | number;\n\
+         if (!(typeof x === \"string\")) {\n  const n: number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

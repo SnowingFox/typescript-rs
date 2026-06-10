@@ -768,6 +768,31 @@ impl Checker {
         self.signature(signature).resolved_type_predicate.as_ref()
     }
 
+    // Unions narrowed types for `&&`/`||` false/true arms, dropping `never`
+    // constituents (Go's `getUnionType` never-retention).
+    // Go: internal/checker/checker.go:Checker.getUnionType
+    fn union_narrowed_flow_types(&mut self, members: &[TypeId]) -> TypeId {
+        let mut kept: Vec<TypeId> = Vec::new();
+        for &m in members {
+            for constituent in self.distributed_types(m) {
+                if !self
+                    .get_type(constituent)
+                    .flags()
+                    .contains(TypeFlags::NEVER)
+                {
+                    kept.push(constituent);
+                }
+            }
+        }
+        kept.sort();
+        kept.dedup();
+        if kept.is_empty() {
+            self.never_type()
+        } else {
+            self.get_union_type(&kept)
+        }
+    }
+
     // Narrows by a binary condition; 4f handles `typeof x === "<name>"`.
     // Go: internal/checker/flow.go:Checker.narrowTypeByBinaryExpression (subset)
     fn narrow_type_by_binary(
@@ -818,13 +843,15 @@ impl Checker {
             }
             let t_left = self.narrow_type_at_condition(program, reference, t, left, false);
             let t_right = self.narrow_type_at_condition(program, reference, t, right, false);
-            return self.get_union_type(&[t_left, t_right]);
+            // Go's `getUnionType` drops `never` constituents; a false `&&` arm can
+            // narrow to `never` when its guard is impossible on the operand type.
+            return self.union_narrowed_flow_types(&[t_left, t_right]);
         }
         if op == Kind::BarBarToken {
             if assume_true {
                 let t_left = self.narrow_type_at_condition(program, reference, t, left, true);
                 let t_right = self.narrow_type_at_condition(program, reference, t, right, true);
-                return self.get_union_type(&[t_left, t_right]);
+                return self.union_narrowed_flow_types(&[t_left, t_right]);
             }
             let t_left = self.narrow_type_at_condition(program, reference, t, left, false);
             return self.narrow_type_at_condition(program, reference, t_left, right, false);
