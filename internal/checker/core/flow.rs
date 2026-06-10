@@ -881,9 +881,16 @@ impl Checker {
         if arena.kind(left) == Kind::TypeOfExpression && arena.kind(right) == Kind::StringLiteral {
             if let NodeData::TypeOfExpression(d) = arena.data(left) {
                 let operand = d.expression;
+                let name = arena.text(right).to_string();
                 if self.is_matching_reference(program, reference, operand) {
-                    let name = arena.text(right).to_string();
                     return self.narrow_type_by_typeof(program, t, &name, effective);
+                }
+                if let Some(access) =
+                    self.get_discriminant_property_access(program, reference, operand, t)
+                {
+                    return self.narrow_type_by_discriminant_typeof(
+                        program, t, access, &name, effective,
+                    );
                 }
             }
         }
@@ -1184,21 +1191,75 @@ impl Checker {
         if !self.get_type(t).flags().contains(TypeFlags::UNION) {
             return None;
         }
-        // The candidate access: a property/element access whose object matches
-        // the reference (Go's `getCandidateDiscriminantPropertyAccess`).
-        let object = match program.arena().data(expr) {
-            NodeData::PropertyAccessExpression(d) => d.expression,
-            NodeData::ElementAccessExpression(d) => d.expression,
-            _ => return None,
-        };
-        if !self.is_matching_reference(program, reference, object) {
-            return None;
-        }
-        let name = self.get_accessed_property_name(program, expr)?;
+        let access =
+            self.get_candidate_discriminant_property_access(program, reference, expr)?;
+        let name = self.get_accessed_property_name(program, access)?;
         if self.is_discriminant_property(program, t, &name) {
-            Some(expr)
+            Some(access)
         } else {
             None
+        }
+    }
+
+    // Returns a property/element access (or const-alias thereof) on `reference`
+    // that may be used as a discriminant guard (Go's
+    // `getCandidateDiscriminantPropertyAccess`).
+    // Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess(1429)
+    fn get_candidate_discriminant_property_access(
+        &self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        expr: NodeId,
+    ) -> Option<NodeId> {
+        let expr = skip_parentheses(program, expr);
+        match program.arena().data(expr) {
+            NodeData::PropertyAccessExpression(d) => {
+                if self.is_matching_reference(program, reference, d.expression) {
+                    Some(expr)
+                } else {
+                    None
+                }
+            }
+            NodeData::ElementAccessExpression(d) => {
+                if self.is_matching_reference(program, reference, d.expression) {
+                    Some(expr)
+                } else {
+                    None
+                }
+            }
+            NodeData::Identifier(_) => {
+                let sym = resolve_name(
+                    program,
+                    expr,
+                    program.arena().text(expr),
+                    SymbolFlags::VALUE,
+                    false,
+                    None,
+                )?;
+                if !self.is_constant_variable(program, sym) {
+                    return None;
+                }
+                let sym_rec = program.symbol(sym);
+                let decl = sym_rec.value_declaration?;
+                let NodeData::VariableDeclaration(vd) = program.arena().data(decl) else {
+                    return None;
+                };
+                if vd.type_node.is_some() {
+                    return None;
+                }
+                let init = skip_parentheses(program, vd.initializer?);
+                let object = match program.arena().data(init) {
+                    NodeData::PropertyAccessExpression(d) => d.expression,
+                    NodeData::ElementAccessExpression(d) => d.expression,
+                    _ => return None,
+                };
+                if self.is_matching_reference(program, reference, object) {
+                    Some(init)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -1349,6 +1410,23 @@ impl Checker {
         };
         let narrowed_prop_type =
             self.narrow_type_by_equality(program, prop_type, value_type, assume_true);
+        self.narrow_type_by_discriminant_filter(program, t, access, narrowed_prop_type)
+    }
+
+    // Narrows a union `t` by filtering constituents whose discriminant property
+    // is comparable to `narrowed_prop_type` (Go's `narrowTypeByDiscriminant`).
+    // Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminant(706)
+    fn narrow_type_by_discriminant_filter(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        access: NodeId,
+        narrowed_prop_type: TypeId,
+    ) -> TypeId {
+        let prop_name = match self.get_accessed_property_name(program, access) {
+            Some(n) => n,
+            None => return t,
+        };
         let narrowed_is_never = self
             .get_type(narrowed_prop_type)
             .flags()
@@ -1373,6 +1451,31 @@ impl Checker {
             }
         }
         self.get_union_type(&kept)
+    }
+
+    // Narrows a union by `typeof ref.prop === "<name>"` on a discriminant property.
+    // Go: internal/checker/flow.go:Checker.narrowTypeByTypeof(595) (discriminant branch)
+    fn narrow_type_by_discriminant_typeof(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        access: NodeId,
+        type_name: &str,
+        assume_true: bool,
+    ) -> TypeId {
+        let prop_name = match self.get_accessed_property_name(program, access) {
+            Some(n) => n,
+            None => return t,
+        };
+        let prop_type = match crate::core::declared_types::get_type_of_property_of_type(
+            self, program, t, &prop_name,
+        ) {
+            Some(pt) => pt,
+            None => return t,
+        };
+        let narrowed_prop_type =
+            self.narrow_type_by_typeof(program, prop_type, type_name, assume_true);
+        self.narrow_type_by_discriminant_filter(program, t, access, narrowed_prop_type)
     }
 
     // Narrows `t` at a `switch`-clause flow node for `reference`. 4t subset: a
