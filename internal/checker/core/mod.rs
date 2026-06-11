@@ -440,6 +440,10 @@ pub struct Checker {
     /// `get_flow_type_of_reference` walk (Go's `FlowState.reduceLabels`).
     // Go: internal/checker/flow.go:FlowState.reduceLabels
     flow_reduce_labels: Vec<tsgo_ast::flow::FlowReduceLabelData>,
+    /// Initial type for the current `get_flow_type_of_reference` walk (Go's
+    /// `FlowState.initialType`; coalesced with declared when unset).
+    // Go: internal/checker/flow.go:FlowState.initialType
+    flow_initial_type: TypeId,
 
     // Intrinsic type singletons (Go: the `c.xxxType` fields set in NewChecker).
     any_type: TypeId,
@@ -714,6 +718,7 @@ impl Checker {
             flow_loop_cache: FxHashMap::default(),
             flow_loop_stack: Vec::new(),
             flow_reduce_labels: Vec::new(),
+            flow_initial_type: auto_type,
             any_type,
             auto_type,
             error_type,
@@ -2943,6 +2948,8 @@ fn intern_union(
     cache: &mut FxHashMap<Vec<TypeId>, TypeId>,
     mut members: Vec<TypeId>,
 ) -> Option<TypeId> {
+    // Go: internal/checker/checker.go:Checker.addTypeToUnion — never is dropped in unions.
+    members.retain(|&id| !types.get(id).flags().contains(TypeFlags::NEVER));
     members.sort();
     members.dedup();
     match members.len() {

@@ -28590,6 +28590,169 @@ fn assignability_chain_array_to_fixed_tuple_still_reports_2620_with_marker_array
     assert_eq!(diags[0].message_chain[0].code, 2620);
 }
 
+// ---- T1-E batch 137: union-of-evolving-array at loop/branch junctions ----
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel(1297)
+#[test]
+fn loop_push_narrows_element_read_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}let arr = [];\n\
+             while (true) {{\n  arr.push(1);\n  break;\n}}\n\
+             const n: number = arr[0];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel(1297)
+#[test]
+fn loop_push_wrong_element_read_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}let arr = [];\n\
+             while (true) {{\n  arr.push(1);\n  break;\n}}\n\
+             const s: string = arr[0];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel(1297)
+#[test]
+fn loop_continue_push_narrows_element_read_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}declare const skip: boolean;\n\
+             let arr = [];\n\
+             while (true) {{\n  if (skip) {{ continue; }}\n  arr.push(1);\n  break;\n}}\n\
+             const n: number = arr[0];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel(1297)
+#[test]
+fn do_while_push_narrows_element_read_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}let arr = [];\n\
+             do {{\n  arr.push(2);\n  break;\n}} while (false);\n\
+             const n: number = arr[0];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel(1297)
+#[test]
+fn for_loop_push_narrows_element_read_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}let arr = [];\n\
+             for (;;) {{\n  arr.push(3);\n  break;\n}}\n\
+             const n: number = arr[0];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowBranchLabel(1225)
+#[test]
+fn branch_push_union_element_read_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}declare const cond: boolean;\n\
+             let arr = [];\n\
+             if (cond) {{ arr.push(1); }} else {{ arr.push(\"a\"); }}\n\
+             const u: number | string = arr[0];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowBranchLabel(1225)
+#[test]
+fn branch_push_union_wrong_element_read_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}declare const cond: boolean;\n\
+             let arr = [];\n\
+             if (cond) {{ arr.push(1); }} else {{ arr.push(\"a\"); }}\n\
+             const n: number = arr[0];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel(1297)
+#[test]
+fn loop_push_multiple_types_unions_elements_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}declare const cond: boolean;\n\
+             let arr = [];\n\
+             while (true) {{\n  if (cond) {{ arr.push(1); }} else {{ arr.push(\"a\"); }}\n  break;\n}}\n\
+             const u: number | string = arr[0];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowBranchLabel(1225)
+#[test]
+fn branch_no_mutation_paths_stay_auto_array_at_use() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}declare const cond: boolean;\n\
+             let arr = [];\n\
+             if (cond) {{ }} else {{ }}\n\
+             arr;"
+        ),
+    );
+    let usage = expr_stmt_expression(&stub, 4);
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let flow = c.get_flow_type_of_reference(p.as_ref(), usage, c.auto_array_type());
+    assert_eq!(flow, c.auto_array_type());
+}
+
 // ---- T1-E batch 136: unreachable-never flow type ----
 
 // Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (unreachable match)

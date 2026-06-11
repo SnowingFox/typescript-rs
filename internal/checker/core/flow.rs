@@ -423,6 +423,7 @@ impl Checker {
                 self.flow_loop_cache.clear();
                 self.flow_loop_stack.clear();
                 self.flow_reduce_labels.clear();
+                self.flow_initial_type = declared_type;
                 let mut cache: FxHashMap<FlowNodeId, TypeId> = FxHashMap::default();
                 self.get_type_at_flow_node(program, reference, declared_type, flow, &mut cache)
             }
@@ -553,7 +554,15 @@ impl Checker {
                 declared
             }
         } else if fnode.flags.contains(FlowFlags::CALL) {
-            self.get_type_at_flow_call(program, reference, declared, flow, cache)
+            match self.get_type_at_flow_call(program, reference, declared, flow, cache) {
+                Some(t) => t,
+                None => match fnode.antecedent {
+                    Some(a) => {
+                        self.get_type_at_flow_node(program, reference, declared, a, cache)
+                    }
+                    None => declared,
+                },
+            }
         } else if fnode.flags.contains(FlowFlags::ARRAY_MUTATION) {
             match self.get_type_at_flow_array_mutation(
                 program, reference, declared, flow, cache,
@@ -596,7 +605,7 @@ impl Checker {
     }
 
     // Unions the types along each antecedent of a non-looping junction.
-    // Go: internal/checker/flow.go:Checker.getTypeAtFlowBranchLabel(1225) (subset)
+    // Go: internal/checker/flow.go:Checker.getTypeAtFlowBranchLabel(1225)
     fn get_type_at_flow_branch_label(
         &mut self,
         program: &dyn BoundProgram,
@@ -606,24 +615,30 @@ impl Checker {
         cache: &mut FxHashMap<FlowNodeId, TypeId>,
     ) -> TypeId {
         let mut types: Vec<TypeId> = Vec::new();
+        let mut subtype_reduction = false;
         let mut list = Some(antecedents);
         while let Some(lid) = list {
             let cell = program.flow_list(lid);
             if let Some(a) = cell.flow {
                 let t = self.get_type_at_flow_node(program, reference, declared, a, cache);
-                if t == declared {
+                if t == declared && declared == self.flow_initial_type {
                     return declared;
                 }
                 if !types.contains(&t) {
                     types.push(t);
+                }
+                if !self.is_type_subset_of(t, declared) {
+                    subtype_reduction = true;
                 }
             }
             list = cell.next;
         }
         if types.is_empty() {
             declared
+        } else if types.len() == 1 {
+            types[0]
         } else {
-            self.get_union_type(&types)
+            self.get_union_or_evolving_array_type(program, declared, &types, subtype_reduction)
         }
     }
 
@@ -666,10 +681,11 @@ impl Checker {
             .find(|entry| entry.flow == flow && entry.reference == reference && !entry.types.is_empty())
             .map(|entry| entry.types.clone())
         {
-            return self.get_union_type(&types);
+            return self.get_union_or_evolving_array_type(program, declared, &types, false);
         }
 
         let mut antecedent_types: Vec<TypeId> = Vec::new();
+        let mut subtype_reduction = false;
         let mut first = true;
         list = fnode.antecedents;
         while let Some(lid) = list {
@@ -692,10 +708,13 @@ impl Checker {
                     t
                 };
                 if flow_type == declared {
-                    return declared;
+                    break;
                 }
                 if !antecedent_types.contains(&flow_type) {
                     antecedent_types.push(flow_type);
+                }
+                if !self.is_type_subset_of(flow_type, declared) {
+                    subtype_reduction = true;
                 }
             }
             list = cell.next;
@@ -706,7 +725,12 @@ impl Checker {
         } else if antecedent_types.len() == 1 {
             antecedent_types[0]
         } else {
-            self.get_union_type(&antecedent_types)
+            self.get_union_or_evolving_array_type(
+                program,
+                declared,
+                &antecedent_types,
+                subtype_reduction,
+            )
         };
         self.flow_loop_cache.insert(key, result);
         result
@@ -846,24 +870,24 @@ impl Checker {
         declared: TypeId,
         flow: FlowNodeId,
         cache: &mut FxHashMap<FlowNodeId, TypeId>,
-    ) -> TypeId {
+    ) -> Option<TypeId> {
         let fnode = program.flow_node(flow);
-        let raw_ante = match fnode.antecedent {
-            Some(a) => self.get_type_at_flow_node(program, reference, declared, a, cache),
-            None => declared,
-        };
-        let ante_type = self.finalize_evolving_array_type(program, raw_ante);
-        let Some(call_expression) = fnode.node else {
-            return ante_type;
-        };
+        let call_expression = fnode.node?;
         let Some(signature) = self.get_effects_signature(program, call_expression) else {
-            return ante_type;
+            return None;
         };
         if let Some(predicate) = self.get_type_predicate_of_signature(signature).cloned() {
             if matches!(
                 predicate.kind,
                 TypePredicateKind::AssertsThis | TypePredicateKind::AssertsIdentifier
             ) {
+                let raw_ante = match fnode.antecedent {
+                    Some(a) => {
+                        self.get_type_at_flow_node(program, reference, declared, a, cache)
+                    }
+                    None => declared,
+                };
+                let ante_type = self.finalize_evolving_array_type(program, raw_ante);
                 let narrowed = if predicate.predicate_type.is_some() {
                     self.narrow_type_by_type_predicate(
                         program,
@@ -877,9 +901,10 @@ impl Checker {
                     && predicate.parameter_index >= 0
                 {
                     let NodeData::CallExpression(d) = program.arena().data(call_expression) else {
-                        return ante_type;
+                        return None;
                     };
-                    if let Some(&arg) = d.arguments.nodes.get(predicate.parameter_index as usize)
+                    if let Some(&arg) =
+                        d.arguments.nodes.get(predicate.parameter_index as usize)
                     {
                         self.narrow_type_by_assertion(program, reference, ante_type, arg)
                     } else {
@@ -889,7 +914,7 @@ impl Checker {
                     ante_type
                 };
                 if narrowed != ante_type {
-                    return narrowed;
+                    return Some(narrowed);
                 }
             }
         }
@@ -898,9 +923,9 @@ impl Checker {
             .flags()
             .contains(TypeFlags::NEVER)
         {
-            return self.unreachable_never_type();
+            return Some(self.unreachable_never_type());
         }
-        ante_type
+        None
     }
 
     // Narrows by the asserted expression of an `asserts` function (no `is T`).
@@ -2262,6 +2287,77 @@ impl Checker {
             return Some(declared);
         }
         None
+    }
+
+    // ---- T1-E batch 137: union-of-evolving-array at loop/branch junctions ----
+
+    // Go: internal/checker/flow.go:isEvolvingArrayTypeList(1499)
+    pub(crate) fn is_evolving_array_type_list(&self, types: &[TypeId]) -> bool {
+        let mut has_evolving_array_type = false;
+        for &t in types {
+            if !self.get_type(t).flags().contains(TypeFlags::NEVER) {
+                if !self.is_evolving_array_type(t) {
+                    return false;
+                }
+                has_evolving_array_type = true;
+            }
+        }
+        has_evolving_array_type
+    }
+
+    // Go: internal/checker/flow.go:Checker.getUnionOrEvolvingArrayType(1286)
+    pub(crate) fn get_union_or_evolving_array_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        declared: TypeId,
+        types: &[TypeId],
+        subtype_reduction: bool,
+    ) -> TypeId {
+        if self.is_evolving_array_type_list(types) {
+            let element_types: Vec<TypeId> = types
+                .iter()
+                .map(|&t| self.get_element_type_of_evolving_array_type(t))
+                .filter(|&t| t != self.never_type())
+                .collect();
+            let union_elem = if element_types.is_empty() {
+                self.never_type()
+            } else if element_types.len() == 1 {
+                element_types[0]
+            } else {
+                self.get_union_type(&element_types)
+            };
+            return self.get_evolving_array_type(union_elem);
+        }
+        let finalized: Vec<TypeId> = types
+            .iter()
+            .map(|&t| self.finalize_evolving_array_type(program, t))
+            .collect();
+        let result = if subtype_reduction {
+            let union = self.get_union_type(&finalized);
+            self.get_union_type_with_subtype_reduction(program, union)
+        } else {
+            self.get_union_type(&finalized)
+        };
+        if result != declared {
+            let result_ty = self.get_type(result);
+            let declared_ty = self.get_type(declared);
+            if result_ty.flags().contains(TypeFlags::UNION)
+                && declared_ty.flags().contains(TypeFlags::UNION)
+            {
+                if let (Some(result_members), Some(decl_members)) =
+                    (result_ty.union_types(), declared_ty.union_types())
+                {
+                    if result_members.len() == decl_members.len()
+                        && result_members
+                            .iter()
+                            .all(|m| decl_members.contains(m))
+                    {
+                        return declared;
+                    }
+                }
+            }
+        }
+        result
     }
 
     // ---- T1-E batch 136: unreachable-never flow type ----

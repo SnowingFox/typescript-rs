@@ -720,6 +720,127 @@ fn empty_array_initializer_starts_evolving_array_in_flow() {
     );
 }
 
+// ---- T1-E batch 137: union-of-evolving-array at loop/branch junctions ----
+
+// Go: internal/checker/flow.go:isEvolvingArrayTypeList(1499)
+#[test]
+fn is_evolving_array_type_list_requires_all_non_never_evolving() {
+    let mut c = Checker::new();
+    let n = c.number_type();
+    let s = c.string_type();
+    let e1 = c.get_evolving_array_type(n);
+    let e2 = c.get_evolving_array_type(s);
+    assert!(c.is_evolving_array_type_list(&[e1, e2]));
+    assert!(!c.is_evolving_array_type_list(&[e1, c.auto_array_type()]));
+    assert!(!c.is_evolving_array_type_list(&[c.auto_array_type()]));
+    assert!(!c.is_evolving_array_type_list(&[]));
+    assert!(!c.is_evolving_array_type_list(&[c.never_type()]));
+}
+
+// Go: internal/checker/flow.go:Checker.getUnionOrEvolvingArrayType(1286)
+#[test]
+fn union_or_evolving_array_combines_element_types() {
+    let mut c = Checker::new();
+    let p = empty();
+    let n = c.number_type();
+    let s = c.string_type();
+    let e_num = c.get_evolving_array_type(n);
+    let e_str = c.get_evolving_array_type(s);
+    let combined = c.get_union_or_evolving_array_type(
+        &p,
+        c.auto_array_type(),
+        &[e_num, e_str],
+        false,
+    );
+    assert!(c.is_evolving_array_type(combined));
+    let union_elem = c.get_union_type(&[n, s]);
+    let expected = c.create_array_type(union_elem);
+    assert_eq!(c.finalize_evolving_array_type(&p, combined), expected);
+}
+
+// Go: internal/checker/flow.go:Checker.getUnionOrEvolvingArrayType(1286)
+#[test]
+fn union_or_evolving_array_finalizes_mixed_antecedents() {
+    let mut c = Checker::new();
+    let p = empty();
+    let n = c.number_type();
+    let e_num = c.get_evolving_array_type(n);
+    let number_array = c.create_array_type(n);
+    let combined = c.get_union_or_evolving_array_type(
+        &p,
+        c.auto_array_type(),
+        &[e_num, number_array],
+        false,
+    );
+    assert!(!c.is_evolving_array_type(combined));
+    assert_eq!(combined, number_array);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowLoopLabel(1297)
+#[test]
+fn loop_push_narrows_to_number_array_at_use() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}let arr = [];\n\
+             while (true) {{\n  arr.push(1);\n  break;\n}}\narr;"
+        ),
+    );
+    let usage = stmt_expr(&stub, 3);
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let declared = c.auto_array_type();
+    let narrowed = c.get_flow_type_of_reference(p.as_ref(), usage, declared);
+    let array_target = c.get_global_type("Array").expect("Array");
+    let expected = c.create_type_reference(array_target, vec![c.number_type()]);
+    assert_eq!(narrowed, expected);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowBranchLabel(1225)
+#[test]
+fn branch_push_unions_evolving_element_types() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}declare const cond: boolean;\n\
+             let arr = [];\n\
+             if (cond) {{ arr.push(1); }} else {{ arr.push(\"a\"); }}\n\
+             arr;"
+        ),
+    );
+    let usage = stmt_expr(&stub, 4);
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let declared = c.auto_array_type();
+    let narrowed = c.get_flow_type_of_reference(p.as_ref(), usage, declared);
+    let union_elem = c.get_union_type(&[c.number_type(), c.string_type()]);
+    let array_target = c.get_global_type("Array").expect("Array");
+    let expected = c.create_type_reference(array_target, vec![union_elem]);
+    assert_eq!(narrowed, expected);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowBranchLabel(1225)
+#[test]
+fn branch_one_arm_push_finalizes_to_number_array() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}declare const cond: boolean;\n\
+             let arr = [];\n\
+             if (cond) {{ arr.push(1); }}\n\
+             arr;"
+        ),
+    );
+    let usage = stmt_expr(&stub, 4);
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let declared = c.auto_array_type();
+    let narrowed = c.get_flow_type_of_reference(p.as_ref(), usage, declared);
+    let array_target = c.get_global_type("Array").expect("Array");
+    let expected = c.create_type_reference(array_target, vec![c.number_type()]);
+    assert_eq!(narrowed, expected);
+}
+
 // ---- T1-E batch 136: unreachable-never flow type ----
 
 use crate::core::types::TypeFlags;
