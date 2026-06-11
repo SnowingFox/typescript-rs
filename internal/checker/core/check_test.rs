@@ -28361,3 +28361,231 @@ fn direct_property_assignment_wrong_type_reports_2322() {
     assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
     assert_eq!(diags[0].code, 2322);
 }
+
+// ---- T1-E batch 135: evolving-array flow narrowing ----
+
+const EVOLVING_ARRAY_LIB: &str = "interface Array<T> {\n  [n: number]: T;\n  length: number;\n  push(...items: T[]): number;\n  unshift(...items: T[]): number;\n}\n";
+
+const EVOLVING_ARRAY_STRING_INDEX_LIB: &str = "interface Array<T> {\n  [n: number]: T;\n  [index: string]: any;\n  length: number;\n  push(...items: T[]): number;\n  unshift(...items: T[]): number;\n}\n";
+
+fn array_ref_in_var_decl_init(p: &StubProgram, stmt_idx: usize) -> tsgo_ast::NodeId {
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    let list = match arena.data(stmts[stmt_idx]) {
+        NodeData::VariableStatement(d) => d.declaration_list,
+        _ => panic!("variable statement"),
+    };
+    let decl = match arena.data(list) {
+        NodeData::VariableDeclarationList(d) => d.declarations.nodes[0],
+        _ => panic!("variable declaration list"),
+    };
+    let init = match arena.data(decl) {
+        NodeData::VariableDeclaration(d) => d.initializer.expect("initializer"),
+        _ => panic!("variable declaration"),
+    };
+    match arena.data(init) {
+        NodeData::ElementAccessExpression(d) => d.expression,
+        _ => panic!("element access initializer"),
+    }
+}
+
+fn sym(p: &dyn BoundProgram, name: &str) -> SymbolId {
+    *p.locals(p.root())
+        .expect("locals")
+        .get(name)
+        .unwrap_or_else(|| panic!("missing symbol {name}"))
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeForVariableLikeDeclaration(16567)
+#[test]
+fn empty_array_let_binding_declared_type_is_auto_array() {
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!("{EVOLVING_ARRAY_LIB}let arr = [];"),
+    ));
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let t = crate::core::declared_types::get_type_of_symbol(
+        &mut c,
+        p.as_ref(),
+        sym(p.as_ref(), "arr"),
+        None,
+    );
+    assert_eq!(t, c.auto_array_type());
+}
+
+// Go: internal/checker/checker.go:Checker.getTypeForVariableLikeDeclaration(16562)
+#[test]
+fn uninitialized_let_declared_type_is_auto() {
+    let p: std::rc::Rc<dyn BoundProgram> =
+        std::rc::Rc::new(StubProgram::parse_and_bind("/a.ts", "let x;"));
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let t = crate::core::declared_types::get_type_of_symbol(
+        &mut c,
+        p.as_ref(),
+        sym(p.as_ref(), "x"),
+        None,
+    );
+    assert_eq!(t, c.auto_type());
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowArrayMutation
+#[test]
+fn push_narrows_empty_array_element_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}let arr = [];\narr.push(1);\nconst n: number = arr[0];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no errors after push(1), got {diags:?}");
+}
+
+#[test]
+fn unshift_narrows_empty_array_element_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!("{EVOLVING_ARRAY_LIB}let arr = [];\narr.unshift(2);\nconst n: number = arr[0];"),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no errors after unshift(2), got {diags:?}");
+}
+
+#[test]
+fn index_assignment_narrows_empty_array_element_type() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!("{EVOLVING_ARRAY_LIB}let arr = [];\narr[0] = 3;\nconst n: number = arr[0];"),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no errors after arr[0]=3, got {diags:?}");
+}
+
+#[test]
+fn push_narrowed_element_wrong_type_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}let arr = [];\narr.push(1);\nconst s: string = arr[0];"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+#[test]
+fn push_target_identifier_stays_auto_array_type() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!("{EVOLVING_ARRAY_LIB}let arr = [];\narr.push(1);"),
+    );
+    let push_call = expr_stmt_expression(&stub, 2);
+    let arena = stub.arena();
+    let callee = match arena.data(push_call) {
+        NodeData::CallExpression(d) => d.expression,
+        _ => panic!("call"),
+    };
+    let arr_ref = match arena.data(callee) {
+        NodeData::PropertyAccessExpression(d) => d.expression,
+        _ => panic!("property access"),
+    };
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let declared = c.auto_array_type();
+    let t = c.check_expression(p.as_ref(), arr_ref);
+    assert_eq!(t, c.auto_array_type());
+    assert_eq!(
+        c.get_flow_type_of_reference(p.as_ref(), arr_ref, declared),
+        c.auto_array_type()
+    );
+}
+
+#[test]
+fn empty_array_without_mutation_stays_auto_array_at_use() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!("{EVOLVING_ARRAY_LIB}let arr = [];\narr;"),
+    );
+    let usage = expr_stmt_expression(&stub, 2);
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let declared = c.auto_array_type();
+    let flow = c.get_flow_type_of_reference(p.as_ref(), usage, declared);
+    assert_eq!(flow, c.auto_array_type());
+    let checked = c.check_expression(p.as_ref(), usage);
+    assert_eq!(checked, c.any_array_type());
+}
+
+#[test]
+fn string_index_assignment_does_not_narrow_numeric_read() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_STRING_INDEX_LIB}let arr = [];\narr[\"x\"] = \"a\";\nconst n: number = arr[0];"
+        ),
+    );
+    let arr_ref = array_ref_in_var_decl_init(&stub, 3);
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let array_target = c.get_global_type("Array").expect("Array");
+    let narrowed = c.get_flow_type_of_reference(p.as_ref(), arr_ref, c.auto_array_type());
+    let number_array = c.create_type_reference(array_target, vec![c.number_type()]);
+    assert_ne!(
+        narrowed, number_array,
+        "string-key assignment must not narrow numeric reads to number[]"
+    );
+}
+
+#[test]
+fn separate_array_bindings_do_not_cross_narrow() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}let a = [];\nlet b = [];\na.push(1);\nconst n: number = b[0];"
+        ),
+    );
+    let b_ref = array_ref_in_var_decl_init(&stub, 4);
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let diags = c.get_diagnostics(p.root());
+    assert!(
+        !diags.iter().any(|d| d.code == 2345),
+        "a.push(1) must be well-typed, got {diags:?}"
+    );
+    let array_target = c.get_global_type("Array").expect("Array");
+    let narrowed_b = c.get_flow_type_of_reference(p.as_ref(), b_ref, c.auto_array_type());
+    let number_array = c.create_type_reference(array_target, vec![c.number_type()]);
+    assert_ne!(
+        narrowed_b, number_array,
+        "b must not inherit a's push narrowing"
+    );
+}
+
+#[test]
+fn assignability_chain_array_to_fixed_tuple_still_reports_2620_with_marker_arrays() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!(
+            "{EVOLVING_ARRAY_LIB}interface ReadonlyArray<T> {{ readonly [n: number]: T; readonly length: number; }}\n\
+             declare const src: number[];\nconst o: [number, number] = src;"
+        ),
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+    assert_eq!(diags[0].message_chain[0].code, 2620);
+}

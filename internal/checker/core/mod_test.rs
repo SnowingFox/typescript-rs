@@ -9,7 +9,7 @@ fn new_constructs_intrinsics_in_order() {
     // 4b constructs 24 types in allocation order (the 4a intrinsics plus the
     // boolean literal/union types, the string|number / number|bigint /
     // template-constraint unions, `emptyObjectType`, and `unknownEmptyObjectType`).
-    assert_eq!(c.type_count(), 24);
+    assert_eq!(c.type_count(), 30);
     assert_eq!(c.any_type(), TypeId(1));
     assert_eq!(c.auto_type(), TypeId(2));
     assert_eq!(c.error_type(), TypeId(3));

@@ -803,6 +803,52 @@ impl Binder<'_> {
             }
             if is_assignment_operator(operator) {
                 self.bind_assignment_target_flow(left);
+                // ---- T1-E batch 135: array index assignment flow ----
+                // Go: internal/binder/binder.go:bindBinaryExpressionFlow(2259)
+                if operator == Kind::EqualsToken
+                    && !tsgo_ast::utilities::is_assignment_target(self.arena, node)
+                    && self.arena.kind(left) == Kind::ElementAccessExpression
+                {
+                    let elem_expr = match self.arena.data(left) {
+                        NodeData::ElementAccessExpression(d) => d.expression,
+                        _ => left,
+                    };
+                    if is_narrowable_operand(self.arena, elem_expr) {
+                        let cf = self.current_flow;
+                        self.current_flow = self.create_flow_mutation(
+                            FlowFlags::ARRAY_MUTATION,
+                            cf,
+                            node,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Records push/unshift array-mutation flow after children are bound.
+    // Go: internal/binder/binder.go:bindCallExpressionFlow(2444) (mutation tail)
+    pub(crate) fn bind_call_expression_array_mutation(&mut self, node: NodeId) {
+        let NodeData::CallExpression(d) = self.arena.data(node) else {
+            return;
+        };
+        let expression = d.expression;
+        if self.arena.kind(expression) == Kind::SuperKeyword {
+            let cf = self.current_flow;
+            self.current_flow = self.create_flow_call(cf, node);
+        }
+        // ---- T1-E batch 135: push/unshift array mutation flow ----
+        if self.arena.kind(expression) == Kind::PropertyAccessExpression {
+            let NodeData::PropertyAccessExpression(access) = self.arena.data(expression) else {
+                return;
+            };
+            if self.arena.kind(access.name) == Kind::Identifier
+                && is_narrowable_operand(self.arena, access.expression)
+                && is_push_or_unshift_name(self.arena.text(access.name))
+            {
+                let cf = self.current_flow;
+                self.current_flow =
+                    self.create_flow_mutation(FlowFlags::ARRAY_MUTATION, cf, node);
             }
         }
     }
@@ -1371,6 +1417,11 @@ fn is_dotted_name(arena: &NodeArena, node: NodeId) -> bool {
         }
         _ => false,
     }
+}
+
+// Go: internal/ast/utilities.go:IsPushOrUnshiftIdentifier
+fn is_push_or_unshift_name(name: &str) -> bool {
+    name == "push" || name == "unshift"
 }
 
 // Go: internal/binder/binder.go:bindChildren (KindBinaryExpression destructuring guard)

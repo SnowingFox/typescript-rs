@@ -755,6 +755,12 @@ pub struct ObjectType {
     /// Per-element variadic flags (`...T` with a type-parameter element).
     /// When `None`, no element is variadic.
     pub tuple_element_variadic: Option<Vec<bool>>,
+    /// Accumulated element type for an evolving array (Go's
+    /// `EvolvingArrayType.elementType`).
+    pub evolving_element_type: Option<TypeId>,
+    /// Lazily materialized manifest array type for an evolving array (Go's
+    /// `EvolvingArrayType.finalArrayType`).
+    pub evolving_final_array_type: Option<TypeId>,
 }
 
 /// The payload of a union type (`A | B`), holding its constituents by id.

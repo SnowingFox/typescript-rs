@@ -2682,7 +2682,42 @@ impl Checker {
                     }
                     return declared;
                 }
-                self.get_flow_type_of_reference(program, node, declared)
+                let flow_type = self.get_flow_type_of_reference(program, node, declared);
+                // ---- T1-E batch 135: auto/autoArray implicit-any reporting ----
+                // Go: internal/checker/checker.go:Checker.checkIdentifier(11139)
+                if !self.is_evolving_array_operation_target(program, node)
+                    && (declared == self.auto_type() || declared == self.auto_array_type())
+                {
+                    if flow_type == self.auto_type() || flow_type == self.auto_array_type() {
+                        if self.no_implicit_any() {
+                            let sym_name =
+                                super::nodebuilder::symbol_to_string(self, program, symbol);
+                            let type_str =
+                                super::nodebuilder::type_to_string(self, program, flow_type);
+                            if let Some(declaration) = program.symbol(symbol).value_declaration {
+                                if let Some(name) = super::symbols_query::name_of_declaration(
+                                    program.arena(),
+                                    declaration,
+                                ) {
+                                    self.error(
+                                        program,
+                                        name,
+                                        &tsgo_diagnostics::VARIABLE_0_IMPLICITLY_HAS_TYPE_1_IN_SOME_LOCATIONS_WHERE_ITS_TYPE_CANNOT_BE_DETERMINED,
+                                        &[sym_name.as_str(), type_str.as_str()],
+                                    );
+                                }
+                            }
+                            self.error(
+                                program,
+                                node,
+                                &tsgo_diagnostics::VARIABLE_0_IMPLICITLY_HAS_AN_1_TYPE,
+                                &[sym_name.as_str(), type_str.as_str()],
+                            );
+                        }
+                        return self.convert_auto_to_any(flow_type);
+                    }
+                }
+                flow_type
             }
         }
     }
@@ -3254,7 +3289,7 @@ impl Checker {
             _ => return self.error_type,
         };
         let is_optional_chain = program.arena().flags(node).contains(NodeFlags::OPTIONAL_CHAIN);
-        let (object_type, optional_chain_was_short_circuited) = if is_optional_chain {
+        let (mut object_type, optional_chain_was_short_circuited) = if is_optional_chain {
             let left_type = self.check_expression(program, expr);
             let non_optional_type = self.get_optional_expression_type(program, left_type, expr);
             let was_optional = non_optional_type != left_type;
@@ -3285,6 +3320,17 @@ impl Checker {
                 optional_chain_was_short_circuited,
                 object_type,
             );
+        }
+        if object_type == self.auto_array_type() || object_type == self.any_array_type() {
+            object_type = self.apparent_marker_array_type(object_type);
+            if object_type == self.auto_array_type() || object_type == self.any_array_type() {
+                return self.finish_optional_property_access(
+                    program,
+                    node,
+                    optional_chain_was_short_circuited,
+                    self.any_type(),
+                );
+            }
         }
         let is_super = program.arena().kind(expr) == Kind::SuperKeyword;
         let apparent = get_apparent_type(self, object_type);
@@ -3868,13 +3914,18 @@ impl Checker {
         };
         // Go's `checkIndexedAccess` types the object via `checkNonNullExpression`
         // (reports possibly-`null`/`undefined`, narrows to the non-null type).
-        let object_type = self.check_non_null_expression(program, expr);
+        let mut object_type = self.check_non_null_expression(program, expr);
         if self
             .get_type(object_type)
             .flags()
             .intersects(TypeFlags::ANY)
+            || object_type == self.auto_array_type()
+            || object_type == self.any_array_type()
         {
-            return object_type;
+            object_type = self.apparent_marker_array_type(object_type);
+            if self.get_type(object_type).flags().intersects(TypeFlags::ANY) {
+                return self.any_type();
+            }
         }
         if program.arena().kind(arg) == Kind::StringLiteral {
             let name = program.arena().text(arg).to_string();
@@ -5344,7 +5395,7 @@ impl Checker {
     // `BooleanLike`) and the non-strict variant. blocked-by: per-kind slices land
     // with the operators that need them.
     // Go: internal/checker/checker.go:Checker.isTypeAssignableToKind(27453)
-    fn is_type_assignable_to_kind(
+    pub(crate) fn is_type_assignable_to_kind(
         &mut self,
         program: &dyn BoundProgram,
         source: TypeId,
@@ -7943,6 +7994,26 @@ impl Checker {
             return self.instantiate_type(t, mapper);
         }
         self.instantiate_anonymous_object_type(program, t, mapper)
+    }
+
+    // Instantiates `t` through a generic reference's type-argument mapper. Method
+    // and function property types are anonymous objects whose call signatures must
+    // be deep-instantiated (Go's `instantiateType` on a method type).
+    // Go: internal/checker/checker.go:Checker.instantiateType (anonymous object arm)
+    pub(crate) fn instantiate_type_for_reference_mapper(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+        mapper: &super::mapper::TypeMapper,
+    ) -> TypeId {
+        if let Some(obj) = self.get_type(t).as_object() {
+            if obj.target.is_none()
+                && (!obj.call_signatures.is_empty() || !obj.construct_signatures.is_empty())
+            {
+                return self.instantiate_anonymous_object_type(program, t, mapper);
+            }
+        }
+        self.instantiate_type(t, mapper)
     }
 
     // Deep-instantiates an anonymous object/function type: re-create each

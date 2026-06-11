@@ -3088,6 +3088,10 @@ fn get_type_of_variable_or_property(
         checker
             .get_contextually_typed_parameter_type(program, parameter)
             .unwrap_or_else(|| checker.any_type())
+    } else if let Some(auto) = declaration
+        .and_then(|decl| no_implicit_any_auto_declared_type(checker, program, decl))
+    {
+        auto
     } else if let Some((decl, initializer)) = declaration
         .and_then(|decl| variable_declaration_initializer(program, decl).map(|i| (decl, i)))
     {
@@ -3205,6 +3209,70 @@ fn get_widened_type_for_assignment_declaration(
 // Reports whether `node` (after unwrapping parentheses) is an empty array
 // literal (`[]`), the assigned value Go's
 // `getAssignmentDeclarationInitializerType` widens to `any[]`.
+// ---- T1-E batch 135: noImplicitAny auto / autoArray declared types ----
+// Go: internal/checker/checker.go:Checker.getTypeForVariableLikeDeclaration(16556)
+fn no_implicit_any_auto_declared_type(
+    checker: &Checker,
+    program: &dyn BoundProgram,
+    decl: NodeId,
+) -> Option<TypeId> {
+    if !checker.no_implicit_any()
+        || program.arena().kind(decl) != Kind::VariableDeclaration
+        || is_catch_clause_variable_declaration(program, decl)
+        || is_binding_pattern_name(program, decl)
+        || is_exported_variable_like_declaration(program, decl)
+        || program.arena().flags(decl).contains(NodeFlags::AMBIENT)
+    {
+        return None;
+    }
+    if combined_node_flags(program, decl).intersects(NodeFlags::CONSTANT) {
+        return None;
+    }
+    match variable_declaration_initializer(program, decl) {
+        None => Some(checker.auto_type()),
+        Some(init) if is_null_or_undefined_initializer(program, init) => Some(checker.auto_type()),
+        Some(init) if is_empty_array_literal_rhs(program, init) => Some(checker.auto_array_type()),
+        _ => None,
+    }
+}
+
+fn is_null_or_undefined_initializer(program: &dyn BoundProgram, node: NodeId) -> bool {
+    matches!(
+        program.arena().kind(node),
+        Kind::NullKeyword | Kind::UndefinedKeyword
+    )
+}
+
+fn is_binding_pattern_name(program: &dyn BoundProgram, decl: NodeId) -> bool {
+    match program.arena().data(decl) {
+        NodeData::VariableDeclaration(d) => matches!(
+            program.arena().kind(d.name),
+            Kind::ObjectBindingPattern | Kind::ArrayBindingPattern
+        ),
+        _ => false,
+    }
+}
+
+fn is_exported_variable_like_declaration(program: &dyn BoundProgram, decl: NodeId) -> bool {
+    let Some(parent) = program.arena().parent(decl) else {
+        return false;
+    };
+    let list_parent = program.arena().parent(parent);
+    let stmt = list_parent.unwrap_or(parent);
+    if program.arena().kind(stmt) != Kind::VariableStatement {
+        return false;
+    }
+    let NodeData::VariableStatement(d) = program.arena().data(stmt) else {
+        return false;
+    };
+    d.modifiers.as_ref().is_some_and(|m| {
+        m.list
+            .nodes
+            .iter()
+            .any(|&n| program.arena().kind(n) == Kind::ExportKeyword)
+    })
+}
+
 fn is_empty_array_literal_rhs(program: &dyn BoundProgram, node: NodeId) -> bool {
     let mut n = node;
     while let NodeData::ParenthesizedExpression(d) = program.arena().data(n) {
@@ -5830,7 +5898,9 @@ pub fn get_type_of_property_of_type(
                 sources: params,
                 targets: args,
             };
-            return Some(checker.instantiate_type(prop_type, &mapper));
+            return Some(checker.instantiate_type_for_reference_mapper(
+                program, prop_type, &mapper,
+            ));
         }
     }
     Some(prop_type)

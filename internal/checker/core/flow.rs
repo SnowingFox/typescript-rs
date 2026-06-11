@@ -19,7 +19,7 @@ use super::program::BoundProgram;
 use super::symbols::resolve_name;
 use super::symbols_query::get_symbol_of_declaration;
 use super::type_facts::TypeFacts;
-use super::types::{LiteralValue, ObjectFlags, TypeFlags, TypeId};
+use super::types::{LiteralValue, ObjectFlags, ObjectType, TypeData, TypeFlags, TypeId};
 use super::Checker;
 
 /// In-progress loop-junction analysis entry (Go's `FlowLoopInfo`).
@@ -417,7 +417,7 @@ impl Checker {
         reference: NodeId,
         declared_type: TypeId,
     ) -> TypeId {
-        match program.flow_node_of(reference) {
+        let evolved = match program.flow_node_of(reference) {
             None => declared_type,
             Some(flow) => {
                 self.flow_loop_cache.clear();
@@ -426,6 +426,13 @@ impl Checker {
                 let mut cache: FxHashMap<FlowNodeId, TypeId> = FxHashMap::default();
                 self.get_type_at_flow_node(program, reference, declared_type, flow, &mut cache)
             }
+        };
+        if self.is_evolving_array_type(evolved)
+            && self.is_evolving_array_operation_target(program, reference)
+        {
+            self.auto_array_type()
+        } else {
+            self.finalize_evolving_array_type(program, evolved)
         }
     }
 
@@ -527,8 +534,19 @@ impl Checker {
             }
         } else if fnode.flags.contains(FlowFlags::CALL) {
             self.get_type_at_flow_call(program, reference, declared, flow, cache)
+        } else if fnode.flags.contains(FlowFlags::ARRAY_MUTATION) {
+            match self.get_type_at_flow_array_mutation(
+                program, reference, declared, flow, cache,
+            ) {
+                Some(t) => t,
+                None => match fnode.antecedent {
+                    Some(a) => {
+                        self.get_type_at_flow_node(program, reference, declared, a, cache)
+                    }
+                    None => declared,
+                },
+            }
         } else {
-            // DEFER(phase-4-checker-4g): assignment/array-mutation flow.
             match fnode.antecedent {
                 Some(a) => self.get_type_at_flow_node(program, reference, declared, a, cache),
                 None => declared,
@@ -810,10 +828,11 @@ impl Checker {
         cache: &mut FxHashMap<FlowNodeId, TypeId>,
     ) -> TypeId {
         let fnode = program.flow_node(flow);
-        let ante_type = match fnode.antecedent {
+        let raw_ante = match fnode.antecedent {
             Some(a) => self.get_type_at_flow_node(program, reference, declared, a, cache),
             None => declared,
         };
+        let ante_type = self.finalize_evolving_array_type(program, raw_ante);
         let Some(call_expression) = fnode.node else {
             return ante_type;
         };
@@ -2160,9 +2179,17 @@ impl Checker {
     ) -> Option<TypeId> {
         let node = node?;
         if self.is_matching_reference(program, reference, node) {
-            // DEFER(phase-4-checker-4u): compound assignment base widening,
-            // auto/auto-array evolving types, and the unreachable `never` result.
-            // blocked-by: evolving-array flow + `unreachableNeverType`.
+            if declared == self.auto_type() || declared == self.auto_array_type() {
+                if self.is_empty_array_assignment(program, node) {
+                    return Some(self.get_evolving_array_type(self.never_type()));
+                }
+                let assigned = self.get_assigned_type(program, node);
+                let assigned = self.get_widened_literal_type(assigned);
+                if self.is_type_assignable_to(program, assigned, declared) {
+                    return Some(assigned);
+                }
+                return Some(self.any_array_type());
+            }
             let t = declared;
             if self.get_type(t).flags().contains(TypeFlags::UNION) {
                 let assigned = self.get_assigned_type(program, node);
@@ -2186,7 +2213,8 @@ impl Checker {
                     }
                     None => declared,
                 };
-                return Some(self.get_non_null_type(ante_type));
+                let finalized = self.finalize_evolving_array_type(program, ante_type);
+                return Some(self.get_non_null_type(finalized));
             }
         }
         // A dotted-name assignment to a prefix of `reference` (e.g. `obj.a = …`
@@ -2199,6 +2227,269 @@ impl Checker {
             return Some(declared);
         }
         None
+    }
+
+    // ---- T1-E batch 135: evolving-array flow narrowing ----
+
+    // Go: internal/checker/flow.go:Checker.getTypeAtFlowArrayMutation(1376)
+    fn get_type_at_flow_array_mutation(
+        &mut self,
+        program: &dyn BoundProgram,
+        reference: NodeId,
+        declared: TypeId,
+        flow: FlowNodeId,
+        cache: &mut FxHashMap<FlowNodeId, TypeId>,
+    ) -> Option<TypeId> {
+        if declared != self.auto_type() && declared != self.auto_array_type() {
+            return None;
+        }
+        let fnode = program.flow_node(flow);
+        let node = fnode.node?;
+        let (expr, args) = match program.arena().data(node) {
+            NodeData::CallExpression(d) => {
+                let mut target = d.expression;
+                if let NodeData::PropertyAccessExpression(pa) = program.arena().data(target) {
+                    target = pa.expression;
+                }
+                (target, d.arguments.nodes.clone())
+            }
+            NodeData::BinaryExpression(d) => {
+                if program.arena().kind(d.operator_token) != Kind::EqualsToken {
+                    return None;
+                }
+                let left = d.left;
+                let target = match program.arena().data(left) {
+                    NodeData::ElementAccessExpression(ea) => ea.expression,
+                    _ => left,
+                };
+                (target, vec![d.right])
+            }
+            _ => return None,
+        };
+        if !self.is_matching_reference(
+            program,
+            reference,
+            get_reference_candidate(program, expr),
+        ) {
+            return None;
+        }
+        let antecedent = fnode.antecedent?;
+        let flow_type = self.get_type_at_flow_node(program, reference, declared, antecedent, cache);
+        if !self.is_evolving_array_type(flow_type) {
+            return Some(flow_type);
+        }
+        let mut evolved = flow_type;
+        if matches!(program.arena().data(node), NodeData::CallExpression(_)) {
+            for arg in args {
+                evolved = self.add_evolving_array_element_type(program, evolved, arg);
+            }
+        } else if let NodeData::BinaryExpression(d) = program.arena().data(node) {
+            let NodeData::ElementAccessExpression(ea) = program.arena().data(d.left) else {
+                return Some(flow_type);
+            };
+            if is_number_like_index_expression(program, ea.argument_expression) {
+                evolved = self.add_evolving_array_element_type(program, evolved, d.right);
+            }
+        }
+        Some(evolved)
+    }
+
+    // Go: internal/checker/flow.go:Checker.getEvolvingArrayType(1481)
+    pub(crate) fn get_evolving_array_type(&mut self, element_type: TypeId) -> TypeId {
+        if let Some(&cached) = self.evolving_array_type_cache.get(&element_type) {
+            return cached;
+        }
+        let result = self.new_object_type(
+            ObjectFlags::EVOLVING_ARRAY,
+            None,
+            ObjectType {
+                evolving_element_type: Some(element_type),
+                ..Default::default()
+            },
+        );
+        self.evolving_array_type_cache
+            .insert(element_type, result);
+        result
+    }
+
+    fn get_element_type_of_evolving_array_type(&self, t: TypeId) -> TypeId {
+        if self.is_evolving_array_type(t) {
+            self.get_type(t)
+                .as_object()
+                .and_then(|o| o.evolving_element_type)
+                .unwrap_or(self.never_type())
+        } else {
+            self.never_type()
+        }
+    }
+
+    // Go: internal/checker/flow.go:Checker.addEvolvingArrayElementType(1529)
+    fn add_evolving_array_element_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        evolving_array_type: TypeId,
+        node: NodeId,
+    ) -> TypeId {
+        let expr_type = self.get_regular_type_of_expression(program, node);
+        let new_element_type = self.get_base_type_of_literal_type(expr_type);
+        let element_type = self.get_element_type_of_evolving_array_type(evolving_array_type);
+        if self.is_type_subset_of(new_element_type, element_type) {
+            return evolving_array_type;
+        }
+        let union = self.get_union_type(&[element_type, new_element_type]);
+        self.get_evolving_array_type(union)
+    }
+
+    // Go: internal/checker/flow.go:Checker.finalizeEvolvingArrayType(1538)
+    pub(crate) fn finalize_evolving_array_type(
+        &mut self,
+        program: &dyn BoundProgram,
+        t: TypeId,
+    ) -> TypeId {
+        if !self.is_evolving_array_type(t) {
+            return t;
+        }
+        if let Some(final_ty) = self
+            .get_type(t)
+            .as_object()
+            .and_then(|o| o.evolving_final_array_type)
+        {
+            return final_ty;
+        }
+        let element_type = self.get_element_type_of_evolving_array_type(t);
+        let final_ty = self.create_final_array_type(program, element_type);
+        if let TypeData::Object(obj) = &mut self.types.get_mut(t).data {
+            obj.evolving_final_array_type = Some(final_ty);
+        }
+        final_ty
+    }
+
+    // Go: internal/checker/flow.go:Checker.createFinalArrayType(1552)
+    fn create_final_array_type(&mut self, program: &dyn BoundProgram, element_type: TypeId) -> TypeId {
+        if self
+            .get_type(element_type)
+            .flags()
+            .contains(TypeFlags::NEVER)
+        {
+            return self.auto_array_type();
+        }
+        let element_type = if self.get_type(element_type).union_types().is_some() {
+            self.get_union_type_with_subtype_reduction(program, element_type)
+        } else {
+            element_type
+        };
+        if let Some(array_target) = self.get_global_type("Array") {
+            return self.create_type_reference(array_target, vec![element_type]);
+        }
+        self.create_array_type(element_type)
+    }
+
+    fn get_union_type_with_subtype_reduction(
+        &mut self,
+        program: &dyn BoundProgram,
+        union: TypeId,
+    ) -> TypeId {
+        let Some(members) = self.get_type(union).union_types() else {
+            return union;
+        };
+        let mut kept: Vec<TypeId> = Vec::new();
+        for &member in members {
+            if kept
+                .iter()
+                .any(|&existing| self.is_type_subset_of(member, existing))
+            {
+                continue;
+            }
+            kept.retain(|&existing| !self.is_type_subset_of(existing, member));
+            kept.push(member);
+        }
+        self.get_union_type(&kept)
+    }
+
+    pub(crate) fn is_evolving_array_type(&self, t: TypeId) -> bool {
+        self.get_type(t)
+            .object_flags()
+            .contains(ObjectFlags::EVOLVING_ARRAY)
+    }
+
+    // Go: internal/checker/flow.go:Checker.isEvolvingArrayOperationTarget(1514)
+    pub(crate) fn is_evolving_array_operation_target(
+        &self,
+        program: &dyn BoundProgram,
+        node: NodeId,
+    ) -> bool {
+        let root = self.get_reference_root(program, node);
+        let arena = program.arena();
+        let Some(parent) = arena.parent(root) else {
+            return false;
+        };
+        let is_length_push_or_unshift =
+            if let NodeData::PropertyAccessExpression(d) = arena.data(parent) {
+                let name = arena.text(d.name);
+                name == "length"
+                    || (arena.kind(d.name) == Kind::Identifier
+                        && is_push_or_unshift_name(name)
+                        && arena
+                            .parent(parent)
+                            .is_some_and(|gp| arena.kind(gp) == Kind::CallExpression))
+            } else {
+                false
+            };
+        let is_element_assignment = if let NodeData::ElementAccessExpression(d) = arena.data(parent) {
+            d.expression == root
+                && is_number_like_index_expression(program, d.argument_expression)
+                && arena.parent(parent).is_some_and(|gp| {
+                    matches!(
+                        arena.data(gp),
+                        NodeData::BinaryExpression(bd)
+                            if arena.kind(bd.operator_token) == Kind::EqualsToken
+                                && bd.left == parent
+                                && !tsgo_ast::utilities::is_assignment_target(arena, gp)
+                    )
+                })
+        } else {
+            false
+        };
+        is_length_push_or_unshift || is_element_assignment
+    }
+
+    // Go: internal/checker/flow.go:Checker.getReferenceRoot(1853)
+    fn get_reference_root(&self, program: &dyn BoundProgram, mut node: NodeId) -> NodeId {
+        let arena = program.arena();
+        loop {
+            let Some(parent) = arena.parent(node) else {
+                break;
+            };
+            match arena.data(parent) {
+                NodeData::ParenthesizedExpression(d) if d.expression == node => node = parent,
+                NodeData::BinaryExpression(d)
+                    if (arena.kind(d.operator_token) == Kind::EqualsToken && d.left == node)
+                        || (arena.kind(d.operator_token) == Kind::CommaToken
+                            && d.right == node) =>
+                {
+                    node = parent;
+                }
+                _ => break,
+            }
+        }
+        node
+    }
+
+    // Go: internal/checker/flow.go:Checker.isEmptyArrayAssignment(276)
+    fn is_empty_array_assignment(&self, program: &dyn BoundProgram, node: NodeId) -> bool {
+        if let NodeData::VariableDeclaration(d) = program.arena().data(node) {
+            return d
+                .initializer
+                .is_some_and(|init| is_empty_array_literal_node(program, init));
+        }
+        if let Some(parent) = program.arena().parent(node) {
+            if program.arena().kind(parent) == Kind::BinaryExpression {
+                if let NodeData::BinaryExpression(d) = program.arena().data(parent) {
+                    return is_empty_array_literal_node(program, d.right);
+                }
+            }
+        }
+        false
     }
 
     // Reports whether `target` is a prefix access chain of `source` (e.g.
@@ -3185,6 +3476,38 @@ fn optional_chain_operand(program: &dyn BoundProgram, node: NodeId) -> Option<No
         NodeData::CallExpression(d) => Some(d.expression),
         NodeData::NonNullExpression(d) => Some(d.expression),
         _ => None,
+    }
+}
+
+fn is_number_like_index_expression(program: &dyn BoundProgram, mut node: NodeId) -> bool {
+    loop {
+        match program.arena().kind(node) {
+            Kind::ParenthesizedExpression => {
+                node = match program.arena().data(node) {
+                    NodeData::ParenthesizedExpression(d) => d.expression,
+                    _ => return false,
+                };
+            }
+            Kind::NumericLiteral => return true,
+            Kind::StringLiteral => return false,
+            Kind::Identifier | Kind::ThisKeyword | Kind::SuperKeyword => return true,
+            _ => return false,
+        }
+    }
+}
+
+// Go: internal/ast/utilities.go:IsPushOrUnshiftIdentifier
+fn is_push_or_unshift_name(name: &str) -> bool {
+    name == "push" || name == "unshift"
+}
+
+fn is_empty_array_literal_node(program: &dyn BoundProgram, mut node: NodeId) -> bool {
+    loop {
+        match program.arena().data(node) {
+            NodeData::ParenthesizedExpression(d) => node = d.expression,
+            NodeData::ArrayLiteralExpression(d) => return d.list.nodes.is_empty(),
+            _ => return false,
+        }
     }
 }
 

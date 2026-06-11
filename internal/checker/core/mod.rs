@@ -473,6 +473,13 @@ pub struct Checker {
     /// The `{}` type produced when narrowing `unknown` after a truthiness guard
     /// (Go's `unknownEmptyObjectType`).
     unknown_empty_object_type: TypeId,
+    /// Marker `any[]` type (Go's `anyArrayType`).
+    any_array_type: TypeId,
+    /// Control-flow-tracked `any[]` marker (Go's `autoArrayType`).
+    auto_array_type: TypeId,
+    /// Interned evolving-array types keyed by element type id (Go's
+    /// `cachedTypes[CachedTypeKindEvolvingArrayType]`).
+    evolving_array_type_cache: FxHashMap<TypeId, TypeId>,
 }
 
 impl Default for Checker {
@@ -627,7 +634,7 @@ impl Checker {
             TypeData::Object(ObjectType::default()),
         );
 
-        Checker {
+        let mut checker = Checker {
             types,
             symbol_reference_links: SymbolLinks::default(),
             global_types: FxHashMap::default(),
@@ -724,7 +731,76 @@ impl Checker {
             template_constraint_type,
             empty_object_type,
             unknown_empty_object_type,
+            any_array_type: TypeId(0),
+            auto_array_type: TypeId(0),
+            evolving_array_type_cache: FxHashMap::default(),
+        };
+        checker.init_marker_array_types();
+        checker
+    }
+
+    // Allocates private marker array types without registering `Array` in
+    // `global_types` (Go's `anyArrayType` / `autoArrayType` init with the
+    // empty-object collision fallback for `autoArrayType`).
+    // Go: internal/checker/checker.go:NewChecker (anyArrayType/autoArrayType)
+    fn init_marker_array_types(&mut self) {
+        self.any_array_type = self.new_marker_array_type(self.any_type);
+        self.auto_array_type = self.new_marker_array_type(self.auto_type);
+    }
+
+    fn new_marker_array_type(&mut self, element_type: TypeId) -> TypeId {
+        let tp = self.new_type_parameter(None);
+        let target = self.new_object_type(
+            ObjectFlags::REFERENCE,
+            None,
+            ObjectType {
+                type_parameters: vec![tp],
+                ..Default::default()
+            },
+        );
+        self.create_type_reference(target, vec![element_type])
+    }
+
+    /// The marker `any[]` type (Go's `anyArrayType`).
+    pub fn any_array_type(&self) -> TypeId {
+        self.any_array_type
+    }
+
+    /// The control-flow-tracked `any[]` marker (Go's `autoArrayType`).
+    pub fn auto_array_type(&self) -> TypeId {
+        self.auto_array_type
+    }
+
+    /// Maps `autoType` / `autoArrayType` to their manifest forms (Go's
+    /// `convertAutoToAny`).
+    // Go: internal/checker/checker.go:Checker.convertAutoToAny(30891)
+    pub(crate) fn convert_auto_to_any(&self, t: TypeId) -> TypeId {
+        if t == self.auto_type {
+            self.any_type
+        } else if t == self.auto_array_type {
+            self.any_array_type
+        } else {
+            t
         }
+    }
+
+    /// When the program defines a global `Array`, map marker array types to a
+    /// real `Array<E>` reference for member/index lookup (without having
+    /// pre-registered `Array` in `global_types` at `NewChecker` time).
+    // Go: internal/checker/checker.go:Checker.createArrayType (post-lib)
+    pub(crate) fn apparent_marker_array_type(&mut self, marker: TypeId) -> TypeId {
+        if marker != self.auto_array_type && marker != self.any_array_type {
+            return marker;
+        }
+        if self.get_global_type("Array").is_none() {
+            return marker;
+        }
+        let element = if marker == self.auto_array_type {
+            self.convert_auto_to_any(self.auto_type)
+        } else {
+            self.any_type
+        };
+        self.create_array_type(element)
     }
 
     /// Returns the checker-wide empty object type (Go's `emptyObjectType`).

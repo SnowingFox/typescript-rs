@@ -1,5 +1,6 @@
 use crate::core::declared_types::get_declared_type_of_symbol;
 use crate::core::program::BoundProgram;
+use std::rc::Rc;
 use crate::core::test_support::StubProgram;
 use crate::core::Checker;
 use tsgo_ast::{NodeData, SymbolId};
@@ -613,6 +614,109 @@ fn flow_optional_chain_truthiness_narrows_object() {
             .intersects(crate::core::types::TypeFlags::NULLABLE),
         "expected non-nullish obj type, got {:?}",
         narrowed
+    );
+}
+
+// ---- T1-E batch 135: evolving-array flow narrowing ----
+
+const EVOLVING_ARRAY_LIB: &str = "interface Array<T> {\n  [n: number]: T;\n  length: number;\n  push(...items: T[]): number;\n  unshift(...items: T[]): number;\n}\n";
+
+fn stmt_expr(p: &StubProgram, idx: usize) -> tsgo_ast::NodeId {
+    use tsgo_ast::NodeData;
+    let arena = p.arena();
+    let stmts = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes.clone(),
+        _ => panic!("source file"),
+    };
+    match arena.data(stmts[idx]) {
+        NodeData::ExpressionStatement(d) => d.expression,
+        _ => panic!("expression statement"),
+    }
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowArrayMutation
+#[test]
+fn flow_push_narrows_to_number_array() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!("{EVOLVING_ARRAY_LIB}let arr = [];\narr.push(1);\narr;"),
+    );
+    let usage = stmt_expr(&stub, 3);
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let declared = c.auto_array_type();
+    let narrowed = c.get_flow_type_of_reference(p.as_ref(), usage, declared);
+    let array_target = c.get_global_type("Array").expect("Array global");
+    let expected = c.create_type_reference(array_target, vec![c.number_type()]);
+    assert_eq!(narrowed, expected);
+}
+
+// Go: internal/checker/flow.go:Checker.getEvolvingArrayType
+#[test]
+fn evolving_array_type_interns_by_element_type() {
+    let mut c = Checker::new();
+    let n = c.number_type();
+    let s = c.string_type();
+    let e1 = c.get_evolving_array_type(n);
+    let e2 = c.get_evolving_array_type(n);
+    let e3 = c.get_evolving_array_type(s);
+    assert_eq!(e1, e2);
+    assert_ne!(e1, e3);
+    assert!(c.is_evolving_array_type(e1));
+}
+
+// Go: internal/checker/flow.go:Checker.finalizeEvolvingArrayType
+#[test]
+fn finalize_evolving_array_never_element_becomes_auto_array() {
+    let mut c = Checker::new();
+    let p = empty();
+    let evolving = c.get_evolving_array_type(c.never_type());
+    let finalized = c.finalize_evolving_array_type(&p, evolving);
+    assert_eq!(finalized, c.auto_array_type());
+}
+
+// Go: internal/checker/flow.go:Checker.isEvolvingArrayOperationTarget
+#[test]
+fn evolving_array_operation_target_recognizes_push_receiver() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!("{EVOLVING_ARRAY_LIB}let arr = [];\narr.push(1);"),
+    );
+    let push_call = stmt_expr(&p, 2);
+    let arena = p.arena();
+    let arr_ref = match arena.data(push_call) {
+        NodeData::CallExpression(d) => match arena.data(d.expression) {
+            NodeData::PropertyAccessExpression(pa) => pa.expression,
+            _ => panic!("property access"),
+        },
+        _ => panic!("call"),
+    };
+    let mut c = Checker::new();
+    assert!(c.is_evolving_array_operation_target(&p, arr_ref));
+}
+
+// Go: internal/checker/flow.go:Checker.isEmptyArrayAssignment
+#[test]
+fn empty_array_initializer_starts_evolving_array_in_flow() {
+    use rustc_hash::FxHashMap;
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        &format!("{EVOLVING_ARRAY_LIB}let arr = [];\narr;"),
+    );
+    let usage = stmt_expr(&stub, 2);
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let declared = c.auto_array_type();
+    let flow_id = p.flow_node_of(usage).expect("usage flow");
+    let mut cache = FxHashMap::default();
+    let flow_type = c.get_type_at_flow_node(p.as_ref(), usage, declared, flow_id, &mut cache);
+    assert!(
+        c.is_evolving_array_type(flow_type),
+        "expected evolving array after `let arr = []`"
+    );
+    assert_eq!(
+        c.finalize_evolving_array_type(p.as_ref(), flow_type),
+        c.auto_array_type()
     );
 }
 

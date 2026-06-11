@@ -1644,6 +1644,10 @@ impl<'a> Binder<'a> {
                 self.bind_binary_expression_flow(node);
             }
             Kind::ConditionalExpression => self.bind_conditional_expression_flow(node),
+            Kind::CallExpression => {
+                self.bind_each_child(node);
+                self.bind_call_expression_array_mutation(node);
+            }
             Kind::VariableDeclaration => self.bind_variable_declaration_flow(node),
             Kind::SourceFile => {
                 let (statements, eof) = match self.arena.data(node) {
