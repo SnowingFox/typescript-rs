@@ -720,6 +720,49 @@ fn empty_array_initializer_starts_evolving_array_in_flow() {
     );
 }
 
+// ---- T1-E batch 138: discriminated-union narrowing on key property ----
+
+use crate::core::declared_types::is_generic_type;
+
+// Go: internal/checker/checker.go:Checker.isGenericType(24729)
+#[test]
+fn is_generic_type_flags_type_parameter() {
+    let mut c = Checker::new();
+    let tp = c.new_type_parameter(None);
+    assert!(is_generic_type(&c, tp));
+    assert!(!is_generic_type(&c, c.string_type()));
+    assert!(!is_generic_type(&c, c.number_type()));
+}
+
+// Go: internal/checker/relater.go:Checker.isDiscriminantProperty(1084)
+#[test]
+fn is_discriminant_property_true_for_literal_kind_union() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\ntype B = { kind: \"b\"; y: string };\ntype U = A | B;",
+    );
+    let u_sym = sym(&stub, "U");
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let u = get_declared_type_of_symbol(&mut c, p.as_ref(), u_sym, p.globals());
+    assert!(c.is_discriminant_property(p.as_ref(), u, "kind"));
+    assert!(!c.is_discriminant_property(p.as_ref(), u, "x"));
+}
+
+// Go: internal/checker/relater.go:Checker.isDiscriminantProperty(1084) (uniform)
+#[test]
+fn is_discriminant_property_false_for_uniform_literal_union_property() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\ntype B = { kind: \"a\"; y: string };\ntype U = A | B;",
+    );
+    let u_sym = sym(&stub, "U");
+    let p: std::rc::Rc<dyn BoundProgram> = std::rc::Rc::new(stub);
+    let mut c = Checker::new_checker(std::rc::Rc::clone(&p));
+    let u = get_declared_type_of_symbol(&mut c, p.as_ref(), u_sym, p.globals());
+    assert!(!c.is_discriminant_property(p.as_ref(), u, "kind"));
+}
+
 // ---- T1-E batch 137: union-of-evolving-array at loop/branch junctions ----
 
 // Go: internal/checker/flow.go:isEvolvingArrayTypeList(1499)

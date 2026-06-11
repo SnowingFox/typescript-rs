@@ -5488,6 +5488,12 @@ pub(crate) fn is_generic_object_type(checker: &Checker, t: TypeId) -> bool {
     flags.intersects(TypeFlags::INSTANTIABLE_NON_PRIMITIVE)
 }
 
+// Reports whether `t` is a generic (instantiable) type (Go's `isGenericType`).
+// Go: internal/checker/checker.go:Checker.isGenericType(24729)
+pub(crate) fn is_generic_type(checker: &Checker, t: TypeId) -> bool {
+    is_generic_object_type(checker, t) || is_generic_index_type(checker, t)
+}
+
 // Returns a union's or intersection's constituent type ids.
 fn union_or_intersection_members(checker: &Checker, t: TypeId) -> Vec<TypeId> {
     let ty = checker.get_type(t);

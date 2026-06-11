@@ -28967,3 +28967,181 @@ fn assertion_call_after_never_path_still_narrows_reachable_arm() {
         "reachable assertion narrowing must still work, got {diags:?}"
     );
 }
+
+// ---- T1-E batch 138: discriminated-union narrowing on key property ----
+
+// Go: internal/checker/relater.go:Checker.isDiscriminantProperty(1084) (`!isGenericType`)
+#[test]
+fn generic_union_discriminant_property_skips_narrowing_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function narrowWithGenericKind<T extends string>(\n\
+           v: { kind: \"a\"; x: number } | { kind: T; y: number }\n\
+         ) {\n\
+           if (v.kind === \"a\") {\n\
+             const n: number = v.x;\n\
+           }\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminant(706) (`HasNeverType`)
+#[test]
+fn never_discriminant_constituent_excluded_from_narrowing_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: never; y: string };\n\
+         declare const v: A | B;\n\
+         if (v.kind === \"a\") {\n\
+           const n: number = v.x;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminant(706) (`HasNeverType`)
+#[test]
+fn never_discriminant_constituent_wrong_member_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: never; y: string };\n\
+         declare const v: A | B;\n\
+         if (v.kind === \"a\") {\n\
+           v.y;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: internal/checker/flow.go:Checker.getDiscriminantPropertyAccess(1408) (declared subset)
+#[test]
+fn partial_union_narrow_then_discriminant_eq_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         type C = { kind: \"c\"; z: boolean };\n\
+         declare const v: A | B | C;\n\
+         if (v.kind !== \"c\") {\n\
+           if (v.kind === \"a\") {\n\
+             const n: number = v.x;\n\
+           }\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getDiscriminantPropertyAccess(1408) (declared subset)
+#[test]
+fn partial_union_narrow_then_discriminant_else_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         type C = { kind: \"c\"; z: boolean };\n\
+         declare const v: A | B | C;\n\
+         if (v.kind !== \"c\") {\n\
+           if (v.kind === \"b\") {\n\
+             const s: string = v.y;\n\
+           }\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminantProperty(683)
+#[test]
+fn numeric_discriminant_three_way_union_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: 1; b: string };\n\
+         type C = { kind: 2; c: boolean };\n\
+         declare const v: A | B | C;\n\
+         if (v.kind === 1) {\n\
+           const s: string = v.b;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminantProperty(683)
+#[test]
+fn boolean_discriminant_property_narrows_union_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { flag: true; a: number };\n\
+         type B = { flag: false; b: string };\n\
+         declare const v: A | B;\n\
+         if (v.flag === true) {\n\
+           const n: number = v.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/relater.go:Checker.isDiscriminantProperty(1084)
+#[test]
+fn uniform_union_property_is_not_discriminant_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: string; x: number };\n\
+         type B = { kind: string; y: string };\n\
+         declare const v: A | B;\n\
+         if (v.kind === \"a\") {\n\
+           const n: number = v.x;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByDiscriminantProperty(683)
+#[test]
+fn chained_discriminant_inequality_then_equality_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         type C = { kind: \"c\"; z: boolean };\n\
+         declare const v: A | B | C;\n\
+         if (v.kind !== \"a\") {\n\
+           if (v.kind === \"b\") {\n\
+             const s: string = v.y;\n\
+           }\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

@@ -1418,6 +1418,8 @@ impl Checker {
         }
     }
 
+    // ---- T1-E batch 138: discriminated-union narrowing on key property ----
+
     // Returns the property-access node `ref.prop` (`left`/`right` of an equality)
     // when it is a candidate discriminant-property access for `reference` on the
     // union `t`: the access's object must match the reference and `prop` must be
@@ -1425,8 +1427,7 @@ impl Checker {
     // + `getCandidateDiscriminantPropertyAccess`).
     //
     // DEFER(phase-4-checker-later): the const-alias (`const k = obj.kind`) and
-    // destructuring (`const { kind } = obj`) candidate forms, and using the
-    // declared union type when the computed type isn't a union subset.
+    // destructuring (`const { kind } = obj`) candidate forms.
     // blocked-by: alias/binding-element reference matching.
     // Go: internal/checker/flow.go:Checker.getDiscriminantPropertyAccess(1408)
     fn get_discriminant_property_access(
@@ -1436,13 +1437,23 @@ impl Checker {
         expr: NodeId,
         t: TypeId,
     ) -> Option<NodeId> {
-        if !self.get_type(t).flags().contains(TypeFlags::UNION) {
+        let declared = self.flow_initial_type;
+        if !self.get_type(declared).flags().contains(TypeFlags::UNION)
+            && !self.get_type(t).flags().contains(TypeFlags::UNION)
+        {
             return None;
         }
         let access =
             self.get_candidate_discriminant_property_access(program, reference, expr)?;
         let name = self.get_accessed_property_name(program, access)?;
-        if self.is_discriminant_property(program, t, &name) {
+        let mut check_type = t;
+        if self.get_type(declared).flags().contains(TypeFlags::UNION)
+            && !self.get_type(t).flags().contains(TypeFlags::UNION)
+            && self.is_type_subset_of(t, declared)
+        {
+            check_type = declared;
+        }
+        if self.is_discriminant_property(program, check_type, &name) {
             Some(access)
         } else {
             None
@@ -1563,8 +1574,6 @@ impl Checker {
     // port does not intern literal types — two `"a"` occurrences are distinct
     // ids but the same discriminant value.
     //
-    // DEFER(phase-4-checker-later): the `!isGenericType(prop type)` exclusion
-    // and the `HasNeverType` interaction. blocked-by: generic-type detection.
     // Go: internal/checker/relater.go:Checker.isDiscriminantProperty(1084)
     pub(crate) fn is_discriminant_property(
         &mut self,
@@ -1589,6 +1598,7 @@ impl Checker {
         let mut first: Option<TypeId> = None;
         let mut non_uniform = false;
         let mut has_literal = false;
+        let mut has_never_constituent = false;
         for m in members {
             let pt = match crate::core::declared_types::get_type_of_property_of_type(
                 self, program, m, name,
@@ -1596,6 +1606,9 @@ impl Checker {
                 Some(pt) => pt,
                 None => continue,
             };
+            if self.get_type(pt).flags().contains(TypeFlags::NEVER) {
+                has_never_constituent = true;
+            }
             match first {
                 None => first = Some(pt),
                 Some(f) => {
@@ -1608,7 +1621,26 @@ impl Checker {
                 has_literal = true;
             }
         }
-        non_uniform && has_literal
+        if !(non_uniform && has_literal) {
+            return false;
+        }
+        let prop_type =
+            crate::core::declared_types::get_type_of_symbol(self, program, prop, None);
+        if crate::core::declared_types::is_generic_type(self, prop_type) {
+            return false;
+        }
+        // Go's `isDiscriminantWithNeverType`: a non-optional synthetic property
+        // with non-uniform literal types that reduces to `never` is not a
+        // discriminant (constituents with `never` are handled during narrowing).
+        if !has_never_constituent
+            && self
+                .get_type(prop_type)
+                .flags()
+                .contains(TypeFlags::NEVER)
+        {
+            return false;
+        }
+        true
     }
 
     // Reports whether `a` and `b` are literal types carrying the same value,
