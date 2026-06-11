@@ -1426,9 +1426,6 @@ impl Checker {
     // a literal discriminant property of `t` (Go's `getDiscriminantPropertyAccess`
     // + `getCandidateDiscriminantPropertyAccess`).
     //
-    // DEFER(phase-4-checker-later): the const-alias (`const k = obj.kind`) and
-    // destructuring (`const { kind } = obj`) candidate forms.
-    // blocked-by: alias/binding-element reference matching.
     // Go: internal/checker/flow.go:Checker.getDiscriminantPropertyAccess(1408)
     fn get_discriminant_property_access(
         &mut self,
@@ -1460,6 +1457,8 @@ impl Checker {
         }
     }
 
+    // ---- T1-E batch 139: const-alias + binding-element discriminant candidates ----
+
     // Returns a property/element access (or const-alias thereof) on `reference`
     // that may be used as a discriminant guard (Go's
     // `getCandidateDiscriminantPropertyAccess`).
@@ -1471,7 +1470,40 @@ impl Checker {
         expr: NodeId,
     ) -> Option<NodeId> {
         let expr = skip_parentheses(program, expr);
-        match program.arena().data(expr) {
+        let arena = program.arena();
+        if is_narrowable_pseudo_reference(arena, reference) {
+            if arena.kind(expr) == Kind::Identifier {
+                let sym = resolve_name(
+                    program,
+                    expr,
+                    arena.text(expr),
+                    SymbolFlags::VALUE,
+                    false,
+                    None,
+                )?;
+                let sym_rec = program.symbol(export_symbol_of_value_if_exported(program, sym));
+                let decl = sym_rec.value_declaration?;
+                let parent = arena.parent(decl)?;
+                if reference != parent {
+                    return None;
+                }
+                match arena.data(decl) {
+                    NodeData::BindingElement(d) if d.initializer.is_none() => {
+                        if !has_dot_dot_dot_token(arena, decl) {
+                            return Some(decl);
+                        }
+                    }
+                    NodeData::ParameterDeclaration(d) if d.initializer.is_none() => {
+                        if !has_dot_dot_dot_token(arena, decl) {
+                            return Some(decl);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return None;
+        }
+        match arena.data(expr) {
             NodeData::PropertyAccessExpression(d) => {
                 if self.is_matching_reference(program, reference, d.expression) {
                     Some(expr)
@@ -1490,7 +1522,7 @@ impl Checker {
                 let sym = resolve_name(
                     program,
                     expr,
-                    program.arena().text(expr),
+                    arena.text(expr),
                     SymbolFlags::VALUE,
                     false,
                     None,
@@ -1500,23 +1532,37 @@ impl Checker {
                 }
                 let sym_rec = program.symbol(sym);
                 let decl = sym_rec.value_declaration?;
-                let NodeData::VariableDeclaration(vd) = program.arena().data(decl) else {
-                    return None;
-                };
-                if vd.type_node.is_some() {
+                if let NodeData::VariableDeclaration(vd) = arena.data(decl) {
+                    if vd.type_node.is_some() {
+                        return None;
+                    }
+                    let init = skip_parentheses(program, vd.initializer?);
+                    let object = match arena.data(init) {
+                        NodeData::PropertyAccessExpression(d) => d.expression,
+                        NodeData::ElementAccessExpression(d) => d.expression,
+                        _ => return None,
+                    };
+                    if self.is_matching_reference(program, reference, object) {
+                        return Some(init);
+                    }
                     return None;
                 }
-                let init = skip_parentheses(program, vd.initializer?);
-                let object = match program.arena().data(init) {
-                    NodeData::PropertyAccessExpression(d) => d.expression,
-                    NodeData::ElementAccessExpression(d) => d.expression,
-                    _ => return None,
-                };
-                if self.is_matching_reference(program, reference, object) {
-                    Some(init)
-                } else {
-                    None
+                if let NodeData::BindingElement(d) = arena.data(decl) {
+                    if d.initializer.is_some() {
+                        return None;
+                    }
+                    let pattern = arena.parent(decl)?;
+                    let var_decl = arena.parent(pattern)?;
+                    let init = get_candidate_variable_declaration_initializer(program, var_decl)?;
+                    if matches!(
+                        arena.kind(init),
+                        Kind::Identifier | Kind::PropertyAccessExpression | Kind::ElementAccessExpression
+                    ) && self.is_matching_reference(program, reference, init)
+                    {
+                        return Some(decl);
+                    }
                 }
+                None
             }
             _ => None,
         }
@@ -1525,11 +1571,8 @@ impl Checker {
     // Returns the accessed property name of an access expression (Go's
     // `getAccessedPropertyName`, reachable subset: property access only).
     //
-    // DEFER(phase-4-checker-later): element-access (`obj["k"]`), binding-element,
-    // and parameter forms. blocked-by: element-access name extraction + binding
-    // destructuring names.
     // Go: internal/checker/flow.go:Checker.getAccessedPropertyName(1699)
-    fn get_accessed_property_name(
+    pub(crate) fn get_accessed_property_name(
         &self,
         program: &dyn BoundProgram,
         access: NodeId,
@@ -1543,6 +1586,7 @@ impl Checker {
                     None
                 }
             }
+            NodeData::BindingElement(_) => get_destructuring_property_name(program, access),
             _ => None,
         }
     }
@@ -1553,7 +1597,7 @@ impl Checker {
         let sym = program.symbol(symbol);
         sym.flags.intersects(SymbolFlags::VARIABLE)
             && sym.value_declaration.is_some_and(|decl| {
-                super::declared_types::combined_node_flags(program, decl)
+                get_combined_node_flags_from_declaration(program, decl)
                     .intersects(NodeFlags::CONSTANT)
             })
     }
@@ -3523,6 +3567,112 @@ impl Checker {
         } else {
             vec![t]
         }
+    }
+}
+
+// OR-folds node flags from a declaration up through its variable-declaration
+// list and statement (Go's `GetCombinedNodeFlags` via `getCombinedFlags`).
+// Go: internal/ast/utilities.go:getCombinedFlags(1146)
+fn get_combined_node_flags_from_declaration(
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> NodeFlags {
+    let arena = program.arena();
+    let mut node = get_root_declaration_for_flags(arena, node);
+    let mut combined = arena.flags(node);
+    if arena.kind(node) == Kind::VariableDeclaration {
+        if let Some(list) = arena.parent(node) {
+            combined |= arena.flags(list);
+            if let Some(stmt) = arena.parent(list) {
+                combined |= arena.flags(stmt);
+            }
+        }
+    }
+    combined
+}
+
+// Walks binding elements up to the enclosing variable/parameter declaration.
+// Go: internal/ast/utilities.go:GetRootDeclaration(1139)
+fn get_root_declaration_for_flags(arena: &tsgo_ast::NodeArena, mut node: NodeId) -> NodeId {
+    while arena.kind(node) == Kind::BindingElement {
+        let Some(parent) = arena.parent(node) else {
+            break;
+        };
+        if matches!(
+            arena.kind(parent),
+            Kind::ObjectBindingPattern | Kind::ArrayBindingPattern
+        ) {
+            if let Some(grandparent) = arena.parent(parent) {
+                node = grandparent;
+                continue;
+            }
+        }
+        break;
+    }
+    node
+}
+
+// Reports whether `reference` is a binding pattern, function, or method used as
+// a pseudo-reference for destructuring narrowing.
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess(1431)
+fn is_narrowable_pseudo_reference(arena: &tsgo_ast::NodeArena, reference: NodeId) -> bool {
+    matches!(
+        arena.kind(reference),
+        Kind::ObjectBindingPattern | Kind::ArrayBindingPattern | Kind::FunctionExpression | Kind::ArrowFunction
+    ) || matches!(arena.data(reference), NodeData::MethodDeclaration(_))
+}
+
+// Go: internal/checker/utilities.go:hasDotDotDotToken
+fn has_dot_dot_dot_token(arena: &tsgo_ast::NodeArena, node: NodeId) -> bool {
+    match arena.data(node) {
+        NodeData::BindingElement(d) => d.dot_dot_dot_token.is_some(),
+        NodeData::ParameterDeclaration(d) => d.dot_dot_dot_token.is_some(),
+        _ => false,
+    }
+}
+
+// Returns the initializer of an untyped variable declaration (Go's
+// `getCandidateVariableDeclarationInitializer`).
+// Go: internal/checker/flow.go:getCandidateVariableDeclarationInitializer(1468)
+fn get_candidate_variable_declaration_initializer(
+    program: &dyn BoundProgram,
+    node: NodeId,
+) -> Option<NodeId> {
+    let NodeData::VariableDeclaration(vd) = program.arena().data(node) else {
+        return None;
+    };
+    if vd.type_node.is_some() {
+        return None;
+    }
+    vd.initializer.map(|init| skip_parentheses(program, init))
+}
+
+// Returns the destructured property name for a binding element (Go's
+// `getDestructuringPropertyName` subset: object/array binding patterns).
+// Go: internal/checker/flow.go:Checker.getDestructuringPropertyName(1769)
+fn get_destructuring_property_name(program: &dyn BoundProgram, node: NodeId) -> Option<String> {
+    let arena = program.arena();
+    let parent = arena.parent(node)?;
+    match arena.data(parent) {
+        NodeData::ObjectBindingPattern(_) => {
+            let NodeData::BindingElement(d) = arena.data(node) else {
+                return None;
+            };
+            let name_node = d.property_name.or(d.name)?;
+            match arena.kind(name_node) {
+                Kind::Identifier | Kind::StringLiteral | Kind::NumericLiteral => {
+                    Some(arena.text(name_node).to_string())
+                }
+                _ => None,
+            }
+        }
+        NodeData::ArrayBindingPattern(d) => d
+            .elements
+            .nodes
+            .iter()
+            .position(|&el| el == node)
+            .map(|idx| idx.to_string()),
+        _ => None,
     }
 }
 

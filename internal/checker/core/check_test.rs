@@ -29145,3 +29145,279 @@ fn chained_discriminant_inequality_then_equality_narrows_no_diagnostic() {
     let diags = c.get_diagnostics(root);
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
+
+// ---- T1-E batch 139: const-alias + binding-element discriminant candidates ----
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (binding element)
+#[test]
+fn destructure_shorthand_discriminant_alias_narrows_parent_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         declare const v: A | B;\n\
+         const { kind } = v;\n\
+         if (kind === \"a\") {\n\
+           const n: number = v.x;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (binding element rename)
+#[test]
+fn destructure_rename_discriminant_alias_narrows_parent_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         const { kind: k } = v;\n\
+         if (k === 0) {\n\
+           const n: number = v.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (binding element)
+#[test]
+fn destructure_discriminant_narrowed_wrong_member_reports_2339() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         declare const v: A | B;\n\
+         const { kind } = v;\n\
+         if (kind === \"a\") {\n\
+           const s: string = v.y;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2339, got {diags:?}");
+    assert_eq!(diags[0].code, 2339);
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (binding element)
+#[test]
+fn destructure_discriminant_inequality_else_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         declare const v: A | B;\n\
+         const { kind } = v;\n\
+         if (kind !== \"a\") {\n\
+         } else {\n\
+           const n: number = v.x;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (binding pattern reference)
+#[test]
+fn parameter_object_destructure_discriminant_narrows_member_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         function narrow(v: A | B) {\n\
+           const { kind } = v;\n\
+           if (kind === \"a\") {\n\
+             const n: number = v.x;\n\
+           }\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (binding pattern reference)
+#[test]
+fn parameter_destructure_discriminant_narrows_binding_element_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         function narrow({ kind }: A | B) {\n\
+           if (kind === \"a\") {\n\
+             const n: number = kind as any as number;\n\
+             n;\n\
+           }\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (const alias)
+#[test]
+fn batch139_const_alias_discriminant_narrows_parent_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         const k = v.kind;\n\
+         if (k === 0) {\n\
+           const n: number = v.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (element-access alias)
+#[test]
+fn batch139_const_alias_element_access_discriminant_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         const k = v[\"kind\"];\n\
+         if (k === 0) {\n\
+           const n: number = v.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (binding element)
+#[test]
+fn numeric_destructure_discriminant_alias_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { status: 0; a: number };\n\
+         type B = { status: 1; b: string };\n\
+         declare const v: A | B;\n\
+         const { status } = v;\n\
+         if (status === 1) {\n\
+           const s: string = v.b;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (binding element)
+#[test]
+fn boolean_destructure_discriminant_alias_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { flag: true; a: number };\n\
+         type B = { flag: false; b: string };\n\
+         declare const v: A | B;\n\
+         const { flag } = v;\n\
+         if (flag === true) {\n\
+           const n: number = v.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (binding element)
+#[test]
+fn destructure_three_way_union_discriminant_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         type C = { kind: \"c\"; z: boolean };\n\
+         declare const v: A | B | C;\n\
+         const { kind } = v;\n\
+         if (kind === \"b\") {\n\
+           const s: string = v.y;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (binding element)
+#[test]
+fn destructure_chained_inequality_then_equality_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         type C = { kind: \"c\"; z: boolean };\n\
+         declare const v: A | B | C;\n\
+         const { kind } = v;\n\
+         if (kind !== \"c\") {\n\
+           if (kind === \"a\") {\n\
+             const n: number = v.x;\n\
+           }\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (const alias boolean)
+#[test]
+fn batch139_const_alias_boolean_discriminant_guard_narrows_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: 0; a: number };\n\
+         type B = { kind: \"b\"; b: string };\n\
+         declare const v: A | B;\n\
+         const isA = v.kind === 0;\n\
+         if (isA) {\n\
+           const n: number = v.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+// Go: internal/checker/flow.go:Checker.getCandidateDiscriminantPropertyAccess (binding element)
+#[test]
+fn destructure_discriminant_not_equal_branch_narrows_complement_no_diagnostic() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "type A = { kind: \"a\"; x: number };\n\
+         type B = { kind: \"b\"; y: string };\n\
+         declare const v: A | B;\n\
+         const { kind } = v;\n\
+         if (kind !== \"b\") {\n\
+           const n: number = v.x;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}

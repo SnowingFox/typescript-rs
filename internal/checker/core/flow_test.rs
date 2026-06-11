@@ -763,6 +763,76 @@ fn is_discriminant_property_false_for_uniform_literal_union_property() {
     assert!(!c.is_discriminant_property(p.as_ref(), u, "kind"));
 }
 
+// ---- T1-E batch 139: const-alias + binding-element discriminant candidates ----
+
+// Go: internal/checker/flow.go:Checker.getAccessedPropertyName(1699) (binding element)
+#[test]
+fn get_accessed_property_name_binding_element_shorthand() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const v: { kind: string };\nconst { kind } = v;",
+    );
+    let p: Rc<dyn BoundProgram> = Rc::new(stub);
+    let mut c = Checker::new_checker(Rc::clone(&p));
+    let binding = find_binding_element_named(p.as_ref(), "kind");
+    assert_eq!(
+        c.get_accessed_property_name(p.as_ref(), binding).as_deref(),
+        Some("kind")
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getAccessedPropertyName(1699) (binding element rename)
+#[test]
+fn get_accessed_property_name_binding_element_rename() {
+    let stub = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const v: { kind: string };\nconst { kind: k } = v;",
+    );
+    let p: Rc<dyn BoundProgram> = Rc::new(stub);
+    let mut c = Checker::new_checker(Rc::clone(&p));
+    let binding = find_binding_element_named(p.as_ref(), "k");
+    assert_eq!(
+        c.get_accessed_property_name(p.as_ref(), binding).as_deref(),
+        Some("kind")
+    );
+}
+
+fn find_binding_element_named(p: &dyn BoundProgram, name: &str) -> tsgo_ast::NodeId {
+    use tsgo_ast::{Kind, NodeData};
+    let root = p.root();
+    let stmts = match p.arena().data(root) {
+        NodeData::SourceFile(d) => &d.statements.nodes,
+        _ => panic!("expected source file"),
+    };
+    for &stmt in stmts {
+        if let NodeData::VariableStatement(vs) = p.arena().data(stmt) {
+            let list = match p.arena().data(vs.declaration_list) {
+                NodeData::VariableDeclarationList(d) => &d.declarations.nodes,
+                _ => continue,
+            };
+            for &decl in list {
+                if let NodeData::VariableDeclaration(vd) = p.arena().data(decl) {
+                    let pattern = vd.name;
+                    if let NodeData::ObjectBindingPattern(ob) = p.arena().data(pattern) {
+                        for &el in &ob.elements.nodes {
+                            if let NodeData::BindingElement(be) = p.arena().data(el) {
+                                if be
+                                    .name
+                                    .is_some_and(|n| p.arena().kind(n) == Kind::Identifier)
+                                    && p.arena().text(be.name.unwrap()) == name
+                                {
+                                    return el;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    panic!("missing binding element {name}");
+}
+
 // ---- T1-E batch 137: union-of-evolving-array at loop/branch junctions ----
 
 // Go: internal/checker/flow.go:isEvolvingArrayTypeList(1499)
