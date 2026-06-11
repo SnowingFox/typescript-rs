@@ -459,6 +459,11 @@ pub struct Checker {
     es_symbol_type: TypeId,
     void_type: TypeId,
     never_type: TypeId,
+    /// Flow-analysis sentinel `never` (Go's `unreachableNeverType`): same flags
+    /// as [`never_type`](Checker::never_type) but a distinct id so
+    /// `get_flow_type_of_reference` can map it back to the declared type.
+    // Go: internal/checker/checker.go:Checker.unreachableNeverType
+    unreachable_never_type: TypeId,
     silent_never_type: TypeId,
     non_primitive_type: TypeId,
     string_or_number_type: TypeId,
@@ -590,6 +595,8 @@ impl Checker {
         );
         let void_type = new_intrinsic(&mut types, TypeFlags::VOID, "void", ObjectFlags::empty());
         let never_type = new_intrinsic(&mut types, TypeFlags::NEVER, "never", ObjectFlags::empty());
+        let unreachable_never_type =
+            new_intrinsic(&mut types, TypeFlags::NEVER, "never", ObjectFlags::empty());
         let silent_never_type = new_intrinsic(
             &mut types,
             TypeFlags::NEVER,
@@ -724,6 +731,7 @@ impl Checker {
             es_symbol_type,
             void_type,
             never_type,
+            unreachable_never_type,
             silent_never_type,
             non_primitive_type,
             string_or_number_type,
@@ -2774,6 +2782,14 @@ impl Checker {
     /// Side effects: none (pure).
     pub fn never_type(&self) -> TypeId {
         self.never_type
+    }
+
+    /// Flow-analysis sentinel `never` (Go's `unreachableNeverType`).
+    ///
+    /// Side effects: none (pure).
+    // Go: internal/checker/checker.go:Checker.unreachableNeverType
+    pub fn unreachable_never_type(&self) -> TypeId {
+        self.unreachable_never_type
     }
 
     /// The `never` type flagged non-inferrable (`silentNeverType`).

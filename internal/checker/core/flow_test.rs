@@ -720,3 +720,158 @@ fn empty_array_initializer_starts_evolving_array_in_flow() {
     );
 }
 
+// ---- T1-E batch 136: unreachable-never flow type ----
+
+use crate::core::types::TypeFlags;
+use tsgo_ast::flow::FlowNodeId;
+use tsgo_ast::FlowFlags;
+
+// Go: internal/checker/checker.go:Checker.unreachableNeverType
+#[test]
+fn unreachable_never_type_is_distinct_intrinsic_never() {
+    let c = Checker::new();
+    assert_ne!(c.unreachable_never_type(), c.never_type());
+    assert!(
+        c.get_type(c.unreachable_never_type())
+            .flags()
+            .contains(TypeFlags::NEVER)
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowNode (UNREACHABLE sentinel)
+#[test]
+fn unreachable_flow_node_yields_unreachable_never() {
+    let p = StubProgram::parse_and_bind("/a.ts", "function f(){ return; }");
+    let unreachable = (0..64)
+        .map(FlowNodeId)
+        .find(|&id| p.flow_node(id).flags.contains(FlowFlags::UNREACHABLE))
+        .expect("binder emits an UNREACHABLE flow sentinel");
+    let mut c = Checker::new();
+    let declared = c.string_type();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let usage = p.root();
+    let narrowed = c.get_type_at_flow_node(&p, usage, declared, unreachable, &mut cache);
+    assert_eq!(narrowed, c.unreachable_never_type());
+}
+
+// Go: internal/checker/flow.go:Checker.getFlowTypeOfReference (post-process)
+#[test]
+fn unreachable_flow_post_processing_restores_declared_type() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\nfunction f() { return; x = \"a\"; x; }",
+    );
+    let arena = p.arena();
+    let func = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes[1],
+        _ => panic!("function"),
+    };
+    let body = match arena.data(func) {
+        NodeData::FunctionDeclaration(d) => d.body.expect("body"),
+        _ => panic!("function body"),
+    };
+    let usage = match arena.data(body) {
+        NodeData::Block(d) => match arena.data(*d.list.nodes.last().unwrap()) {
+            NodeData::ExpressionStatement(es) => es.expression,
+            _ => panic!("usage stmt"),
+        },
+        _ => panic!("block"),
+    };
+    let mut c = Checker::new();
+    let declared = c.string_or_number_type();
+    let flow_type = c.get_flow_type_of_reference(&p, usage, declared);
+    assert_eq!(flow_type, declared);
+}
+
+// Go: internal/checker/flow.go:Checker.getFlowTypeOfReference (non-null parent)
+#[test]
+fn non_null_parent_truthy_never_facts_restore_declared() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: null | undefined;\nif (x) { const y = x!; y; }",
+    );
+    let arena = p.arena();
+    let if_stmt = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes[1],
+        _ => panic!("if"),
+    };
+    let then_block = match arena.data(if_stmt) {
+        NodeData::IfStatement(d) => d.then_statement,
+        _ => panic!("if then"),
+    };
+    let usage = match arena.data(then_block) {
+        NodeData::Block(d) => match arena.data(*d.list.nodes.last().unwrap()) {
+            NodeData::ExpressionStatement(es) => es.expression,
+            _ => panic!("usage"),
+        },
+        _ => panic!("block"),
+    };
+    let mut c = Checker::new();
+    let declared = get_declared_type_of_symbol(&mut c, &p, sym(&p, "x"), None);
+    let flow_type = c.get_flow_type_of_reference(&p, usage, declared);
+    assert_eq!(flow_type, declared);
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByAssertion (`false`)
+#[test]
+fn assertion_false_yields_unreachable_never_internally() {
+    let p = StubProgram::parse_and_bind("/a.ts", "declare let x: string;\nfalse;");
+    let arena = p.arena();
+    let x = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => match arena.data(d.statements.nodes[0]) {
+            NodeData::VariableStatement(vs) => {
+                let list = match arena.data(vs.declaration_list) {
+                    NodeData::VariableDeclarationList(dl) => dl.declarations.nodes[0],
+                    _ => panic!("decl"),
+                };
+                match arena.data(list) {
+                    NodeData::VariableDeclaration(vd) => vd.name,
+                    _ => panic!("var"),
+                }
+            }
+            _ => panic!("stmt"),
+        },
+        _ => panic!("sf"),
+    };
+    let false_kw = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => match arena.data(d.statements.nodes[1]) {
+            NodeData::ExpressionStatement(es) => es.expression,
+            _ => panic!("false"),
+        },
+        _ => panic!("sf2"),
+    };
+    let mut c = Checker::new();
+    let declared = c.string_type();
+    let narrowed = c.narrow_type_by_assertion(&p, x, declared, false_kw);
+    assert_eq!(narrowed, c.unreachable_never_type());
+    assert_ne!(narrowed, c.never_type());
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (unreachable match)
+#[test]
+fn unreachable_direct_assignment_flow_restores_declared() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let x: string | number;\nfunction f() { return; x = 1; x; }",
+    );
+    let arena = p.arena();
+    let func = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => d.statements.nodes[1],
+        _ => panic!("function"),
+    };
+    let body = match arena.data(func) {
+        NodeData::FunctionDeclaration(d) => d.body.expect("body"),
+        _ => panic!("body"),
+    };
+    let usage = match arena.data(body) {
+        NodeData::Block(d) => match arena.data(*d.list.nodes.last().unwrap()) {
+            NodeData::ExpressionStatement(es) => es.expression,
+            _ => panic!("usage"),
+        },
+        _ => panic!("block"),
+    };
+    let mut c = Checker::new();
+    let declared = c.string_or_number_type();
+    assert_eq!(c.get_flow_type_of_reference(&p, usage, declared), declared);
+}
+

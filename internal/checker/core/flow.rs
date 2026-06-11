@@ -427,13 +427,33 @@ impl Checker {
                 self.get_type_at_flow_node(program, reference, declared_type, flow, &mut cache)
             }
         };
-        if self.is_evolving_array_type(evolved)
+        let result = if self.is_evolving_array_type(evolved)
             && self.is_evolving_array_operation_target(program, reference)
         {
             self.auto_array_type()
         } else {
             self.finalize_evolving_array_type(program, evolved)
+        };
+        if result == self.unreachable_never_type() {
+            return declared_type;
         }
+        if let Some(parent) = program.arena().parent(reference) {
+            if program.arena().kind(parent) == Kind::NonNullExpression {
+                let result_flags = self.get_type(result).flags();
+                if !result_flags.contains(TypeFlags::NEVER) {
+                    let with_facts =
+                        self.get_type_with_facts(result, super::type_facts::TypeFacts::NE_UNDEFINED_OR_NULL);
+                    if self
+                        .get_type(with_facts)
+                        .flags()
+                        .contains(TypeFlags::NEVER)
+                    {
+                        return declared_type;
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Walks one flow node for `reference` and returns the narrowed type (partial
@@ -456,8 +476,7 @@ impl Checker {
         cache.insert(flow, declared);
         let fnode = program.flow_node(flow);
         let result = if fnode.flags.contains(FlowFlags::UNREACHABLE) {
-            // DEFER(phase-4-checker-4g): unreachable code yields `never`.
-            declared
+            self.unreachable_never_type()
         } else if fnode.flags.contains(FlowFlags::START) {
             declared
         } else if fnode.flags.intersects(FlowFlags::CONDITION) {
@@ -477,6 +496,7 @@ impl Checker {
                 program,
                 reference,
                 declared,
+                flow,
                 fnode.node,
                 fnode.antecedent,
                 cache,
@@ -839,43 +859,48 @@ impl Checker {
         let Some(signature) = self.get_effects_signature(program, call_expression) else {
             return ante_type;
         };
-        let Some(predicate) = self.get_type_predicate_of_signature(signature).cloned() else {
-            return ante_type;
-        };
-        if !matches!(
-            predicate.kind,
-            TypePredicateKind::AssertsThis | TypePredicateKind::AssertsIdentifier
-        ) {
-            return ante_type;
-        }
-        let narrowed = if let Some(predicate_type) = predicate.predicate_type {
-            self.narrow_type_by_type_predicate(
-                program,
-                reference,
-                ante_type,
-                &predicate,
-                call_expression,
-                true,
-            )
-        } else if predicate.kind == TypePredicateKind::AssertsIdentifier
-            && predicate.parameter_index >= 0
-        {
-            let NodeData::CallExpression(d) = program.arena().data(call_expression) else {
-                return ante_type;
-            };
-            if let Some(&arg) = d.arguments.nodes.get(predicate.parameter_index as usize) {
-                self.narrow_type_by_assertion(program, reference, ante_type, arg)
-            } else {
-                ante_type
+        if let Some(predicate) = self.get_type_predicate_of_signature(signature).cloned() {
+            if matches!(
+                predicate.kind,
+                TypePredicateKind::AssertsThis | TypePredicateKind::AssertsIdentifier
+            ) {
+                let narrowed = if predicate.predicate_type.is_some() {
+                    self.narrow_type_by_type_predicate(
+                        program,
+                        reference,
+                        ante_type,
+                        &predicate,
+                        call_expression,
+                        true,
+                    )
+                } else if predicate.kind == TypePredicateKind::AssertsIdentifier
+                    && predicate.parameter_index >= 0
+                {
+                    let NodeData::CallExpression(d) = program.arena().data(call_expression) else {
+                        return ante_type;
+                    };
+                    if let Some(&arg) = d.arguments.nodes.get(predicate.parameter_index as usize)
+                    {
+                        self.narrow_type_by_assertion(program, reference, ante_type, arg)
+                    } else {
+                        ante_type
+                    }
+                } else {
+                    ante_type
+                };
+                if narrowed != ante_type {
+                    return narrowed;
+                }
             }
-        } else {
-            ante_type
-        };
-        if narrowed == ante_type {
-            ante_type
-        } else {
-            narrowed
         }
+        if self
+            .get_type(self.get_return_type_of_signature(signature))
+            .flags()
+            .contains(TypeFlags::NEVER)
+        {
+            return self.unreachable_never_type();
+        }
+        ante_type
     }
 
     // Narrows by the asserted expression of an `asserts` function (no `is T`).
@@ -889,7 +914,7 @@ impl Checker {
     ) -> TypeId {
         let expr = skip_parentheses(program, expr);
         if program.arena().kind(expr) == Kind::FalseKeyword {
-            return self.never_type();
+            return self.unreachable_never_type();
         }
         if let NodeData::BinaryExpression(d) = program.arena().data(expr) {
             let op = program.arena().kind(d.operator_token);
@@ -945,7 +970,12 @@ impl Checker {
         let func_type = self.check_non_null_expression(program, d.expression);
         let signatures = self.get_signatures_of_type(func_type);
         let signature = *signatures.first()?;
-        if self.get_type_predicate_of_signature(signature).is_some() {
+        if self.get_type_predicate_of_signature(signature).is_some()
+            || self
+                .get_type(self.get_return_type_of_signature(signature))
+                .flags()
+                .contains(TypeFlags::NEVER)
+        {
             Some(signature)
         } else {
             None
@@ -2173,12 +2203,16 @@ impl Checker {
         program: &dyn BoundProgram,
         reference: NodeId,
         declared: TypeId,
+        flow: FlowNodeId,
         node: Option<NodeId>,
         antecedent: Option<FlowNodeId>,
         cache: &mut FxHashMap<FlowNodeId, TypeId>,
     ) -> Option<TypeId> {
         let node = node?;
         if self.is_matching_reference(program, reference, node) {
+            if !self.is_reachable_flow_node(program, flow) {
+                return Some(self.unreachable_never_type());
+            }
             if declared == self.auto_type() || declared == self.auto_array_type() {
                 if self.is_empty_array_assignment(program, node) {
                     return Some(self.get_evolving_array_type(self.never_type()));
@@ -2222,12 +2256,15 @@ impl Checker {
         // longer reference — return the declared type instead.
         // Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
         if self.contains_matching_reference(program, reference, node) {
-            // DEFER(phase-4-checker-4u): unreachable assignments yield `never`.
-            // blocked-by: `unreachableNeverType`.
+            if !self.is_reachable_flow_node(program, flow) {
+                return Some(self.unreachable_never_type());
+            }
             return Some(declared);
         }
         None
     }
+
+    // ---- T1-E batch 136: unreachable-never flow type ----
 
     // ---- T1-E batch 135: evolving-array flow narrowing ----
 

@@ -9,7 +9,7 @@ fn new_constructs_intrinsics_in_order() {
     // 4b constructs 24 types in allocation order (the 4a intrinsics plus the
     // boolean literal/union types, the string|number / number|bigint /
     // template-constraint unions, `emptyObjectType`, and `unknownEmptyObjectType`).
-    assert_eq!(c.type_count(), 30);
+    assert_eq!(c.type_count(), 31);
     assert_eq!(c.any_type(), TypeId(1));
     assert_eq!(c.auto_type(), TypeId(2));
     assert_eq!(c.error_type(), TypeId(3));
@@ -20,12 +20,14 @@ fn new_constructs_intrinsics_in_order() {
     assert_eq!(c.regular_true_type(), TypeId(12));
     assert_eq!(c.true_type(), TypeId(13));
     assert_eq!(c.boolean_type(), TypeId(14));
-    assert_eq!(c.non_primitive_type(), TypeId(19));
-    assert_eq!(c.string_or_number_type(), TypeId(20));
-    assert_eq!(c.number_or_bigint_type(), TypeId(21));
-    assert_eq!(c.template_constraint_type(), TypeId(22));
-    assert_eq!(c.empty_object_type(), TypeId(23));
-    assert_eq!(c.unknown_empty_object_type(), TypeId(24));
+    assert_eq!(c.unreachable_never_type(), TypeId(18));
+    assert_eq!(c.silent_never_type(), TypeId(19));
+    assert_eq!(c.non_primitive_type(), TypeId(20));
+    assert_eq!(c.string_or_number_type(), TypeId(21));
+    assert_eq!(c.number_or_bigint_type(), TypeId(22));
+    assert_eq!(c.template_constraint_type(), TypeId(23));
+    assert_eq!(c.empty_object_type(), TypeId(24));
+    assert_eq!(c.unknown_empty_object_type(), TypeId(25));
 }
 
 // Go: internal/checker/checker.go:NewChecker (boolean = false | true union)

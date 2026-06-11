@@ -28589,3 +28589,218 @@ fn assignability_chain_array_to_fixed_tuple_still_reports_2620_with_marker_array
     assert_eq!(diags[0].code, 2322);
     assert_eq!(diags[0].message_chain[0].code, 2620);
 }
+
+// ---- T1-E batch 136: unreachable-never flow type ----
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (unreachable match)
+#[test]
+fn unreachable_direct_assignment_usage_keeps_declared_no_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() {\n  let x: string | number;\n  return;\n  x = \"hello\";\n  const v: string | number = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2322),
+        "unreachable assignment must not force never on x, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference)
+#[test]
+fn unreachable_parent_assignment_child_keeps_declared_no_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() {\n  let obj: { a: number };\n  return;\n  obj = { a: 1 };\n  const n: number = obj.a;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2322),
+        "unreachable parent assignment must keep child declared type, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowCall (never return)
+#[test]
+fn never_return_call_usage_keeps_declared_no_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function die(): never;\n\
+         function f() {\n  let x: string;\n  die();\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2322),
+        "code after never-returning call must keep declared type, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowCall (never return)
+#[test]
+fn never_return_call_does_not_narrow_to_never_for_wrong_assign() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function die(): never;\n\
+         let x: string | number;\n\
+         die();\n\
+         const bad: number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getFlowTypeOfReference (non-null parent)
+#[test]
+fn non_null_parent_truthy_never_facts_keep_declared_no_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare const x: null | undefined;\n\
+         if (x) {\n  const y: null | undefined = x!;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "non-null parent must restore declared nullable type, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getFlowTypeOfReference (post-process)
+#[test]
+fn unreachable_usage_after_return_keeps_declared_no_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() {\n  let x: string;\n  return;\n  const s: string = x;\n}",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2322),
+        "unreachable reference must map unreachable-never back to declared, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (reachable contrast)
+#[test]
+fn reachable_direct_assignment_still_narrows_no_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | string };\n\
+         obj.a = \"hello\";\n\
+         const s: string = obj.a;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "reachable assignment narrowing must still apply, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.narrowTypeByAssertion (`false` via asserts)
+#[test]
+fn asserts_false_argument_unreachable_restores_declared_no_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function assertNever(x: unknown): asserts x;\n\
+         let x: string | number;\n\
+         assertNever(false && x);\n\
+         const v: string | number = x;",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.iter().all(|d| d.code != 2322),
+        "asserts on false must not poison x with never, got {diags:?}"
+    );
+}
+
+// Go: internal/checker/flow.go:Checker.isReachableFlowNode
+#[test]
+fn usage_after_return_flow_is_not_reachable() {
+    let p = StubProgram::parse_and_bind(
+        "/a.ts",
+        "function f() { return; let x: string; x; }",
+    );
+    let arena = p.arena();
+    let func = match arena.data(p.root()) {
+        NodeData::SourceFile(d) => match arena.data(d.statements.nodes[0]) {
+            NodeData::FunctionDeclaration(fd) => fd.body.expect("body"),
+            _ => panic!("function"),
+        },
+        _ => panic!("root"),
+    };
+    let usage = match arena.data(func) {
+        NodeData::Block(d) => match arena.data(*d.list.nodes.last().unwrap()) {
+            NodeData::ExpressionStatement(es) => es.expression,
+            _ => panic!("usage"),
+        },
+        _ => panic!("block"),
+    };
+    let flow = p.flow_node_of(usage).expect("usage flow");
+    let c = Checker::new();
+    assert!(!c.is_reachable_flow_node(&p, flow));
+}
+
+// Go: internal/checker/checker.go:Checker.unreachableNeverType
+#[test]
+fn unreachable_never_and_never_both_stringify_as_never() {
+    let c = Checker::new();
+    assert_eq!(
+        c.type_to_string(c.unreachable_never_type()),
+        c.type_to_string(c.never_type())
+    );
+    assert_ne!(c.unreachable_never_type(), c.never_type());
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowAssignment (containsMatchingReference reachable)
+#[test]
+fn reachable_parent_assignment_stale_guard_still_reports_2322() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare let obj: { a: number | string };\n\
+         if (typeof obj.a === \"number\") {\n\
+           obj = { a: \"hello\" };\n\
+           const n: number = obj.a;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert_eq!(diags.len(), 1, "expected one 2322, got {diags:?}");
+    assert_eq!(diags[0].code, 2322);
+}
+
+// Go: internal/checker/flow.go:Checker.getTypeAtFlowCall (assertion still narrows)
+#[test]
+fn assertion_call_after_never_path_still_narrows_reachable_arm() {
+    let p = std::rc::Rc::new(StubProgram::parse_and_bind(
+        "/a.ts",
+        "declare function assertIsString(x: unknown): asserts x is string;\n\
+         let x: string | number;\n\
+         if (typeof x === \"string\") {\n\
+           assertIsString(x);\n\
+           const s: string = x;\n\
+         }",
+    ));
+    let root = p.root();
+    let mut c = Checker::new_checker(p);
+    let diags = c.get_diagnostics(root);
+    assert!(
+        diags.is_empty(),
+        "reachable assertion narrowing must still work, got {diags:?}"
+    );
+}
